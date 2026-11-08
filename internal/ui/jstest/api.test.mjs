@@ -140,6 +140,7 @@ test('every method calls its route with the secret only in the header', async ()
     [() => api.deliveryHealth(), 'GET', '/v1/admin/delivery-health'],
     [() => api.audit({ limit: 50, before: 7 }), 'GET', '/v1/admin/audit?limit=50&before=7'],
     [() => api.counters(), 'GET', '/v1/admin/counters'],
+    [() => api.activityStats(), 'GET', '/v1/admin/activity-stats'],
     [() => api.blob('abc'), 'GET', '/v1/blobs/abc'],
     [() => api.agentKinds(), 'GET', '/v1/admin/agent-kinds'],
     [() => api.agentAdd({ kind: 'session', spec_version: '2026-11-06', request_id: 'req_1', inputs: { name: 'a' } }), 'POST', '/v1/admin/agents'],
@@ -155,6 +156,21 @@ test('every method calls its route with the secret only in the header', async ()
     assert.equal(last.init.headers.Authorization, 'Bearer vn_secret', url);
     assert.equal(last.init.credentials, 'omit', url);
   }
+});
+
+test('activityStats reads an uncached authenticated snapshot and preserves API errors', async () => {
+  const body = { now: '2026-11-09T12:34:56.789Z', window_start: '2026-11-09T11:34:56.789Z', window_end: '2026-11-09T12:34:56.789Z', bucket_seconds: 60, messages: 0, messages_per_minute: 0, active_peers: 0, buckets: Array(60).fill(0), peers: {} };
+  const { api, calls } = harness(() => json(200, body));
+  assert.deepEqual(await api.activityStats(), body);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, '/v1/admin/activity-stats');
+  assert.equal(calls[0].init.method, 'GET');
+  assert.equal(calls[0].init.cache, 'no-store');
+  assert.equal(calls[0].init.credentials, 'omit');
+  assert.equal(calls[0].init.headers.Authorization, 'Bearer vn_secret');
+  assert.equal(calls[0].init.body, undefined);
+  const denied = harness(() => json(403, { error: { code: 'forbidden', message: 'operator required' } }));
+  await assert.rejects(denied.api.activityStats(), { status: 403, code: 'forbidden' });
 });
 
 test('send carries the operator_ui ingress mark; presence posts state and at', async () => {

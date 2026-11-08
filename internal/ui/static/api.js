@@ -441,6 +441,7 @@ export function createApi({ secret, fetch = globalThis.fetch, onUnauthorized = (
     deliveryHealth: () => get('/v1/admin/delivery-health'),
     audit: ({ limit, before } = {}) => get('/v1/admin/audit' + query({ limit, before })),
     counters: () => get('/v1/admin/counters'),
+    activityStats: () => get('/v1/admin/activity-stats'),
     notices: () => get('/v1/hub/notices'),
     prefs, patchPrefs, previewPrefs,
     // blob(sha) reads a hub-hosted blob; blob(sha, id) a direct R2 one.

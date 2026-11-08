@@ -10,6 +10,8 @@ import { chip, h, idCopy, idText, peerLink } from './dom.js';
 import { closeInvite, inviteButton } from './invite.js';
 import { ago, kindShort, kindTitle, short, title as threadTitle, when } from './format.js';
 import * as subs from './subs.js';
+import { activitySnapshot, peerActivity } from './sparkline-model.js';
+import { createSparkline } from './sparkline.js';
 
 const RELOAD_MS = 30000;
 const AUDIT_PAGE = 50;
@@ -49,6 +51,11 @@ export function mount(root, ctx) {
   const time = iso => h('time', { text: when(iso, nowMs()), title: iso || '' });
 
   const res = {
+    activity: store.resource('dashboard-activity', async () => {
+      const snapshot = activitySnapshot(await api.activityStats());
+      if (!snapshot) throw new Error('Invalid activity snapshot');
+      return snapshot;
+    }),
     counters: store.resource('peers', () => api.counters()),
     peers: store.resource('peers', () => api.adminPeers()),
     // Created peers emit directory_updated, so the peers tag refreshes this.
@@ -94,6 +101,46 @@ export function mount(root, ctx) {
     return el;
   }
 
+  const activityCount = h('strong', { class: 'activity-count', text: '—' });
+  const activityRate = h('strong', { class: 'activity-rate', text: '—' });
+  const activityActive = h('strong', { class: 'activity-active', text: '—' });
+  const activityStatus = h('p', { class: 'activity-status', role: 'status' });
+  const overviewChart = createSparkline();
+  overviewChart.el.className += ' activity-chart';
+  const activityPanel = h('section', { class: 'dash-activity', 'aria-label': 'Hourly activity' },
+    h('div', { class: 'activity-overview' },
+      h('div', { class: 'activity-volume' }, h('span', { text: 'Messages last hour' }), activityCount),
+      overviewChart.el,
+      h('div', { class: 'activity-metric' }, h('span', { text: 'Messages / min' }), activityRate, h('span', { text: 'Hourly average' })),
+      h('div', { class: 'activity-metric' }, h('span', { text: 'Active peers' }), activityActive, h('span', { text: 'Sent in last hour, not presence' }))),
+    activityStatus);
+  const peerCharts = new Map();
+  const rate = n => n.toLocaleString('en-US', { maximumFractionDigits: 2 });
+  function renderActivity() {
+    const value = res.activity.get(), err = res.activity.error();
+    activityCount.textContent = value ? value.messages.toLocaleString('en-US') : '—';
+    activityRate.textContent = value ? rate(value.messages_per_minute) : '—';
+    activityActive.textContent = value ? String(value.active_peers) : '—';
+    activityStatus.textContent = value
+      ? `${err ? 'Stale · ' + errText(err) + ' · ' : res.activity.loading() ? 'Refreshing · ' : ''}Snapshot ${value.window_end} · rolling hour; non-reactions, including sources and hub. Active peers includes operator and dots.`
+      : err ? 'Activity unavailable: ' + errText(err) + ' · retries every 30 seconds.' : 'Loading activity…';
+    activityPanel.setAttribute('data-state', err ? value ? 'stale' : 'error' : value ? 'ready' : 'loading');
+    overviewChart.update(value, value, { label: 'Hub messages' });
+    let max = 0;
+    if (value) for (const p of Object.values(value.peers)) for (const n of p.buckets) max = Math.max(max, n);
+    for (const [id, view] of peerCharts) {
+      const p = peerActivity(value, id);
+      view.summary.textContent = p ? `${p.messages.toLocaleString('en-US')} messages · ${rate(p.messages_per_minute)} / min avg${err ? ' · stale' : ''}` : err ? 'Activity unavailable' : 'Loading activity…';
+      view.chart.update(value, p, { label: peerName(id), max });
+    }
+  }
+  function peerActivityCell(id) {
+    if (!peerCharts.has(id)) {
+      const summary = h('p', { class: 'peer-activity-summary' }), chart = createSparkline();
+      peerCharts.set(id, { summary, chart, cell: h('td', { class: 'peer-activity' }, summary, chart.el) });
+    }
+    return peerCharts.get(id).cell;
+  }
   const counterLine = h('p', { class: 'dash-counters mono' });
   // subs.js owns the whole section, heading and count included, so the
   // dashboard shows one "Subscriptions" heading, not two.
@@ -102,6 +149,7 @@ export function mount(root, ctx) {
     h('div', { class: 'dash' },
       h('h1', { text: 'Dashboard' }),
       h('p', { class: 'lede', text: 'Add agents under Peers, or open a launcher to run a job. Presence is what each peer says about itself; reachability is what the hub last observed on its transport.' }),
+      activityPanel,
       counterLine,
       section('peers', 'd-peers', 'Peers'),
       section('principals', 'd-principals', 'Principals'),
@@ -111,7 +159,7 @@ export function mount(root, ctx) {
       section('loop', 'd-loop', 'Loop control'),
       subsSlot,
       section('audit', 'd-audit', 'Audit tail')));
-  subs.renderSection(subsSlot, ctx);
+  const stopSubs = subs.renderSection(subsSlot, ctx);
   sections.peers.el.querySelector('h2').append(inviteButton(ctx, () => res.peers.reload()));
 
   // fill renders one section from its resource: its own error, then whatever
@@ -122,7 +170,8 @@ export function mount(root, ctx) {
     if (err) kids.push(failure(label, err));
     if (value) kids.push(...draw(value, s));
     else if (!err) { kids.push(loading()); s.count.textContent = ''; }
-    s.body.replaceChildren(...kids);
+    for (const old of [...s.body.childNodes]) if (!kids.includes(old)) old.remove();
+    kids.forEach((node, i) => { if (s.body.childNodes[i] !== node) s.body.insertBefore(node, s.body.childNodes[i] || null); });
   }
 
   function renderCounters() {
@@ -137,24 +186,33 @@ export function mount(root, ctx) {
     counterLine.textContent = 'All-time totals: ' + keys.map(k => (COUNTER_LABELS[k] || k.replace(/_/g, ' ')) + ' ' + value[k]).join(' · ') + (err ? ' · stale: ' + errText(err) : '');
   }
 
+  const peerTable = table(['Peer', 'Kind', 'Presence', 'Reachability', 'Credential', 'Routes', 'Quota', 'Location', 'Activity · last hour'], []);
+  const peerTableWrap = h('div', { class: 'peer-table-scroll', role: 'region', 'aria-label': 'Peers; activity charts share a common scale' }, peerTable);
+  const peerRows = new Map();
+  let lastPeers, lastArchived;
+  const archivedLabel = h('span');
+  const archivedToggle = h('label', { class: 'show-archived' }, h('input', {
+    type: 'checkbox', 'aria-label': 'Show archived',
+    onchange: e => { showArchived = !!e.target.checked; render(); },
+  }), archivedLabel);
+  const peerEmpty = none('');
   function drawPeers(value, s) {
     const list = visiblePeers(value.peers, showArchived);
     const rows = list.shown;
     s.count.textContent = String(rows.length);
-    const toggle = h('label', { class: 'show-archived' },
-      h('input', {
-        type: 'checkbox',
-        checked: showArchived || null,
-        'aria-label': 'Show archived',
-        onchange: e => { showArchived = !!e.target.checked; render(); },
-      }),
-      h('span', { text: list.archived ? 'Show archived (' + list.archived + ')' : 'Show archived' }));
-    if (!rows.length) return [toggle, none(list.archived ? 'Archived peers are hidden.' : 'No peers enrolled.')];
-    return [toggle, table(['Peer', 'Kind', 'Presence', 'Reachability', 'Credential', 'Routes', 'Quota', 'Location'], rows.map(p => {
+    archivedLabel.textContent = list.archived ? 'Show archived (' + list.archived + ')' : 'Show archived';
+    if (showArchived) archivedToggle.querySelector('input').setAttribute('checked', '');
+    else archivedToggle.querySelector('input').removeAttribute('checked');
+    peerEmpty.textContent = list.archived ? 'Archived peers are hidden.' : 'No peers enrolled.';
+    if (lastPeers === value && lastArchived === showArchived) return [archivedToggle, rows.length ? peerTableWrap : peerEmpty];
+    lastPeers = value; lastArchived = showArchived;
+    const nextRows = rows.map(p => {
       const presenceAge = p.presence === 'n/a' ? '' : p.presenceAt ? age(p.presenceAt) : 'never reported';
       const reachSub = [p.via, p.seen ? age(p.seen) : ''].filter(Boolean).join(', ');
       const mark = p.archivedAt ? chip('archived', 'bad') : (p.disabled ? chip('disabled', 'bad') : null);
-      return h('tr', { class: p.disabled || p.archivedAt ? 'off' : null },
+      const row = peerRows.get(p.id) || h('tr');
+      row.className = p.disabled || p.archivedAt ? 'off' : '';
+      const cells = h('tr', null,
         h('td', null, peerLink(p.id, p.name, { cls: 'pn' }), mark ? [' ', mark] : null, idCell(p.id, 'peer id'), p.kind === 'launcher' && !p.disabled && !p.archivedAt ? h('a', { class: 'sub', href: '#peer/' + p.id, text: 'Launch job →' }) : null),
         h('td', null, h('span', { class: 'pill', title: kindTitle(p.kind) }, h('i', { class: 'kd k-' + p.kind }), kindShort(p.kind))),
         h('td', null, h('span', { class: 'pill' }, h('i', { class: 'pd ' + p.presence.replace('/', '') }), p.presence),
@@ -165,7 +223,17 @@ export function mount(root, ctx) {
         h('td', { class: 'mono sm', text: p.hosts.length ? p.hosts.join(', ') : 'none' }),
         h('td', { class: 'mono sm', text: p.quota }),
         h('td', { class: 'mono sm', text: p.location }));
-    }))];
+      const activityCell = peerActivityCell(p.id);
+      if (activityCell.parentNode !== row) row.append(activityCell);
+      for (const old of [...row.children]) if (old !== activityCell) old.remove();
+      for (const cell of [...cells.children]) row.insertBefore(cell, activityCell);
+      peerRows.set(p.id, row);
+      return row;
+    });
+    const body = peerTable.querySelector('tbody');
+    for (const old of [...body.children]) if (!nextRows.includes(old)) old.remove();
+    nextRows.forEach((row, i) => { if (body.children[i] !== row) body.insertBefore(row, body.children[i] || null); });
+    return [archivedToggle, rows.length ? peerTableWrap : peerEmpty];
   }
 
   // Principals with limits or created peers (§18.4); absent when there are none.
@@ -292,6 +360,7 @@ export function mount(root, ctx) {
   function render() {
     renderCounters();
     fill('peers', res.peers, 'Peers', drawPeers);
+    renderActivity();
     const pv = res.principals.get();
     sections.principals.el.hidden = !res.principals.error() && !principalRows(pv && pv.principals).length;
     if (!sections.principals.el.hidden) fill('principals', res.principals, 'Principals', drawPrincipals);
@@ -315,6 +384,7 @@ export function mount(root, ctx) {
   }
   return () => {
     closeInvite();
+    stopSubs();
     audit.alive = false;
     clearInterval(timer);
     for (const off of offs) off();

@@ -1,5 +1,7 @@
 # Changelog
 
+- 2026-11-09: Preserve live dashboard activity charts and operator activity stats alongside launcher recovery; documented in docs/OPERATOR.md.
+
 - 2026-11-08: prevent consumed manual inbox pages from resurfacing as new Codex backlog, preserve unread replay metadata and pending claims, and give deferred-backlog footers the exact opaque replay cursor; keep the eight-message batch cap and explicit replay behavior (internal/cli; docs/connectors/codex-appserver.md, docs/OPERATOR.md, docs/PROTOCOL.md; issue #56).
 
 - 2026-11-08: retain submitted launcher requests across reloads and navigation, add explicit Codex daemon recovery guidance, and raise the measured UI allowance from 640 to 656 KiB for 664,284 bytes of assets.

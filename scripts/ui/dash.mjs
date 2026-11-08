@@ -21,7 +21,7 @@ try {
     await page.route('**/__keep-interception__', route => route.continue());
     const releases = {};
     for (const [key, glob] of Object.entries({
-      peers: '**/v1/admin/peers', threads: '**/v1/admin/threads*', health: '**/v1/admin/delivery-health',
+      activity: '**/v1/admin/activity-stats', peers: '**/v1/admin/peers', threads: '**/v1/admin/threads*', health: '**/v1/admin/delivery-health',
       subs: '**/v1/admin/subscriptions',
       dead: '**/v1/admin/dead-letters', cuts: '**/v1/admin/loop-cuts*', counters: '**/v1/admin/counters', audit: '**/v1/admin/audit*',
     })) releases[key] = await hold(glob);
@@ -41,7 +41,7 @@ try {
     await shot('12-dash-initial');
 
     // Sections load independently: some answered, the rest still held.
-    for (const key of ['counters', 'dead', 'cuts', 'audit']) await releases[key]();
+    for (const key of ['activity', 'counters', 'dead', 'cuts', 'audit']) await releases[key]();
     await sec('dead').locator('tbody tr').first().waitFor();
     await sec('loop').locator('.total').waitFor();
     await sec('audit').locator('.audit .ln').first().waitFor();
