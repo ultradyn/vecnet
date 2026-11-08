@@ -744,6 +744,7 @@ export function createHarness(raw, ports = {}) {
       };
       await verify(); journal.intent = row.key; save();
       await call(m.tools.tmux, ['-S', join(m.runRoot, 'tmux.sock'), 'send-keys', '-t', session, '-l', '/quit']);
+      await pause(1000);
       await verify();
       await call(m.tools.tmux, ['-S', join(m.runRoot, 'tmux.sock'), 'send-keys', '-t', session, 'Enter']);
       await until(async () => owned.launch ? absent(panePid(row)) : ports.tuiClosed ? ports.tuiClosed(owned) : absent(owned.pid), 30000);
@@ -882,7 +883,7 @@ export function createHarness(raw, ports = {}) {
     const cwd = join(m.runRoot, 'ws-' + session);
     if (!['a', 'b'].includes(session) || owned.cwd !== cwd) fail('ownership_changed');
     launchShape(owned.launch, cwd); await checkTmux();
-    const panes = (await tmux('list-panes', '-a', '-F', '#{session_name}\t#{pane_pid}')).stdout.trim().split('\n').map(row => row.split('\t'));
+    const panes = (await tmux('list-panes', '-a', '-F', '#{session_name}:#{pane_pid}')).stdout.trim().split('\n').map(row => row.split(':'));
     const active = Object.keys(journal.threads).filter(s => !journal.completed.includes('close-' + s));
     if (journal.threadIntent && !journal.threadIntent.closed) active.push(journal.threadIntent.session);
     if (!equal(panes.map(p => p[0]).sort(), active.sort()) || panes.some(p => p.length !== 2 || !/^\d+$/.test(p[1])) ||

@@ -323,7 +323,7 @@ s.sessions[name]={id:name==='a'?${JSON.stringify(uuid(1))}:${JSON.stringify(uuid
 else if(args.includes('display-message'))process.stdout.write(String(s.server.pid));
 else if(args.includes('kill-server')){const raw=fs.readFileSync('/proc/'+s.server.pid+'/stat','utf8');if(raw.slice(raw.lastIndexOf(')')+2).split(' ')[19]!==s.server.birth)process.exit(92);process.kill(s.server.pid,'SIGTERM');}
 else if(args.includes('capture-pane')){if(!s.startup)process.stdout.write('Thread ID: '+part().id+'\\n›');else{const show=(part().seeded||s.startup.eager)&&part().statusRequested;part().statusExposed=Boolean(show);save(s);process.stdout.write((s.startup.screen??'')+'\\n'+(show?'Thread ID: '+part().id+'\\n':'')+'›');}}
-else if(args.includes('list-panes')){const rows=args.includes('-a')?Object.entries(s.sessions).filter(([,p])=>!p.closed):[[session,part()]];for(const [name,p]of rows){if(p.closed)continue;const format=args[args.indexOf('-F')+1],values={session_name:name,session_id:'$'+(name==='a'?1:2),window_id:'@'+(name==='a'?1:2),pane_id:'%'+(name==='a'?1:2),pane_pid:p.pid,pane_current_path:fs.readlinkSync('/proc/'+p.pid+'/cwd')};process.stdout.write(Object.entries(values).reduce((text,[key,value])=>text.split('#{'+key+'}').join(String(value)),format)+'\\n');}}
+else if(args.includes('list-panes')){const rows=args.includes('-a')?Object.entries(s.sessions).filter(([,p])=>!p.closed):[[session,part()]];for(const [name,p]of rows){if(p.closed)continue;const requested=args[args.indexOf('-F')+1],format=s.startup?.sanitizeFormatTabs&&!process.env.LANG&&!process.env.LC_ALL&&!process.env.LC_CTYPE?requested.split(String.fromCharCode(9)).join('_'):requested,values={session_name:name,session_id:'$'+(name==='a'?1:2),window_id:'@'+(name==='a'?1:2),pane_id:'%'+(name==='a'?1:2),pane_pid:p.pid,pane_current_path:fs.readlinkSync('/proc/'+p.pid+'/cwd')};process.stdout.write(Object.entries(values).reduce((text,[key,value])=>text.split('#{'+key+'}').join(String(value)),format)+'\\n');}}
 else if(args.includes('list-sessions'))process.stdout.write(Object.keys(s.sessions).filter(name=>!s.sessions[name].closed).join('\\n')+'\\n');
 else if(args.includes('send-keys')){if(args.includes('-l')){s.sessions[session].input=args.at(-1);save(s);}
 else {const text=part().input;if(s.startup){s.events.push({kind:'submit',session,text});save(s);}
@@ -623,7 +623,7 @@ test('R53 actual supervisor death retains intent and finite writer retirement', 
 test('R53 tmux handoff refuses unmatched ancestry without killing the proved private server', async t => {
   const f = await flowRehearsal(t, { corruption: 'extra-handoff' });
   retainUntilFiniteStop(f, join(f.m.runRoot, 'handoff-extra.started'));
-  await f.harness().install(); const began = Date.now();
+  await f.harness().install();
   await assert.rejects(f.harness().run(), { code: 'child_drain_unproved' });
   const server = JSON.parse(readFileSync(join(f.m.runRoot, 'flow.json'))).server;
   const raw = readFileSync(`/proc/${server.pid}/stat`, 'utf8'), fields = raw.slice(raw.lastIndexOf(')') + 2).split(' ');
@@ -631,7 +631,8 @@ test('R53 tmux handoff refuses unmatched ancestry without killing the proved pri
   const journal = JSON.parse(readFileSync(join(f.m.runRoot, 'journal.json')));
   assert.equal(journal.children.length, 1); assert.ok(journal.threadIntent);
   await assert.rejects(f.harness().cleanup(), { code: 'child_drain_unproved' });
-  await delay(Math.max(0, 2300 - (Date.now() - began)));
+  const ended = join(f.m.runRoot, 'handoff-extra.ended'), deadline = Date.now() + 3000;
+  while (!existsSync(ended) && Date.now() < deadline) await delay(10);
   assert.ok(existsSync(join(f.m.runRoot, 'handoff-extra.ended')), 'unmatched finite descendant retired before fixture cleanup');
 });
 
@@ -880,7 +881,28 @@ async function startupFixture(t, startup) {
   mkdirSync(p.share, { recursive: true, mode: 0o700 });
   writeFileSync(p.template, 'startup prior template\n', { mode: 0o640 }); chmodSync(p.template, 0o640);
   writeFileSync(p.installation, '{"startupPrior":true}\n', { mode: 0o600 }); symlinkSync('/startup/prior-release', p.current);
-  await f.harness().install(); return f;
+  await f.harness().install();
+  if (startup.quitSettle) {
+    // Real monotonic elapsed time, not a virtual clock or proof of an explicit timer.
+    const run = f.ports.run, pending = new Map(), minimum = 1000000000n;
+    f.quitSubmissions = [];
+    f.ports.run = async (command, args, options) => {
+      const tmux = command === f.m.tools.tmux, session = args[args.indexOf('-t') + 1], at = process.hrtime.bigint();
+      const literal = tmux && args.includes('send-keys') && args.includes('-l') && args.at(-1) === '/quit';
+      const enter = tmux && args.includes('send-keys') && args.at(-1) === 'Enter' && pending.has(session);
+      const proof = enter ? pending.get(session) : undefined;
+      if (proof) {
+        assert.ok(at - proof.literal >= minimum, 'R55 literal /quit must settle for 1000ms before Enter');
+        assert.ok(proof.verified !== undefined && proof.verified - proof.literal >= minimum, 'R55 owned pane inventory must be reverified after settling and before Enter');
+      }
+      const result = await run(command, args, options);
+      if (literal) pending.set(session, { literal: process.hrtime.bigint() });
+      if (tmux && args.includes('list-panes') && args.includes('-a')) for (const row of pending.values()) row.verified = at;
+      if (proof) { f.quitSubmissions.push({ session, elapsed: at - proof.literal, reverified: proof.verified - proof.literal }); pending.delete(session); }
+      return result;
+    };
+  }
+  return f;
 }
 async function restoredStartup(f) {
   assert.equal((await f.harness().rollback()).code, 'rollback_residuals');
@@ -907,6 +929,57 @@ for (const screen of ['', 'Permissions ReadOnly(never)']) test(`startup lazy UUI
   assert.ok(s.events.filter(e => e.kind === 'rpc').every(e => ['thread/read', 'thread/turns/list', 'turn/start'].includes(e.method)));
   assert.equal(j.completed.includes('evidence_complete'), false); assert.deepEqual(j.owners, {});
   assert.equal((await f.harness().cleanup()).count, 5); await restoredStartup(f);
+});
+test('R54 startup scrubbed-locale tmux TAB sanitization permits exact owned launch and cleanup', async t => {
+  // Model the observed real tmux format behavior; do not normalize its output in the harness port.
+  const f = await startupFixture(t, { eager: true, stopAtControl: 'a', staleSocket: true, sanitizeFormatTabs: true });
+  const run = f.ports.run; let scrubbedPaneLists = 0;
+  f.ports.run = (command, args, options) => {
+    if (command === f.m.tools.tmux && args.includes('list-panes') && args.includes('-a')) {
+      for (const key of ['LANG', 'LC_ALL', 'LC_CTYPE']) assert.equal(options.env[key], undefined, 'pane query uses the scrubbed harness locale');
+      scrubbedPaneLists++;
+    }
+    return run(command, args, options);
+  };
+  await assert.rejects(f.harness().run(), { code: 'fixture_startup_stop' });
+  const j = startupJournal(f), s = startupState(f), owned = j.threads.a;
+  assert.equal(owned.uuidFromOwnTui, true);
+  assert.equal(owned.launch.pid, s.sessions.a.pid); assert.equal(owned.launch.birth, s.sessions.a.birth);
+  assert.equal(owned.launch.cwd, join(f.m.runRoot, 'ws-a'));
+  assert.equal(j.completed.includes('evidence_complete'), false);
+  assert.ok(scrubbedPaneLists > 0, 'startup verified its exact pane inventory under the scrubbed locale');
+  const legacy = await f.ports.run(f.m.tools.tmux,
+    ['-S', join(f.m.runRoot, 'tmux.sock'), 'list-panes', '-a', '-F', '#{session_name}\t#{pane_pid}'], { env: f.env });
+  assert.equal(legacy.stdout, 'a_' + owned.launch.pid + '\n', 'fixture reproduces the observed literal-TAB sanitization');
+  const beforeCleanup = scrubbedPaneLists;
+  assert.equal((await f.harness().cleanup()).count, 5);
+  assert.ok(scrubbedPaneLists > beforeCleanup, 'cleanup reverified the active exact owned launch');
+  await pidAbsent(owned.launch.pid); await pidAbsent(s.server.pid);
+  assert.equal(existsSync(join(f.m.runRoot, 'tmux.sock')), false);
+  await restoredStartup(f);
+});
+test('R55 cleanup settles literal quit before Enter and retires exact owned launch', async t => {
+  const f = await startupFixture(t, { eager: true, stopAtControl: 'a', staleSocket: true, quitSettle: true });
+  await assert.rejects(f.harness().run(), { code: 'fixture_startup_stop' });
+  const j = startupJournal(f), s = startupState(f), owned = j.threads.a;
+  assert.equal(owned.uuidFromOwnTui, true);
+  assert.equal(owned.launch.pid, s.sessions.a.pid); assert.equal(owned.launch.birth, s.sessions.a.birth);
+  assert.equal(owned.launch.cwd, join(f.m.runRoot, 'ws-a'));
+  assert.equal(owned.launch.parents.at(-1).pid, s.server.pid);
+  const readback = f.ports.peerDisabled, disabled = new Set();
+  f.ports.peerDisabled = async p => { const result = await readback(p); if (result) disabled.add(p.id); return result; };
+  assert.equal((await f.harness().cleanup()).count, 5);
+  assert.equal(f.quitSubmissions.length, 1);
+  assert.equal(f.quitSubmissions[0].session, 'a');
+  assert.ok(f.quitSubmissions[0].elapsed >= 1000000000n);
+  assert.ok(f.quitSubmissions[0].reverified >= 1000000000n);
+  assert.equal(startupState(f).sessions.a.closed, true);
+  await pidAbsent(owned.launch.pid); await pidAbsent(s.server.pid);
+  assert.equal(existsSync(join(f.m.runRoot, 'tmux.sock')), false);
+  assert.ok(startupJournal(f).completed.includes('close-a'));
+  assert.deepEqual([...disabled].sort(), f.m.peers.map(p => p.peerId).sort());
+  assert.deepEqual(JSON.parse(readFileSync(f.peers)), Object.fromEntries(f.m.peers.map(p => [p.peerId, true])));
+  await restoredStartup(f);
 });
 for (const question of ['Do you trust this directory?', 'Sign in to continue', 'Approval required: approve this command?', 'Allow this command to run? [y/N]',
   'Would you like to run the following command?', 'Would you like to apply the following changes?', 'Permission required: allow access?']) test('startup refuses actual setup interaction: ' + question, async t => {
