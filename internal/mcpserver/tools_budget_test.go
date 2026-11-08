@@ -71,6 +71,7 @@ func testToolsBudget(t *testing.T, operator bool) {
 		achieved["vecnet_agent_kinds"] = 471
 		achieved["vecnet_agent_add"] = 1977
 		achieved["vecnet_agent_status"] = 2615
+		achieved["vecnet_route_stats"] = 572 // Measured in both eras; no total-budget exemption.
 	} else {
 		delete(achieved, "vecnet_peer_lifecycle")
 		delete(achieved, "vecnet_peer_invite_get")
@@ -91,6 +92,9 @@ func testToolsBudget(t *testing.T, operator bool) {
 			t.Fatal(err)
 		}
 		t.Logf("%s: %d bytes", entry.Name, len(raw))
+		if entry.Name == "vecnet_route_stats" && (!operator || len(raw) > 1024) {
+			t.Errorf("route stats: operator=%t, %d bytes; require operator-only entry <=1024", operator, len(raw))
+		}
 		baseline, ok := achieved[entry.Name]
 		if r2Baseline, isR2 := r2Achieved[entry.Name]; isR2 {
 			// Remove only the explicit R2 additions when applying master's total

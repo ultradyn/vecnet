@@ -16,13 +16,16 @@ func TestProjectionCatalogDescriptions(t *testing.T) {
 	if err := json.Unmarshal(envelope.SchemaJSON(), &doc); err != nil {
 		t.Fatal(err)
 	}
-	for _, spec := range append(toolSpecs(doc.Defs), guideSpec()) {
+	for _, spec := range append(toolSpecs(doc.Defs), guideSpec(), routeStatsSpec()) {
 		if strings.TrimSpace(toolDescriptions[spec.name]) == "" {
 			t.Errorf("missing MCP description for %s", spec.name)
 		}
 	}
 	if toolPropertyDescriptions["vecnet_peer_lifecycle"]["action"] == "" {
 		t.Error("missing lifecycle action description")
+	}
+	if strings.TrimSpace(toolPropertyDescriptions["vecnet_route_stats"]["id"]) == "" {
+		t.Error("missing route stats id description")
 	}
 }
 

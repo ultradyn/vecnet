@@ -54,7 +54,7 @@ func (s *server) adminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/admin/sources/{id}/disable", s.adminDisableSource)
 	mux.HandleFunc("POST /v1/admin/routes", s.adminAddRoute)
 	mux.HandleFunc("GET /v1/admin/routes", s.adminListRoutes)
-	mux.HandleFunc("GET /v1/admin/route-stats", s.adminRouteStats)
+	mux.Handle("/v1/admin/route-stats", s.routeStatsHandler())
 	mux.HandleFunc("DELETE /v1/admin/routes/{id}", s.adminRemoveRoute)
 	mux.HandleFunc("POST /v1/admin/routes/{id}/rotate", s.adminRotateRoute)
 	mux.HandleFunc("POST /v1/admin/routes/{id}/verify", s.adminVerifyRoute)

@@ -70,7 +70,7 @@ func TestRouteStatsHTTPContractAndErrors(t *testing.T) {
 	e.Now.Advance(time.Date(2030,1,10,12,0,0,0,time.UTC).Sub(e.Now.Now()))
 	peer, peerSecret := e.NewPeer("session", "stats-http-peer")
 	_, principalSecret := e.NewPrincipal("stats-http-principal")
-	route, _, err := e.Hub.AddRoute(context.Background(), "peer", peer, "https://stats-http.example:8443/private-path?private-query#private-fragment")
+	route, _, err := e.Hub.AddRoute(context.Background(), "peer", peer, "https://stats-http.example:8443/private-path?private-query")
 	if err != nil { t.Fatal(err) }
 	sub := fmt.Sprintf("sub_%026d", 51)
 	at := envelope.FormatTime(e.Now.Now())
