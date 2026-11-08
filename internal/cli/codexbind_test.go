@@ -131,6 +131,147 @@ func (f *bindFixture) rejected(hint string, args ...string) {
 }
 func bindID(i int) string { return fmt.Sprintf("%08x-89ab-cdef-0123-456789abcdef", i) }
 
+// Independent config directories share admission state and a canonical Codex
+// home, but authenticate distinct peers even when their profile/as labels match.
+// All rows and registry entries must be produced by the public CLI paths.
+func codexIndependentSources(t *testing.T, first, second *bindFixture, limit string) {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var peer string
+		switch r.Header.Get("Authorization") {
+		case "Bearer vn_peer_source_A":
+			peer = "peer_A"
+		case "Bearer vn_peer_source_B":
+			peer = "peer_B"
+		default:
+			http.Error(w, "unknown fixture credential", http.StatusUnauthorized)
+			return
+		}
+		switch r.URL.Path {
+		case "/v1/peers/me":
+			_ = json.NewEncoder(w).Encode(map[string]string{"kind": "peer", "peer_id": peer})
+		case "/v1/peers":
+			_, _ = w.Write([]byte(`{"peers":[]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	data := filepath.Join(first.env["HOME"], "shared-data")
+	if err := os.Mkdir(data, 0700); err != nil {
+		t.Fatal(err)
+	}
+	// Exercise canonical-home accounting through different input paths too.
+	alias := filepath.Join(second.env["HOME"], "shared-codex-home")
+	if err := os.Symlink(first.home, alias); err != nil {
+		t.Fatal(err)
+	}
+	second.env["CODEX_HOME"] = alias
+	for i, f := range []*bindFixture{first, second} {
+		f.hub = server.URL
+		f.peer.Store([]string{"peer_A", "peer_B"}[i])
+		f.env["XDG_DATA_HOME"] = data
+		f.env["VECNET_CODEX_MAX_BINDINGS"] = limit
+		f.env["VECNET_CONFIG"] = filepath.Join(f.env["HOME"], "source", "config.toml")
+		f.path = filepath.Join(filepath.Dir(f.env["VECNET_CONFIG"]), "codex", "bindings.json")
+		f.env["VECNET_CODEX_BINDINGS"] = f.path
+		hub := server.URL
+		if i == 1 {
+			hub += "/" // Thread/hub exclusion compares normalized hubs.
+		}
+		profile := Profile{Hub: hub, Secret: []string{"vn_peer_source_A", "vn_peer_source_B"}[i]}
+		if err := saveConfig(f.env["VECNET_CONFIG"], Config{Profiles: map[string]Profile{"p": profile, "q": profile}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func codexSourceCLI(f *bindFixture, as string, args ...string) (int, string, string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var out, errs bytes.Buffer
+	argv := append([]string{"--net", "p", "--as", as}, args...)
+	code := RunContext(ctx, argv, strings.NewReader(""), &out, &errs, func(k string) string { return f.env[k] })
+	return code, out.String(), errs.String()
+}
+
+func codexSourceBinding(t *testing.T, f *bindFixture, thread, as string) codexBinding {
+	t.Helper()
+	file, err := loadCodexBindings(f.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(file.Bindings) != 1 {
+		t.Fatalf("source %s: got %d rows, want its own binding for %s/%s", f.path, len(file.Bindings), f.peer.Load(), thread)
+	}
+	home, err := filepath.EvalSymlinks(f.env["CODEX_HOME"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := file.Bindings[0]
+	if b.Profile != "p" || b.As != as || b.Caller != f.peer.Load().(string) || b.ThreadID != thread || b.Hub != f.hub || b.CodexHome != home || file.disabled("p", as) {
+		t.Fatalf("source %s lost its identity: %+v", f.path, b)
+	}
+	return b
+}
+
+func TestCodexBindIndependentSourceLabels(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("participating data-root registry admission is Linux-specific")
+	}
+	for _, as := range []string{"", "same_label"} {
+		t.Run("as="+as, func(t *testing.T) {
+			first, second := newBindFixture(t), newBindFixture(t)
+			codexIndependentSources(t, first, second, "2")
+			for i, f := range []*bindFixture{first, second} {
+				thread := []string{bindT1, bindT2}[i]
+				code, _, errs := codexSourceCLI(f, as, "codex", "bind", "--thread", thread)
+				if code != 0 {
+					t.Fatalf("distinct peer %s refused with capacity available: exit=%d stderr=%s", f.peer.Load(), code, errs)
+				}
+			}
+			codexSourceBinding(t, first, bindT1, as)
+			codexSourceBinding(t, second, bindT2, as)
+			// Matching labels remain exclusive inside each owning source.
+			before := second.raw()
+			code, _, errs := codexSourceCLI(second, as, "codex", "bind", "--thread", bindID(3))
+			if code != 1 || !strings.Contains(errs, "already bound: p to Codex thread") || !bytes.Equal(before, second.raw()) {
+				t.Fatalf("local label exclusion lost: exit=%d stderr=%s", code, errs)
+			}
+		})
+	}
+}
+
+func TestCodexBindIndependentSourceGuards(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("participating data-root registry admission is Linux-specific")
+	}
+	for _, tc := range []struct{ name, limit, thread, hint string }{
+		{"thread_hub", "2", bindT1, "Codex thread in another registered source"},
+		{"combined_cap", "1", bindT2, "binding limit 1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			first, second := newBindFixture(t), newBindFixture(t)
+			codexIndependentSources(t, first, second, tc.limit)
+			code, _, errs := codexSourceCLI(first, "", "codex", "bind", "--thread", bindT1)
+			if code != 0 {
+				t.Fatalf("first bind: exit=%d stderr=%s", code, errs)
+			}
+			before := first.raw()
+			// A distinct label ensures the guard cannot pass because of I1.
+			code, _, errs = codexSourceCLI(second, "", "--net", "q", "codex", "bind", "--thread", tc.thread, "--takeover")
+			if code != 1 || !strings.Contains(errs, tc.hint) {
+				t.Fatalf("guard %s: exit=%d stderr=%s, want %q", tc.name, code, errs, tc.hint)
+			}
+			file, err := loadCodexBindings(second.path)
+			if err != nil || len(file.Bindings) != 0 || !bytes.Equal(before, first.raw()) {
+				t.Fatalf("refused cross-source admission changed rows: %+v err=%v", file, err)
+			}
+			codexSourceBinding(t, first, bindT1, "")
+		})
+	}
+}
+
 func TestCodexBindWritesFile(t *testing.T) {
 	f := newBindFixture(t)
 	// Exercise the real dispatch entry point as well as the clock seam.
