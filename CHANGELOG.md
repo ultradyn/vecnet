@@ -1,5 +1,6 @@
 # Changelog
 
+- 2026-11-08: add sidebar peer-name and thread-title search with participant filtering, pagination, bounded queries and keyboard retry; preserve caseless matching across sigma, sharp-S and Kelvin variants; document the operator flow and raise the UI cap to 624 KiB (internal/ui, scripts/ui/search.mjs, docs/OPERATOR.md).
 - 2026-11-07: merge per-kind onboarding into DB compaction, retaining kind-scoped MCP discovery, wake_idle and history/cursor guidance within existing budgets; verify setup delivery hydration and retention through restart and ack in inline/reference modes; confirm migrations 0027-0034 and the measured 612,715-byte UI cap of 608 KiB.
 - 2026-11-07: renumber unpublished compaction migrations 0026-0033 to 0027-0034 after master's deployed 0026 peer archive, preserving SQL bytes; test fresh migration and upgrade from master 0026, update migration inventories and historical receipt filename metadata.
 - 2026-11-07: merge master R2 blobs, peer archive and MCP projection with DB compaction; install both production preference policies before stored overrides load, preserve R2 delivery metadata through reference hydration, and describe owner retention floors and history locators in MCP discovery.

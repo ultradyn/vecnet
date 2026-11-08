@@ -395,3 +395,14 @@ Fixture services only: the demo hub, routed R2 grant endpoints and a local fake 
 - [r2-settings-off-confirm-390.png](r2-settings-off-confirm-390.png) — 390 px: Choosing Off: the hub's preview names blob_expiry_off and the shared confirmation dialog states the cost with the hub's own figures (no automatic or disaster expiry; used of the limit). Cancel wrote nothing.
 - [r2-settings-quota-full-1440.png](r2-settings-quota-full-1440.png) — 1440 px: Storage over its limit after an operator lowered it: the meter reads full, "over by 52 MB", and says new uploads are refused while nothing already uploaded is deleted.
 - [r2-settings-quota-full-390.png](r2-settings-quota-full-390.png) — 390 px: Storage over its limit after an operator lowered it: the meter reads full, "over by 52 MB", and says new uploads are refused while nothing already uploaded is deleted.
+
+- [sr-idle.png](sr-idle.png) — Sidebar search above Your Threads, with the slash shortcut hint.
+- [sr-peer-hit.png](sr-peer-hit.png) — Peer name matches and hub title results for hark.
+- [sr-thread-hit.png](sr-thread-hit.png) — Thread title matches for release, with no peer name matches.
+- [sr-miss.png](sr-miss.png) — No peer names or thread titles match.
+- [sr-loading.png](sr-loading.png) — Thread search held pending while peer matches remain visible.
+- [sr-error.png](sr-error.png) — Failed title search with an actionable Retry button.
+- [sr-participant.png](sr-participant.png) — Thread title results narrowed to the selected peer.
+- [sr-narrow.png](sr-narrow.png) — Search in the 220 px sidebar at a 1000 px viewport.
+- [sr-phone.png](sr-phone.png) — Search in the phone sidebar at a 390 px viewport.
+- [sr-cleared.png](sr-cleared.png) — Cleared search with the ordinary thread lists restored.
