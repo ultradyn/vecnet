@@ -22,6 +22,90 @@ func runDisplayInbox(t *testing.T, env map[string]string, output io.Writer, flag
 	return code, errs.String()
 }
 
+func TestInboxDisplayPreservesUnreadReplayMetadata(t *testing.T) {
+	for _, format := range []string{"text", "json"} {
+		for _, printedInReplay := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/printed-in-replay=%t", format, printedInReplay), func(t *testing.T) {
+				f := newAppHookFixture(t)
+				for _, body := range []string{"printed first", "unread second", "unread third"} {
+					f.add(t, "wake_idle", body, "")
+				}
+				f.run(t, "busy", "wake")
+				var before map[string]json.RawMessage
+				if err := json.Unmarshal(f.bytes(t), &before); err != nil {
+					t.Fatal(err)
+				}
+				var refs []json.RawMessage
+				if err := json.Unmarshal(before["replay"], &refs); err != nil {
+					t.Fatal(err)
+				}
+				if len(refs) != 3 {
+					t.Fatal("fixture did not defer three deliveries")
+				}
+				for n := range refs {
+					var ref map[string]json.RawMessage
+					if err := json.Unmarshal(refs[n], &ref); err != nil {
+						t.Fatal(err)
+					}
+					ref["future_field"] = json.RawMessage(fmt.Sprintf(`{"nested":{"keep":true,"ordinal":%d},"values":[null,"fixture",false]}`, n))
+					refs[n], _ = json.Marshal(ref)
+				}
+				wantReplay := refs[1:]
+				if !printedInReplay {
+					refs = refs[1:]
+				}
+				before["replay"], _ = json.Marshal(refs)
+				before["claims"] = json.RawMessage(`[{"ID":"dly_pending","After":"opaque-before","Priority":"wake_idle","Claim":"ambiguous","Order":19,"future_claim":{"keep":true}}]`)
+				before["poll_cursor"] = json.RawMessage(`"opaque-poll"`)
+				before["ack_after"] = json.RawMessage(`"opaque-fence"`)
+				before["future_top"] = json.RawMessage(`{"keep":[true,null]}`)
+				raw, err := json.Marshal(before)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(f.path, raw, 0600); err != nil {
+					t.Fatal(err)
+				}
+				binding := []byte("{\n \"session\":\"fixture-owned\", \"future_field\":true\n}\n")
+				if err := os.WriteFile(bindingPath(f.path), binding, 0600); err != nil {
+					t.Fatal(err)
+				}
+				flags := []string{"inbox", "--since", "e1.0", "--limit", "1"}
+				if format == "json" {
+					flags = append([]string{"--json"}, flags...)
+				}
+				var output bytes.Buffer
+				if code, stderr := runDisplayInbox(t, f.env, &output, flags...); code != 0 || !strings.Contains(output.String(), "printed first") || strings.Contains(output.String(), "unread second") {
+					t.Fatalf("one-delivery inbox failed: %d %s %s", code, stderr, output.String())
+				}
+				var after map[string]json.RawMessage
+				if err := json.Unmarshal(f.bytes(t), &after); err != nil {
+					t.Fatal(err)
+				}
+				sameJSON := func(want, got json.RawMessage) bool {
+					var w, g any
+					return json.Unmarshal(want, &w) == nil && json.Unmarshal(got, &g) == nil && reflect.DeepEqual(w, g)
+				}
+				wanted, _ := json.Marshal(wantReplay)
+				if !sameJSON(wanted, after["replay"]) {
+					t.Fatalf("unread replay metadata/order changed: got %s, want %s", after["replay"], wanted)
+				}
+				if !sameJSON(json.RawMessage(`["dly_1"]`), after["displayed"]) {
+					t.Fatal("printed delivery did not publish proof")
+				}
+				for key, value := range before {
+					if key != "replay" && key != "shown" && key != "displayed" && !sameJSON(value, after[key]) {
+						t.Fatalf("unrelated state field changed: %s", key)
+					}
+				}
+				if got, err := os.ReadFile(bindingPath(f.path)); err != nil || !bytes.Equal(got, binding) {
+					t.Fatal("session sidecar changed")
+				}
+			})
+		}
+	}
+}
+
 func TestInboxFailedOutputPreservesReplayAndAck(t *testing.T) {
 	for _, format := range []string{"text", "json"} {
 		for _, short := range []bool{false, true} {

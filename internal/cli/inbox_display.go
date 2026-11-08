@@ -74,6 +74,27 @@ func (a *app) displayInbox(c *client, profile string, events []envelope.Event, o
 			eligible = append(eligible, delivery)
 		}
 	}
+	// Filter original elements rather than rebuilding unread references from
+	// replayRef, which cannot represent metadata added by a newer client.
+	var kept []json.RawMessage
+	retired := false
+	if len(eligible) > 0 && len(fields["replay"]) > 0 {
+		var replay []json.RawMessage
+		if json.Unmarshal(fields["replay"], &replay) != nil {
+			return write()
+		}
+		for _, raw := range replay {
+			var ref struct{ ID string }
+			if json.Unmarshal(raw, &ref) != nil {
+				return write()
+			}
+			if slices.Contains(eligible, ref.ID) {
+				retired = true
+			} else {
+				kept = append(kept, raw)
+			}
+		}
+	}
 	if err := write(); err != nil {
 		return err
 	}
@@ -83,15 +104,16 @@ func (a *app) displayInbox(c *client, profile string, events []envelope.Event, o
 	for _, delivery := range eligible {
 		s.recordDisplay(delivery)
 	}
-	s.Replay = slices.DeleteFunc(s.Replay, func(ref replayRef) bool { return slices.Contains(eligible, ref.ID) })
 	// Change only proof fields. Preserve unknown/legacy fields verbatim as
 	// JSON values and never open or rewrite the separate session binding.
 	fields["shown"], _ = json.Marshal(s.Shown)
 	fields["displayed"], _ = json.Marshal(s.Displayed)
-	if len(s.Replay) == 0 {
-		delete(fields, "replay")
-	} else {
-		fields["replay"], _ = json.Marshal(s.Replay)
+	if retired {
+		if len(kept) == 0 {
+			delete(fields, "replay")
+		} else {
+			fields["replay"], _ = json.Marshal(kept)
+		}
 	}
 	raw, err := json.Marshal(fields)
 	if err == nil {
