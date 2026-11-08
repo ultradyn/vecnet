@@ -43,11 +43,12 @@ export function quoted(q) {
 // from that public directory; thread participants can still name them.
 export function matchPeers(directory, q) {
   const list = Array.isArray(directory) ? directory : directory && Array.isArray(directory.peers) ? directory.peers : [];
-  const needle = normQuery(q).toLowerCase();
+  // Uppercase gives every sigma form the same key, including word-final ς.
+  const needle = normQuery(q).toUpperCase();
   const ranked = [];
   for (const p of list) {
     if (!p || !str(p.peer_id)) continue;
-    const name = str(p.name).toLowerCase();
+    const name = str(p.name).toUpperCase();
     const at = needle ? name.indexOf(needle) : 0;
     if (at < 0) continue;
     ranked.push({ p, name, rank: !needle ? 0 : name === needle ? 0 : at === 0 ? 1 : 2 });
@@ -93,7 +94,7 @@ export function threadResults(st, { me, nameOf, now, unread, lastAt = () => '' }
     const refused = e.code === 'invalid_value' && e.details && e.details.field === 'q';
     return { ...base, state: 'error', note: (refused ? 'The hub refused this search: ' : 'Search failed: ') + (e.message || 'error'), rows, retry: true };
   }
-  if (!page) return { ...base, state: 'loading', note: 'Searching…' };
+  if (!page) return { ...base, state: 'loading', note: 'Searching…', retry: !!st.retrying, busy: st.loading };
   const more = !!page.next;
   if (st.loading) return { ...base, state: 'loading', note: '', rows, more, busy: true };
   if (!rows.length) return { ...base, state: 'empty', note: st.q ? 'No thread title contains ' + quoted(st.q) : 'No threads', more };
@@ -109,7 +110,7 @@ export function threadResults(st, { me, nameOf, now, unread, lastAt = () => '' }
 // tests.
 export function createSearch({ api, delay = DEBOUNCE_MS, limit = SEARCH_PAGE, setTimer = setTimeout, clearTimer = clearTimeout }) {
   let text = '', q = '', participant = '';
-  let page = null, error = null, loading = false, timer = null, ctl = null, seq = 0;
+  let page = null, error = null, loading = false, retrying = false, timer = null, ctl = null, seq = 0;
   const subs = new Set();
   const notify = () => { for (const fn of [...subs]) fn(); };
   const searching = () => (q !== '' || participant !== '') && !tooLong(q);
@@ -120,35 +121,36 @@ export function createSearch({ api, delay = DEBOUNCE_MS, limit = SEARCH_PAGE, se
   function cancel() {
     seq++;
     if (ctl) { ctl.abort(); ctl = null; }
-    loading = false;
+    loading = retrying = false;
   }
-  function load(cursor) {
+  function load(cursor, retry = false) {
     cancel();
     const mine = seq, c = new AbortController();
     ctl = c;
     loading = true;
+    retrying = retry;
     error = null;
     if (!cursor) page = null;
     api.searchThreads({ q, participant, limit, cursor: cursor || undefined, signal: c.signal }).then(reply => {
       if (mine !== seq) return;
       ctl = null;
-      loading = false;
+      loading = retrying = false;
       const got = reply && Array.isArray(reply.threads) ? reply.threads : [];
       page = { threads: cursor && page ? [...page.threads, ...got] : got, next: (reply && str(reply.next)) || null };
       notify();
     }, e => {
       if (mine !== seq) return;
       ctl = null;
-      loading = false;
+      loading = retrying = false;
       error = e || new Error('search failed');
       notify();
     });
     notify();
   }
-  function apply() {
+  function apply(retry = false) {
     timer = null;
     q = normQuery(text);
-    if (searching()) { load(''); return; }
+    if (searching()) { load('', retry); return; }
     cancel();
     page = null;
     error = null;
@@ -187,14 +189,15 @@ export function createSearch({ api, delay = DEBOUNCE_MS, limit = SEARCH_PAGE, se
     },
     // retry asks again from the first page.
     retry() {
+      if (loading) return;
       unschedule();
-      apply();
+      apply(true);
     },
     // open: the box has a query or a participant, so the sidebar shows
     // results in place of its thread lists. pending: a typed query is
     // waiting out the debounce.
     state() {
-      return { text, q, participant, page, error, loading, pending: timer !== null, tooLong: tooLong(q), open: normQuery(text) !== '' || participant !== '' };
+      return { text, q, participant, page, error, loading, retrying, pending: timer !== null, tooLong: tooLong(q), open: normQuery(text) !== '' || participant !== '' };
     },
     subscribe(fn) { subs.add(fn); return () => subs.delete(fn); },
     close() { unschedule(); cancel(); subs.clear(); },

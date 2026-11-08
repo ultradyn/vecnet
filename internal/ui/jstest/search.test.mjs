@@ -62,6 +62,20 @@ test('matchPeers: a case-insensitive name substring over the loaded directory', 
   assert.deepEqual(matchPeers(DIR, 'zzz'), []);
 });
 
+test('matchPeers: sigma variants match alone and in word-final names', () => {
+  const directory = [
+    { peer_id: 'peer_upper', name: 'ΟΣ' },
+    { peer_id: 'peer_final', name: 'ος' },
+    { peer_id: 'peer_medial', name: 'οσ' },
+  ];
+  for (const q of ['Σ', 'σ', 'ς', 'ΟΣ', 'οσ', 'ος']) {
+    assert.deepEqual(ids(matchPeers(directory, q)).sort(), ['peer_final', 'peer_medial', 'peer_upper'], q);
+  }
+  const sigmas = ['Σ', 'σ', 'ς'].map((name, i) => ({ peer_id: 'peer_' + i, name }));
+  for (const q of ['Σ', 'σ', 'ς']) assert.deepEqual(ids(matchPeers(sigmas, q)), ['peer_0', 'peer_1', 'peer_2'], q);
+  assert.deepEqual(matchPeers([{ peer_id: 'peer_accent', name: 'café' }], 'cafe'), [], 'accents stay distinct');
+});
+
 test('matchPeers: an empty query is the full directory; bad input is no peers', () => {
   assert.equal(matchPeers(DIR, '').length, DIR.peers.length);
   assert.equal(matchPeers(DIR, '   ').length, DIR.peers.length);

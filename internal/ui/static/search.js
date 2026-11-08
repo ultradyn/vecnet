@@ -104,7 +104,7 @@ export function createSearchBox(field, { api, nameOf, onChange, results = null, 
 // only) and the Threads group. o: { box, directory, me, nameOf, now, unread,
 // lastAt(id), avatarCtx (or null before the shell is ready), threadLink(row) }.
 // Focus on a control that is redrawn moves to its replacement, or to the box
-// when the control is gone (Retry, once it is pressed).
+// when the control is gone (for example after a successful Retry).
 export function renderResults(el, o) {
   const st = o.box.state();
   const focused = el.contains(document.activeElement) ? document.activeElement.dataset.key : '';
@@ -120,7 +120,7 @@ export function renderResults(el, o) {
   parts.push(h('div', { class: 'grp sr-grp' }, h('span', { text: tv.heading }), tv.rows.length ? h('span', { class: 'n', text: String(tv.rows.length) + (tv.more ? '+' : '') }) : null));
   const list = tv.rows.map(r => { const a = o.threadLink(r); a.dataset.key = 't:' + r.id; return a; });
   if (tv.note) list.push(h('div', { class: 'none' + (tv.state === 'error' ? ' bad' : ''), text: tv.note, 'aria-busy': tv.state === 'loading' ? 'true' : null }));
-  if (tv.retry) list.push(h('button', { type: 'button', class: 'linkbtn more', 'data-key': 'retry', text: 'Retry', onclick: () => o.box.retry() }));
+  if (tv.retry) list.push(h('button', { type: 'button', class: 'linkbtn more', 'data-key': 'retry', text: tv.busy ? 'Retrying…' : 'Retry', 'aria-disabled': tv.busy ? 'true' : null, onclick: () => o.box.retry() }));
   // While the next page loads the button stays (aria-disabled, not disabled,
   // so it keeps focus); more() ignores a press meanwhile.
   if (tv.more) list.push(h('button', { type: 'button', class: 'linkbtn more', 'data-key': 'more', text: tv.busy ? 'Loading more…' : 'More results', 'aria-disabled': tv.busy ? 'true' : null, onclick: () => o.box.more() }));
