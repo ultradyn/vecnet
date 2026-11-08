@@ -1,7 +1,7 @@
 package cli
 
-// SOURCE DRAFT / UNEXECUTED. Proposed routeStats and cmdRouteStats helpers
-// are deliberately absent. These tests do not exercise command dispatch.
+// These tests cover the routeStats and cmdRouteStats helpers directly.
+// Public command dispatch is covered separately in route_stats_dispatch_test.go.
 import (
 	"bytes"
 	"context"

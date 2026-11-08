@@ -137,6 +137,7 @@ admin (operator credential):
   route add --owner ID --url URL | route verify <route_id>
   route add --owner ID --kind grokbot --url URL --key-file PATH
   route list [--json] | route rotate <route_id> --key-file PATH | route remove <route_id>
+  route stats <peer_id|route_id|sub_id> [--json]
        the crsr_ key is read only from a file, 0600, never from argv
   source add --kind github --name N --route ID [--events A,B] [--priority P]
        prints the ingress URL and the secret, once
@@ -1849,6 +1850,9 @@ func (a *app) cmdPeer(args []string) error {
 }
 
 func (a *app) cmdRoute(args []string) error {
+	if len(args) > 0 && args[0] == "stats" {
+		return a.cmdRouteStats(args[1:])
+	}
 	o, err := parseFlags("route", args, map[string]flagKind{"owner": strFlag, "url": strFlag, "kind": strFlag, "key-file": strFlag})
 	if err != nil {
 		return err
@@ -1914,7 +1918,7 @@ func (a *app) cmdRoute(args []string) error {
 		return a.ok("verified " + o.pos[1])
 	}
 	return usageErr("usage: vecnet route add --owner ID --url URL | " +
-		"route add --owner ID --kind grokbot --url URL --key-file PATH | route verify <route_id> | route list [--json] | route rotate <route_id> --key-file PATH | route remove <route_id>")
+		"route add --owner ID --kind grokbot --url URL --key-file PATH | route verify <route_id> | route list [--json] | route rotate <route_id> --key-file PATH | route remove <route_id> | route stats <peer_id|route_id|sub_id> [--json]")
 }
 
 func (a *app) cmdTeam(args []string) error {
