@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, realpath, rm, writeFile, readFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, writeFile, readFile, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { execFile } from 'node:child_process';
 import type { PluginContext } from '../src/backend.ts';
@@ -32,9 +32,9 @@ test('workspace allocation owns worktree creation; root mode never changes branc
   assert.deepEqual(calls, [['git', '-C', repo, 'branch', '--show-current']]);
   assert.equal(await readFile(marker, 'utf8'), 'keep existing checkout');
   calls.length = 0;
-  const temporary = await allocate({ ...spec, workspaceMode: 'temp', project: { alias: 'temporary', repoRoot: '/does-not-exist', baseRef: '' } }, root, ctx);
+  const temporary = await allocate({ ...spec, workspaceMode: 'temp', project: { alias: 'any-scratch-name', repoRoot: '/does-not-exist', baseRef: '', scratch: true } }, root, ctx);
   assert.equal(temporary.path, join(root, 'job_one')); assert.equal(temporary.branch, undefined); assert.equal(calls.length, 0);
-  await assert.rejects(allocate({ ...spec, workspaceMode: 'temp' }, root, ctx), /EEXIST/);
+  await assert.rejects(allocate({ ...spec, workspaceMode: 'temp', project: { ...spec.project, scratch: true } }, root, ctx), /EEXIST/);
   await assert.rejects(allocate({ ...spec, jobId: '../escape', workspaceMode: 'temp' }, root, ctx), /invalid_job/);
   assert.throws(() => workspaceRoot('relative'), /absolute/);
 });
@@ -69,4 +69,32 @@ test('real disposable Git: worktree branch/base and project-root preservation', 
   assert.equal(rootWs.path, repo); assert.equal(rootWs.branch, 'existing-branch');
   assert.equal(await exec(['git', '-C', repo, 'status', '--porcelain']), before);
   assert.equal(await readFile(join(repo, 'tracked.txt'), 'utf8'), 'keep me');
+});
+
+
+test('scratch flag, not alias spelling, gates temp and ordinary modes; canonical /tmp roots are refused before creation', async t => {
+  const parent = process.env.ACP_TEST_ROOT ?? process.env.TMPDIR ?? '/mnt/build-cache/tmp';
+  assert.ok(parent.startsWith('/') && parent !== '/tmp' && !parent.startsWith('/tmp/'));
+  await mkdir(parent, { recursive: true });
+  const dir = await realpath(await mkdtemp(join(parent, 'vecnet-acp-scratch-')));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const repo = join(dir, 'repo'), root = join(dir, 'jobs'); await mkdir(repo);
+  const calls: string[][] = [];
+  const ctx = { exec: async (argv: string[]) => { calls.push(argv); return { code: 0, stdout: argv.includes('rev-parse') ? base : 'existing', stderr: '' }; } } as unknown as PluginContext;
+  const spec = { jobId: 'job_scratch', tag: 'vl-job_scratch', title: 'test', prompt: 'hello', preset: 'fake', permissionMode: 'ask',
+    project: { alias: 'temporary', repoRoot: repo, baseRef: 'master' }, branch: 'launch/job_scratch', env: {}, attachments: [] } as AcpLaunchSpec;
+  await assert.rejects(allocate({ ...spec, workspaceMode: 'temp' }, root, ctx), /scratch/);
+  await assert.rejects(allocate({ ...spec, workspaceMode: 'temp', project: { ...spec.project, scratch: false } } as AcpLaunchSpec, root, ctx), /scratch/);
+  for (const workspaceMode of ['worktree', 'project-root'] as const) {
+    await assert.rejects(allocate({ ...spec, workspaceMode, project: { ...spec.project, scratch: true } } as AcpLaunchSpec, root, ctx), /scratch/);
+  }
+  assert.equal(calls.length, 0);
+  // A legacy ordinary repo literally called temporary remains ordinary.
+  const ordinary = await allocate({ ...spec, workspaceMode: 'project-root' }, root, ctx);
+  assert.equal(ordinary.path, repo);
+  const scratch = { ...spec, workspaceMode: 'temp', project: { alias: 'any-scratch-name', repoRoot: '', baseRef: '', scratch: true } } as AcpLaunchSpec;
+  const temp = await allocate(scratch, root, ctx); assert.equal(temp.path, join(root, 'job_scratch'));
+  await assert.rejects(allocate({ ...scratch, jobId: 'job_forbidden' }, '/tmp/acp-must-not-create-this-root', ctx), /tmp/);
+  const link = join(dir, 'to-system-temp'); await symlink('/tmp', link);
+  await assert.rejects(allocate({ ...scratch, jobId: 'job_forbidden' }, join(link, 'acp-must-not-create-this-root'), ctx), /tmp/);
 });

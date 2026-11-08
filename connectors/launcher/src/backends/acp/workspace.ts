@@ -1,13 +1,14 @@
 import { mkdir, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { isAbsolute, join, resolve } from 'node:path';
-import type { LaunchSpec, PluginContext } from '../../backend.ts';
+import { isAbsolute, join, resolve, dirname, basename } from 'node:path';
+import type { LaunchSpec, PluginContext, ResolvedProject } from '../../backend.ts';
 
 export const workspaceModes = ['worktree', 'project-root', 'temp'] as const;
 export type WorkspaceMode = typeof workspaceModes[number];
 // Local extension until cx lands the shared allocation contract. Never interpret
 // project.repoRoot as an already allocated job directory.
-export type AcpLaunchSpec = LaunchSpec & { workspaceMode?: WorkspaceMode };
+export type AcpResolvedProject = ResolvedProject & { scratch?: boolean };
+export type AcpLaunchSpec = Omit<LaunchSpec, 'project'> & { project: AcpResolvedProject; workspaceMode?: WorkspaceMode };
 export interface Workspace { mode: WorkspaceMode; path: string; repo?: string; branch?: string }
 export function workspaceRoot(configured?: string): string {
   const root = configured ?? join(homedir(), '.cache', 'vecnet-launcher', 'workspaces');
@@ -19,10 +20,24 @@ export async function git(ctx: PluginContext, args: string[], signal?: AbortSign
   if (r.code !== 0) throw new Error('acp_workspace_git_failed');
   return r.stdout.trim();
 }
+async function prospectiveCanonical(path: string): Promise<string> {
+  try { return await realpath(path); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    const parent = dirname(path);
+    if (parent === path) throw error;
+    return join(await prospectiveCanonical(parent), basename(path));
+  }
+}
 export async function allocate(spec: AcpLaunchSpec, root: string, ctx: PluginContext, signal?: AbortSignal): Promise<Workspace> {
   const mode = spec.workspaceMode ?? 'worktree';
   if (!workspaceModes.includes(mode)) throw new Error('acp_workspace_mode_unsupported');
   if (!/^job_[A-Za-z0-9_]+$/.test(spec.jobId)) throw new Error('acp_invalid_job');
+  if (mode === 'temp' ? spec.project.scratch !== true : spec.project.scratch !== undefined && spec.project.scratch !== false) throw new Error('acp_workspace_scratch_mismatch');
+  if (mode === 'temp') {
+    const canonical = await prospectiveCanonical(root);
+    if (canonical === '/tmp' || canonical.startsWith('/tmp/')) throw new Error('acp_temp_root_forbidden_under_tmp');
+  }
   if (mode === 'project-root') {
     const repo = await realpath(spec.project.repoRoot);
     if (!isAbsolute(spec.project.repoRoot) || resolve(spec.project.repoRoot) !== repo) throw new Error('acp_project_root_must_be_canonical');
@@ -36,6 +51,7 @@ export async function allocate(spec: AcpLaunchSpec, root: string, ctx: PluginCon
   if (mode === 'temp') {
     // Exclusive mkdir prevents adopting an old job's directory. No alias repo
     // lookup, Git init, branch creation, or shared repo mutation in this mode.
+    // Only the explicit project.scratch flag authorizes temp allocation.
     await mkdir(path, { mode: 0o700 });
     return { mode, path };
   }

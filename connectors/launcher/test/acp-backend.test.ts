@@ -36,7 +36,7 @@ async function fixture(t: TestContext, scenario = 'normal') {
     presets: { fake: { argv: [process.execPath, fixturePath, scenario, log], provider: 'fixture', mode_id: 'ask' } } };
   const hooks: SessionHooks = { onEvent() {}, onPermissionRequest: async () => ({ optionId: 'no', decidedBy: 'test' }), onQuestion: async () => { throw new Error('not advertised'); } };
   const spec = (over: Partial<AcpLaunchSpec> = {}): AcpLaunchSpec => ({ jobId: 'job_test', tag: 'vl-job_test', title: 'test', prompt: 'Hello',
-    project: { alias: 'temporary', repoRoot: '/not/preallocated', baseRef: 'master' }, branch: 'launch/job_test', workspaceMode: 'temp',
+    project: { alias: 'any-scratch-name', repoRoot: '/not/preallocated', baseRef: '', scratch: true }, branch: 'launch/job_test', workspaceMode: 'temp',
     preset: 'fake', permissionMode: 'ask', attachments: [], env: { VECNET_CREDENTIAL: 'test-secret-must-be-scrubbed' }, ...over });
   const backend = await plugin.create(config, ctx), handles = new Set<SessionHandle>();
   const launch = async (over: Partial<AcpLaunchSpec> = {}, useHooks = hooks) => { const h = await backend.launch(spec(over), useHooks); handles.add(h); return h; };
