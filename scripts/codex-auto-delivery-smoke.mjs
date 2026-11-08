@@ -1066,10 +1066,26 @@ export function createHarness(raw, ports = {}) {
   async function openRpc() {
     if (!rpc) rpc = ports.rpc ?? await (await import(pathToFileURL(join(generation().root, 'launcher/src/codex/rpc.ts')).href)).openCodexRpc({ codexHome: m.approval.codexHome, euid: uid(), log: { info() {}, warn() {}, error() {} }, timeoutMs: 5000 });
   }
-  async function requireNullRequirements() {
+  function requireManagedPolicyAbsent() {
+    if (process.platform !== 'linux') fail('native_policy_unproved');
+    for (const ancestor of ['/', '/etc', '/etc/codex']) {
+      let s;
+      try { s = lstatSync(ancestor); } catch (e) { if (e.code === 'ENOENT') return; throw e; }
+      if (s.isSymbolicLink() || !s.isDirectory() || s.uid !== 0 || (s.mode & 0o022)) fail('native_policy_unproved');
+    }
+    try { lstatSync('/etc/codex/managed_config.toml'); } catch (e) { if (e.code === 'ENOENT') return; throw e; }
+    fail('native_policy_unproved');
+  }
+  async function requireNativePolicy(owned) {
     try {
+      requireManagedPolicyAbsent();
       const result = await rpc.call('configRequirements/read', {}, 5000);
       if (!record(result) || !Object.hasOwn(result, 'requirements') || result.requirements !== null) fail('native_policy_unproved');
+      if (owned !== undefined) {
+        if (!record(owned) || !owned.uuidFromOwnTui || !uuid.test(owned.id)) fail('native_policy_unproved');
+        const thread = (await rpc.call('thread/read', { threadId: owned.id, includeTurns: false }, 5000))?.thread;
+        if (!record(thread) || thread.id !== owned.id || thread.cwd !== owned.cwd || !record(thread.status) || thread.status.type !== 'idle') fail('native_policy_unproved');
+      }
     } catch { fail('native_policy_unproved'); }
   }
   async function history(owned) {
@@ -1093,7 +1109,7 @@ export function createHarness(raw, ports = {}) {
     const socketPath = join(m.runRoot, 'tmux.sock');
     if (journal.tmux) await checkTmux(); else if (present(socketPath)) fail('preexisting_consumer');
     if (present(join(m.runRoot, 'ws-' + session))) fail('preexisting_consumer');
-    await requireNullRequirements();
+    await requireNativePolicy();
     const cwd = join(m.runRoot, 'ws-' + session), marker = 'OWN-' + randomBytes(16).toString('hex'); mkdirPrivate(cwd, journal.dirs);
     journal.threadIntent = { session, cwd, marker, newServer: !journal.tmux }; save();
     const handoff = journal.tmux ? undefined : async children => {
@@ -1195,7 +1211,7 @@ export function createHarness(raw, ports = {}) {
       shell: nativeShell, shellHash: shellIdentity.shellHash, shellIdentity, login: false,
       toolHash: journal.tools[m.tools.codex], launchHash: digestObject(nativeTuiLaunch(m, session, plan.paths.runtime)),
       beforeTurnIds: before.map(turn => turn.id), beforeHistoryHash: digestObject(before) };
-    await requireNullRequirements();
+    await requireNativePolicy(own);
     journal.nativeCapabilityIntent = intent; save();
     try {
       await submit(session, requestText);
@@ -1237,7 +1253,7 @@ export function createHarness(raw, ports = {}) {
       const turns = await history(thread); beforeHistoryHashes[thread.id] = digestObject(turns);
       if (thread.id === own.id) beforeTurnIds = turns.map(t => t.id);
     }
-    await requireNullRequirements();
+    await requireNativePolicy(own);
     journal.sourceIntent = actorSourceIntent(p, requireBinding);
     journal.actorIntent = { session: p.session, command, requestedScript: command, requestText, commandHash: hash(command), requestHash: hash(requestText),
       expectedEventCommand, eventCommandHash: hash(expectedEventCommand),
