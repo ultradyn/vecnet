@@ -101,7 +101,7 @@ var propertyDescriptions = map[string]string{
 
 var toolPropertyDescriptions = map[string]map[string]string{
 	"vecnet_ack":            {"cursor": "Event cursor: next_cursor from the inbox page you have fully handled."},
-	"vecnet_inbox":          {"after": "Event cursor e<epoch>.<seq>. head skips backlog; omit for last ack.", "include_sender_chain": "Include loop ancestry."},
+	"vecnet_inbox":          {"after": "Event cursor e<epoch>.<seq>. head skips existing backlog. Omit for last ack.", "include_sender_chain": "Show chain."},
 	"vecnet_thread":         {"id": "Thread ID.", "after": "Message ID: next_after; locators also accept expired anchors."},
 	"vecnet_threads":        {"cursor": "Opaque cursor: next from the previous page."},
 	"vecnet_react":          {"priority": "Optional. The default depends on the emoji. wake costs the recipient a run."},
