@@ -52,3 +52,11 @@ Owned launcher intake remains stopped with no active jobs; separate automatic de
 - `448f9192c818f819f3a48c5831b75ee8f7b804dbdd5d7d5e8694cfc3507a5b15` `connectors/launcher/src/config.ts`
 - `4b56c5738c2a0aea85a192093c6dc210b8f67b6fc754f4281523bead865a96db` `connectors/launcher/src/policy.ts`
 - `c992be8900349db1b4343b25e768429d8b80e60df6deb5f54c9b371519b102a1` `connectors/launcher/src/presence.ts`
+
+## Native RPC identity and temp-prompt follow-up
+
+After the initial fixed snapshot, source inspection found the native adapter also used an unbound wire RPC id as the parent bridge request identity. A new real-parent-bridge regression reused a completed id for a changed file grant root: the earlier requester acceptance incorrectly bypassed a new operator card. `/tmp/vecnet-native-rpc-id-red.log` records the intended assertion failure (0/1 pass), before production changes. Native bridge identity now combines the wire id with a SHA-256 of the complete method and normalized permission draft, including authoritative paths, raw scope and grant options. Exact wire response ids remain unchanged. Changed operations cannot inherit the old bridge grant. No live exploit was observed.
+
+ACP's branchless temp workspace also exposed a shared prompt mismatch. `/tmp/vecnet-temp-prompt-red.log` records the intended failing real buildLaunchSpec assertion before production change. Explicit branch instructions now apply only to worktrees; project-root and temp preserve the decision footer and no-push instruction. Native temp still initializes its owned Git branch independently.
+
+Follow-up source: `e3861a09378ec09de4d6e5980270cca8122d0e5c`. Both new regressions plus existing native/launch tests: `/tmp/vecnet-native-rpc-id-prompt-green.log`, exit 0, 115/115 pass; full TypeScript `/tmp/vecnet-native-rpc-id-prompt-tsc.log`, exit 0. Commands use the same absolute Node, --test-concurrency=1 and the two test paths `connectors/launcher/test/backends/codex-app-server.test.ts` and `connectors/launcher/test/launch.test.ts`; RED used the respective test-name patterns `reused RPC id` and `instructs a branch only`. Native backend tested SHA-256: `05bfe7542e8cf6a01e4600ec62b66d4b7fe52761b49b83d64c19f4644bee485b`. Main worker drained after these sequential checks. Fresh model/intake remains held until scoped review.
