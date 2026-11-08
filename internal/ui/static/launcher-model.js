@@ -42,7 +42,7 @@ export function launcherChoices(row) {
   else if (!backends.some(b => b.health === 'ok' && b.presets.length)) reason = 'No healthy backend with an advertised preset is available. ' + LAUNCHER_HOST_HELP;
   else if (!backends.some(b => b.health === 'ok' && b.presets.length && b.modes.length)) reason = 'No permission modes advertised for a healthy backend.';
   else if (!backends.some(b => b.health === 'ok' && b.presets.length && b.modes.length && b.workspaces.length)) reason = 'No supported workspace is configured for a healthy backend.';
-  return { projects, scratchProject, temporary, backends, modes, reason };
+  return { projects, scratchProject, temporary, backends, modes, hasWorkspaces, reason };
 }
 
 export function buildLaunch(row, values, key, now) {
@@ -65,7 +65,8 @@ export function buildLaunch(row, values, key, now) {
     content: { text: prompt }, ...(title ? { thread_title: title } : {}),
     expires_at: new Date(deadline).toISOString(),
     job_request: { version: 1, job_key: key, operation: 'launch', instructions: prompt,
-      input: { backend: values.backend, project: workspace === 'temp' ? choices.scratchProject : values.project, workspace_mode: workspace,
+      input: { backend: values.backend, project: workspace === 'temp' ? choices.scratchProject : values.project,
+        ...(choices.hasWorkspaces ? { workspace_mode: workspace } : {}),
         preset: values.preset, permission_mode: values.mode, ...(title ? { title } : {}) } },
   };
 }
@@ -103,7 +104,8 @@ function recoveryBody(body, launcher) {
     Number.isFinite(Date.parse(body.expires_at)) && only(j, ['version', 'job_key', 'operation', 'instructions', 'input']) &&
     j.version === 1 && j.operation === 'launch' && j.job_key === body.idempotency_key && j.instructions === body.content.text &&
     only(i, ['backend', 'project', 'workspace_mode', 'preset', 'permission_mode', 'title']) && ALIAS.test(i.backend) && ALIAS.test(i.project) &&
-    typeof i.preset === 'string' && MODES.includes(i.permission_mode) && WORKSPACES.includes(i.workspace_mode);
+    typeof i.preset === 'string' && MODES.includes(i.permission_mode) &&
+    (!Object.hasOwn(i, 'workspace_mode') || WORKSPACES.includes(i.workspace_mode));
 }
 
 export function createLaunchRecovery({ storage, origin, pubkey, caller, launcher }) {

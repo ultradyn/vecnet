@@ -4,6 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { buildLaunch, createLaunchRecovery, launcherChoices, launcherHostRecovery, launcherSetupCommands, launcherSetupIssue } from '../static/launcher-model.js';
 import { inviteBlock, submitBody } from '../static/invite-model.js';
 import { launcherSection } from '../static/launcher.js';
+import { validateSchema } from '../../../connectors/launcher/src/contract/metadata.ts';
 
 const now = Date.parse('2026-11-08T00:00:00Z');
 const peer = 'peer_01JD3Q2K8M4N6P8R0T2V4X6Z8B';
@@ -22,6 +23,210 @@ class FormEl {
   replaceChildren(...xs) { this.kids = xs; }
 }
 const formNodes = el => [el, ...(el.kids || []).flatMap(x => typeof x === 'object' ? formNodes(x) : [])];
+
+// Exact ed88 launch-input.v1.schema.json, frozen before workspace_mode existed.
+// Keep the prior closed contract intact; validate with the daemon's validator.
+const legacyInputSchema = JSON.parse(String.raw`{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "launch-input.v1.schema.json",
+  "type": "object",
+  "properties": {
+    "backend": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+      "not": {
+        "const": "any"
+      }
+    },
+    "project": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
+    "preset": {
+      "type": "string",
+      "minLength": 1
+    },
+    "permission_mode": {
+      "enum": [
+        "read-only",
+        "ask",
+        "auto",
+        "full-access"
+      ]
+    },
+    "base_ref": {
+      "type": "string",
+      "minLength": 1
+    },
+    "title": {
+      "type": "string",
+      "maxLength": 200
+    },
+    "idle": {
+      "type": "object",
+      "properties": {
+        "wrapup_after": {
+          "type": [
+            "string",
+            "integer"
+          ],
+          "pattern": "^[0-9]+(?:\\.[0-9]+)?(?:ms|s|m|h|d)$",
+          "minimum": 1
+        },
+        "wrapup_turn": {
+          "type": "boolean"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "relay_from": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^peer_[0-9A-HJKMNP-TV-Z]{26}$"
+      }
+    },
+    "reply_priority": {
+      "enum": [
+        "wake",
+        "wake_idle",
+        "hold"
+      ]
+    },
+    "deliver": {
+      "type": "object",
+      "properties": {
+        "push_branch": {
+          "type": "boolean"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "backend",
+    "project",
+    "preset",
+    "permission_mode"
+  ],
+  "additionalProperties": false
+}`);
+
+for (const accepted of [false, true]) {
+  test('fix2 late original 429 preserves ' + (accepted ? 'a successful retry receipt' : 'an uncertain remounted retry'), async () => {
+    const previous = globalThis.document;
+    globalThis.document = { createElement: tag => new FormEl(tag) };
+    const records = new Map(), sends = [], requests = [];
+    const recoveryStorage = { getItem: k => records.get(k) || null, setItem: (k, v) => records.set(k, v), removeItem: k => records.delete(k) };
+    const scope = { storage: recoveryStorage, origin: 'https://ordering-' + accepted + '.example', pubkey: 'ordering-hub', caller: 'operator-ordering', launcher: peer };
+    const ctx = { peerId: peer, me: scope.caller, recoveryStorage, recoveryOrigin: scope.origin,
+      api: { hubIdentity: async () => ({ pubkey: scope.pubkey }), send(body) {
+        sends.push(JSON.stringify(body));
+        return new Promise((resolve, reject) => requests.push({ resolve, reject }));
+      } }, store: { hubNow: () => now, invalidate() {} }, setLeaveGuard() {}, nav() {} };
+    let first, second, original, retry;
+    const result = { thread_id: 'thr_ordering', message_id: 'msg_ordering', job_id: 'job_ordering' };
+    const stored = () => [...records.entries()].find(([k]) => k.includes('.recovery.'))?.[1];
+    try {
+      first = launcherSection(ctx); await first.ready; first.draw(workspaceRow());
+      let nodes = formNodes(first.el);
+      nodes.find(x => x.id === 'launch-prompt').value = 'Never duplicate after a delayed rejection';
+      original = nodes.find(x => x.tag === 'form').on.submit({ preventDefault() {} });
+      assert.equal(requests.length, 1);
+      const before = stored(), body = JSON.parse(sends[0]);
+      first.unmount();
+      second = launcherSection(ctx); await second.ready; second.draw(workspaceRow());
+      nodes = formNodes(second.el);
+      const button = () => nodes.find(x => x.tag === 'button' && x.attrs.type === 'submit');
+      assert.equal(button().textContent, 'Retry launch');
+      retry = nodes.find(x => x.tag === 'form').on.submit({ preventDefault() {} });
+      assert.equal(requests.length, 2);
+      assert.equal(sends[1], sends[0], 'remounted retry keeps the exact request bytes');
+      if (accepted) { requests[1].resolve(result); await retry; }
+      requests[0].reject(Object.assign(new Error('original attempt rate limited'), { status: 429 }));
+      await original;
+      if (!accepted) {
+        requests[1].reject(Object.assign(new Error('accepted retry response lost'), { status: 503 }));
+        await retry;
+        assert.equal(stored(), before, 'late original rejection must not retire a newer uncertain attempt');
+        assert.equal(button().textContent, 'Retry launch');
+      } else {
+        assert.equal(button().textContent, 'Open job thread');
+      }
+      const saved = createLaunchRecovery(scope).snapshot().value;
+      assert.deepEqual(saved?.body, body, 'body, key and deadline remain original');
+      assert.deepEqual(saved?.result, accepted ? result : undefined);
+      const fresh = await import('../static/launcher-model.js?fix2-ordering-' + accepted);
+      assert.deepEqual(fresh.createLaunchRecovery(scope).snapshot().value, saved, 'stored recovery survives reload');
+    } finally {
+      for (const request of requests) request.reject(Object.assign(new Error('test cleanup'), { status: 503 }));
+      await Promise.allSettled([original, retry]);
+      first?.unmount(); second?.unmount();
+      globalThis.document = previous;
+    }
+  });
+}
+
+test('fix2 legacy default worktree input validates against the exact prior closed schema', () => {
+  const legacy = row(); legacy.peer.capabilities.push('project:temporary');
+  assert.ok(!legacy.peer.capabilities.some(x => x.startsWith('workspace:')));
+  assert.equal(launcherChoices(legacy).reason, '');
+  assert.equal(legacyInputSchema.additionalProperties, false);
+  assert.equal(Object.hasOwn(legacyInputSchema.properties, 'workspace_mode'), false);
+  for (const project of ['vecnet', 'temporary']) {
+    const input = buildLaunch(legacy, { ...values(), project, workspace: 'worktree' }, 'launch-legacy-schema', now).job_request.input;
+    assert.deepEqual(validateSchema(legacyInputSchema, input), [], 'legacy daemon must accept the ready form’s payload');
+    assert.equal(Object.hasOwn(input, 'workspace_mode'), false);
+    assert.ok(validateSchema(legacyInputSchema, { ...input, workspace_mode: 'worktree' }).length, 'the frozen schema still rejects the modern field');
+    for (const workspace of ['project-root', 'temp']) {
+      assert.throws(() => buildLaunch(legacy, { ...values(), project, workspace }, 'launch-legacy-schema', now), /workspace mode/);
+    }
+  }
+});
+
+test('fix2 legacy recovery reload renders worktree and retries byte-identical body without adding a mode', async () => {
+  const previous = globalThis.document;
+  globalThis.document = { createElement: tag => new FormEl(tag) };
+  const body = {
+    idempotency_key: 'launch-legacy-reload', recipients: [peer], kind: 'message', priority: 'wake',
+    content: { text: 'Resume the original legacy operation' }, expires_at: '2026-11-09T00:00:00.000Z',
+    job_request: { version: 1, job_key: 'launch-legacy-reload', operation: 'launch', instructions: 'Resume the original legacy operation',
+      input: { backend: 'codex-app-server', project: 'temporary', preset: 'default', permission_mode: 'ask' } },
+  };
+  const scope = { origin: 'https://legacy-reload.example', pubkey: 'legacy-reload-hub', caller: 'operator-legacy', launcher: peer };
+  const key = 'vecnet.ui.launcher.recovery.v1:' + JSON.stringify([scope.origin, scope.pubkey, scope.caller, scope.launcher]);
+  const bytes = JSON.stringify(body), record = JSON.stringify({ v: 1, at: now, body });
+  const records = new Map([[key, record]]), sent = [];
+  const storage = { getItem: k => records.get(k) || null, setItem: (k, v) => records.set(k, v), removeItem: k => records.delete(k) };
+  let section;
+  try {
+    assert.deepEqual(validateSchema(legacyInputSchema, body.job_request.input), []);
+    const fresh = await import('../static/launcher-model.js?fix2-legacy-reload');
+    const restored = fresh.createLaunchRecovery({ ...scope, storage });
+    assert.equal(restored.snapshot().invalid, false, 'an absent workspace mode is a valid legacy record');
+    assert.equal(JSON.stringify(restored.snapshot().value?.body), bytes);
+    const legacy = row(); legacy.peer.capabilities.push('project:temporary');
+    const initial = buildLaunch(legacy, { ...values(), project: 'temporary', workspace: 'worktree', title: '',
+      prompt: body.content.text, deadline: body.expires_at }, body.idempotency_key, now);
+    assert.equal(JSON.stringify(initial), bytes, 'initial wire body agrees with the restored legacy bytes');
+    section = launcherSection({ peerId: peer, me: scope.caller, recoveryStorage: storage, recoveryOrigin: scope.origin,
+      api: { hubIdentity: async () => ({ pubkey: scope.pubkey }), async send(value) {
+        sent.push(JSON.stringify(value)); throw Object.assign(new Error('response lost'), { status: 503 });
+      } }, store: { hubNow: () => now }, setLeaveGuard() {} });
+    await section.ready; section.draw(legacy);
+    const nodes = formNodes(section.el);
+    assert.equal(nodes.find(x => x.id === 'launch-workspace').value, 'worktree');
+    assert.equal(nodes.find(x => x.id === 'launch-project').value, 'temporary');
+    assert.equal(nodes.find(x => x.id === 'launch-prompt').value, body.content.text);
+    assert.equal(nodes.find(x => x.tag === 'button' && x.attrs.type === 'submit').textContent, 'Retry launch');
+    await nodes.find(x => x.tag === 'form').on.submit({ preventDefault() {} });
+    assert.deepEqual(sent, [bytes]);
+    assert.equal(records.get(key), record, 'retry must not normalize or rewrite the legacy record');
+    assert.deepEqual(validateSchema(legacyInputSchema, JSON.parse(sent[0]).job_request.input), []);
+  } finally { section?.unmount(); globalThis.document = previous; }
+});
 
 test('I1 unresolved launch survives component replacement with its exact body/key/deadline', async () => {
   const previous = globalThis.document;
@@ -261,7 +466,8 @@ test('changing native to T3 refreshes rendered permissions and replaces read-onl
 });
 
 test('UI launch payload uses existing message API, one daemon recipient, launch job and message deadline', () => {
-  const body = buildLaunch(row(), values(), 'launch-123', now);
+  const modern = row(); modern.peer.capabilities.push('workspace:codex-app-server/worktree');
+  const body = buildLaunch(modern, values(), 'launch-123', now);
   assert.deepEqual(body, {
     idempotency_key: 'launch-123', recipients: [peer], kind: 'message', priority: 'wake',
     content: { text: 'Implement and verify the launcher.' }, thread_title: 'Fix launcher', expires_at: '2026-11-08T01:00:00.000Z',

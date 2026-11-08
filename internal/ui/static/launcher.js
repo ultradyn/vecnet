@@ -86,7 +86,7 @@ export function launcherSection(ctx) {
     if (saved) {
       const input = saved.body.job_request.input;
       options(backend, [input.backend]); options(preset, [input.preset]); options(mode, [input.permission_mode]);
-      options(workspace, [input.workspace_mode]); options(project, [input.workspace_mode === 'temp' ? '' : input.project]);
+      options(workspace, [input.workspace_mode ?? 'worktree']); options(project, [input.workspace_mode === 'temp' ? '' : input.project]);
       title.value = saved.body.thread_title || ''; prompt.value = saved.body.job_request.instructions;
       const at = new Date(saved.body.expires_at);
       deadline.value = new Date(at.getTime() - at.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
@@ -127,10 +127,9 @@ export function launcherSection(ctx) {
       ctx.store.invalidate('threads');
       if (!gone) ctx.nav('#thread/' + res.thread_id);
     } catch (x) {
-      const uncertain = !x.status || x.status >= 500 || ['network', 'aborted', 'hub_moved', 'idempotency_conflict'].includes(x.code);
-      if (!uncertain && !retrying) recovery.discard(body);
-      const text = (x.message || String(x)) + (uncertain || retrying ? ' The exact launch request is retained for recovery; a job may already be running.' : '');
-      if (!gone) error.textContent = text;
+      // A remounted form may already have retried this operation. An older
+      // rejection cannot retire its unresolved request or accepted receipt.
+      if (!gone) error.textContent = (x.message || String(x)) + ' The exact launch request is retained for recovery; a job may already be running.';
     } finally {
       busy = false;
       if (!gone) draw(row);
