@@ -11,6 +11,6 @@ A daemon that runs coding-agent sessions for `launch` jobs addressed to a vecnet
 
 ## Develop
 
-Shared wire types, ports and fakes come from [`../hub-client`](../hub-client/README.md). Run `just ln-setup` once per worktree, then `just ln-check` (strict type check and unit tests, through `build2` with at most two workers) and `just ln-e2e` (against a real hub with a fake backend). On the build boxes: `just bb bash -c 'just ln-setup && just ln-check'`. Node 22.18 or newer runs the TypeScript as written; there are no runtime dependencies.
+Shared wire types, ports and fakes come from [`../hub-client`](../hub-client/README.md). Run `just ln-setup` once per worktree, then `just ln-check` (strict type check and unit tests, through `build2` with at most two workers) and `just ln-e2e` (against a real hub with a fake backend). On the build boxes: `just bb bash -c 'just ln-setup && just ln-check'`. Node 22.18+ on 22.x, 23.6+ on 23.x, or 24+ runs the TypeScript as written; there are no runtime dependencies.
 
 `just ln-run check --config …` and `just ln-run run --config …` run it from the checkout. `just ln-install` (coordinator or Max only) copies the checkout to `~/.local/share/vecnet-launcher/<sha>` and installs the unit without enabling it.
