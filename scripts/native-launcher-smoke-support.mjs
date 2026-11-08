@@ -1,5 +1,5 @@
 // Host-side smoke gates. No launcher/runtime policy or real-account activation.
-import { spawn as spawnChild } from 'node:child_process';
+import { runBounded } from './codex-auto-delivery-smoke.mjs';
 import { createHash, randomBytes } from 'node:crypto';
 import { readFile, readdir, lstat } from 'node:fs/promises';
 import { writeFileSync, renameSync, openSync, closeSync, fsyncSync, chmodSync } from 'node:fs';
@@ -9,22 +9,54 @@ const check = (ok, message) => { if (!ok) throw new Error(message); };
 const sha = data => createHash('sha256').update(data).digest('hex');
 const digest = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 
-export function runHost(command, args, { spawn = spawnChild, commandEnv = process.env, input = '', timeoutMs = 60000 } = {}) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { env: commandEnv, stdio: ['pipe', 'pipe', 'pipe'] });
-    let out = '', timedOut = false;
-    const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, timeoutMs);
-    child.stdout.on('data', data => { out += data; if (out.length > 8 * 1024 * 1024) { timedOut = true; child.kill('SIGKILL'); } });
-    child.stderr.on('data', () => {}); // Captured provider/config output never enters errors.
-    child.stdin.on('error', () => {});
-    child.once('error', () => { clearTimeout(timer); reject(new Error('host command spawn failed')); });
-    child.once('close', (code, signal) => {
-      clearTimeout(timer);
-      if (timedOut || signal || code !== 0) reject(new Error('host command failed: ' + (timedOut ? 'timeout' : signal ? 'signal' : 'nonzero exit')));
-      else resolve(out);
-    });
-    child.stdin.end(input);
-  });
+export async function runHost(command, args, { commandEnv = process.env, input = '', timeoutMs = 60000, run = runBounded } = {}) {
+  try {
+    const result = await run(command, args, { env: commandEnv, input, timeoutMs, maxBytes: 8 * 1024 * 1024 });
+    check(result.code === 0 && typeof result.stdout === 'string', 'invalid host command result');
+    return result.stdout;
+  } catch (error) {
+    // No raw child/provider/config output or paths in diagnostics. Preserve the
+    // supervisor's retirement proof; an untyped refusal cannot prove drainage.
+    const code = /^(?:child_[a-z_]+|containment_unavailable)$/.test(error.code) ? error.code : 'child_drain_unproved';
+    const drained = error.drained === true;
+    throw Object.assign(new Error('host command failed: ' + code), { code, drained, ambiguous: !drained });
+  }
+}
+
+// Intent survives interruption before the supervisor returns. Neither a known
+// job nor destroyed local pipes authorize another operation after an unproved
+// child. The journal intentionally excludes argv/input and command output.
+export function createSmokeHostRunner({ getJournal, commandEnv, run = runHost }) {
+  let held = false;
+  function assertRetired() {
+    const child = getJournal().snapshot().host_command;
+    if (held || (child && child.drained !== true)) {
+      throw Object.assign(new Error('host child retirement unresolved; preserve recovery files'), {
+        code: 'child_drain_unproved', drained: false, ambiguous: true,
+      });
+    }
+  }
+  const execute = async (command, args, options = {}) => {
+    assertRetired();
+    const journal = getJournal(), intent = { id: randomBytes(12).toString('hex'), command: basename(command),
+      arguments_sha256: sha(JSON.stringify(args)), state: 'pending', drained: false };
+    held = true;
+    journal.update({ host_command: intent }); // synchronous/fsynced before dispatch
+    try {
+      const output = await run(command, args, { ...options, commandEnv });
+      journal.update({ host_command: { ...intent, state: 'retired', drained: true } });
+      held = false;
+      return output;
+    } catch (error) {
+      const drained = error.drained === true;
+      journal.update({ host_command: { ...intent, state: drained ? 'retired' : 'unresolved', drained,
+        code: /^(?:child_[a-z_]+|containment_unavailable)$/.test(error.code) ? error.code : 'child_drain_unproved' } });
+      held = !drained;
+      throw error;
+    }
+  };
+  execute.assertRetired = assertRetired;
+  return execute;
 }
 
 // Synchronous atomic/fsynced writes close the signal/dispatch journal gap.

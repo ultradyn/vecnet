@@ -1,12 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { spawn as spawnProcess } from 'node:child_process';
 import * as fs from 'node:fs/promises';
 import { join, basename, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { cleanupNativeSmoke } from './native-launcher-cleanup.mjs';
 import { demoCloser } from './ui/lib.mjs';
+import * as support from './native-launcher-smoke-support.mjs';
 
 const smokeURL = new URL('./native-launcher-live-smoke.mjs', import.meta.url);
 const sha = x => createHash('sha256').update(x).digest('hex');
@@ -60,7 +62,8 @@ async function fixture(t, options = {}) {
     content: { text: 'synthetic marker prompt' }, expires_at: '2026-11-10T00:00:00.000Z',
     job_request: { version: 1, job_key: 'launch-synthetic', operation: 'launch', instructions: 'synthetic marker prompt',
       input: { backend, project: mode === 'temp' ? 'temporary' : 'canary', workspace_mode: mode, preset: 'default', permission_mode: backend === 'acp' ? 'ask' : 'read-only' } } };
-  const state = { trace: [], logs: [], errors: [], dispatches: [], beforeDispatch: null, beforeRepeat: null, source, owned, hub, cli, manifest, body, approval, exit: 0 };
+  const state = { trace: [], logs: [], errors: [], dispatches: [], replays: [], cancellations: [], historyReads: [],
+    beforeDispatch: null, beforeRepeat: null, source, owned, hub, cli, manifest, body, approval, unit, configPath, exit: 0 };
   let shot = false, followup = false, cancelled = false;
   const session = { backend, id: 'session_synthetic', extra: { workspace, workspace_mode: mode,
     branch: options.sessionBranch ?? (mode === 'worktree' || (mode === 'temp' && backend === 'codex-app-server') ? 'launch/' + job.job_id : mode === 'project-root' ? 'master' : undefined),
@@ -118,6 +121,19 @@ async function fixture(t, options = {}) {
     });
     return child;
   }
+  // This injected bounded-command port creates no OS children. A synthetic
+  // close proves retirement; process containment is tested with real children
+  // below, through runHost's default supervisor rather than a fake close event.
+  const runSynthetic = (command, args, opts) => new Promise((resolve, reject) => {
+    const child = spawn(command, args); let stdout = '';
+    child.stdout.on('data', data => { stdout += data; });
+    child.once('error', () => reject(Object.assign(new Error('synthetic host error'), { code: 'child_failed', drained: true })));
+    child.once('close', (code, signal) => {
+      if (signal || code !== 0) reject(Object.assign(new Error('synthetic host failure'), { code: 'child_failed', drained: true }));
+      else resolve({ code, stdout, stderr: '' });
+    });
+    child.stdin.end(opts.input);
+  });
   let requestReady, responseReady, routeHandler;
   const request = { url: () => 'http://synthetic.invalid/v1/messages', method: () => 'POST', postDataJSON: () => structuredClone(body) };
   const response = { ok: () => true, status: () => 200, json: async () => { if (options.lostResponse) throw new Error('synthetic lost accepted response'); return job; } };
@@ -158,10 +174,13 @@ async function fixture(t, options = {}) {
       await fn({ page, demo, async asPeer(_peer, method, path, value) {
         let result = {};
         if (path === '/v1/admin/peers') result = { peers: [{ peer: { peer_id: launcher, capabilities: ['project:canary'], quota: { backends: { [backend]: 'ok' } } } }] };
-        else if (method === 'GET') result = { messages: history() };
+        else if (method === 'GET') { state.historyReads.push(path); result = { messages: history() }; }
         else if (value.job_request) {
-          state.beforeRepeat = await journal(); if (options.interruptAccepted) throw new Error('synthetic interruption after acceptance'); result = job;
-        } else if (value.job_status) { if (options.fault === 'settleJob') throw new Error('synthetic cancellation failure'); cancelled = true; result = { message_id: 'msg_cancel_request' }; }
+          state.beforeRepeat = await journal(); state.replays.push(structuredClone(value));
+          if (options.interruptAccepted) { state.replayFault = 'lost-response'; throw new Error('synthetic interruption after acceptance'); }
+          result = { ...job, ...(options.replayID ? { [options.replayID]: 'foreign_' + options.replayID } : {}) };
+          state.replayReply = structuredClone(result);
+        } else if (value.job_status) { state.cancellations.push(structuredClone(value)); if (options.fault === 'settleJob') throw new Error('synthetic cancellation failure'); cancelled = true; result = { message_id: 'msg_cancel_request' }; }
         else { if (options.unavailableProvider) throw new Error('synthetic unavailable provider'); followup = true; result = { message_id: 'msg_followup' }; }
         return { ok: true, status: 200, json: async () => result };
       }, async shot() {
@@ -179,6 +198,13 @@ async function fixture(t, options = {}) {
     './ui/lib.mjs': { withDemo, assert: (ok, msg) => assert.ok(ok, msg), root: source },
     '../connectors/launcher/src/codex/rpc.ts': { openCodexRpc: async () => ({ version: options.nativeVersion || '0.134.0', call: async () => ({ thread: { cwd: workspace } }), close() {} }) },
     './native-launcher-cleanup.mjs': { cleanupNativeSmoke },
+    './native-launcher-smoke-support.mjs': { ...support, runHost: async (command, args, opts) => {
+      if (options.unprovedChild && command === 'systemctl' && args.includes('restart')) {
+        state.trace.push(['unproved-child', command, ...args]);
+        throw Object.assign(new Error('child_drain_unproved'), { code: 'child_drain_unproved', ambiguous: true, drained: false });
+      }
+      return support.runHost(command, args, { ...opts, run: runSynthetic });
+    } },
   };
   const vars = {}, original = await fs.readFile(smokeURL, 'utf8');
   const sourceText = original.replace(/^import\s+\{([^}]+)\}\s+from\s+'([^']+)';/gm, (_line, names, spec) => {
@@ -236,8 +262,59 @@ for (const outcome of ['interruptDispatch', 'lostResponse', 'interruptAccepted']
     assert.equal(await exists(join(f.hub, 'hub.db')), true); assert.equal(f.exit, 1);
     assert.deepEqual(await f.recover((await f.journal()).request), job, 'recovered replay resolves the original job/thread/message');
     assert.equal((await fs.stat(join(f.owned, 'recovery.json'))).mode & 0o777, 0o600);
+    if (outcome === 'interruptAccepted') {
+      assert.equal(f.replayFault, 'lost-response', 'the first acceptance succeeded and the actual replay lost its response');
+      await assertUnresolvedReplayRetained(f);
+    }
   });
 }
+
+async function assertUnresolvedReplayRetained(f) {
+  const journal = await f.journal();
+  assert.equal(f.exit, 1); assert.equal(f.receipt, null);
+  assert.deepEqual(f.replays, [f.body], 'one replay uses the immutable original body/key/deadline');
+  assert.deepEqual(f.beforeRepeat.accepted, job); assert.deepEqual(journal.accepted, job);
+  assert.deepEqual(journal.request, f.body);
+  assert.equal(f.beforeRepeat.launch_unresolved, true, 'the uncertainty hold is durable before dispatch');
+  assert.equal(journal.launch_unresolved, true, 'unvalidated replay leaves its durable hold');
+  assert.equal(await exists(join(f.owned, 'config.toml')), true, 'unresolved replay retains launcher credentials');
+  assert.equal(await fs.readFile(join(f.owned, 'config.toml'), 'utf8'), 'synthetic-only credential');
+  assert.equal(await exists(f.configPath), true, 'launcher configuration remains recoverable');
+  assert.equal(await fs.readFile(f.unit, 'utf8'), 'synthetic exact owned unit');
+  assert.deepEqual(await f.recover(journal.request), job, 'original hub still resolves the original accepted identifiers');
+  const authority = JSON.parse(await fs.readFile(join(f.owned, 'demo-recovery.json'), 'utf8'));
+  assert.equal(authority.operator_secret, 'synthetic-operator-only');
+  assert.deepEqual(f.cancellations, [], 'unresolved replay cannot authorize cancellation of the original job');
+  assert.deepEqual(f.historyReads, [], 'an unresolved replay cannot select a thread for settlement');
+  assert.equal(f.trace.some(row => row[0] === 'command' && row[1] === 'systemctl' && row.some(x => ['stop', 'show', 'daemon-reload'].includes(x))), false);
+  assert.equal(f.trace.some(row => row[0] === 'remove'), false, 'no unit or private authority removal');
+  assert.equal(f.beforeRepeat.phase, 'retry-dispatched', 'durable retry intent must precede the actual replay');
+  assert.equal(journal.phase, 'retry-dispatched', 'the unresolved retry is never journaled as complete');
+}
+
+for (const replayID of ['job_id', 'thread_id', 'message_id']) {
+  test('F-HI1 local replay changed ' + replayID + ' retains authority without teardown', async t => {
+    const f = await fixture(t, { replayID }); await f.run();
+    assert.deepEqual(f.replayReply, { ...job, [replayID]: 'foreign_' + replayID }, 'the intended disagreeing replay reached the acceptance boundary');
+    await assertUnresolvedReplayRetained(f);
+  });
+}
+
+test('F-HI2 local unproved host child blocks cancellation and service teardown', async t => {
+  const f = await fixture(t, { unprovedChild: true }); await f.run();
+  const boundary = f.trace.findIndex(row => row[0] === 'unproved-child');
+  assert.ok(boundary >= 0, 'uncertain retirement occurred at the owned restart after exact acceptance');
+  assert.deepEqual((await f.journal()).accepted, job); assert.equal(f.exit, 1); assert.equal(f.receipt, null);
+  const child = (await f.journal()).host_command;
+  assert.equal(child.state, 'unresolved'); assert.equal(child.drained, false);
+  assert.equal(child.command, 'systemctl'); assert.match(child.arguments_sha256, /^[a-f0-9]{64}$/);
+  assert.deepEqual(f.cancellations, [], 'no cancellation can race a possibly active host writer');
+  assert.equal(f.trace.slice(boundary + 1).some(row => ['command', 'remove'].includes(row[0])), false, 'no conflicting host operation follows uncertain retirement');
+  assert.equal(await fs.readFile(join(f.owned, 'config.toml'), 'utf8'), 'synthetic-only credential');
+  assert.equal(await exists(f.configPath), true); assert.equal(await exists(f.unit), true);
+  assert.equal(await exists(join(f.hub, 'hub.db')), true);
+  assert.equal(await exists(join(f.owned, 'demo-recovery.json')), true);
+});
 
 for (const terminal of ['succeeded', 'failed']) {
   test('H4 ' + terminal + ' permits safe teardown but cannot pass cancellation', async t => {
@@ -327,28 +404,166 @@ test('H6 native temp has its owned Git branch while ACP temp remains without Git
 });
 
 test('H2 host command accepts only normal zero, rejects both signals, nonzero and timeout', async t => {
-  const source = await fs.readFile(smokeURL, 'utf8');
-  let runner;
-  if (source.includes('runHost')) runner = (await import('./native-launcher-smoke-support.mjs')).runHost;
-  else {
-    const original = source.slice(source.indexOf('async function run('), source.indexOf('\nconst cli ='));
-    runner = async (command, args, opts) => {
-      const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-      return new AsyncFunction('spawn', 'env', 'basename', 'dir', 'setTimeout', original + '\nreturn run("synthetic", [], {});')(opts.spawn, {}, basename, 'synthetic-private', fn => setTimeout(fn, 1));
-    };
-  }
   for (const [code, signal, timeout] of [[0, null, false], [1, null, false], [null, 'SIGKILL', false], [null, 'SIGTERM', false], [0, null, true]]) {
     await t.test(JSON.stringify({ code, signal, timeout }), async () => {
-    let child;
-    const spawn = () => {
-      child = new EventEmitter(); child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.stdin = new EventEmitter();
-      child.kill = () => child.emit('close', 0, null);
-      child.stdin.end = () => { if (!timeout) queueMicrotask(() => child.emit('close', code, signal)); };
-      return child;
-    };
-    const promise = runner('synthetic', [], { spawn, timeoutMs: 1 });
-    if (code === 0 && !signal && !timeout) await promise;
-    else await assert.rejects(promise, /command|failed|signal|timeout/i);
+      const program = timeout ? 'setTimeout(()=>process.exit(0),3000)' : signal ? `process.kill(process.pid,${JSON.stringify(signal)})`
+        : `process.stdout.write('host stdout\\n',()=>process.exit(${code}))`;
+      const promise = support.runHost(process.execPath, ['-e', program], { timeoutMs: timeout ? 100 : 2000 });
+      if (code === 0 && !signal && !timeout) assert.equal(await promise, 'host stdout\n');
+      else await assert.rejects(promise, error => {
+        assert.match(error.message, /command|failed|signal|timeout/i);
+        assert.equal(error.drained, true, 'an ordinary finite command has proved retirement even when the gate fails');
+        return true;
+      });
     });
   }
 });
+
+test('F-HI2 host intent and refusal survive reopening the private journal', async t => {
+  const dir = await fs.mkdtemp(join(tmpdir(), 'native-host-journal-fixture-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true })); // no OS children in this fixture
+  const journal = support.createSmokeJournal(dir, { accepted: job });
+  let calls = 0, rejectRun;
+  const ports = { getJournal: () => journal, commandEnv: { FIXTURE: 'private' }, run: async (_command, _args, options) => {
+    calls++; assert.equal(options.commandEnv.FIXTURE, 'private');
+    return new Promise((_resolve, reject) => { rejectRun = reject; });
+  } };
+  const runner = support.createSmokeHostRunner(ports);
+  const pending = runner('synthetic-command', ['PRIVATE_ARGUMENT'], { input: 'PRIVATE_INPUT' });
+  const load = async () => JSON.parse(await fs.readFile(join(dir, 'recovery.json'), 'utf8'));
+  const before = await load();
+  assert.equal(before.host_command.state, 'pending'); assert.equal(before.host_command.drained, false);
+  assert.deepEqual(before.accepted, job);
+  // A new instance sees the fsynced hold, independent of the first runner's
+  // memory, and cannot invoke its supplied command port at all.
+  const reopened = support.createSmokeHostRunner({ ...ports, getJournal: () => ({ snapshot: () => before }) });
+  await assert.rejects(reopened('conflicting-command', []), /retirement unresolved/);
+  rejectRun(Object.assign(new Error('PRIVATE_OUTPUT'), { code: 'child_drain_unproved', drained: false }));
+  await assert.rejects(pending, { code: 'child_drain_unproved' });
+  const after = await load();
+  assert.equal(after.host_command.id, before.host_command.id);
+  assert.equal(after.host_command.state, 'unresolved'); assert.equal(after.host_command.drained, false);
+  assert.deepEqual(after.accepted, job);
+  const recovered = support.createSmokeHostRunner({ ...ports, getJournal: () => ({ snapshot: () => after }) });
+  await assert.rejects(recovered('conflicting-command', []), /retirement unresolved/);
+  await assert.rejects(runner('conflicting-command', []), /retirement unresolved/);
+  assert.equal(calls, 1, 'neither in-memory nor reopened recovery can launch a conflicting operation');
+  assert.doesNotMatch(JSON.stringify(after), /PRIVATE_ARGUMENT|PRIVATE_INPUT|PRIVATE_OUTPUT/);
+});
+
+test('F-HI2 an untyped host failure cannot clear the durable retirement hold', async t => {
+  const dir = await fs.mkdtemp(join(tmpdir(), 'native-host-untyped-fixture-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true })); // synthetic port, no OS child
+  const journal = support.createSmokeJournal(dir, { accepted: job });
+  let calls = 0;
+  const runner = support.createSmokeHostRunner({ getJournal: () => journal, commandEnv: {}, run: async () => {
+    calls++; throw new Error('synthetic untyped failure');
+  } });
+  await assert.rejects(runner('synthetic-command', []), /synthetic untyped failure/);
+  assert.equal(journal.snapshot().host_command.drained, false);
+  assert.deepEqual(journal.snapshot().accepted, job);
+  await assert.rejects(runner('conflicting-command', []), /retirement unresolved/);
+  assert.equal(calls, 1);
+});
+
+const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+async function waitForFixture(predicate, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  do { if (await predicate()) return true; await pause(20); } while (Date.now() < deadline);
+  return false;
+}
+async function processIdentity(pid) {
+  try {
+    const raw = await fs.readFile(`/proc/${pid}/stat`, 'utf8'), fields = raw.slice(raw.lastIndexOf(')') + 2).split(' ');
+    return { pid, birth: fields[19], state: fields[0] };
+  } catch (error) { if (['ENOENT', 'ESRCH'].includes(error.code)) return null; throw error; }
+}
+async function retired(identity) {
+  const current = await processIdentity(identity.pid);
+  return !current || current.birth !== identity.birth || ['Z', 'X'].includes(current.state);
+}
+
+// Run the real public runner in a disposable worker. Its own stdio is ignored,
+// so a broken runner cannot hold the test process's pipes open. Every fixture
+// process self-exits; the guard signals only the directly spawned worker. Root
+// removal depends on observed PID/birth retirement, never elapsed run age.
+async function hostProcessFixture(t, { inherited = true, leaderStays = false, flood = false, detached = false } = {}) {
+  const dir = await fs.mkdtemp(join(tmpdir(), 'native-host-child-fixture-'));
+  const actors = join(dir, 'actors.json'), ready = join(dir, 'ready.json'), late = join(dir, 'late'), ended = join(dir, 'ended');
+  const outcomePath = join(dir, 'outcome.json');
+  await fs.writeFile(join(dir, 'authority'), 'fixture-only retained authority', { mode: 0o600 });
+  const identify = `function identify(pid){const raw=fs.readFileSync('/proc/'+pid+'/stat','utf8'),f=raw.slice(raw.lastIndexOf(')')+2).split(' ');return {pid,birth:f[19]}}`;
+  const descendant = `const fs=require('node:fs');${identify}
+fs.writeFileSync(${JSON.stringify(ready)},JSON.stringify(identify(process.pid)));
+process.stdout.on('error',()=>{});process.stderr.on('error',()=>{});
+${flood ? `setTimeout(()=>{try{const chunk=Buffer.alloc(65536,'NATIVE_PRIVATE_OUTPUT');for(let n=0;n<192;n++)fs.writeSync(1,chunk)}catch{}},200);` : ''}
+setTimeout(()=>fs.writeFileSync(${JSON.stringify(late)},'late writer'),3500);
+setTimeout(()=>{fs.writeFileSync(${JSON.stringify(ended)},'finite writer ended');process.exit(0)},5000);`;
+  const leader = `const fs=require('node:fs'),cp=require('node:child_process');${identify}
+const child=cp.spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{detached:${detached},stdio:${JSON.stringify(inherited ? ['ignore', 'inherit', 'inherit'] : 'ignore')}});child.unref();
+fs.writeFileSync(${JSON.stringify(actors)},JSON.stringify([identify(process.pid),identify(child.pid)]));
+${leaderStays ? '' : `const poll=setInterval(()=>{if(fs.existsSync(${JSON.stringify(ready)})){clearInterval(poll);process.exit(0)}},5);`}
+setTimeout(()=>process.exit(0),5500)${leaderStays ? '' : '.unref()'};`;
+  const worker = `import fs from 'node:fs';import {runHost} from ${JSON.stringify(new URL('./native-launcher-smoke-support.mjs', import.meta.url).href)};
+const start=performance.now();let outcome;
+try{const stdout=await runHost(process.execPath,['-e',${JSON.stringify(leader)}],{commandEnv:process.env,timeoutMs:1000});outcome={ok:true,bytes:Buffer.byteLength(stdout)}}
+catch(e){outcome={ok:false,code:e.code,drained:e.drained,ambiguous:e.ambiguous,message:e.message}}
+outcome.elapsedMs=performance.now()-start;fs.writeFileSync(${JSON.stringify(outcomePath)},JSON.stringify(outcome));process.exit(0);`;
+  const child = spawnProcess(process.execPath, ['--input-type=module', '-e', worker], {
+    stdio: 'ignore', env: { PATH: '/usr/bin:/bin', HOME: dir, TMPDIR: dir },
+  });
+  let spawnError, guarded = false, finish;
+  const closed = new Promise(resolve => { finish = resolve; child.once('error', error => { spawnError = error; resolve(); }); child.once('close', resolve); });
+  const workerIdentity = await processIdentity(child.pid);
+  const guard = setTimeout(() => { guarded = true; child.kill('SIGKILL'); child.unref(); finish(); }, 3500);
+  t.after(async () => {
+    clearTimeout(guard);
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    const stopped = await waitForFixture(async () => {
+      const identities = await fs.readFile(actors, 'utf8').then(JSON.parse, () => null);
+      if (!workerIdentity || !identities || identities.length !== 2) return false;
+      return (await Promise.all([workerIdentity, ...identities].map(retired))).every(Boolean);
+    }, 7500);
+    assert.ok(stopped, 'unproved fixture retirement; private root retained at ' + dir);
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+  await closed; clearTimeout(guard);
+  if (spawnError) throw spawnError;
+  const outcome = await fs.readFile(outcomePath, 'utf8').then(JSON.parse, () => null);
+  const descendantIdentity = await fs.readFile(ready, 'utf8').then(JSON.parse, () => null);
+  return { dir, outcome, guarded, descendantIdentity, late, ended };
+}
+
+for (const [name, options] of [
+  ['exited leader with inherited pipes', { inherited: true }],
+  ['timed-out leader with inherited pipes', { inherited: true, leaderStays: true }],
+  ['exited leader with ignored-pipe late writer', { inherited: false }],
+  ['exited leader with descendant output flood', { inherited: true, flood: true }],
+  ['exited leader with separate-session late writer', { inherited: false, detached: true }],
+]) {
+  test('F-HI2 real runHost bounds ' + name, { skip: process.platform !== 'linux' }, async t => {
+    const f = await hostProcessFixture(t, options);
+    assert.ok(f.descendantIdentity, 'the actual finite descendant reached the intended boundary');
+    assert.equal(f.guarded, false, 'runHost must settle before the independent 3500ms worker guard');
+    assert.ok(f.outcome, 'runner produced an observable result');
+    assert.equal(f.outcome.ok, false, 'a live descendant cannot be reported as successful retirement');
+    assert.ok(f.outcome.elapsedMs < 2500, 'command plus pipe drain must be bounded: ' + f.outcome.elapsedMs + 'ms');
+    assert.match(f.outcome.message, /child|command|timeout|drain|output/i);
+    assert.doesNotMatch(f.outcome.message, /NATIVE_PRIVATE_OUTPUT/);
+    if (options.flood) assert.equal(f.outcome.code, 'child_output_limit', '12 MiB of descendant output must hit the bounded output cap');
+    if (f.outcome.drained === true) {
+      assert.equal(await retired(f.descendantIdentity), true, 'a claimed drain proves the exact descendant stopped');
+      assert.equal(await exists(f.late), false, 'a retired descendant cannot perform its scheduled late write');
+    } else {
+      assert.equal(f.outcome.drained, false, 'uncertain retirement must be explicit');
+      assert.equal(f.outcome.ambiguous, true, 'unproved writers require a recovery hold');
+      assert.equal(await fs.readFile(join(f.dir, 'authority'), 'utf8'), 'fixture-only retained authority');
+    }
+    if (options.detached) {
+      assert.equal(f.outcome.drained, false, 'separate-session ownership is not permission to terminate it');
+      assert.equal(await retired(f.descendantIdentity), false, 'unproved separate-session writer remains accounted for');
+      assert.equal(await waitForFixture(() => exists(f.ended), 6500), true, 'finite writer ends before any root removal');
+      assert.equal(await exists(f.late), true, 'the held writer really can write after bounded refusal');
+    }
+  });
+}

@@ -35,3 +35,15 @@ test('removes credentials only after job settlement and proven complete owned se
   assert.equal(await cleanupNativeSmoke(confirmed, f.ops), true);
   assert.deepEqual(f.calls, ['settleJob','verifyUnit','stopUnit','verifyStopped','removeUnit','reloadManager','removePrivateFiles']);
 });
+
+test('F-HI2 cleanup checks host retirement before cancellation and again before host teardown', async t => {
+  for (const boundary of ['before cancellation', 'after settlement']) await t.test(boundary, async t => {
+    const f = await fixture(t); let held = boundary === 'before cancellation';
+    f.ops.assertHostRetired = () => { if (held) throw new Error('host child retirement unresolved'); };
+    const settle = f.ops.settleJob;
+    f.ops.settleJob = async () => { await settle(); held = true; };
+    await assert.rejects(cleanupNativeSmoke(confirmed, f.ops), /retirement unresolved/);
+    await f.preserved();
+    assert.deepEqual(f.calls, boundary === 'before cancellation' ? ['retain'] : ['settleJob', 'retain']);
+  });
+});
