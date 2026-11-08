@@ -248,6 +248,51 @@ func TestRouteAttemptHTTPActualRequests(t *testing.T) {
 	})
 }
 
+func TestRouteAttemptHTTPInformationalRetryI1(t *testing.T) {
+	f := setup(t, always(200))
+	dly := f.send(f.aSec, f.msg("wake")).Deliveries[0].DeliveryID
+	d := t1Claim(t, f)
+	calls := 0
+	var sent []byte
+	f.w = &push.Worker{Hub: f.env.Hub, Now: f.env.Now.Now, Client: &http.Client{
+		Transport: t1RoundTrip(func(req *http.Request) (*http.Response, error) {
+			calls++
+			var err error
+			sent, err = io.ReadAll(req.Body)
+			if err != nil {
+				return nil, err
+			}
+			return &http.Response{
+				StatusCode: http.StatusSwitchingProtocols,
+				Header:     http.Header{},
+				Body:       io.NopCloser(strings.NewReader("")),
+				Request:    req,
+			}, nil
+		}),
+	}}
+	f.w.Push(f.ctx, d)
+	// The existing classifier must durably retry before telemetry is checked:
+	// one spent attempt, positive backoff, no receipt or terminal counter.
+	t1PushOutcome(t, f, dly, "queued", 1)
+	if calls != 1 || !bytes.Equal(sent, d.Body) {
+		t.Fatalf("HTTP 101 payload calls/body = %d/%v", calls, bytes.Equal(sent, d.Body))
+	}
+	a := t1PushRows(t, f)
+	if len(a) != 1 {
+		t.Fatalf("HTTP 101 payload produced %d observations, want one", len(a))
+	}
+	row := a[0]
+	if row.delivery != dly || row.outcome != "fail" || !row.class.Valid || row.class.String != "http_status" || !row.status.Valid || row.status.Int64 != 101 {
+		t.Fatalf("HTTP 101 retry telemetry = %+v, want fail/http_status/status 101", row)
+	}
+	if row.body != len(d.Body) || row.at != envelope.FormatTime(f.env.Now.Now()) {
+		t.Fatalf("HTTP 101 body/completion = %+v, want %d bytes", row, len(d.Body))
+	}
+	if f.step() != 0 || calls != 1 || len(t1PushRows(t, f)) != 1 {
+		t.Fatal("HTTP 101 retry lost backoff or introduced another request/observation")
+	}
+}
+
 func TestRouteAttemptExcludesPreflightAndChallenges(t *testing.T) {
 	t.Run("challenge_hold_and_held_wake_idle", func(t *testing.T) {
 		f := setup(t, always(200)) // setup performs a real signed challenge

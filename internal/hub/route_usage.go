@@ -109,10 +109,10 @@ func routeAttemptOutcome(a RouteAttemptObservation) (outcome, class string) {
 		}
 		return "fail", class
 	}
-	if status == 408 || status == 429 || status >= 500 && status < 600 {
-		return "fail", class
+	if result := classifyPush(status, a.NetError); result == pushConflict || result == pushTerminal {
+		return "refused", class
 	}
-	return "refused", class
+	return "fail", class
 }
 
 func routeAttemptStatusClass(status int) string {
