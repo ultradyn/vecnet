@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -236,7 +237,8 @@ func TestDashArchivedPeerVisibility(t *testing.T) {
 	f := seededDash()
 	archived := dashPeer("peer_archived", "retired", "session", "offline", "unknown", 48*time.Hour, nil, "lan:old")
 	archived.ArchivedAt = dashBefore(time.Hour)
-	f.peers = append(f.peers, archived)
+	archived.Disabled = true
+	f.peers = []opapi.PeerRow{f.peers[0], f.peers[len(f.peers)-1], archived}
 	m, p := openDash(t, f, newClock())
 
 	// Archived peers are absent initially, while an independently disabled peer
@@ -248,8 +250,112 @@ func TestDashArchivedPeerVisibility(t *testing.T) {
 	// The dashboard's archived toggle reveals the peer and labels its lifecycle
 	// state, so an archived+disabled peer would not be mistaken for merely disabled.
 	p.press("a")
-	frame = plainAt(t, m, 140, 42)
-	dashHas(t, frame, "retired", "archived", "archived shown")
+	for _, size := range [][2]int{{140, 42}, {80, 24}} {
+		frame = plainAt(t, m, size[0], size[1])
+		assertFrame(t, frame, size[0], size[1])
+		dashHas(t, frame, "retired", "archived shown")
+		row := dashRow(t, m, size[0], size[1], "retired")
+		dashHas(t, row, "archived")
+		dashLacks(t, row, "disabled")
+	}
+}
+
+func TestDashArchivedPeerInteractions(t *testing.T) {
+	f := seededDash()
+	first := dashPeer("peer_hidden_first", "retired-first", "session", "offline", "unknown", time.Hour, nil, "old")
+	first.ArchivedAt = dashBefore(time.Hour)
+	middle := first
+	middle.Peer.PeerID, middle.Peer.Name = "peer_hidden_middle", "retired-middle"
+	f.peers = []opapi.PeerRow{first, f.peers[0], middle, f.peers[1], f.peers[len(f.peers)-1]}
+	before := slices.Clone(f.peers)
+	m, p := openDash(t, f, newClock())
+	d := m.screens[tabDash].(*dashScreen)
+	wantSelected := func(want string) {
+		t.Helper()
+		if d.peer != want {
+			t.Fatalf("selected peer = %q, want %q", d.peer, want)
+		}
+	}
+	plainAt(t, m, 140, 42)
+	for _, id := range []string{first.Peer.PeerID, middle.Peer.PeerID} {
+		if _, ok := hitByID(m, "peer:"+id); ok {
+			t.Fatalf("hidden peer %s has a mouse hit", id)
+		}
+	}
+	clickHit(t, m, "peer:peer_op")
+	p.press("j")
+	wantSelected("peer_codex")
+	p.press("k")
+	wantSelected("peer_op")
+	plainAt(t, m, 140, 42)
+	wheelHit(t, m, "dash.peers", true)
+	wantSelected("peer_codex")
+	wheelHit(t, m, "dash.peers", true)
+	wantSelected("peer_old")
+	wheelHit(t, m, "dash.peers", false)
+	wantSelected("peer_codex")
+	clickHit(t, m, "peer:peer_old")
+	p.press("enter")
+	p.until("clicked visible peer query", func() bool { return f.narrowed("peer_old") == 1 })
+	p.press("esc")
+	plainAt(t, m, 140, 42)
+	clickHit(t, m, "peer:peer_codex")
+	p.press("a", "a")
+	wantSelected("peer_codex")
+	p.press("a")
+	plainAt(t, m, 140, 42)
+	clickHit(t, m, "peer:"+middle.Peer.PeerID)
+	wantSelected(middle.Peer.PeerID)
+	p.press("a")
+	wantSelected("peer_op")
+	plainAt(t, m, 140, 42)
+	if _, ok := hitByID(m, "peer:"+middle.Peer.PeerID); ok {
+		t.Fatal("hidden-again peer retained a mouse hit")
+	}
+	p.press("enter")
+	p.until("repaired visible peer query", func() bool { return f.narrowed("peer_op") == 1 })
+	for _, id := range []string{first.Peer.PeerID, middle.Peer.PeerID} {
+		if n := f.narrowed(id); n != 0 {
+			t.Errorf("hidden peer %s received %d participant queries", id, n)
+		}
+	}
+	if !reflect.DeepEqual(m.Data.Peers, before) {
+		t.Fatal("filtering or toggling changed the peer order or lifecycle data")
+	}
+	for _, name := range dashWrites {
+		if n := f.count(name); n != 0 {
+			t.Errorf("%s called %d times while filtering peers", name, n)
+		}
+	}
+}
+
+func TestDashArchivedPeerEmptySelection(t *testing.T) {
+	for _, count := range []int{0, 1} {
+		t.Run(fmt.Sprintf("archived-%d", count), func(t *testing.T) {
+			f := seededDash()
+			f.peers = nil
+			if count == 1 {
+				row := dashPeer("peer_retired", "retired", "session", "offline", "unknown", time.Hour, nil, "old")
+				row.ArchivedAt = dashBefore(time.Hour)
+				f.peers = []opapi.PeerRow{row}
+			}
+			m, p := openDash(t, f, newClock())
+			d := m.screens[tabDash].(*dashScreen)
+			p.press("a")
+			if count == 1 {
+				plainAt(t, m, 140, 42)
+				clickHit(t, m, "peer:peer_retired")
+			}
+			p.press("a", "j", "k", "enter")
+			if d.peer != "" || d.focus != dashOnPeers || d.narrow != nil {
+				t.Fatalf("empty filtered table retained a selection or opened threads: %+v", d)
+			}
+			if n := f.narrowed("peer_retired"); n != 0 {
+				t.Fatalf("hidden peer received %d queries", n)
+			}
+			assertFrame(t, plainAt(t, m, 80, 24), 80, 24)
+		})
+	}
 }
 
 func TestDashReadOnly(t *testing.T) {
