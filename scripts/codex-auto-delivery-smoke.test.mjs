@@ -117,7 +117,7 @@ test('credential mode and symlink collisions refuse before install', async t => 
 test('actor proof requires an owned TUI command item, never a controller-supplied thread environment', () => {
   const command = '/fixture/vecnet --net a --json peers';
   const own = { id: uuid(1), cwd: '/fixture/ws-a', firstMarker: 'OWN-A', uuidFromOwnTui: true };
-  const history = [{ id: 'turn-1', items: [{ type: 'commandExecution', command, cwd: own.cwd, exitCode: 0, status: 'completed' }] }];
+  const history = [{ id: 'turn-1', items: [{ type: 'commandExecution', command: fixtureNativeEvent(command), cwd: own.cwd, exitCode: 0, status: 'completed' }] }];
   assert.equal(proveActor(own, history, command).kind, 'owned-tui-command');
   assert.throws(() => proveActor({ ...own, uuidFromOwnTui: false }, history, command), { code: 'actor_unproved' });
   assert.throws(() => proveActor(own, [], command), { code: 'actor_unproved' });
@@ -334,10 +334,10 @@ if(text==='/status'){if(s.startup){part().statusRequested=true;save(s);}process.
 if(text==='/quit'){request({op:'quit',name:session,stale:s.startup?.staleSocket===true});part().closed=true;save(s);process.exit(0);}
 if(s.startup){part().seeded=true;save(s);}
 const turn={id:'t'+(++s.counter),status:'completed',items:[{type:'userMessage',text}]};
-if(text.startsWith('Run exactly')&&s.startup?.actorOutcome==='no-execution'){
+if(text.startsWith('Run exactly')&&s.startup?.actorOutcome==='no-execution'&&!text.split('approvals: ')[1]?.startsWith('printf ')){
 turn.items.push({type:'agentMessage',channel:'commentary',text:'I will run the exact command once with the current sandbox settings.'},{type:'agentMessage',text:'FACT none'});s.turns[part().id].push(turn);save(s);
-}else if(text.startsWith('Run exactly')){const command=text.split('approvals: ')[1];let code=0;try{cp.execFileSync('/bin/sh',['-c',command],{env:{...process.env,CODEX_THREAD_ID:part().id},stdio:'pipe'});}catch(e){code=e.status??1;}
-turn.items.push({type:'commandExecution',command,cwd:part().cwd,exitCode:code,status:'completed'});
+}else if(text.startsWith('Run exactly')){const command=text.split('approvals: ')[1].split('\\n')[0];let code=0;try{cp.execFileSync('/usr/bin/bash',['-c',command],{cwd:part().cwd,env:{...process.env,CODEX_THREAD_ID:part().id},stdio:'pipe'});}catch(e){code=e.status??1;}
+turn.items.push({type:'commandExecution',command:'/usr/bin/bash -c '+String.fromCharCode(39)+command+String.fromCharCode(39),cwd:part().cwd,exitCode:code,status:'completed'});
 const fresh=read();fresh.counter=Math.max(fresh.counter,s.counter);fresh.turns[part().id].push(turn);save(fresh);
 }else{turn.items.push({type:'agentMessage',text:'FACT none'});s.turns[part().id].push(turn);save(s);}}}
 `;
@@ -345,6 +345,7 @@ const fresh=read();fresh.counter=Math.max(fresh.counter,s.counter);fresh.turns[p
   const binaryProgram = prologue + `
 if(!process.env.FIXTURE_LOCKED){const r=cp.spawnSync('/usr/bin/flock',['--exclusive',file+'.lock',process.execPath,__filename,...args],{env:{...process.env,FIXTURE_LOCKED:'1'},stdio:'inherit'});process.exit(r.status??1);}
 const s=read(),profile=args[args.indexOf('--net')+1],p=s.peers.find(p=>p.profile===profile),root=path.dirname(file),data=path.join(process.env.XDG_DATA_HOME,'vecnet/codex-delivery'),runtime=path.join(process.env.XDG_RUNTIME_DIR,'vecnet');
+if(s.startup?.actorExit===3&&args.includes('peers')&&process.env.CODEX_THREAD_ID)process.exit(3);
 function owner(hub){const slug=slugs[hub];put(path.join(runtime,'delivery-'+slug+'.json'),{hub:urls[hub],state_root:data,registry:path.join(data,'registry.json'),managed:true,binary_digest:crypto.createHash('sha256').update(fs.readFileSync(__filename)).digest('hex'),launcher:process.env.VECNET_CODEX_DELIVERY_ENTRY,pid:12345,birth:'fixture'});fs.writeFileSync(path.join(runtime,'delivery-'+slug+'.lock'),'',{mode:384});fs.writeFileSync(path.join(runtime,slug+'.active'),'');
 put(path.join(data,slug,'descriptor.json'),{version:1,hub:urls[hub]});put(path.join(data,slug,'hub.json'),{version:1,hub:urls[hub]});const ledger=path.join(data,slug,'ledger.sqlite');if(!fs.existsSync(ledger)){const db=new (require('node:sqlite').DatabaseSync)(ledger);db.exec('CREATE TABLE kv(ns TEXT,key TEXT,value TEXT)');db.close();fs.chmodSync(ledger,384);}}
 if(args.includes('peers')&&process.env.VECNET_CODEX_AUTO_DELIVERY==='1'){
@@ -931,7 +932,7 @@ for (const screen of ['', 'Permissions ReadOnly(never)']) test(`startup lazy UUI
     assert.equal(submitted.filter(text => text.startsWith('OWN-')).length, 1);
     assert.equal(j.threads[name].cwd, join(f.m.runRoot, 'ws-' + name));
   }
-  for (const e of s.events.filter(e => e.kind === 'tmux' && e.args.includes('new-session'))) assert.deepEqual(e.args.slice(-5), [f.m.tools.codex, '-s', 'read-only', '-a', 'never']);
+  for (const e of s.events.filter(e => e.kind === 'tmux' && e.args.includes('new-session'))) assertNativeLaunchPolicy(f.m, [f.m.tools.tmux, ...e.args], f.ports.runtime);
   assert.ok(s.events.filter(e => e.kind === 'rpc').every(e => ['thread/read', 'thread/turns/list', 'turn/start'].includes(e.method)));
   assert.equal(j.completed.includes('evidence_complete'), false); assert.deepEqual(j.owners, {});
   assert.equal((await f.harness().cleanup()).count, 5); await restoredStartup(f);
@@ -1111,19 +1112,18 @@ function observeActor(input) {
   assert.equal(typeof actorObservation.observeActorTurn, 'function', 'L-A1 needs the pure, correlated full-turn observation interface');
   return actorObservation.observeActorTurn(input);
 }
-test('L-A1 completed exact actor request without any command yields bound terminal failure, never success', () => {
+test('L-A1 completed exact actor request without projected commands is execution-unproved, never nonexecution proof', () => {
   const input = actorObservationInput(), before = structuredClone(input), result = observeActor(input);
-  assert.equal(result.status, 'terminal-no-execution');
-  assert.deepEqual(result.proof, { kind: 'owned-actor-not-executed', threadId: input.owned.id, turnId: 'actor-turn',
+  assert.equal(result.status, 'terminal-execution-unproved');
+  assert.deepEqual(result.proof, { kind: 'owned-actor-execution-unproved', threadId: input.owned.id, turnId: 'actor-turn',
     commandHash: actorDigest(input.command), requestHash: actorDigest(input.requestText),
     actorIntentHash: actorDigest(input.actorIntent), sourceIntentHash: actorDigest(input.sourceIntent),
     historyHash: actorDigest(input.turns), beforeTurnIdsHash: actorDigest(input.beforeTurnIds) });
   assert.deepEqual(input, before, 'pure observation cannot rewrite intent/history/source pins');
-  assert.equal(result.proof.kind === 'owned-tui-command', false);
 });
 test('L-A1 executed observation still requires the unchanged strict actor proof', () => {
   const input = actorObservationInput();
-  input.turns[1].items.push({ type: 'commandExecution', command: input.command, cwd: input.owned.cwd, exitCode: 0, status: 'completed' });
+  input.turns[1].items.push({ type: 'commandExecution', command: fixtureNativeEvent(input.command), cwd: input.owned.cwd, exitCode: 0, status: 'completed' });
   const result = observeActor(input);
   assert.equal(result.status, 'executed'); assert.deepEqual(result.proof, proveActor(input.owned, [input.turns[1]], input.command));
 });
@@ -1171,7 +1171,7 @@ async function noExecutionActorFixture(t) {
   f.ports.rpc = { async call(method, params, ...rest) {
     const result = await rpc.call(method, params, ...rest);
     if (method === 'thread/turns/list' && params.cursor == null && result.data?.some(turn =>
-      turn.items?.some(item => item.type === 'userMessage' && item.text?.startsWith('Run exactly this local command once')))) {
+      turn.items?.some(item => item.type === 'userMessage' && item.text?.startsWith('Run exactly this local command once') && !item.text.split('approvals: ')[1]?.startsWith('printf ')))) {
       // Existing RPC seam: a completed exact actor must classify at its first
       // full-history observation. Old production repolls after 500ms; stop it
       // there instead of waiting the real 180-second deadline or faking time.
@@ -1182,14 +1182,14 @@ async function noExecutionActorFixture(t) {
   } };
   const result = await f.harness().run().then(value => ({ value }), error => ({ error }));
   stopRepoll = false; // Fresh cleanup may reobserve only the same owned history.
-  assert.ok(result.error, 'a never-executed operator request must preserve RUN failure');
-  assert.ok(['actor_not_executed', 'fixture_actor_repolled'].includes(result.error.code), 'unexpected fixture/setup failure: ' + result.error.code);
+  assert.ok(result.error, 'an execution-unproved operator request must preserve RUN failure');
+  assert.ok(['actor_not_executed', 'actor_execution_unproved', 'fixture_actor_repolled'].includes(result.error.code), 'unexpected fixture/setup failure: ' + result.error.code);
   const journal = startupJournal(f), state = startupState(f), own = journal.threads.a;
-  const actorTurns = state.turns[own.id].filter(turn => turn.items?.some(item => item.type === 'userMessage' && item.text?.startsWith('Run exactly')));
+  const actorTurns = state.turns[own.id].filter(turn => turn.items?.some(item => item.type === 'userMessage' && item.text?.startsWith('Run exactly') && !item.text.split('approvals: ')[1]?.startsWith('printf ')));
   assert.equal(actorTurns.length, 1); assert.equal(actorTurns[0].status, 'completed');
   assert.equal(actorTurns[0].items.some(item => item.type === 'agentMessage' && item.text === 'FACT none'), true);
-  assert.equal(Object.values(state.turns).flatMap(turns => turns.flatMap(turn => turn.items ?? [])).some(item => item.type === 'commandExecution'), false);
-  assert.equal(journal.actorIntent.commandHash, actorDigest(actorTurns[0].items[0].text.split('approvals: ')[1]));
+  assert.equal(actorTurns[0].items.some(item => item.type === 'commandExecution'), false, 'the failed actor has no projected command; separate capability events do not prove nonexecution');
+  assert.equal(journal.actorIntent.commandHash, actorDigest(actorTurns[0].items[0].text.split('approvals: ')[1].split('\n')[0]));
   assert.equal(journal.completed.some(step => step.startsWith('actor-') || step.startsWith('wake-') || step === 'evidence_complete'), false);
   assert.equal(journal.proofs.some(proof => proof.kind === 'owned-tui-command'), false); assert.deepEqual(journal.owners, {});
   assert.deepEqual(journal.inputs.sources, []); assert.ok(journal.sourceIntent);
@@ -1198,30 +1198,22 @@ async function noExecutionActorFixture(t) {
   return { f, error: result.error, actorTurn: actorTurns[0], intent: structuredClone(journal.actorIntent),
     sourceIntent: structuredClone(journal.sourceIntent), inputs: structuredClone(journal.inputs) };
 }
-test('L-A1 real submitted operator request ending in commentary and FACT none fails promptly as actor_not_executed', async t => {
+test('L-A1 real submitted operator request ending in commentary and FACT none fails promptly as execution-unproved', async t => {
   const { f, error, actorTurn, intent } = await noExecutionActorFixture(t);
-  assert.equal(error.code, 'actor_not_executed');
-  assert.equal(intent.failure.kind, 'owned-actor-not-executed'); assert.equal(intent.failure.turnId, actorTurn.id);
+  assert.equal(error.code, 'actor_execution_unproved');
+  assert.equal(intent.failure.kind, 'owned-actor-execution-unproved'); assert.equal(intent.failure.turnId, actorTurn.id);
   assert.equal(intent.failure.commandHash, intent.commandHash); assert.equal(intent.failure.requestHash, actorDigest(actorTurn.items[0].text));
   assert.equal(startupJournal(f).phase, 'running', 'failure must not become acceptance evidence');
 });
-test('L-A2 guarded cleanup archives the bound never-executed intent after owned processes drain without repairing RUN', async t => {
-  const { f, error, intent, sourceIntent, inputs } = await noExecutionActorFixture(t), original = startupState(f);
+test('L-A2 cleanup refuses an execution-unproved intent before OPEN, close or archive', async t => {
+  const { f, intent, sourceIntent, inputs } = await noExecutionActorFixture(t), before = actorCleanupEffects(f);
   const lock = join(f.m.runRoot, 'lifecycle.lock'), inode = lstatSync(lock).ino;
-  assert.equal((await f.harness().cleanup()).code, 'cleaned');
+  await assert.rejects(f.harness().cleanup(), { code: 'actor_unproved' });
   const journal = startupJournal(f);
-  assert.equal(journal.actorIntent, undefined); assert.equal(journal.actorRecovery.status, 'aborted_without_command');
-  assert.deepEqual(journal.actorRecovery.intent, intent, 'archive the exact failed action, never invent success');
-  assert.equal(journal.actorRecovery.sourceIntentHash, actorDigest(sourceIntent));
+  assert.deepEqual(journal.actorIntent, intent); assert.equal(journal.actorRecovery, undefined);
   assert.deepEqual(journal.sourceIntent, sourceIntent); assert.deepEqual(journal.inputs, inputs, 'no source/journal repin');
-  assert.equal(error.code, 'actor_not_executed');
-  assert.equal(journal.completed.includes('evidence_complete'), false); assert.deepEqual(journal.owners, {});
-  assert.equal(journal.proofs.some(proof => proof.kind === 'owned-tui-command'), false);
-  for (const pane of Object.values(original.sessions)) await pidAbsent(pane.pid);
-  await pidAbsent(original.server.pid); assert.equal(existsSync(join(f.m.runRoot, 'tmux.sock')), false);
-  assert.equal(lstatSync(lock).ino, inode); assert.ok(journal.completed.includes('tmux-closed'));
-  assert.deepEqual(JSON.parse(readFileSync(f.peers)), Object.fromEntries(f.m.peers.map(p => [p.peerId, true])));
-  await restoredStartup(f);
+  assertActorAuthorityRetained(f, before); assertNoUnknownRetirement(f);
+  assert.equal(lstatSync(lock).ino, inode);
 });
 for (const [name, change] of Object.entries({
   'missing failed-action proof': (f, j) => { delete j.actorIntent.failure; },
@@ -1514,4 +1506,253 @@ test('review1 I2 both delivery leases stay held on the same inode through close 
   });
   compete('after-release', 0); assert.deepEqual(checkpoints, ['close-a', 'close-b', 'archive', 'after-release']);
   await restoredStartup(f);
+});
+
+// NAP / R-C64 TESTS ONLY. These are source-contract regressions, not native
+// acceptance. The controller owns every execution and the installed-format gate.
+function fixtureNativeEvent(script) {
+  assert.equal(typeof script, 'string'); assert.ok(script.includes(' '));
+  assert.equal(/[\x00-\x1f\x7f']/.test(script), false, 'bounded fixture renderer refuses unsupported script bytes');
+  return "/usr/bin/bash -c '" + script + "'";
+}
+function assertNoUnknownRetirement(f) {
+  const j = startupJournal(f);
+  assert.equal(existsSync(actorOpenPath(f)), false, 'unknown execution cannot publish without-command OPEN');
+  for (const name of ['evidence', 'plan', 'before', 'receipt']) assert.equal(existsSync(actorPrivatePath(f, name)), false);
+  assert.equal(j.actorRecovery, undefined); assert.ok(j.actorIntent); assert.ok(j.sourceIntent);
+  assert.equal(j.completed.some(step => ['close-a', 'close-b', 'tmux-closed', 'evidence_complete'].includes(step)), false);
+  assert.ok(existsSync(join(f.m.runRoot, 'tmux.sock')), 'refusal does not close owned obligations');
+}
+for (const [name, attempt] of Object.entries({
+  'omitted failed custom exec exit3': { status: 'completed', exitCode: 3 },
+  'omitted successful custom exec exit0': { status: 'completed', exitCode: 0 },
+  'omitted unresolved custom exec': { status: 'inProgress', exitCode: null },
+})) test('NAP missing native event is execution-unproved despite ' + name, () => {
+  const input = actorObservationInput(), before = structuredClone(input);
+  // Separate synthetic channel: this projection is deliberately NOT inserted
+  // into app-server turns. All three native realities have the same omission.
+  const nativeProjection = { threadId: input.owned.id, turnId: 'actor-turn', tool: 'exec',
+    command: input.command, cwd: input.owned.cwd, ...attempt };
+  assert.equal(input.turns[1].items.some(item => item.type === 'commandExecution'), false);
+  const observed = observeActor(input);
+  assert.equal(observed.status, 'terminal-execution-unproved', JSON.stringify(nativeProjection));
+  assert.equal(observed.proof.kind, 'owned-actor-execution-unproved');
+  assert.deepEqual(input, before);
+});
+test('NAP positive canary metadata and disabled Code Mode do not prove nonexecution', () => {
+  const input = actorObservationInput();
+  const canary = { id: 'capability', status: 'completed', items: [{ type: 'userMessage', text: 'Run harmless printf' },
+    { type: 'commandExecution', command: "/usr/bin/bash -c 'printf CAP'", cwd: input.owned.cwd, status: 'completed', exitCode: 0 }] };
+  input.turns.splice(1, 0, canary); input.beforeTurnIds.push(canary.id);
+  input.actorIntent.beforeTurnIdsHash = actorDigest(input.beforeTurnIds);
+  input.actorIntent.nativeCapability = { commandHash: actorDigest('printf CAP'), eventCommandHash: actorDigest(canary.items[1].command),
+    threadId: input.owned.id, turnId: canary.id, codeMode: false, codeModeHost: false };
+  const observed = observeActor(input);
+  assert.equal(observed.status, 'terminal-execution-unproved'); assert.equal(observed.proof.kind, 'owned-actor-execution-unproved');
+});
+for (const [name, attempt] of Object.entries({
+  'omitted exit3': { status: 'completed', exitCode: 3 },
+  'omitted exit0': { status: 'completed', exitCode: 0 },
+  'omitted unresolved': { status: 'inProgress', exitCode: null },
+})) test('NAP automatic retirement refuses ' + name + ' even with a successful canary and flags off', async t => {
+  const { f } = await noExecutionActorFixture(t), j = startupJournal(f);
+  // Historical input is a synthetic legacy failed intent. The separate public
+  // projection is fixture data, not a claim that this worker ran a subprocess.
+  const nativeProjection = { threadId: j.threads.a.id, command: j.actorIntent.command,
+    cwd: j.threads.a.cwd, tool: 'exec', ...attempt };
+  j.nativeCapabilities = { a: { kind: 'owned-native-command-probe', threadId: j.threads.a.id,
+    command: 'printf CAP', expectedEventCommand: "/usr/bin/bash -c 'printf CAP'", status: 'completed', exitCode: 0 },
+    features: { code_mode: false, code_mode_host: false } };
+  saveStartupJournal(f, j);
+  const before = actorCleanupEffects(f);
+  await observeActorRecoveryFs(f, {}, async probe => {
+    await assert.rejects(f.harness().cleanup(), { code: 'actor_unproved' }, JSON.stringify(nativeProjection));
+    assert.equal(probe.archives.length, 0); assert.equal(probe.fileSyncs.length, 0); assert.equal(probe.directorySyncs.length, 0);
+  });
+  assertActorAuthorityRetained(f, before); assertNoUnknownRetirement(f);
+});
+test('NAP exact native Bash event proves the requested script with distinct event and script hashes', () => {
+  const input = actorObservationInput(), expectedEventCommand = "/usr/bin/bash -c 'env VECNET_CODEX_AUTO_DELIVERY=1 /fixture/vecnet --net a --json peers'";
+  const event = { type: 'commandExecution', command: expectedEventCommand, cwd: input.owned.cwd, status: 'completed', exitCode: 0 };
+  const proof = proveActor(input.owned, [{ id: 'actor-turn', status: 'completed', items: [event] }], input.command);
+  assert.equal(proof.kind, 'owned-tui-command'); assert.equal(proof.commandHash, actorDigest(input.command));
+  assert.equal(proof.eventCommandHash, actorDigest(expectedEventCommand));
+  input.expectedEventCommand = expectedEventCommand;
+  input.actorIntent.expectedEventCommand = expectedEventCommand; input.actorIntent.eventCommandHash = actorDigest(expectedEventCommand);
+  input.turns[1].items.push(event);
+  assert.equal(observeActor(input).status, 'executed');
+});
+test('NAP native proof refuses raw scripts, alternate wrappers, mutations and ambiguous events', () => {
+  const input = actorObservationInput(), expected = fixtureNativeEvent(input.command);
+  const good = { type: 'commandExecution', command: expected, cwd: input.owned.cwd, status: 'completed', exitCode: 0 };
+  for (const command of [input.command, expected.replace('/usr/bin/bash', '/bin/bash'), expected.replace(' -c ', ' -lc '),
+    fixtureNativeEvent(input.command + ' '), fixtureNativeEvent('X=1 ' + input.command), fixtureNativeEvent(input.command + '; true'),
+    expected + ' extra', expected.slice(0, -1), expected + '\0']) {
+    assert.throws(() => proveActor(input.owned, [{ items: [{ ...good, command }] }], input.command), { code: 'actor_unproved' }, command);
+  }
+  for (const items of [[good, { ...good }], [{ ...good, cwd: '/foreign' }], [{ ...good, exitCode: 3 }], [{ ...good, status: 'inProgress', exitCode: null }]])
+    assert.throws(() => proveActor(input.owned, [{ items }], input.command), { code: 'actor_unproved' });
+  for (const script of [input.command + "'", input.command + '\n', input.command + '\0'])
+    assert.throws(() => proveActor(input.owned, [{ items: [{ ...good, command: script }] }], script), { code: 'actor_unproved' });
+});
+test('NAP exact native outer quoting preserves supported inner double quotes, dollars and backticks', () => {
+  const own = actorObservationInput().owned;
+  for (const [script, command] of [
+    ['printf "a b"', '/usr/bin/bash -c \'printf "a b"\''],
+    ['printf "$VALUE"', '/usr/bin/bash -c \'printf "$VALUE"\''],
+    ['printf `true`', '/usr/bin/bash -c \'printf `true`\''],
+  ]) {
+    const proof = proveActor(own, [{ id: 'exact', status: 'completed', items: [{ type: 'commandExecution', command,
+      cwd: own.cwd, status: 'completed', exitCode: 0 }] }], script);
+    assert.equal(proof.commandHash, actorDigest(script)); assert.equal(proof.eventCommandHash, actorDigest(command));
+  }
+});
+test('NAP actor permission is explicit, fixed and cannot contain caller-supplied roots', t => {
+  const { m } = fixture(t), legacy = structuredClone(m); delete legacy.actor.permission;
+  assert.throws(() => validateManifest(legacy), { code: 'invalid_manifest' });
+  const approved = structuredClone(m); approved.actor.permission = 'scoped-vecnet-network';
+  assert.equal(validateManifest(approved).actor.permission, 'scoped-vecnet-network');
+  for (const permission of ['read-only', 'danger-full-access', '', true, { write: [m.runRoot] }]) {
+    const bad = structuredClone(approved); bad.actor.permission = permission;
+    assert.throws(() => validateManifest(bad), { code: 'invalid_manifest' });
+  }
+  const bad = structuredClone(approved); bad.actor.writeRoots = [m.approval.home];
+  assert.throws(() => validateManifest(bad), { code: 'invalid_manifest' });
+});
+function assertNativeLaunchPolicy(m, launch, runtime = planHarness(m).paths.runtime) {
+  const argv = launch.slice(launch.indexOf(m.tools.codex) + 1), profileAt = argv.indexOf('-P');
+  assert.ok(profileAt >= 0, 'an explicit scoped permission profile must override inherited sandbox_mode');
+  const profile = argv[profileAt + 1]; assert.match(profile, /^[a-z][a-z0-9_-]+$/);
+  assert.equal(argv.includes('-s'), false); assert.equal(argv.includes('--sandbox'), false);
+  assert.equal(argv[argv.indexOf('-a') + 1], 'never');
+  assert.deepEqual(argv.flatMap((value, i) => value === '--disable' ? [argv[i + 1]] : []).sort(), ['code_mode', 'code_mode_host']);
+  const configs = new Map(argv.flatMap((value, i) => value === '-c' ? [argv[i + 1]] : []).map(value => {
+    const at = value.indexOf('='); assert.ok(at > 0); return [value.slice(0, at), JSON.parse(value.slice(at + 1))];
+  }));
+  const base = 'permissions.' + profile;
+  assert.equal(configs.get(base + '.extends'), ':read-only'); assert.equal(configs.get(base + '.network.enabled'), true);
+  const actual = [...configs].filter(([key]) => key.startsWith(base + '.filesystem.')).map(([key, value]) => {
+    assert.equal(value, 'write'); return JSON.parse(key.slice((base + '.filesystem.').length));
+  }).sort();
+  const receivers = m.peers.filter(p => p.role === 'receiver');
+  const expected = [...new Set([...receivers.map(p => p.config + '.lock'), ...receivers.flatMap(p => [join(dirname(p.config), 'codex'), join(dirname(p.config), 'state')]),
+    runtime, join(m.approval.home, '.local/share/vecnet/codex-delivery'), join(m.approval.home, '.local/share/vecnet/codex-notices')])].sort();
+  assert.deepEqual(actual, expected, 'only exact derived writes; no whole HOME/RUN/CODEX_HOME or installation/operator roots');
+  assert.equal(configs.size, expected.length + 2, 'no hidden policy override or workspace grant');
+}
+test('NAP dry-run declares invocation-only exact write scopes and never approvals', t => {
+  const f = fixture(t), before = snapshot(f.root), plan = planHarness(f.m);
+  for (const launch of plan.operations.tuis) assertNativeLaunchPolicy(f.m, launch);
+  assert.deepEqual(snapshot(f.root), before, 'planning cannot rewrite configuration or create permission roots');
+});
+test('NAP dispatched owned TUI argv equals the reviewed plan', async t => {
+  const f = await startupFixture(t, { eager: true, stopAtControl: 'b', staleSocket: true });
+  await assert.rejects(f.harness().run(), { code: 'fixture_startup_stop' });
+  const launches = startupState(f).events.filter(e => e.kind === 'tmux' && e.args.includes('new-session')).map(e => e.args);
+  const planned = planHarness(f.m), runtime = planned.paths.runtime;
+  assert.equal(launches.length, 2);
+  for (const [i, launch] of launches.entries()) {
+    // The existing fixture remaps /run/user to its own scratch runtime only.
+    const expected = planned.operations.tuis[i].slice(1).map(value => value.replaceAll(runtime, f.ports.runtime));
+    assert.deepEqual(launch, expected); assertNativeLaunchPolicy(f.m, [f.m.tools.tmux, ...launch], f.ports.runtime);
+  }
+});
+for (const fault of ['missing event', 'wrong command', 'wrong cwd', 'exit3', 'duplicate event', 'wrong turn']) test('NAP native capability ' + fault + ' stops before effectful actor and allows ordinary owned cleanup', async t => {
+  const f = await startupFixture(t, { eager: true, stopAtControl: false, staleSocket: true, actorOutcome: 'no-execution' }), run = f.ports.run;
+  let blockedEffects = 0;
+  f.ports.run = async (command, args, options) => {
+    if (command === f.m.tools.tmux && args.includes('send-keys') && args.includes('-l') && args.at(-1).startsWith('Run exactly')) {
+      if (!args.at(-1).split('approvals: ')[1]?.startsWith('printf ')) {
+        blockedEffects++; throw Object.assign(Error('fixture_before_effectful_actor'), { code: 'fixture_before_effectful_actor' });
+      }
+    }
+    return run(command, args, options);
+  };
+  const rpc = f.ports.rpc;
+  f.ports.rpc = { async call(method, params, ...rest) {
+    const out = await rpc.call(method, params, ...rest);
+    if (method === 'thread/turns/list') {
+      const extra = [], data = out.data.map(turn => ({ ...turn, items: turn.items.flatMap(item => {
+        if (item.type !== 'commandExecution') return [item];
+        if (fault === 'missing event') return [];
+        if (fault === 'wrong command') return [{ ...item, command: item.command + ' extra' }];
+        if (fault === 'wrong cwd') return [{ ...item, cwd: '/foreign' }];
+        if (fault === 'exit3') return [{ ...item, exitCode: 3 }];
+        if (fault === 'duplicate event') return [item, { ...item }];
+        extra.push({ id: turn.id + '-other', status: 'completed', items: [item] }); return [];
+      }) }));
+      return { ...out, data: [...data, ...extra] };
+    }
+    return out;
+  } };
+  await assert.rejects(f.harness().run(), { code: 'native_tool_unproved' });
+  const j = startupJournal(f); assert.equal(blockedEffects, 0); assert.equal(j.actorIntent, undefined); assert.equal(j.sourceIntent, undefined);
+  assert.deepEqual(j.owners, {}); assert.deepEqual(j.inputs.sources, []); assert.deepEqual(JSON.parse(readFileSync(f.peers)), {});
+  assert.equal(existsSync(actorOpenPath(f)), false);
+  assert.equal((await f.harness().cleanup()).code, 'cleaned'); await restoredStartup(f);
+});
+test('NAP both harmless native probes and exact event pins precede the first effectful submission', async t => {
+  const f = await startupFixture(t, { eager: true, stopAtControl: false, staleSocket: true }), run = f.ports.run;
+  const probes = []; let effect;
+  f.ports.run = async (command, args, options) => {
+    if (command === f.m.tools.tmux && args.includes('send-keys') && args.includes('-l') && args.at(-1).startsWith('Run exactly')) {
+      const text = args.at(-1), requestedScript = text.split('approvals: ')[1]?.split('\n')[0], session = args[args.indexOf('-t') + 1];
+      const journal = startupJournal(f), expectedEventCommand = fixtureNativeEvent(requestedScript);
+      if (requestedScript.startsWith('printf ')) {
+        probes.push({ session, journal, requestedScript, expectedEventCommand, text });
+      } else {
+        effect = { session, journal, requestedScript, expectedEventCommand, text };
+        throw Object.assign(Error('fixture_after_native_probes'), { code: 'fixture_after_native_probes' });
+      }
+    }
+    return run(command, args, options);
+  };
+  await assert.rejects(f.harness().run(), { code: 'fixture_after_native_probes' });
+  assert.deepEqual(probes.map(p => p.session).sort(), ['a', 'b']);
+  const state = startupState(f);
+  for (const probe of probes) {
+    assert.equal(probe.journal.actorIntent, undefined); assert.equal(probe.journal.sourceIntent, undefined);
+    const pin = probe.journal.nativeCapabilityIntent;
+    assert.equal(pin.requestedScript, probe.requestedScript); assert.equal(pin.expectedEventCommand, probe.expectedEventCommand);
+    assert.equal(pin.commandHash, actorDigest(probe.requestedScript)); assert.equal(pin.eventCommandHash, actorDigest(probe.expectedEventCommand));
+    const own = effect.journal.threads[probe.session];
+    assert.equal(pin.shell, '/usr/bin/bash'); assert.equal(pin.shellHash, createHash('sha256').update(readFileSync('/usr/bin/bash')).digest('hex'));
+    assert.equal(pin.login, false); assert.equal(pin.cwd, own.cwd);
+    assert.ok(probe.text.includes('shell=/usr/bin/bash')); assert.ok(probe.text.includes('login=false')); assert.ok(probe.text.includes('workdir=' + own.cwd));
+    const commands = state.turns[own.id].flatMap(turn => turn.items).filter(item => item.type === 'commandExecution');
+    assert.equal(commands.length, 1); assert.equal(commands[0].command, probe.expectedEventCommand);
+    assert.equal(commands[0].cwd, own.cwd); assert.equal(commands[0].status, 'completed'); assert.equal(commands[0].exitCode, 0);
+  }
+  const intent = effect.journal.actorIntent;
+  assert.equal(intent.command, effect.requestedScript); assert.equal(intent.expectedEventCommand, effect.expectedEventCommand);
+  assert.equal(intent.commandHash, actorDigest(effect.requestedScript)); assert.equal(intent.eventCommandHash, actorDigest(effect.expectedEventCommand));
+  assert.ok(effect.text.includes('shell=/usr/bin/bash')); assert.ok(effect.text.includes('login=false'));
+  assert.ok(effect.text.includes('workdir=' + effect.journal.threads[effect.session].cwd));
+});
+test('NAP an exact wrapped actor exit3 remains failed attempted execution with active intent', async t => {
+  const f = await startupFixture(t, { eager: true, stopAtControl: false, staleSocket: true, actorExit: 3 });
+  await assert.rejects(f.harness().run(), { code: 'actor_sandbox_denied' });
+  const j = startupJournal(f), own = j.threads.a, command = j.actorIntent.command;
+  const items = startupState(f).turns[own.id].flatMap(turn => turn.items).filter(item => item.type === 'commandExecution' && item.command === fixtureNativeEvent(command));
+  assert.equal(items.length, 1); assert.equal(items[0].exitCode, 3); assert.equal(items[0].cwd, own.cwd);
+  assert.ok(j.sourceIntent); assert.equal(j.actorRecovery, undefined); assert.deepEqual(j.owners, {}); assert.deepEqual(j.inputs.sources, []);
+  assert.equal(j.completed.some(step => step.startsWith('actor-') || step === 'evidence_complete'), false);
+  assert.equal(existsSync(actorOpenPath(f)), false);
+});
+test('NAP required permission directories are precreated, journal-owned and removed on unused rollback', async t => {
+  const f = await startupFixture(t, { eager: true, stopAtControl: 'a', staleSocket: true });
+  await assert.rejects(f.harness().run(), { code: 'fixture_startup_stop' });
+  const plan = planHarness(f.m), journal = startupJournal(f);
+  const roots = [...new Set([...f.m.peers.filter(p => p.role === 'receiver').flatMap(p => [join(dirname(p.config), 'codex'), join(dirname(p.config), 'state')]), plan.paths.notices])];
+  for (const root of roots) {
+    assert.equal(existsSync(root), true, 'permission root must exist before any capability/actor command: ' + root);
+    const stat = lstatSync(root); assert.ok(stat.isDirectory()); assert.equal(stat.uid, process.geteuid()); assert.equal(stat.mode & 0o7777, 0o700);
+    assert.equal(readdirSync(root).filter(name => !name.endsWith('.lock')).length, 0, 'no preconsumer or state was created');
+    assert.ok(journal.dirs.some(row => row.path === root && row.dev === stat.dev && row.ino === stat.ino), 'created directory ownership is durable');
+  }
+  for (const config of new Set(f.m.peers.filter(p => p.role === 'receiver').map(p => p.config))) {
+    const lock = lstatSync(config + '.lock'); assert.ok(lock.isFile()); assert.equal(lock.mode & 0o7777, 0o600);
+  }
+  assert.equal((await f.harness().cleanup()).code, 'cleaned'); await restoredStartup(f);
+  for (const root of roots.filter(root => !root.endsWith('/codex'))) assert.equal(existsSync(root), false, 'unused journal-owned directory must be rolled back');
 });
