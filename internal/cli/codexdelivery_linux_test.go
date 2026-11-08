@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -32,7 +33,10 @@ func deliveryWrite(t *testing.T, path, text string, mode os.FileMode) {
 func deliveryQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
 func newDeliveryFixture(t *testing.T) *deliveryFixture {
 	t.Helper()
-	d := t.TempDir()
+	return newDeliveryFixtureIn(t, t.TempDir())
+}
+func newDeliveryFixtureIn(t *testing.T, d string) *deliveryFixture {
+	t.Helper()
 	f := &deliveryFixture{t: t, dir: d, entry: filepath.Join(d, "release", "delivery-main.ts"), config: filepath.Join(d, "v.toml"), bindings: filepath.Join(d, "bindings.json")}
 	for _, sub := range []string{"bin", "release", "run", ".local", ".local/share", "codex", "config"} {
 		if err := os.Mkdir(filepath.Join(d, sub), 0700); err != nil {
@@ -205,10 +209,7 @@ func TestCodexDeliveryProcess(t *testing.T) {
 	case "systemctl":
 		// No installed fixture template by default. Tests opt in by creating a
 		// private marker, so the host service manager is never contacted.
-		if _, err := os.Stat(filepath.Join(os.Getenv("VECNET_TEST_MANAGER_ROOT"), "systemd-installed")); err != nil {
-			fmt.Println("not-found")
-			os.Exit(0)
-		}
+		_, installedErr := os.Stat(filepath.Join(os.Getenv("VECNET_TEST_MANAGER_ROOT"), "systemd-installed"))
 		if strings.Contains(strings.Join(args, " "), "show") {
 			failure, _ := os.ReadFile(filepath.Join(os.Getenv("VECNET_TEST_MANAGER_ROOT"), "systemd-show-failure"))
 			switch string(failure) {
@@ -237,14 +238,18 @@ func TestCodexDeliveryProcess(t *testing.T) {
 				os.Exit(0)
 			}
 			if strings.Contains(joined, "--property=ActiveState") {
-				state, _ := os.ReadFile(filepath.Join(root, "manager-state"))
-				if len(state) == 0 {
+				state, err := os.ReadFile(filepath.Join(root, "manager-state"))
+				if errors.Is(err, os.ErrNotExist) {
 					state = []byte("ActiveState=inactive\nSubState=dead\nJob=\n")
 				}
 				fmt.Print(string(state))
 				os.Exit(0)
 			}
-			fmt.Println("loaded")
+			if installedErr == nil {
+				fmt.Println("loaded")
+			} else {
+				fmt.Println("not-found")
+			}
 			os.Exit(0)
 		}
 		file, _ := os.OpenFile(filepath.Join(os.Getenv("VECNET_TEST_MANAGER_ROOT"), "systemctl-calls"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
@@ -366,10 +371,17 @@ func TestCodexDeliveryProcess(t *testing.T) {
 		}
 		stop := make(chan os.Signal, 1)
 		signal.Notify(stop, syscall.SIGTERM, syscall.SIGINT)
-		<-stop
-		file, _ = os.OpenFile(filepath.Join(os.Getenv("HOME"), "runner-signals"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
-		fmt.Fprintln(file, os.Getpid())
-		file.Close()
+		var finite <-chan time.Time
+		if _, err := os.Stat(filepath.Join(os.Getenv("HOME"), "finite-runner")); err == nil {
+			finite = time.After(10 * time.Second)
+		}
+		select {
+		case <-stop:
+			file, _ = os.OpenFile(filepath.Join(os.Getenv("HOME"), "runner-signals"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+			fmt.Fprintln(file, os.Getpid())
+			file.Close()
+		case <-finite:
+		}
 		lease.Close()
 		os.Exit(0)
 	}
@@ -604,6 +616,112 @@ func TestCodexDeliveryOldNode(t *testing.T) {
 	}
 	if paths, _ := filepath.Glob(filepath.Join(f.dir, "run", "vecnet", "*.json")); len(paths) != 0 {
 		t.Fatal("unsupported Node started a doomed owner")
+	}
+}
+
+func TestCodexDeliveryNodeCompatibility(t *testing.T) {
+	for _, tc := range []struct {
+		version string
+		want    codexInactiveReason
+	}{
+		{"v20.19.0", "node_too_old"},
+		{"v22.17.9", "node_too_old"},
+		{"v22.18.0", ""},
+		{"v22.20.0", ""},
+		{"v23.0.0", "node_too_old"},
+		{"v23.5.0", "node_too_old"},
+		{"v23.5.9", "node_too_old"},
+		{"v23.6.0", ""},
+		{"v24.0.0", ""},
+		{"v25.0.0", ""},
+		{"v23.x.0", "node_unavailable"},
+	} {
+		t.Run(tc.version, func(t *testing.T) {
+			f := newDeliveryFixture(t)
+			deliveryWrite(t, filepath.Join(f.dir, "bin", "node"), "#!/bin/sh\nprintf '%s\\n' "+deliveryQuote(tc.version)+"\n", 0700)
+			release, err := f.app.codexDeliveryRelease()
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = f.app.checkCodexDeliveryNode(context.Background(), release)
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("supported Node %s refused: %v", tc.version, err)
+				}
+				return
+			}
+			var reason codexInactiveReason
+			if !errors.Is(err, errCodexDelivery) || !errors.As(err, &reason) || reason != tc.want {
+				t.Fatalf("Node %s: reason=%q error=%v, want typed %q hooks fallback", tc.version, reason, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestCodexDeliveryUnsupportedNodePreflight(t *testing.T) {
+	for _, version := range []string{"v22.17.9", "v23.0.0", "v23.5.0", "v23.5.9"} {
+		t.Run(version, func(t *testing.T) {
+			for _, action := range []string{"ensure", "probe"} {
+				t.Run(action, func(t *testing.T) {
+					f := newDeliveryFixture(t)
+					nodeCalls := filepath.Join(f.dir, "unexpected-node-call")
+					managerCalls := filepath.Join(f.dir, "unexpected-manager-call")
+					// Every fake is synchronous and finite, including on the RED
+					// path. The manager refuses before any detached owner can start.
+					deliveryWrite(t, filepath.Join(f.dir, "bin", "node"), "#!/bin/sh\nif [ \"$1\" = --version ]; then printf '%s\\n' "+deliveryQuote(version)+"; exit 0; fi\nprintf '%s\\n' \"$@\" > "+deliveryQuote(nodeCalls)+"\nprintf '%s\\n' '{\"loaded\":true,\"previous\":\"gone\"}'\n", 0700)
+					deliveryWrite(t, filepath.Join(f.dir, "bin", "systemctl"), "#!/bin/sh\nprintf '%s\\n' \"$@\" > "+deliveryQuote(managerCalls)+"\nexit 1\n", 0700)
+					ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+					defer cancel()
+					var err error
+					if action == "ensure" {
+						err = f.app.ensureCodexDelivery(ctx, "https://hub.invalid", f.config, f.bindings)
+					} else {
+						var probe codexDeliveryProbe
+						probe, err = f.app.probeCodexDelivery(ctx, f.env["CODEX_HOME"], bindT1, bindT2)
+						if probe.Loaded || probe.Previous != "unknown" {
+							t.Errorf("unsupported Node produced an authoritative probe: %+v", probe)
+						}
+					}
+					var reason codexInactiveReason
+					if !errors.Is(err, errCodexDelivery) || !errors.As(err, &reason) || reason != "node_too_old" {
+						t.Errorf("unsupported Node %s: reason=%q error=%v, want typed node_too_old hooks fallback", version, reason, err)
+					}
+					for _, path := range []string{nodeCalls, managerCalls} {
+						if _, err := os.Stat(path); !os.IsNotExist(err) {
+							t.Errorf("unsupported Node reached runtime/manager boundary %s: %v", filepath.Base(path), err)
+						}
+					}
+					if starts := f.starts(); len(starts) != 0 {
+						t.Errorf("unsupported Node started a worker: %v", starts)
+					}
+					if paths, err := filepath.Glob(filepath.Join(f.dir, "run", "vecnet", "delivery-*.json")); err != nil || len(paths) != 0 {
+						t.Errorf("unsupported Node published owner metadata: %v %v", paths, err)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestCodexDeliverySupportedNodeProbe(t *testing.T) {
+	for _, version := range []string{"v22.18.0", "v23.6.0", "v24.0.0"} {
+		t.Run(version, func(t *testing.T) {
+			f := newDeliveryFixture(t)
+			// Keep the existing probe fixture's environment checks, replacing
+			// only its version response with this supported boundary value.
+			node := filepath.Join(f.dir, "bin", "node")
+			probeNode := filepath.Join(f.dir, "bin", "probe-node")
+			if err := os.Rename(node, probeNode); err != nil {
+				t.Fatal(err)
+			}
+			deliveryWrite(t, node, "#!/bin/sh\nif [ \"$1\" = --version ]; then printf '%s\\n' "+deliveryQuote(version)+"; exit 0; fi\nexec "+deliveryQuote(probeNode)+" \"$@\"\n", 0700)
+			f.env["VECNET_TOKEN"] = "fixture-must-not-inherit"
+			f.env["CODEX_THREAD_ID"] = bindT1
+			probe, err := f.app.probeCodexDelivery(context.Background(), f.env["CODEX_HOME"], bindT1, bindT2)
+			if err != nil || !probe.Loaded || probe.Previous != "gone" {
+				t.Fatalf("supported Node %s probe=%+v error=%v", version, probe, err)
+			}
+		})
 	}
 }
 
@@ -1163,6 +1281,157 @@ func TestCodexDeliveryIncompatibleManagedScope(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// Unlike the older lifecycle fixtures, these cases retain their roots on any
+// failure and observe retirement before removing a successful fixture's root.
+func newFiniteDeliveryFixture(t *testing.T) *deliveryFixture {
+	t.Helper()
+	d, err := os.MkdirTemp("", "vecnet-delivery-not-found-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	retired := false
+	t.Cleanup(func() {
+		if !retired || t.Failed() {
+			t.Logf("retained delivery fixture root: %s", d)
+			return
+		}
+		if err := os.RemoveAll(d); err != nil {
+			t.Error(err)
+		}
+	})
+	f := newDeliveryFixtureIn(t, d)
+	deliveryWrite(t, filepath.Join(d, "finite-runner"), "ten-second maximum lifetime", 0600)
+	t.Cleanup(func() {
+		var owners []deliveryOwner
+		for _, runtime := range []string{"run", "custom-run"} {
+			paths, err := filepath.Glob(filepath.Join(d, runtime, "vecnet", "delivery-*.json"))
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			for _, path := range paths {
+				var owner deliveryOwner
+				if err := deliveryRead(path, &owner); err != nil || owner.PID <= 1 || owner.Birth == "" {
+					t.Errorf("cannot prove fixture ownership at %s: %+v %v", path, owner, err)
+					return
+				}
+				owners = append(owners, owner)
+				if deliveryOwnerRunning(owner) {
+					if err := syscall.Kill(owner.PID, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
+						t.Errorf("retire owned fixture PID %d: %v", owner.PID, err)
+						return
+					}
+				}
+			}
+		}
+		until := time.Now().Add(3 * time.Second)
+		for {
+			retired = true
+			for _, owner := range owners {
+				if deliveryOwnerRunning(owner) {
+					retired = false
+				}
+			}
+			if retired {
+				return
+			}
+			if time.Now().After(until) {
+				t.Error("fixture PID/birth retirement unproven; retaining root")
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	})
+	return f
+}
+
+func TestCodexDeliveryNotFoundManagedScope(t *testing.T) {
+	for _, tc := range []struct {
+		name, properties string
+		absent           bool
+	}{
+		{"inactive", "ActiveState=inactive\nSubState=dead\nJob=\n", true},
+		{"active", "ActiveState=active\nSubState=running\nJob=\n", false},
+		{"activating", "ActiveState=activating\nSubState=auto-restart\nJob=\n", false},
+		{"queued", "ActiveState=inactive\nSubState=dead\nJob=7\n", false},
+		{"unknown", "ActiveState=unknown\nSubState=unknown\nJob=\n", false},
+		{"missing", "", false},
+		{"missing-active", "SubState=dead\nJob=\n", false},
+		{"missing-substate", "ActiveState=inactive\nJob=\n", false},
+		{"missing-job", "ActiveState=inactive\nSubState=dead\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFiniteDeliveryFixture(t)
+			f.installManaged()
+			var before deliveryOwner
+			var managedMeta string
+			if !tc.absent {
+				if err := f.ensure("https://hub.invalid"); err != nil {
+					t.Fatalf("managed control start: %v", err)
+				}
+				deliveryWait(t, func() bool { return len(f.starts()) == 1 })
+				_, managedMeta = f.owner()
+				if err := deliveryRead(managedMeta, &before); err != nil || !before.Managed || !deliveryOwnerRunning(before) {
+					t.Fatalf("missing live managed control: %+v %v", before, err)
+				}
+			}
+			// Removing the unit definition does not stop its managed consumer.
+			if err := os.Remove(filepath.Join(f.dir, "systemd-installed")); err != nil {
+				t.Fatal(err)
+			}
+			deliveryWrite(t, filepath.Join(f.dir, "manager-state"), tc.properties, 0600)
+			for key, sub := range map[string]string{"XDG_DATA_HOME": "custom-data", "XDG_RUNTIME_DIR": "custom-run"} {
+				path := filepath.Join(f.dir, sub)
+				if err := os.Mkdir(path, 0700); err != nil {
+					t.Fatal(err)
+				}
+				f.env[key] = path
+			}
+			callsBefore, _ := os.ReadFile(filepath.Join(f.dir, "systemctl-calls"))
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			err := f.app.ensureCodexDelivery(ctx, "https://hub.invalid", f.config, f.bindings)
+			_, slug, _ := codexDeliveryHub("https://hub.invalid")
+			customMeta := filepath.Join(f.env["XDG_RUNTIME_DIR"], "vecnet", "delivery-"+slug+".json")
+			customStarts := filepath.Join(f.env["XDG_DATA_HOME"], "vecnet", "codex-delivery", slug, "starts")
+			if tc.absent {
+				if err != nil {
+					t.Fatalf("proven absent unit should permit detached start: %v", err)
+				}
+				var owner deliveryOwner
+				if err := deliveryRead(customMeta, &owner); err != nil || owner.Managed || !deliveryOwnerRunning(owner) {
+					t.Fatalf("missing live detached positive control: %+v %v", owner, err)
+				}
+				deliveryWait(t, func() bool {
+					raw, _ := os.ReadFile(customStarts)
+					return len(strings.Fields(string(raw))) == 1
+				})
+			} else {
+				var reason codexInactiveReason
+				if !errors.Is(err, errCodexDelivery) || !errors.As(err, &reason) || reason != "ownership_ambiguous" {
+					t.Errorf("not-found/%s must refuse with ownership_ambiguous: reason=%q error=%v", tc.name, reason, err)
+				}
+				for _, path := range []string{customMeta, customStarts} {
+					if _, err := os.Stat(path); !os.IsNotExist(err) {
+						t.Errorf("not-found/%s spawned a detached consumer: %s (%v)", tc.name, path, err)
+					}
+				}
+				var after deliveryOwner
+				if err := deliveryRead(managedMeta, &after); err != nil || after != before || !deliveryOwnerRunning(before) {
+					t.Errorf("not-found/%s changed the live managed owner: before=%+v after=%+v error=%v", tc.name, before, after, err)
+				}
+				if signals, err := os.ReadFile(filepath.Join(f.dir, "runner-signals")); !os.IsNotExist(err) {
+					t.Errorf("not-found/%s signaled an existing owner: %s (%v)", tc.name, signals, err)
+				}
+			}
+			callsAfter, _ := os.ReadFile(filepath.Join(f.dir, "systemctl-calls"))
+			if string(callsAfter) != string(callsBefore) {
+				t.Errorf("not-found/%s mutated the manager: before=%q after=%q", tc.name, callsBefore, callsAfter)
+			}
+		})
 	}
 }
 

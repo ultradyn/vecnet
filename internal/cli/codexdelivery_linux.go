@@ -436,6 +436,9 @@ func (a *app) ensureCodexDeliveryPlatform(ctx context.Context, hub, config, bind
 		if !installed && !a.deliveryUnitInactive(ctx, unit) {
 			return codexInactiveReason("ownership_ambiguous")
 		}
+	} else if state == "not-found" && !a.deliveryUnitInactive(ctx, unit) {
+		// A missing unit definition does not prove its consumer or job is gone.
+		return codexInactiveReason("ownership_ambiguous")
 	}
 	// Even a free local lease cannot authorize replacement across manager scopes.
 	// A held managed owner is never demoted because paths/assets/unit changed.
