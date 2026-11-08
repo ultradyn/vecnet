@@ -3,9 +3,8 @@ import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import childProcess from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
-import { mkdir, mkdtemp, readFile, rm, stat, realpath } from 'node:fs/promises';
+import { mkdir, readFile, stat, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import plugin from '../src/backends/acp/index.ts';
 import type { PluginContext, SessionHandle, SessionHooks, TurnEvent } from '../src/backend.ts';
@@ -20,15 +19,15 @@ import { fakeClock, memoryLog } from '../../hub-client/testing/fixtures.ts';
 import type { SendRequest, ReceiptBody } from '../../hub-client/src/wire.ts';
 import { threadDelivery } from './fixtures.ts';
 import { until } from './daemon-harness.ts';
+import { acpTestDir } from './fixtures/acp-test-root.ts';
 
 const hooks: SessionHooks = { onEvent() {}, async onPermissionRequest(r) { return { optionId: r.defaultOnExpiry, decidedBy: 'expired' }; },
   async onQuestion() { return { answers: {}, answeredBy: 'timeout' }; } };
 async function fixture(t: TestContext, scenario: string, allocationFailure = false) {
-  const parent = process.env.ACP_TEST_ROOT ?? join(process.env.XDG_CACHE_HOME ?? join(homedir(), '.cache'), 'vecnet-launcher', 'acp-tests'); assert.ok(parent.startsWith('/') && parent !== '/tmp' && !parent.startsWith('/tmp/'));
-  await mkdir(parent, { recursive: true });
-  const canonicalParent = await realpath(parent);
-  assert.ok(canonicalParent !== '/tmp' && !canonicalParent.startsWith('/tmp/')); const dir = await mkdtemp(join(parent, 'acp-fix1-recovery-'));
+  let handle: SessionHandle | undefined, closeResources: () => unknown | Promise<unknown> = () => {};
+  const dir = await acpTestDir(t, 'acp-fix1-recovery-', () => closeResources());
   const clock = fakeClock(Date.parse('2026-11-08T00:00:00Z')), log = memoryLog(), ledger = openLedger(':memory:', clock);
+  closeResources = async () => { try { if (handle) await handle.settle('cancel'); } finally { ledger.close(); } };
   const outbox = createOutbox({ ledger, clock, log, hub: { async send() { throw new Error('no hub'); }, async receipt() {} } });
   const jobs = createJobReporter({ ledger, outbox });
   const cfg = parseConfig({ host: 'test-host', hub: { url: 'http://127.0.0.1:9', credential_file: '/synthetic' }, state_dir: dir, backends: [], projects: {} });
@@ -57,8 +56,6 @@ async function fixture(t: TestContext, scenario: string, allocationFailure = fal
   const backend = await plugin.create(config, ctx);
   const deps: LaunchDeps = { ledger, jobs, backends: new Map([['acp', backend]]), hooks: () => hooks, clock, log, host: 'test-host', cfg,
     projects: () => ({ alias: 'repo', repoRoot: repo, baseRef: 'master' }) };
-  let handle: SessionHandle | undefined;
-  t.after(async () => { if (handle) await handle.settle('cancel'); ledger.close(); await rm(dir, { recursive: true, force: true }); });
   const job = () => ledger.job(jobId)!;
   const calls = async (): Promise<Array<Record<string, any>>> => { try { return (await readFile(wirePath, 'utf8')).trim().split('\n').filter(Boolean).map(s => JSON.parse(s)); } catch { return []; } };
   const rows = () => ledger.pendingOutbox(1000, clock.now());
@@ -139,4 +136,12 @@ test('I2 real lane drains delayed authoritative process exit after lost state, f
   assert.equal(observed.some(e => e.type === 'turn_finished'), false);
   const status = f.rows().map(r => r.payload as SendRequest).find(r => r.job_status?.state === 'failed');
   assert.equal((status?.job_status?.output as Record<string, unknown> | undefined)?.error, 'session_exited');
+});
+
+
+test('fix2 real launcher recovery fixture launches through a persistent cache symlink with canonical paths', async t => {
+  const f = await fixture(t, 'normal');
+  assert.equal(f.dir, await realpath(f.dir), 'recovery fixture must supply canonical cwd/workspace paths');
+  const result = await f.launch(); assert.ok(result.ok);
+  assert.equal(result.handle.ref.extra?.workspace, await realpath(String(result.handle.ref.extra?.workspace)));
 });
