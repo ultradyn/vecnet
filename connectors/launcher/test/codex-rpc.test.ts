@@ -2,8 +2,11 @@ import test, { beforeEach } from 'node:test';
 import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import childProcess from 'node:child_process';
+import { createServer } from 'node:net';
+import type { Socket } from 'node:net';
+import { createHash } from 'node:crypto';
 import { syncBuiltinESMExports } from 'node:module';
-import { mkdtemp, rm, chmod, readlink, writeFile, symlink } from 'node:fs/promises';
+import { mkdtemp, rm, chmod, readlink, writeFile, symlink, mkdir } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fakeClock, memoryLog } from '../../hub-client/testing/fixtures.ts';
 import { startFakeCodexAppServer } from './fake-codex-appserver.ts';
@@ -143,4 +146,94 @@ test('concurrent calls correlate replies and definite errors stay non-ambiguous'
   await assert.rejects(rpc.call('turn/interrupt' as AllowedMethod, {}, 1000), /method/i);
   await read(rpc);
   assert.equal(fake.requests.some(r => r.method === 'turn/interrupt'), false);
+});
+
+test('configRequirements/read crosses the socket once without admitting mutation or other methods', { timeout: 5000 }, async t => {
+  const dir = roots.get(t)!, targetDir = join(dir, 'policy-socket'), codexHome = join(dir, 'policy-home');
+  await mkdir(targetDir, { mode: 0o700 }); await chmod(targetDir, 0o700);
+  await mkdir(join(codexHome, 'app-server-control'), { recursive: true, mode: 0o700 });
+  const target = join(targetDir, 'rpc.sock');
+  const requests: { id?: number; method: string; params?: unknown }[] = [], paths: string[] = [];
+  const sockets = new Set<Socket>();
+  const expected = { requirements: null, sources: [{ kind: 'managed', detail: 'finite-socket-only' }],
+    future: { revision: 7, flags: [false, null, 'retained'] } };
+  // Independent finite wire fake: no changes to the shared app-server fixture,
+  // and no production framing or RPC implementation substituted by the test.
+  const server = createServer(socket => {
+    sockets.add(socket); socket.on('error', () => {});
+    let bytes: Buffer = Buffer.alloc(0), upgraded = false, policyId: number | undefined;
+    const send = (value: unknown) => {
+      const body = Buffer.from(JSON.stringify(value)), header = Buffer.alloc(body.length < 126 ? 2 : 4);
+      header[0] = 0x81;
+      if (header.length === 2) header[1] = body.length;
+      else { header[1] = 126; header.writeUInt16BE(body.length, 2); }
+      socket.write(Buffer.concat([header, body]));
+    };
+    socket.on('data', chunk => {
+      bytes = Buffer.concat([bytes, chunk]);
+      if (!upgraded) {
+        const end = bytes.indexOf('\r\n\r\n'); if (end < 0) return;
+        const head = bytes.subarray(0, end).toString('ascii'); bytes = bytes.subarray(end + 4);
+        paths.push(head.split(' ')[1]);
+        const key = /\r\nSec-WebSocket-Key:\s*([^\r\n]+)/i.exec(head)?.[1].trim();
+        if (!key) { socket.destroy(); return; }
+        const accept = createHash('sha1').update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');
+        socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
+        upgraded = true;
+      }
+      while (bytes.length >= 2) {
+        const op = bytes[0] & 15;
+        if (op === 8) { socket.end(); return; }
+        if (op !== 1 || !(bytes[0] & 128) || !(bytes[1] & 128)) { socket.destroy(); return; }
+        let length = bytes[1] & 127, at = 2;
+        if (length === 126) { if (bytes.length < 4) return; length = bytes.readUInt16BE(2); at = 4; }
+        else if (length === 127) { socket.destroy(); return; }
+        if (bytes.length < at + 4 + length) return;
+        const maskAt = at, body = Buffer.from(bytes.subarray(at + 4, at + 4 + length));
+        body.forEach((value, n) => { body[n] = value ^ bytes[maskAt + n % 4]; });
+        bytes = bytes.subarray(at + 4 + length);
+        const request = JSON.parse(body.toString()) as (typeof requests)[number]; requests.push(request);
+        if (request.method === 'initialize') send({ id: request.id, result: { userAgent: 'codex-tui/0.166.0 (finite)' } });
+        else if (request.method === 'initialized') continue;
+        else if (request.method === 'configRequirements/read') policyId = request.id;
+        else if (request.method === 'thread/read') {
+          // Resolve the concurrent thread call first and include an unrelated ID:
+          // only the matching policy reply may settle the requirements read.
+          send({ id: request.id, result: { thread: { id: 't' } } });
+          if (policyId !== undefined) {
+            send({ id: policyId + 1000, result: { requirements: { wrongCorrelation: true } } });
+            send({ id: policyId, result: expected }); policyId = undefined;
+          }
+        } else send({ id: request.id, error: { code: -32601, message: 'unexpected fake method' } });
+      }
+    });
+  });
+  t.after(async () => { for (const socket of sockets) socket.destroy(); await new Promise<void>(resolve => server.close(() => resolve())); });
+  await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(target, resolve); });
+  await symlink(target, socketPathFor(codexHome));
+  const rpc = await openCodexRpc({ codexHome, euid, log: memoryLog(), timeoutMs: 1000 }); t.after(() => rpc.close());
+  // Cast only at the existing runtime-boundary seam. This keeps baseline tests
+  // importable before AllowedMethod gains the read method: RED must be behavior.
+  for (const method of ['config/value/write', 'config/batchWrite', 'configRequirements/write', 'config/read',
+    'configRequirements/readExtra', 'thread/start', 'turn/interrupt', 'settings/update']) {
+    await assert.rejects(rpc.call(method as AllowedMethod, {}, 1000),
+      (error: unknown) => error instanceof CodexRpcError && error.code === -1 && error.message === 'forbidden_method' && !error.ambiguous);
+  }
+  await read(rpc); // Socket barrier: every forbidden call above must be absent.
+  assert.deepEqual(requests.map(request => request.method), ['initialize', 'initialized', 'thread/read']);
+  const requirements = rpc.call<typeof expected>('configRequirements/read' as AllowedMethod, {}, 1000);
+  const barrier = read(rpc);
+  const [result, thread] = await Promise.all([requirements, barrier]);
+  assert.deepEqual(result, expected); assert.equal(thread.thread.id, 't');
+  assert.deepEqual(requests.map(request => request.method),
+    ['initialize', 'initialized', 'thread/read', 'configRequirements/read', 'thread/read']);
+  const policyRequest = requests[3];
+  assert.equal(typeof policyRequest.id, 'number'); assert.notEqual(policyRequest.id, requests[4].id);
+  assert.deepEqual(policyRequest.params, {});
+  rpc.close();
+  // Closing the only connection bounds the observation: no retry, fallback,
+  // settings/config mutation, thread creation or hidden observer connection.
+  assert.deepEqual(paths, ['/']); assert.equal(sockets.size, 1);
+  assert.deepEqual(requests.map(request => request.method),
+    ['initialize', 'initialized', 'thread/read', 'configRequirements/read', 'thread/read']);
 });
