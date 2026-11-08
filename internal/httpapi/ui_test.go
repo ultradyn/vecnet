@@ -36,7 +36,10 @@ import (
 // of search modules and CSS plus shell wiring.
 // Raised to 640 KiB for the launcher host setup and launch forms on 2026-11-08;
 // measured at 651,308 bytes after native backend permission discovery.
-const uiMaxBytes = 640 << 10
+// Raised to 656 KiB on 2026-11-08 for persistent scoped launch recovery and
+// explicit daemon recovery guidance; measured at 664,284 bytes (the smallest
+// 16 KiB increment above the frozen UI). The total-size assertion remains.
+const uiMaxBytes = 656 << 10
 
 var (
 	scriptTag   = regexp.MustCompile(`(?is)<script\b([^>]*)>(.*?)</script>`)
