@@ -90,7 +90,8 @@ func (a *app) routeStats(o opts, selectClient func() (*client, error)) error {
 
 // Rebuild errors before the shared exit printer sees them. Neither wrapping a
 // raw cause nor filtering its characters can keep selectors and remote text
-// private. Preserve exit classes and only the standard interruption sentinels.
+// private. Preserve exit classes, relocation control, and standard interruption
+// sentinels.
 func routeStatsError(err error) error {
 	if err == nil {
 		return nil
@@ -104,6 +105,14 @@ func routeStatsError(err error) error {
 	case errors.As(err, &me):
 		return &mcpStartupError{message: "route stats client selection refused"}
 	case errors.As(err, &he):
+		if he.Status == http.StatusGone && he.Code == "hub_moved" {
+			// The shared dispatcher verifies the notice and follows at most once.
+			// Keep only that control payload; terminal output stays fixed.
+			return &hubError{
+				Status: he.Status, Code: "hub_moved", Message: "route stats request failed",
+				Details: map[string]any{"notice": he.Details["notice"]},
+			}
+		}
 		code, message := "http_error", "route stats request failed"
 		switch he.Code {
 		case "unauthenticated":
