@@ -122,6 +122,28 @@ func TestRouteStatsMCPParityAndErrors(t *testing.T) {
 				if resp.StatusCode!=200 { t.Fatal("HTTP parity fixture failed") }
 				result:=t2MCPResult(t,e,e.OperatorSecret,headers,map[string]any{"id":id},0,"")
 				t2MCPEqual(t,t2MCPJSON(t,httpRaw),result["structuredContent"])
+				if id==peer {
+					// Literal Grok oracle is independent of shared-reader parity.
+					grokID:=t2MCPID("route",62)
+					at:=venv.FormatTime(e.Now.Now())
+					rows:=t2MCPJSON(t,httpRaw)["routes"].([]any)
+					found:=0
+					for _,value:=range rows {
+						row:=value.(map[string]any)
+						if row["route_id"]!=grokID { continue }
+						found++
+						t2MCPEqual(t,row,map[string]any{
+							"route_id":grokID,"kind":"grokbot","host":"routine-stats.example",
+							"owner_kind":"peer","owner_id":peer,"attempt_scope":"route",
+							"requests":1,"ok":0,"fail":0,"refused":1,"distinct_ids":1,
+							"last_used_at":at,"last_success_at":nil,"last_error":"routine_not_started",
+							"last_error_at":at,"last_status":200,
+							"body_bytes":map[string]any{"avg":11,"p95":11,"p99":11,"samples":1},
+							"latency_ms":map[string]any{"avg":5,"p95":5,"p99":5,"samples":1},
+						})
+					}
+					if found!=1 { t.Fatal("expected exactly one Grok route") }
+				}
 				if era==mcpserver.ProtoCurrent {
 					if result["resultType"]!="complete" { t.Fatal("current resultType missing") }
 					if _,ok:=result["_meta"].(map[string]any);!ok { t.Fatal("current server metadata missing") }
@@ -151,6 +173,7 @@ func TestRouteStatsMCPParityAndErrors(t *testing.T) {
 				m:=t2MCPResult(t,e,e.OperatorSecret,headers,args,-32602,"")
 				t2MCPNoCanary(t,t2MCPEncode(t,m),"length-canary","unexpected-key-canary","unexpected-value-canary","invalid-meta-canary")
 			}
+			var invalidMessage string
 			for _,id:=range []string{
 				"selector-canary","self","default"," "+peer,peer+" ",peer+","+route,
 				"x",strings.Repeat("x",80),
@@ -159,9 +182,18 @@ func TestRouteStatsMCPParityAndErrors(t *testing.T) {
 				"sub_0000000000000000000000000a","sub_0000000000000000000000000",
 			} {
 				m:=t2MCPResult(t,e,e.OperatorSecret,headers,map[string]any{"id":id},0,"invalid_value")
-				t2MCPNoCanary(t,t2MCPEncode(t,m),id)
+				// A one-byte selector can occur in required envelope keys.
+				// Compare its fixed message/details instead of scanning that byte.
+				if id!="x" { t2MCPNoCanary(t,t2MCPEncode(t,m),id) }
 				errorBody:=m["structuredContent"].(map[string]any)["error"].(map[string]any)
 				if errorBody["details"].(map[string]any)["field"]!="id" { t.Fatal("hub syntax error lost fixed field") }
+				message,ok:=errorBody["message"].(string)
+				if !ok || message=="" { t.Fatal("invalid selector needs a fixed message") }
+				if invalidMessage=="" { invalidMessage=message }
+				if message!=invalidMessage { t.Fatal("invalid selector message varies with rejected input") }
+				t2MCPEqual(t,errorBody["details"],map[string]any{"field":"id"})
+				content:=m["content"].([]any)[0].(map[string]any)
+				if content["text"]!="invalid_value: "+invalidMessage { t.Fatal("invalid selector text differs from fixed error message") }
 			}
 			for _,prefix:=range []string{"peer","route","sub"} {
 				id:=t2MCPID(prefix,999)
@@ -230,9 +262,8 @@ func t2MCPCatalogBudget(t *testing.T,entries []map[string]any,operator bool) {
 		t.Logf("%s: %d compact bytes (unmeasured until this source is run)",name,n)
 		if name=="vecnet_route_stats" {
 			if !operator || n>1024 { t.Fatal("route stats violates operator-only 1024-byte ceiling") }
-			// Exclude only the explicitly additive entry from the old legacy
-			// allowance; its bytes still count against the full ceiling above.
-			legacyTotal-=n+1
+			// Keep this entry in BOTH existing catalog totals; only the
+			// already approved R2 normalization below may adjust legacyTotal.
 			continue
 		}
 		baseline,ok:=pins[name]

@@ -227,6 +227,24 @@ func TestRouteStatsPercentilesNullsAndLastFields(t *testing.T) {
 	t2Equal(t, t2One(t, t2Stats(t, e, route))["latency_ms"], t2Dist(0.333, 1, 1, 3))
 
 	t2Exec(t, e, "DELETE FROM route_attempts WHERE route_id=?", route)
+	// A success expires while a later failure stays selected: last_success
+	// cannot be read from the uncapped or out-of-window history.
+	agedSuccess:=now.Add(-168*time.Hour)
+	retainedFailure:=now.Add(-time.Hour)
+	t2Attempt(t,e,route,"aging-ok",agedSuccess,"ok",200,nil,8,8)
+	t2Attempt(t,e,route,"aging-fail",retainedFailure,"fail",503,"http_5xx",9,9)
+	row=t2One(t,t2Stats(t,e,route))
+	t2Equal(t,row["requests"],2)
+	t2Equal(t,row["last_success_at"],envelope.FormatTime(agedSuccess))
+	e.Now.Advance(time.Millisecond)
+	now=e.Now.Now()
+	row=t2One(t,t2Stats(t,e,route))
+	for key,want:=range map[string]any{
+		"requests":1,"ok":0,"fail":1,"refused":0,"distinct_ids":1,
+		"last_success_at":nil,"last_used_at":envelope.FormatTime(retainedFailure),
+		"last_error_at":envelope.FormatTime(retainedFailure),"last_error":"http_5xx","last_status":503,
+	} { t2Equal(t,row[key],want) }
+	t2Exec(t,e,"DELETE FROM route_attempts WHERE route_id=?",route)
 	// Cutoff equality is included; an out-of-window failure cannot supply
 	// last_error. Future rows must be excluded BEFORE applying the cap.
 	cutoff := now.Add(-168*time.Hour)
@@ -356,13 +374,19 @@ func TestRouteStatsDistinctIDsAndRetainedDeliveryEvidence(t *testing.T) {
 	t2Delivery(t, e, "too-old", a, r, "accepted", 9, now.Add(-168*time.Hour-time.Millisecond))
 	t2Delivery(t, e, "future", a, r, "accepted", 9, now.Add(time.Millisecond))
 	// Stored in-window evidence outside the SELECTED cap is still evidence.
+	// This accepted delivery has exactly one observation, only on r, older
+	// than every cap-filling row. It cannot gain evidence via s1 or s2.
+	t2Delivery(t,e,"outside-all-selected",a,r,"accepted",0,now)
+	t2Attempt(t,e,r,"outside-all-selected",now.Add(-time.Millisecond),"ok",200,nil,9,9)
 	for i := 0; i < 1001; i++ { t2Attempt(t, e, r, "retry-only", now, "ok", 200, nil, 1, 1) }
 	t2Delivery(t, e, "retry-only", a, r, "accepted", 0, now)
-	wantA := map[string]any{"peer_ids": []string{a}, "total": 5, "with_push_evidence": 3, "accepted_without_push_evidence": 1}
+	wantA := map[string]any{"peer_ids": []string{a}, "total": 6, "with_push_evidence": 4, "accepted_without_push_evidence": 1}
 	t2Equal(t, t2Stats(t, e, a)["retained_deliveries"], wantA)
 	row := t2One(t, t2Stats(t, e, r))
 	t2Equal(t, row["requests"], 1000)
 	t2Equal(t, row["distinct_ids"], 1)
+	t2Equal(t,row["body_bytes"],t2Dist(1,1,1,1000))
+	if count(t,e,"SELECT count(*) FROM route_attempts WHERE delivery_id=?", "outside-all-selected")!=1 { t.Fatal("uncapped evidence fixture must have exactly one stored observation") }
 	for _, pair := range []struct{id string; requests, distinct int}{{s1, 2, 1}, {s2, 3, 2}} {
 		row := t2One(t, t2Stats(t, e, pair.id))
 		t2Equal(t, row["requests"], pair.requests)
@@ -372,11 +396,19 @@ func TestRouteStatsDistinctIDsAndRetainedDeliveryEvidence(t *testing.T) {
 	peers := []string{a, b}
 	sort.Strings(peers)
 	t2Equal(t, t2Stats(t, e, r)["retained_deliveries"], map[string]any{
-		"peer_ids": peers, "total": 6, "with_push_evidence": 3, "accepted_without_push_evidence": 2,
+		"peer_ids": peers, "total": 7, "with_push_evidence": 4, "accepted_without_push_evidence": 2,
 	})
+	// A peer-owned route includes both its owner and every current member;
+	// owner a is already a member, so it must occur only once.
+	t2Exec(t,e,"UPDATE routes SET owner_kind='peer',owner_id=? WHERE route_id=?",a,r)
+	t2Equal(t,t2Stats(t,e,r)["retained_deliveries"],map[string]any{
+		"peer_ids":peers,"total":7,"with_push_evidence":4,"accepted_without_push_evidence":2,
+	})
+	// Restore principal ownership for the existing empty-membership oracle.
+	t2Exec(t,e,"UPDATE routes SET owner_kind='principal',owner_id=? WHERE route_id=?",prn,r)
 	// No 1000-row cap applies to delivery context.
 	for i := 0; i < 1001; i++ { t2Delivery(t, e, fmt.Sprint("context-", i), b, r, "queued", 0, now) }
-	t2Equal(t, t2Stats(t, e, r)["retained_deliveries"].(map[string]any)["total"], 1007)
+	t2Equal(t, t2Stats(t, e, r)["retained_deliveries"].(map[string]any)["total"], 1008)
 	t2Exec(t, e, "UPDATE peers SET route_id=NULL WHERE route_id=?", r)
 	t2Equal(t, t2Stats(t, e, r)["retained_deliveries"], map[string]any{"peer_ids": []any{}, "total": 0, "with_push_evidence": 0, "accepted_without_push_evidence": 0})
 	// A peer-owned route includes its owner even if no current membership.
@@ -384,7 +416,7 @@ func TestRouteStatsDistinctIDsAndRetainedDeliveryEvidence(t *testing.T) {
 	t2Equal(t, t2Stats(t, e, r)["retained_deliveries"], wantA)
 	// Inclusive lower/upper delivery time bounds, independent of attempts.
 	t2Delivery(t, e, "cutoff-equality", a, r, "accepted", 0, now.Add(-168*time.Hour))
-	t2Equal(t, t2Stats(t, e, r)["retained_deliveries"].(map[string]any)["total"], 6)
+	t2Equal(t, t2Stats(t, e, r)["retained_deliveries"].(map[string]any)["total"], 7)
 	// In-window retained rows with only stale/future telemetry have NO
 	// in-window evidence. Updated_at is independent of observation completion.
 	t2Delivery(t,e,"stale-only",a,r,"accepted",0,now)
@@ -392,7 +424,7 @@ func TestRouteStatsDistinctIDsAndRetainedDeliveryEvidence(t *testing.T) {
 	t2Attempt(t,e,s1,"stale-only",now.Add(-168*time.Hour-time.Millisecond),"ok",200,nil,1,1)
 	t2Attempt(t,e,s1,"future-only",now.Add(time.Millisecond),"ok",200,nil,1,1)
 	t2Equal(t,t2Stats(t,e,r)["retained_deliveries"],map[string]any{
-		"peer_ids":[]string{a},"total":8,"with_push_evidence":3,"accepted_without_push_evidence":4,
+		"peer_ids":[]string{a},"total":9,"with_push_evidence":4,"accepted_without_push_evidence":4,
 	})
 }
 
