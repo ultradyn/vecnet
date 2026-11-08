@@ -142,6 +142,149 @@ func TestCodexAutoNextAction(t *testing.T) {
 	}
 }
 
+func autoIndependentSources(t *testing.T, limit string) (*bindFixture, *bindFixture) {
+	t.Helper()
+	first, second := autoFixture(t), autoFixture(t)
+	codexIndependentSources(t, first, second, limit)
+	for _, f := range []*bindFixture{first, second} {
+		// Keep ensure on a bounded fake-manager refusal path after registration;
+		// no delivery runner, real manager or app-server is needed for admission.
+		deliveryWrite(t, filepath.Join(f.env["PATH"], "systemctl"), "#!/bin/sh\nexit 1\n", 0700)
+	}
+	return first, second
+}
+
+func autoSourceAction(t *testing.T, f *bindFixture, thread, as string) {
+	t.Helper()
+	f.env["CODEX_THREAD_ID"] = thread
+	f.env["VECNET_CODEX_AUTO_DELIVERY"] = "0"
+	wantCode, wantOut, wantErr := codexSourceCLI(f, as, "peers")
+	delete(f.env, "VECNET_CODEX_AUTO_DELIVERY")
+	code, out, errs := codexSourceCLI(f, as, "peers")
+	if wantCode != 0 || code != wantCode || out != wantOut || errs != wantErr {
+		t.Fatalf("ordinary action changed: baseline=(%d,%q,%q), auto=(%d,%q,%q)", wantCode, wantOut, wantErr, code, out, errs)
+	}
+}
+
+func autoSourceProbed(t *testing.T, f *bindFixture) {
+	t.Helper()
+	autoDone(f)
+	if _, err := os.Stat(filepath.Join(f.env["HOME"], "probe-started")); err != nil {
+		t.Fatalf("source did not reach its loaded-thread probe: %v", err)
+	}
+}
+
+func TestCodexAutoIndependentSourceLabels(t *testing.T) {
+	for _, as := range []string{"", "same_label"} {
+		t.Run("as="+as, func(t *testing.T) {
+			first, second := autoIndependentSources(t, "2")
+			autoSourceAction(t, first, bindT1, as)
+			autoSourceProbed(t, first)
+			before := first.raw()
+			autoSourceAction(t, second, bindT2, as)
+			autoSourceProbed(t, second)
+			codexSourceBinding(t, first, bindT1, as)
+			codexSourceBinding(t, second, bindT2, as)
+			if !bytes.Equal(before, first.raw()) {
+				t.Fatal("second source rewrote the first source's binding")
+			}
+		})
+	}
+}
+
+func TestCodexAutoIndependentSourceGuards(t *testing.T) {
+	for _, tc := range []struct{ name, limit, thread string }{
+		{"thread_hub", "2", bindT1},
+		{"combined_cap", "1", bindT2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			first, second := autoIndependentSources(t, tc.limit)
+			autoSourceAction(t, first, bindT1, "")
+			autoSourceProbed(t, first)
+			before := first.raw()
+			// Distinct labels isolate these guards from the I1 label defect.
+			second.env["VECNET_PROFILE"] = "q"
+			second.env["CODEX_THREAD_ID"] = tc.thread
+			code, _, errs := autoRun(second, "", "--net", "q", "peers")
+			if code != 0 {
+				t.Fatalf("ordinary action: exit=%d stderr=%s", code, errs)
+			}
+			autoSourceProbed(t, second)
+			file, err := loadCodexBindings(second.path)
+			if err != nil || len(file.Bindings) != 0 || !bytes.Equal(before, first.raw()) {
+				t.Fatalf("refused %s admission changed rows: %+v err=%v", tc.name, file, err)
+			}
+			codexSourceBinding(t, first, bindT1, "")
+		})
+	}
+}
+
+func TestCodexAutoIndependentSourceConcurrentAdmission(t *testing.T) {
+	for _, limit := range []string{"1", "2"} {
+		t.Run("cap="+limit, func(t *testing.T) {
+			first, second := autoIndependentSources(t, limit)
+			sources := []*bindFixture{first, second}
+			for i, f := range sources {
+				deliveryWrite(t, filepath.Join(f.env["HOME"], "probe-hold"), "", 0600)
+				// Release held probes even if a setup assertion aborts the test.
+				f := f
+				t.Cleanup(func() {
+					_ = os.WriteFile(filepath.Join(f.env["HOME"], "probe-release"), nil, 0600)
+					autoDone(f)
+				})
+				autoSourceAction(t, f, []string{bindT1, bindT2}[i], "")
+			}
+			// Both public CLI children observed empty local state and reached
+			// the read-only warm-thread probe before either can commit a row.
+			for _, f := range sources {
+				deliveryWait(t, func() bool {
+					_, err := os.Stat(filepath.Join(f.env["HOME"], "probe-started"))
+					return err == nil
+				})
+			}
+			for _, f := range sources {
+				deliveryWrite(t, filepath.Join(f.env["HOME"], "probe-release"), "", 0600)
+			}
+			admitted := 0
+			for i, f := range sources {
+				autoSourceProbed(t, f)
+				file, err := loadCodexBindings(f.path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(file.Bindings) != 0 {
+					admitted++
+					codexSourceBinding(t, f, []string{bindT1, bindT2}[i], "")
+				}
+			}
+			want := 2
+			if limit == "1" {
+				want = 1
+			}
+			if admitted != want {
+				t.Fatalf("concurrent independent sources admitted %d, want %d at combined cap %s", admitted, want, limit)
+			}
+			var registry deliveryRegistry
+			registryPath := filepath.Join(first.env["XDG_DATA_HOME"], "vecnet", "codex-delivery", "registry.json")
+			if err := deliveryRead(registryPath, &registry); err != nil {
+				t.Fatal(err)
+			}
+			if registry.Version != 1 || len(registry.Sources) != 2 {
+				t.Fatalf("concurrent registration lost a source: %+v", registry)
+			}
+			for _, f := range sources {
+				found := false
+				for _, source := range registry.Sources {
+					found = found || source == (deliverySource{Config: f.env["VECNET_CONFIG"], Bindings: f.path})
+				}
+				if !found {
+					t.Fatalf("registry lost source %s", f.env["VECNET_CONFIG"])
+				}
+			}
+		})
+	}
+}
+
 func autoRegister(f *bindFixture, thread string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 750*time.Millisecond)
 	defer cancel()

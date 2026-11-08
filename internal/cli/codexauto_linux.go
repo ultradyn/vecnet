@@ -286,7 +286,7 @@ func (a *app) updateCodexAuto(config, path string, binding codexBinding, old *co
 	now := time.Now().UTC()
 
 	for _, b := range other {
-		if normalizeHub(b.Hub) == binding.Hub && (b.ThreadID == binding.ThreadID || (b.Profile == binding.Profile && b.As == binding.As)) {
+		if normalizeHub(b.Hub) == binding.Hub && b.ThreadID == binding.ThreadID {
 			return errCodexDelivery
 		}
 	}

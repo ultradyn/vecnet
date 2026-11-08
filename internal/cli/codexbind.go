@@ -311,9 +311,6 @@ func (a *app) cmdCodex(args []string, nowTime func() time.Time) error {
 			if b.ThreadID == thread && normalizeHub(b.Hub) == binding.Hub {
 				return usageErr("already bound: Codex thread in another registered source")
 			}
-			if b.Profile == binding.Profile && b.As == binding.As && normalizeHub(b.Hub) == binding.Hub {
-				return usageErr("already bound: profile in another registered source")
-			}
 		}
 		existing := -1
 		for i, b := range file.Bindings {
