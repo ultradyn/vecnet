@@ -1,5 +1,7 @@
 # Changelog
 
+- 2026-11-09: Keep unresolved Codex acceptance actors as failed obligations, require exact pinned native shell events and per-TUI capability probes, select explicit workspace permissions for derived state directories plus each actor's own empty workspace, and check trusted Linux managed-policy absence and fresh null requirements before launches and native commands, with exact current owned-idle reads before native commands.
+
 - 2026-11-09: Show send/reply destination names beside full peer IDs and compact CLI/MCP inbox ancestry by default, with explicit sender-chain opt-in; preserve canonical envelopes and delivery semantics.
 
 - 2026-11-09: Preserve live dashboard activity charts and operator activity stats alongside launcher recovery; documented in docs/OPERATOR.md.
