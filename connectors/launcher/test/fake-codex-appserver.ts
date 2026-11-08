@@ -27,6 +27,8 @@ export interface FakeCodex {
   attachOther(threadId: string): void;
   detachOther(threadId: string): void;
   failNext(method: string, err: { code: number; message: string } | 'drop'): void;
+  /** Drop only the requesting connection after successful turn/item acceptance. */
+  acceptThenDropNextTurn(): void;
   close(): Promise<void>;
   // Test controls described in the plan but omitted from its interface block.
   overrides: { threadId: string; params: unknown; conn: number }[];
@@ -69,7 +71,7 @@ export async function startFakeCodexAppServer(o: { dir: string; clock?: Clock; u
   // Keep provenance off the wire, including when a receipt is recorded later.
   const steeredItems = new WeakSet<Item>();
   let version = '0.166.0', connectionId = 0, serverId = 10000, turnId = 0, itemId = 0;
-  let holdNext = false, stopped = false;
+  let holdNext = false, dropAcceptedTurn = false, stopped = false;
   const requests: FakeCodex['requests'] = [], replies: unknown[] = [], paths: string[] = [], overrides: FakeCodex['overrides'] = [];
   function nextTurnId(): string {
     let id: string;
@@ -189,6 +191,8 @@ export async function startFakeCodexAppServer(o: { dir: string; clock?: Clock; u
         if (!item.clientId) throw new Error('withheld fake item requires clientUserMessageId');
         withheld.set(item.clientId, { thread: t, turn, item });
       } else receipt(t, turn, item);
+      // R17: acceptance/history/withholding already happened; response has not.
+      if (dropAcceptedTurn) { dropAcceptedTurn = false; p.socket.destroy(); return; }
       respond(method === 'turn/start' ? { turn } : { turnId: turn.id }); return;
     }
     error(-32601, 'method not found');
@@ -289,6 +293,7 @@ export async function startFakeCodexAppServer(o: { dir: string; clock?: Clock; u
       const t = get(threadId);
       for (let k = 0; k < n; k++) t.turns.push({ id: nextTurnId(), items: [], status: 'completed', error: null });
     },
+    acceptThenDropNextTurn() { dropAcceptedTurn = true; },
     withholdNextItem() { holdNext = true; },
     recordLater(clientId, atMs) {
       const entry = withheld.get(clientId); if (!entry) throw new Error(`no withheld item: ${clientId}`);

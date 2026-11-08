@@ -71,9 +71,9 @@ messaging:
        --mcp: the hooks name MCP server vecnet-P, and --write registers it (claude mcp add)
   hook rebind [--profile P]
        bind the profile's hook to this Claude Code session (run from its Bash tool)
-  codex bind --thread UUID [--codex-home DIR] [--ttl DUR] [--idle-dormant DUR] [--attended] [--renew]
+  codex bind --thread UUID [--codex-home DIR] [--ttl DUR] [--idle-dormant DUR] [--attended] [--renew|--takeover]
        opt in to app-server delivery; ttl defaults to 24h (1h–168h); unattended needs -a never or auto reviewer
-  codex unbind [--thread UUID] | codex bindings [--json]
+  codex unbind [--thread UUID] | codex bindings [--json] | codex status
   threads [--limit N]
   thread <id> [--after MESSAGE_ID] [--limit N]
   thread budget <id> <n>                          set budget_remaining
@@ -182,6 +182,7 @@ func RunContext(ctx context.Context, args []string, stdin io.Reader, stdout, std
 		fmt.Fprint(stderr, usageText)
 		return exitUsage
 	}
+	a.autoCodexAction(rest[0], rest[1:])
 	return a.exit(a.dispatch(rest[0], rest[1:]))
 }
 
@@ -200,7 +201,8 @@ type app struct {
 	// retainedRequestID is the agent-add id for this process, generated or
 	// explicit, so a verified hub follow redispatches the same submission.
 	retainedRequestID string
-	prefsCmd          bool // preferences exit codes and JSON errors
+	prefsCmd          bool    // preferences exit codes and JSON errors
+	codexNotice       *string // worker returns a notice through completion, never a helper pipe
 }
 
 // exit prints err and maps it to an exit code. Preferences commands use the

@@ -6,6 +6,7 @@ import { redactingLog } from '../redact.ts';
 import { createEngine, vecnetConfigPath } from './engine.ts';
 import type { Binding, Engine } from './engine.ts';
 import { openCodexRpc } from './rpc.ts';
+import type { DeliverySource } from './delivery.ts';
 
 /** Default number of explicit bindings kept loaded per canonical Codex home. */
 export const CODEX_MAX_KEPT_LOADED = 8;
@@ -86,18 +87,21 @@ function parseBinding(x: unknown): Binding | undefined {
 }
 
 /** Everything that makes an engine a different engine. expiresAt alone is a renewal, applied in place. */
-function fingerprint(b: Binding): string {
-  return JSON.stringify([b.origin, b.profile, b.as ?? '', b.hub, b.caller, b.codexHome, b.threadId, b.createdAt, b.idleDormantMs ?? null, b.attended]);
+type SourcedBinding = Binding & { source?: DeliverySource };
+const bindingKey = (b: Binding) => JSON.stringify([b.threadId, b.hub]);
+
+function fingerprint(b: SourcedBinding): string {
+  return JSON.stringify([b.origin, b.profile, b.as ?? '', b.hub, b.caller, b.codexHome, b.threadId, b.createdAt, b.idleDormantMs ?? null, b.attended, b.source?.config, b.source?.bindings]);
 }
 
-type Entry = { binding: Binding; engine: Engine; print: string; over: boolean; expired: boolean; expiry?: { cancel(): void } };
+type Entry = { binding: SourcedBinding; engine: Engine; print: string; over: boolean; expired: boolean; expiry?: { cancel(): void } };
 
 /**
  * Run one delivery engine per opt-in binding. Explicit bindings come from the
  * `vecnet codex bind` file, re-read every 10 s; launcher bindings are added in
  * memory by the launcher. The connector never starts Codex and never loads a thread.
  */
-export function startCodexConnector(o: { kv: KeyValue; clock: Clock; log: Log; env: NodeJS.ProcessEnv }): CodexConnector {
+export function startCodexConnector(o: { kv: KeyValue; clock: Clock; log: Log; env: NodeJS.ProcessEnv; hub?: string; sources?: () => DeliverySource[] }): CodexConnector {
   const log = redactingLog(o.log), { clock, kv } = o;
   const euid = process.geteuid?.() ?? -1;
   const env = Object.fromEntries(Object.entries(o.env).filter((e): e is [string, string] => typeof e[1] === 'string'));
@@ -105,7 +109,7 @@ export function startCodexConnector(o: { kv: KeyValue; clock: Clock; log: Log; e
   const deps = { clock, log: o.log, kv, vecnetBin: o.env.VECNET_BIN || 'vecnet', env, openRpc: openCodexRpc, euid };
   const entries = new Map<string, Entry>();
   let stopped = false, stopping: Promise<void> | undefined, chain: Promise<void> = Promise.resolve(), timer: { cancel(): void } | undefined;
-  let lastFile = '', lastSkipped = -1;
+  const fileStates = new Map<string, string>(), skippedStates = new Map<string, number>();
   const unresolvedHomes = new Set<string>(), overLogged = new Set<string>(), conflictLogged = new Set<string>();
 
   /** All changes run one at a time, so one thread never has two engines. */
@@ -113,15 +117,23 @@ export function startCodexConnector(o: { kv: KeyValue; clock: Clock; log: Log; e
     chain = chain.then(() => stopped ? undefined : fn()).catch(() => { log.warn('codex_connector_failed'); });
     return chain;
   }
-  function canonical(home: string): string {
+  function canonical(home: string): string | undefined {
     try { return realpathSync(home); }
     catch {
       if (!unresolvedHomes.has(home)) { unresolvedHomes.add(home); log.warn('codex_home_unresolved', { codexHome: home }); }
-      return home;
+      return undefined;
     }
   }
-  function launch(b: Binding, over: boolean): Entry {
-    const engine = createEngine(b, deps);
+  function launch(b: SourcedBinding, over: boolean): Entry {
+    // New owners fence recovery by hub. Legacy callers keep their existing KV
+    // key format until that delivery path is retired; preserve recovery rows.
+    const prefix = 'hub:' + JSON.stringify(b.hub) + ':';
+    const scopedKv: KeyValue = o.hub !== undefined || o.sources !== undefined ? {
+      get: key => kv.get(prefix + key), set: (key, value) => kv.set(prefix + key, value),
+      delete: key => kv.delete(prefix + key), keys: (p = '') => kv.keys(prefix + p).map(key => key.slice(prefix.length)),
+    } : kv;
+    const sourceEnv = b.source ? { ...env, VECNET_CONFIG: b.source.config, VECNET_CODEX_BINDINGS: b.source.bindings } : env;
+    const engine = createEngine(b, { ...deps, kv: scopedKv, env: sourceEnv });
     // Before start: an engine over the limit never subscribes, not even once.
     engine.setOverLimit(over);
     engine.start();
@@ -135,43 +147,54 @@ export function startCodexConnector(o: { kv: KeyValue; clock: Clock; log: Log; e
     await e.engine.stop();
   }
 
-  function fileChanged(s: FileState) {
+  function fileChanged(path: string, s: FileState) {
     const sig = s.state + ':' + ('reason' in s ? s.reason ?? '' : '');
-    if (sig === lastFile) return;
-    lastFile = sig;
+    if (sig === fileStates.get(path)) return;
+    fileStates.set(path, sig);
     if (s.state === 'absent' || s.state === 'unlocatable') log.info('codex_connector_disabled', { reason: s.state === 'absent' ? 'no_bindings_file' : 'no_config_path' });
     else if (s.state === 'refused') log.warn('codex_bindings_refused', { reason: s.reason });
     else if (s.state === 'invalid') log.warn('codex_bindings_invalid', { reason: s.reason });
   }
 
   async function reload() {
-    const s = readBindings(path, euid);
-    fileChanged(s);
-    const listed = s.state === 'ok' ? s.bindings : [];
-    if (s.state === 'ok' && s.skipped !== lastSkipped) {
-      lastSkipped = s.skipped;
-      if (s.skipped) log.warn('codex_bindings_skipped', { count: s.skipped });
+    const listed: SourcedBinding[] = [];
+    const sources = o.sources ? o.sources() : [{ config: vecnetConfigPath(o.env) ?? '', bindings: path ?? '' }];
+    // Stable ordering also makes ties independent of registry enumeration order.
+    const unique = new Map(sources.map(source => [JSON.stringify([source.config, source.bindings]), source]));
+    for (const [id, source] of [...unique].sort(([a], [b]) => a.localeCompare(b))) {
+      const s = readBindings(source.bindings || undefined, euid);
+      fileChanged(id, s);
+      if (s.state !== 'ok') continue;
+      if (s.skipped !== skippedStates.get(id)) {
+        skippedStates.set(id, s.skipped);
+        if (s.skipped) log.warn('codex_bindings_skipped', { count: s.skipped });
+      }
+      for (const b of s.bindings) listed.push({ ...b, ...(o.sources ? { source } : {}) });
     }
-    // Oldest first. A thread or profile@as appears in at most one binding;
-    // `codex bind` enforces that, and a hand-edited file keeps the oldest.
-    const sorted = [...listed].sort((a, b) => a.createdAt - b.createdAt || (a.threadId < b.threadId ? -1 : a.threadId > b.threadId ? 1 : 0));
-    const wanted = new Map<string, Binding>(), identities = new Set<string>();
+    const sorted = listed.sort((a, b) => a.createdAt - b.createdAt ||
+      bindingKey(a).localeCompare(bindingKey(b)) || (a.source?.config ?? '').localeCompare(b.source?.config ?? ''));
+    const wanted = new Map<string, SourcedBinding>(), identities = new Set<string>();
     for (const b of sorted) {
-      const identity = b.profile + '@' + (b.as ?? '');
-      const held = entries.get(b.threadId);
-      if (wanted.has(b.threadId) || identities.has(identity) || held?.binding.origin === 'launcher') {
-        if (!conflictLogged.has(b.threadId)) { conflictLogged.add(b.threadId); log.warn('codex_binding_duplicate', { threadId: b.threadId }); }
+      const key = bindingKey(b), identity = JSON.stringify([b.source?.config ?? '', b.hub, b.profile, b.as ?? '']);
+      const held = entries.get(key);
+      if (wanted.has(key) || identities.has(identity) || held?.binding.origin === 'launcher') {
+        if (!conflictLogged.has(key)) { conflictLogged.add(key); log.warn('codex_binding_duplicate', { threadId: b.threadId }); }
         continue;
       }
-      wanted.set(b.threadId, b); identities.add(identity);
+      wanted.set(key, b); identities.add(identity);
     }
-    // The limit counts unexpired explicit bindings per canonical Codex home.
+    // Count across every registered source and hub BEFORE selecting this hub.
+    // Unresolved homes might alias any existing home, so count them conservatively.
     const now = clock.now(), counts = new Map<string, number>(), over = new Map<string, boolean>();
-    for (const b of wanted.values()) {
-      if (now >= b.expiresAt) { over.set(b.threadId, false); continue; }
-      const home = canonical(b.codexHome), n = (counts.get(home) ?? 0) + 1;
-      counts.set(home, n); over.set(b.threadId, n > limit);
+    let unresolved = 0, total = 0;
+    for (const [key, b] of wanted) {
+      if (now >= b.expiresAt) { over.set(key, false); continue; }
+      const home = canonical(b.codexHome);
+      const n = home === undefined ? ++unresolved + total : (counts.get(home) ?? 0) + 1 + unresolved;
+      if (home !== undefined) { counts.set(home, (counts.get(home) ?? 0) + 1); total++; }
+      over.set(key, n > limit);
     }
+    for (const [key, b] of wanted) if (o.hub !== undefined && b.hub !== o.hub) wanted.delete(key);
     // Stop engines whose binding is gone or changed identity, before any replacement starts.
     const retiring: Promise<void>[] = [];
     for (const [threadId, e] of entries) {
@@ -183,7 +206,7 @@ export function startCodexConnector(o: { kv: KeyValue; clock: Clock; log: Log; e
     if (stopped) return;
     for (const [threadId, b] of wanted) {
       const isOver = over.get(threadId)!;
-      if (isOver && !overLogged.has(threadId)) { overLogged.add(threadId); log.warn('codex_binding_over_limit', { threadId, limit }); }
+      if (isOver && !overLogged.has(threadId)) { overLogged.add(threadId); log.warn('codex_binding_over_limit', { threadId: b.threadId, limit }); }
       if (!isOver) overLogged.delete(threadId);
       const e = entries.get(threadId);
       if (!e) { entries.set(threadId, launch(b, isOver)); continue; }
@@ -221,21 +244,24 @@ export function startCodexConnector(o: { kv: KeyValue; clock: Clock; log: Log; e
           log.warn('codex_launcher_binding_invalid', { threadId: b.threadId }); return;
         }
         if (clock.now() >= b.expiresAt) return;
-        const held = entries.get(b.threadId);
+        if (o.hub !== undefined && b.hub !== o.hub) return;
+        const key = bindingKey(b), held = entries.get(key);
         if (held?.binding.origin === 'explicit') { log.warn('codex_binding_duplicate', { threadId: b.threadId }); return; }
-        if (held) await retire(b.threadId);
+        if (held) await retire(key);
         if (stopped) return;
         // The launcher owns this thread's policy: it counts as attended, and
         // outside the explicit limit, because the launcher bounds its own jobs.
         const e = launch(b, false);
         e.expiry = clock.timer(Math.max(0, b.expiresAt - clock.now()), () => {
-          void serial(async () => { if (entries.get(b.threadId) === e) await retire(b.threadId); });
+          void serial(async () => { if (entries.get(key) === e) await retire(key); });
         });
-        entries.set(b.threadId, e);
+        entries.set(key, e);
       });
     },
     removeLauncherBinding(threadId) {
-      void serial(async () => { if (entries.get(threadId)?.binding.origin === 'launcher') await retire(threadId); });
+      void serial(async () => {
+        for (const [key, e] of entries) if (e.binding.threadId === threadId && e.binding.origin === 'launcher') await retire(key);
+      });
     },
   };
 }

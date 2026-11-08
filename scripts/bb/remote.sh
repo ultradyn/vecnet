@@ -5,6 +5,9 @@
 set -uo pipefail
 
 BASE="$HOME/bb-src/vecnet4"
+# The box may symlink bb-src onto another volume. Derive every private path
+# from that physical base so canonical temp/data comparisons agree.
+BASE=$(cd "$BASE" && pwd -P) || exit 64
 lane=$1
 RL="$BASE/$lane"
 TC="$BASE/.toolchain"

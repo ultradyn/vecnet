@@ -669,6 +669,8 @@ export function openInvite(ctx, onCreated, opener, prefill) {
       h('span', null, lineNodes(line)),
       i === codeStep ? slot : null));
     const urlBtn = copier('Copy URL', d.mcpURL, 'pri');
+    const prompt = h('pre', { id: 'inv-dot-prompt', class: 'inv-prompt mono', tabindex: '0', 'aria-label': 'Dot setup prompt',
+      text: 'Use vecnet_guide to finish setting up incoming messages in this chat. Create one task with trigger vecnet, event vecnet.message and no settings. Under Advanced, set Runs in: Same chat for every run. Use the guide\'s recommended task instruction.' });
     lede.textContent = 'Connect ' + (d.name || 'the dot') + ' from ChatGPT.';
     body.replaceChildren(...[
       h('p', { class: 'inv-warn', role: 'note', text: 'Shown once — the link code binds a ChatGPT login to this dot. Give it only to whoever sets up the plugin.' }),
@@ -676,8 +678,10 @@ export function openInvite(ctx, onCreated, opener, prefill) {
       h('div', { class: 'inv-url-row' }, h('input', { id: 'inv-mcp', class: 'inv-url mono', readonly: true, value: d.mcpURL, spellcheck: 'false', onfocus: e => e.target.select() }), urlBtn),
       h('ol', { class: 'inv-steps' }, steps),
       panel.note ? h('p', { class: 'inv-note', text: panel.note }) : null,
+      h('p', { class: 'inv-note', text: 'After connecting the plugin, paste this prompt into the Dot:' }),
+      prompt,
       h('p', { class: 'inv-meta mono', text: 'ChatGPT dot · peer ' + d.peerId }),
-      h('div', { class: 'inv-acts' }, h('button', { type: 'button', class: 'btn', text: 'Done', onclick: () => close() })),
+      h('div', { class: 'inv-acts' }, h('button', { type: 'button', class: 'btn', text: 'Done', onclick: () => close() }), copier('Copy prompt', () => prompt.textContent, 'pri')),
     ].filter(Boolean));
     urlBtn.focus();
   }

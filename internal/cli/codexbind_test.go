@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -145,10 +147,94 @@ func TestCodexBindWritesFile(t *testing.T) {
 	if bindValue[string](t, b, "profile") != "p" || bindValue[string](t, b, "as") != "" || bindValue[string](t, b, "thread_id") != bindT1 || bindValue[string](t, b, "codex_home") != f.home {
 		t.Fatalf("entry=%s", f.raw())
 	}
-	if !strings.Contains(out.String(), "bound p to Codex thread "+bindT1+"; the launcher connector picks it up within 10 s") {
+	if !strings.Contains(out.String(), "bound p to Codex thread "+bindT1+"; run `vecnet --net 'p' codex status` to inspect delivery state") {
 		t.Fatalf("output=%q", out.String())
 	}
 }
+
+func TestCodexBindStatusGuidance(t *testing.T) {
+	for _, tc := range []struct {
+		name, profile, envProfile, as string
+	}{
+		{"no environment profile", "p", "", ""},
+		{"different environment hub", "p", "q", ""},
+		{"selected as", "p", "q", "peer_x"},
+		{"shell arguments", "p 'quoted' $HOME; `false`", "q", "peer 'quoted' $HOME; `false`"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, other := newBindFixture(t), newBindFixture(t)
+			f.env["VECNET_PROFILE"] = tc.envProfile
+			if err := saveConfig(f.env["VECNET_CONFIG"], Config{Profiles: map[string]Profile{
+				tc.profile: {Hub: f.hub, Secret: "vn_peer_test"},
+				"q":        {Hub: other.hub, Secret: "vn_peer_test"},
+			}}); err != nil {
+				t.Fatal(err)
+			}
+			// The default identity stays disabled when a selected --as row binds.
+			f.ok("--net", tc.profile, "unbind")
+			out := f.bind(tc.profile, bindT1, "--as", tc.as)
+			_, suggestion, found := strings.Cut(out, "; run `")
+			suggestion, _, ended := strings.Cut(suggestion, "` to inspect delivery state")
+			if !found || !ended {
+				t.Fatalf("missing status suggestion: %q", out)
+			}
+			// Let a real shell decode the emitted command into argv. The vecnet
+			// function only prints arguments; no installed binary or host env is used.
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, "/bin/sh", "-c", "vecnet() { printf '%s\\000' \"$@\"; }; "+suggestion)
+			cmd.Dir = f.env["HOME"]
+			cmd.Env = []string{"HOME=" + f.env["HOME"], "PATH=/nonexistent"}
+			raw, err := cmd.Output()
+			if err != nil {
+				t.Fatalf("status suggestion %q: %v", suggestion, err)
+			}
+			argv := strings.Split(strings.TrimSuffix(string(raw), "\x00"), "\x00")
+			selected := &app{getenv: func(k string) string { return f.env[k] }}
+			rest, _, err := selected.parseGlobal(argv)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if selected.net != tc.profile || selected.as != tc.as || strings.Join(rest, " ") != "codex status" {
+				t.Errorf("suggestion lost bound selectors: argv=%q net=%q as=%q", argv, selected.net, selected.as)
+			}
+			checkStatus := func(disabled bool) {
+				t.Helper()
+				var status, errs bytes.Buffer
+				code := Run(argv, strings.NewReader(""), &status, &errs, func(k string) string { return f.env[k] })
+				if code != 0 || !strings.Contains(status.String(), "Codex auto-delivery for "+f.hub+": ") || strings.Contains(status.String(), other.hub) || strings.Contains(status.String(), "disabled by explicit opt-out") != disabled {
+					t.Errorf("following %q: exit=%d stdout=%q stderr=%q, want hub=%s disabled=%t", suggestion, code, status.String(), errs.String(), f.hub, disabled)
+				}
+			}
+			checkStatus(false)
+			if tc.as != "" {
+				if out := f.ok("--net", tc.profile, "status"); runtime.GOOS == "linux" && !strings.Contains(out, "disabled by explicit opt-out") {
+					t.Fatalf("default identity lost independent opt-out: %q", out)
+				}
+				f.ok("--net", tc.profile, "--as", tc.as, "unbind")
+				checkStatus(runtime.GOOS == "linux")
+			}
+		})
+	}
+}
+
+func TestCodexBindStatusGuidanceUnquotable(t *testing.T) {
+	for _, tc := range []struct{ profile, as string }{{"p\nextra", ""}, {"p", "peer\nextra"}} {
+		t.Run(fmt.Sprintf("%q@%q", tc.profile, tc.as), func(t *testing.T) {
+			f := newBindFixture(t)
+			if err := saveConfig(f.env["VECNET_CONFIG"], Config{Profiles: map[string]Profile{
+				tc.profile: {Hub: f.hub, Secret: "vn_peer_test"},
+			}}); err != nil {
+				t.Fatal(err)
+			}
+			out := f.bind(tc.profile, bindT1, "--as", tc.as)
+			if !strings.Contains(out, "select the bound --net profile and --as identity explicitly before running `vecnet codex status`") {
+				t.Fatalf("fallback must require explicit bound selectors: %q", out)
+			}
+		})
+	}
+}
+
 func TestCodexBindUnique(t *testing.T) {
 	f := newBindFixture(t)
 	f.bind("p", bindT1)
@@ -606,5 +692,45 @@ func TestCodexBindCallerKinds(t *testing.T) {
 				t.Fatalf("principal identity: exit %d: %s", code, errs)
 			}
 		})
+	}
+}
+
+func TestCodexBindTakeover(t *testing.T) {
+	f := newBindFixture(t)
+	f.bind("p", bindT1)
+	f.rejected("already bound:", "bind", "--thread", bindT2)
+	f.bind("p", bindT2, "--takeover")
+	if len(f.entries()) != 1 || bindValue[string](t, f.entries()[0], "thread_id") != bindT2 {
+		t.Fatal("takeover did not replace binding")
+	}
+	f.rejected("already bound:", "--net", "q", "bind", "--thread", bindT2, "--takeover")
+}
+
+func TestCodexAutoOptOut(t *testing.T) {
+	f := newBindFixture(t)
+	f.ok("unbind")
+	var file struct {
+		Disabled []struct{ Profile, As string }
+	}
+	if err := json.Unmarshal(f.raw(), &file); err != nil {
+		t.Fatal(err)
+	}
+	if len(file.Disabled) != 1 || file.Disabled[0].Profile != "p" {
+		t.Fatalf("unbind without a row must disable p: %s", f.raw())
+	}
+	f.bind("p", bindT1)
+	file.Disabled = nil
+	if err := json.Unmarshal(f.raw(), &file); err != nil {
+		t.Fatal(err)
+	}
+	if len(file.Disabled) != 0 {
+		t.Fatalf("explicit bind must clear opt-out: %s", f.raw())
+	}
+	f.ok("unbind", "--thread", bindT1)
+	if err := json.Unmarshal(f.raw(), &file); err != nil {
+		t.Fatal(err)
+	}
+	if len(file.Disabled) != 1 || file.Disabled[0].Profile != "p" {
+		t.Fatalf("thread unbind must disable its profile: %s", f.raw())
 	}
 }

@@ -14,6 +14,18 @@ import { createFakeBackend } from './fake-backend.ts';
 import { harness, launch, launched, message, settle, until, LAUNCHER, REQUESTER, T0 } from './daemon-harness.ts';
 import { directoryEntry, fakeClock, memoryLog } from '../../hub-client/testing/fixtures.ts';
 
+test('legacy explicit connector is retired before delivery activation', async t => {
+  let bindingReads = 0;
+  const h = await harness(t, { env: {
+    get VECNET_CODEX_BINDINGS() { bindingReads++; return '/unused-fixture-bindings.json'; },
+  } });
+  await settle();
+  assert.equal(bindingReads, 0, 'ordinary launcher must not consume explicit Codex bindings');
+  const { jobId } = await launched(h);
+  assert.equal(h.launches(), 1, 'ordinary launcher still executes jobs');
+  assert.ok(h.statuses(jobId).some(s => s.state === 'running'));
+});
+
 test('a crash after the accept tx and before startLaunch → restart launches exactly once', async t => {
   const h = await harness(t);
   // After startup, hang the launch path's capability read: the accept tx has

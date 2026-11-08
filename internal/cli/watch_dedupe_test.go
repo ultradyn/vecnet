@@ -50,6 +50,10 @@ func runDedupeWatchPages(t *testing.T, pages [][]envelope.Event) (string, chan<-
 	opened := make(chan *http.Request, 1)
 	polls := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/peers/me" {
+			fmt.Fprint(w, `{"kind":"peer","peer_id":"peer_test"}`)
+			return
+		}
 		if r.URL.Path == "/v1/peers" {
 			fmt.Fprint(w, `{"peers":[]}`)
 			return
@@ -224,7 +228,7 @@ func TestWatchReplayCancellation(t *testing.T) {
 
 func TestWatchLiveSkipsShown(t *testing.T) {
 	path, frames, out, stop := runDedupeWatch(t, nil)
-	if err := (stateFile{path: path}).update(context.Background(), func(s *hookState) error { s.claim("dly_B"); return nil }); err != nil {
+	if err := (stateFile{path: path}).update(context.Background(), func(s *hookState) error { s.recordDisplay("dly_B"); return nil }); err != nil {
 		t.Fatal(err)
 	}
 	b, c := hookDelivery("dly_B"), hookDelivery("dly_C")
@@ -253,5 +257,47 @@ func TestMonitorLineStripsBidi(t *testing.T) {
 	}
 	if got := peerName(hostile); got != "a_b_c_d_e" {
 		t.Errorf("peerName=%q", got)
+	}
+}
+
+// Task5a3 primary compatibility tests, prepared before product changes.
+func TestWatchDeferredPreservesExplicitReplay(t *testing.T) {
+	h := newDeferredWatch(t, "replay", false, 0)
+	if err := (stateFile{h.f.path}).update(t.Context(), func(s *hookState) error {
+		s.recordDisplay("dly_1")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	go func() { h.done <- h.w.run() }()
+	t.Cleanup(func() { h.stop(t) })
+	h.complete(t, "opaque-y-A")
+	if strings.Count(h.out.String(), "retained A") != 1 {
+		t.Fatal("deliberate initial replay no longer prints a previously displayed delivery")
+	}
+}
+
+func TestWatchDeferredLeavesOtherModesUnchanged(t *testing.T) {
+	for _, mode := range []string{"json-monitor", "plain-watch", "daemon-trigger"} {
+		t.Run(mode, func(t *testing.T) {
+			h := newDeferredWatch(t, "sse", true, 1)
+			switch mode {
+			case "json-monitor":
+				h.w.a.json = true
+			case "plain-watch":
+				h.w.forMonitor = false
+			case "daemon-trigger":
+				h.w.forMonitor, h.w.a.json, h.w.deliveriesOnly = false, true, true
+			}
+			go func() { h.done <- h.w.run() }()
+			t.Cleanup(func() { h.stop(t) })
+			h.complete(t, "opaque-a-suffix-2")
+			if strings.Count(h.out.String(), "retained A") != 1 || strings.Count(h.out.String(), "suffix 2") != 1 {
+				t.Fatal("monitor deferral changed a non-monitor/JSON transport")
+			}
+			if s := readHookState(t, h.f.path); len(s.Claims) != 1 || len(s.Displayed) != 0 {
+				t.Fatal("non-monitor transport changed shared delivery ownership/proof")
+			}
+		})
 	}
 }

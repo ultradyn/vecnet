@@ -1254,3 +1254,81 @@ func TestHookCodexEventsSilent(t *testing.T) {
 		}
 	}
 }
+
+// Hook admission is authoritative for both claiming and automatic registration.
+func TestHookCodexAutoSessionAdmission(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("automatic registration is Linux-only")
+	}
+	for _, scenario := range []string{"unbound tool", "foreign tool", "ambiguous prompt", "eligible prompt", "eligible tool", "eligible rate-limited tool"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := newBindFixture(t)
+			root := f.env["HOME"]
+			f.env["CODEX_THREAD_ID"] = bindT1
+			f.env["XDG_RUNTIME_DIR"] = filepath.Join(root, "runtime")
+			f.env["XDG_DATA_HOME"] = filepath.Join(root, "data")
+			f.env["VECNET_BIN"] = filepath.Join(root, "auto-helper")
+			if err := os.Mkdir(f.env["XDG_RUNTIME_DIR"], 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(f.env["VECNET_BIN"], []byte("#!/bin/sh\n: > \"$HOME/auto-started\"\n"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			getenv := func(k string) string { return f.env[k] }
+			path, err := statePath(getenv, "p", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			event := "PostToolUse"
+			if strings.Contains(scenario, "prompt") {
+				event = "UserPromptSubmit"
+			}
+			if scenario == "foreign tool" || strings.Contains(scenario, "eligible") && event == "PostToolUse" {
+				if err := (stateFile{path}).update(context.Background(), func(s *hookState) error {
+					session := "session-A"
+					if scenario == "foreign tool" {
+						session = "session-B"
+					}
+					s.bindSession(hookOwner{session: session}, bindDeclared, time.Now())
+					if scenario == "eligible rate-limited tool" {
+						s.LastPostToolPoll = time.Now()
+					}
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if scenario == "ambiguous prompt" {
+				delete(f.env, "VECNET_PROFILE")
+				if _, err := registerSession(context.Background(), sessionsPath(path), "session-A", "q", time.Now()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var out, errs bytes.Buffer
+			input := strings.NewReader(fmt.Sprintf(`{"session_id":"session-A","hook_event_name":%q}`, event))
+			code := RunContext(context.Background(), []string{"--net", "p", "hook"}, input, &out, &errs, getenv)
+			if code != 0 {
+				t.Fatalf("hook exit=%d stderr=%s", code, &errs)
+			}
+			eligible := strings.HasPrefix(scenario, "eligible")
+			deadline := time.Now().Add(200 * time.Millisecond)
+			if eligible {
+				deadline = time.Now().Add(2 * time.Second)
+			}
+			started := false
+			for time.Now().Before(deadline) {
+				if _, err := os.Stat(filepath.Join(root, "auto-started")); err == nil {
+					started = true
+					break
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+			if started != eligible {
+				t.Fatalf("registration started=%v, eligible=%v", started, eligible)
+			}
+			if _, err := os.Stat(f.path); !os.IsNotExist(err) {
+				t.Fatal("marker helper must not write bindings")
+			}
+		})
+	}
+}

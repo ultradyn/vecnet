@@ -19,6 +19,7 @@
   "files": [
     "bin/",
     "native/",
+    "connectors/",
     "BUILD_INFO.json",
     "THIRD_PARTY_NOTICES.txt"
   ],

@@ -47,6 +47,11 @@ BB_HOST=x-p35 BB_JOBS=4 just bb CGO_ENABLED=1 CC=/usr/bin/gcc build2 go test -ra
 
 The remote command gets a clean environment (`env -i`): lane-private `HOME`, `TMPDIR` and `TMUX_TMPDIR`, shared `GOCACHE`/`GOMODCACHE`, `GOTOOLCHAIN=local`, and `VECNET_BB=1`. Nothing reads or writes the box user's dotfiles.
 
+The wrapper resolves the existing `~/bb-src/vecnet4` base physically before
+deriving these paths. A symlink onto `/work/bb-src` therefore gives commands
+physical HOME, temporary, XDG and cache paths without a TMPDIR override. Sync
+locations and lane ownership remain the same. Regression: `just bb bash scripts/bb/remote.test.sh`.
+
 ## Box choice and fallback
 
 `BB_HOST=<host>` pins a box. Otherwise the first reachable host in `BB_HOSTS` wins; the default is `x-boss x-tall x-p35 x-tuf x-19`. When the first box fails its probe (an mDNS miss costs about 7 s), the fallback is cached for 10 minutes in `$XDG_RUNTIME_DIR/vecnet-bb/host`, so a burst of checks does not pay the probe each time. `BB_HOSTS` is also the host list for `just bb-clean`.

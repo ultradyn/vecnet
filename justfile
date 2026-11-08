@@ -96,6 +96,11 @@ codex-smoke: build
 codex-appserver-smoke: build
     build2 node --disable-warning=ExperimentalWarning scripts/codex-appserver-smoke.mjs
 
+# Controller-only acceptance; no implicit build, activation requires opt-in/private manifest.
+[positional-arguments]
+codex-auto-delivery-smoke +ARGS:
+    node --disable-warning=ExperimentalWarning scripts/codex-auto-delivery-smoke.mjs "$@"
+
 # Screen scripts run serially; helpers are not executable checks.
 ui-shots:
     #!/usr/bin/env bash
@@ -168,22 +173,60 @@ ln-test *ARGS:
 ln-check: ln-typecheck ln-test
 
 # launcher: end to end against a real hub and fake backend
-ln-e2e: build
+ln-e2e-native-b:
+    CGO_ENABLED=0 build2 go build -p 2 -ldflags "-X github.com/XertroV/vecnet/internal/buildinfo.Version=codex-auto-delivery-e2e-b" -o bin/vecnet-5c-b ./cmd/vecnet
+
+ln-e2e: build ln-e2e-native-b
     build2 node --disable-warning=ExperimentalWarning --test --test-concurrency=1 connectors/launcher/test/e2e/*.test.ts
 
 ln-run *ARGS:
     node --disable-warning=ExperimentalWarning connectors/launcher/src/main.ts {{ARGS}}
 
-# coordinator/Max only; never enables the unit
+# coordinator/Max only; refreshes active delivery owners, never enables launcher
 ln-install:
     #!/usr/bin/env bash
     set -euo pipefail
+    umask 077
     dest="$HOME/.local/share/vecnet-launcher/$(git rev-parse --short HEAD)"
+    install -d -m0700 "$HOME/.local/share/vecnet-launcher"
     mkdir -p "$dest"
-    rsync -a --delete --exclude node_modules connectors/hub-client connectors/launcher "$dest/"
+    rsync -a --delete --exclude node_modules --exclude '.env*' --exclude '*.pem' --exclude '*.key' --exclude auth.json --exclude 'credentials*' connectors/hub-client connectors/launcher "$dest/"
     ln -sfn "$dest" "$HOME/.local/share/vecnet-launcher/current"
     install -Dm0644 connectors/launcher/systemd/vecnet-launcher.service "$HOME/.config/systemd/user/vecnet-launcher.service"
-    echo "installed $dest; run: systemctl --user daemon-reload"
+    node --input-type=module - "$dest" <<'JS'
+    import {execFileSync} from 'node:child_process';
+    import {chmodSync, readFileSync, realpathSync, renameSync, writeFileSync} from 'node:fs';
+    import {dirname, isAbsolute, join} from 'node:path';
+    const home = process.env.HOME, destination = process.argv[2];
+    const requested = process.env.VECNET_BIN || execFileSync('/bin/sh', ['-c', 'command -v vecnet'], {encoding:'utf8'}).trim();
+    if (!isAbsolute(requested)) throw new Error('VECNET_BIN must name an absolute installed executable');
+    const binary = realpathSync(requested), node = realpathSync(process.execPath);
+    const entry = realpathSync(join(destination, 'launcher/src/codex/delivery-main.ts'));
+    const path = dirname(node) + ':/usr/local/bin:/usr/bin:/bin';
+    for (const value of [home,binary,node,entry,path]) if (!/^\/[A-Za-z0-9_./+:-]+$/.test(value)) throw new Error('installed paths require unambiguous systemd tokens');
+    const metadata = {version:1,binary,entry,node,path};
+    const template = readFileSync('connectors/launcher/systemd/vecnet-delivery@.service','utf8').replaceAll('@BINARY@',binary).replaceAll('@ENTRY@',entry).replaceAll('@PATH@',path);
+    const unit = join(home,'.config/systemd/user/vecnet-delivery@.service');
+    writeFileSync(unit+'.tmp',template,{mode:0o600}); renameSync(unit+'.tmp',unit);
+    const manifest = join(home,'.local/share/vecnet-launcher/delivery.json');
+    writeFileSync(manifest+'.tmp',JSON.stringify(metadata)+'\n',{mode:0o600}); chmodSync(manifest+'.tmp',0o600); renameSync(manifest+'.tmp',manifest);
+    JS
+    systemctl --user daemon-reload
+    node --input-type=module - <<'JS'
+    import {execFileSync} from 'node:child_process';
+    import {existsSync, readFileSync, readdirSync} from 'node:fs';
+    import {join} from 'node:path';
+    const home = process.env.HOME;
+    const installed = JSON.parse(readFileSync(join(home,'.local/share/vecnet-launcher/delivery.json'),'utf8'));
+    const root = join(process.env.XDG_DATA_HOME || join(home,'.local/share'),'vecnet/codex-delivery');
+    const env = {...process.env,VECNET_BIN:installed.binary,VECNET_CODEX_DELIVERY_ENTRY:installed.entry,VECNET_CODEX_AUTO_DELIVERY:'0'};
+    if (existsSync(root)) for (const entry of readdirSync(root,{withFileTypes:true})) {
+      if (!entry.isDirectory() || !/^[0-9a-f]{64}$/.test(entry.name) || !existsSync(join(root,entry.name,'descriptor.json'))) continue;
+      const run = command => execFileSync(installed.binary,['codex',command,'--hub-id',entry.name],{env,encoding:'utf8',timeout:10000});
+      if (JSON.parse(run('delivery-status')).running === true) run('delivery-refresh');
+    }
+    JS
+    echo "installed $dest; delivery template reloaded and active owners refreshed"
 
 # Check a deployed hub's MCP and OAuth contracts (bearer in VECNET_MCP_TOKEN).
 mcp-conformance ORIGIN:

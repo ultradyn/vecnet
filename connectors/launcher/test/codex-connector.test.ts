@@ -11,7 +11,6 @@ import { CODEX_RELOAD_MS, startCodexConnector } from '../src/codex/connector.ts'
 import { startFakeCodexAppServer } from './fake-codex-appserver.ts';
 import { fakeClock, memoryLog } from '../../hub-client/testing/fixtures.ts';
 import type { KeyValue } from '../src/backend.ts';
-import { harness } from './daemon-harness.ts';
 
 // Every path below is private to the test: no real config, cache, Codex home,
 // daemon socket or vecnet binary is ever named, and a `codex` on PATH is a trap.
@@ -41,7 +40,7 @@ async function setup(t: TestContext, o: { threads?: { id: string; status?: unkno
   writeFileSync(trace, '');
   // A shell stand-in for the Go CLI: watch idles until killed; hooks claim nothing.
   writeFileSync(join(bin, 'vecnet'), `#!/bin/sh
-printf '%s\\n' "$*" >> '${trace}'
+printf '%s\\n' "config=$VECNET_CONFIG $*" >> '${trace}'
 case " $* " in
   *" watch "*) exec sleep 3600 ;;
   *" --release "*) echo '{"version":1,"released":true}' ;;
@@ -84,8 +83,8 @@ esac
     writeFileSync(bindingsPath, JSON.stringify({ version: 1, bindings: list }, null, 2), { mode });
     chmodSync(bindingsPath, mode);
   };
-  const start = () => {
-    const c = startCodexConnector({ kv, clock, log, env }), stop = c.stop;
+  const start = (options: { hub?: string; sources?: () => { config: string; bindings: string }[] } = {}) => {
+    const c = startCodexConnector({ kv, clock, log, env, ...options }), stop = c.stop;
     let stopped = false;
     c.stop = () => { if (!stopped) { stopped = true; live--; } return stop(); };
     live++; connectors.push(c); return c;
@@ -118,6 +117,77 @@ esac
   });
   return { dir, fake, home, env, kv, clock, log, bindingsPath, binding, writeBindings, start, resumed, unsubscribed, subscribed, logged, reload, ready, trace };
 }
+
+test('hub filtering follows shared home admission', async t => {
+  const [a, b, c] = [uuid(100), uuid(101), uuid(102)];
+  const s = await setup(t, { threads: [a, b, c].map(id => ({ id })), maxBindings: '2' });
+  const second = join(s.dir, 'bindings', 'second.json'), alias = join(s.dir, 'alias');
+  symlinkSync(s.home, alias);
+  s.writeBindings([s.binding(a, 1, { hub: 'https://other.invalid' })]);
+  writeFileSync(second, JSON.stringify({ version: 1, bindings: [s.binding(c, 3), s.binding(b, 2, { codex_home: alias })] }), { mode: 0o600 });
+  const sources = [{ config: s.env.VECNET_CONFIG!, bindings: s.bindingsPath }, { config: join(s.dir, 'second.toml'), bindings: second }];
+  s.start({ hub: 'https://hub.invalid', sources: () => sources });
+  await s.ready();
+  await eventually(() => s.subscribed(b), 'second source admitted after shared-home counting');
+  await s.reload();
+  assert.equal(s.resumed(a), false, 'another hub is filtered');
+  assert.equal(s.resumed(c), false, 'another hub still consumes the oldest home slot');
+  // Registry changes take effect on the next reload; duplicate sources count once.
+  sources.splice(0, 1, sources[1]);
+  await s.reload();
+  await eventually(() => s.subscribed(c), 'removing the other hub frees a home slot');
+});
+
+test("two hubs never claim each other's bindings", async t => {
+  const [a, b] = [uuid(110), uuid(111)];
+  const s = await setup(t, { threads: [a, b].map(id => ({ id })) });
+  s.writeBindings([s.binding(a, 1), s.binding(b, 2, { hub: 'https://other.invalid' }),
+    s.binding(a, 3, { hub: 'https://other.invalid', profile: 'p1', caller: 'peer_other' })]);
+  const first = s.start({ hub: 'https://hub.invalid' });
+  await eventually(() => s.subscribed(a), 'first hub subscribed');
+  await s.reload();
+  assert.equal(s.resumed(b), false, 'first hub must not subscribe or claim another hub');
+  await eventually(() => readFileSync(s.trace, 'utf8').includes('--expect-hub https://hub.invalid --expect-caller peer_1'), 'first hub claims only its pinned peer');
+  assert.equal(readFileSync(s.trace, 'utf8').includes('--net p2'), false, 'another hub gets no Go child');
+  const second = s.start({ hub: 'https://other.invalid' });
+  await eventually(() => s.fake.subscribers(a).length === 2 && s.subscribed(b), 'one engine for each thread/hub pair');
+  await first.stop();
+  assert.equal(s.fake.subscribers(a).length, 1, 'stopping one hub preserves the other subscription');
+  assert.ok(s.subscribed(b));
+  await s.reload();
+  await eventually(() => {
+    const trace = readFileSync(s.trace, 'utf8');
+    return trace.includes('--expect-hub https://other.invalid --expect-caller peer_other') &&
+      trace.includes('--expect-hub https://other.invalid --expect-caller peer_2');
+  }, 'other hub claims with its own caller pins');
+  const claims = readFileSync(s.trace, 'utf8').split('\n').filter(line => line.includes('--expect-hub'));
+  const pins = claims.map(line => /--net (\S+).*--expect-hub (\S+) --expect-caller (\S+)/.exec(line)!.slice(1).join(' '));
+  assert.deepEqual([...new Set(pins)].sort(), [
+    'p1 https://hub.invalid peer_1', 'p1 https://other.invalid peer_other', 'p2 https://other.invalid peer_2',
+  ]);
+  assert.equal(s.fake.requests.filter(r => r.method === 'initialize').length, 3);
+  await second.stop();
+});
+
+test('two distinct peers on one hub get one engine each', async t => {
+  const [a, b] = [uuid(120), uuid(121)];
+  const s = await setup(t, { threads: [a, b].map(id => ({ id })) });
+  const second = join(s.dir, 'bindings', 'second.json'), config = join(s.dir, 'never-read.toml');
+  execFileSync('mkfifo', ['-m', '600', config]);
+  // Identical profile labels from different configs name distinct peers.
+  s.writeBindings([s.binding(a, 1)]);
+  writeFileSync(second, JSON.stringify({ version: 1, bindings: [s.binding(b, 2, { profile: 'p1' })] }), { mode: 0o600 });
+  s.start({ hub: 'https://hub.invalid', sources: () => [
+    { config: s.env.VECNET_CONFIG!, bindings: s.bindingsPath }, { config, bindings: second },
+  ] });
+  await eventually(() => [a, b].every(s.subscribed), 'both source peers subscribed');
+  await s.reload();
+  assert.equal(s.fake.requests.filter(r => r.method === 'initialize').length, 2);
+  await eventually(() => {
+    const trace = readFileSync(s.trace, 'utf8');
+    return trace.includes(`config=${config} --net p1`) && trace.includes(`config=${s.env.VECNET_CONFIG} --net p1`);
+  }, 'each Go child receives its source config path without Node reading it');
+});
 
 test('connector starts one engine per binding and stops removed ones', async t => {
   const [a, b, c] = [uuid(1), uuid(2), uuid(3)];
@@ -221,28 +291,6 @@ test('a FIFO at the bindings path is refused without blocking', async t => {
   await s.reload();
   assert.deepEqual(s.logged('codex_bindings_refused').map(e => e.meta), [{ reason: 'not_file' }]);
   assert.deepEqual(s.fake.requests, [], 'a FIFO starts nothing');
-});
-
-test('daemon start and stop drive the connector', async t => {
-  const id = uuid(30);
-  const s = await setup(t, { threads: [{ id }] });
-  // No bindings file: the daemon starts, the connector logs once and starts no engine.
-  const quiet = await harness(t, { env: s.env });
-  await eventually(() => quiet.log.entries.some(e => e.msg === 'codex_connector_disabled'), 'connector disabled at daemon start');
-  assert.deepEqual(s.fake.requests, []);
-  await quiet.daemon.stop();
-  // With a binding, the daemon's connector subscribes; stop() unsubscribes it.
-  s.writeBindings([s.binding(id, 1, { expires_at: new Date(Date.parse('2026-11-05T00:00:00.000Z') + 24 * hour).toISOString() })]);
-  const h = await harness(t, { env: s.env });
-  await eventually(() => s.subscribed(id), 'daemon connector subscribed the bound thread');
-  await h.daemon.stop();
-  assert.equal(s.subscribed(id), false);
-  assert.ok(s.unsubscribed(id), 'daemon stop sends thread/unsubscribe');
-  const n = s.fake.requests.length;
-  await delay(100);
-  assert.equal(s.fake.requests.length, n, 'nothing is sent after the daemon stops');
-  // The engine's ledger rows live in the daemon's own ledger, in the codex namespace.
-  assert.deepEqual(h.inspect(l => l.kv('codex').keys('inflight:')), []);
 });
 
 test('launcher bindings live until expiresAt and are never written to the file', async t => {
