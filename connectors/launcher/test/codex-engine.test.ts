@@ -1338,16 +1338,42 @@ for (const pendingClaim of [true, false]) test(pendingClaim
   fake.setThread({ id: 'thread', status: { type: 'idle' } }); fake.attachOther('thread');
   const lease = join(dir, 'lease'), bin = join(dir, 'vecnet');
   const hookReady = join(dir, 'hook-ready'), watchReady = join(dir, 'watch-ready'), release = join(dir, 'release');
+  const ownedRetired = (ready: string) => {
+    // Captured by the owned child before publishing readiness. A PID alone
+    // authorizes no signals; birth identity is used only to observe retirement.
+    if (!existsSync(ready + '.identity')) return false;
+    const original = readFileSync(ready + '.identity', 'utf8');
+    const pid = Number(original.slice(0, original.indexOf(' ')));
+    const fields = (value: string) => value.slice(value.lastIndexOf(')') + 2).trim().split(/\s+/);
+    const birth = fields(original)[19];
+    if (!Number.isSafeInteger(pid) || pid <= 0 || !birth) return false;
+    try {
+      const current = fields(readFileSync(`/proc/${pid}/stat`, 'utf8'));
+      if (!current[19]) return false;
+      return current[19] !== birth || current[0] === 'Z' || current[0] === 'X';
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true;
+      throw error;
+    }
+  };
+  const children = pendingClaim ? [hookReady, watchReady] : [watchReady];
   writeFileSync(lease, '', { mode: 0o600 });
   writeFileSync(bin, `#!/bin/sh
 case " $* " in
   *" watch "*)
+    /bin/cat /proc/$$/stat > '${watchReady}.identity'
     echo $$ > '${watchReady}'
     ${pendingClaim ? `echo '{"type":"delivery","data":{"delivery_id":"d1","message":{"priority":"wake"}}}'` : ':'}
-    while [ ! -f '${release}' ]; do /bin/sleep 0.01; done ;;
+    remaining=1000
+    while [ ! -f '${release}' ] && [ "$remaining" -gt 0 ]; do remaining=$((remaining - 1)); /bin/sleep 0.01; done
+    # Delayed non-lease child: observing the claim's lease release proves nothing about this exit.
+    /bin/sleep 0.4
+    if [ -f '${release}' ]; then echo control-retained > '${watchReady}.ended'; fi ;;
   *" hook "*)
+    /bin/cat /proc/$$/stat > '${hookReady}.identity'
     echo $$ > '${hookReady}'
-    while [ ! -f '${release}' ]; do /bin/sleep 0.01; done
+    remaining=1000
+    while [ ! -f '${release}' ] && [ "$remaining" -gt 0 ]; do remaining=$((remaining - 1)); /bin/sleep 0.01; done
     echo '{"version":1,"deliveries":[]}' ;;
 esac
 `, { mode: 0o700 });
@@ -1369,8 +1395,12 @@ createEngine({profile:'p',hub:'https://hub.invalid',caller:'peer_p',codexHome:${
     writeFileSync(release, '');
     if (runner.exitCode === null && runner.signalCode === null) runner.kill('SIGKILL');
     await exited; await fake.close();
-    // Wait for both bounded fixture children to consume the release marker.
-    await delay(100); rmSync(dir, { recursive: true, force: true });
+    // Lease release does not prove watch retirement. Keep the control root
+    // until every owned child retires; a bounded wait failure retains it.
+    await eventually(() => children.every(ownedRetired), `F-RM1 bounded retirement wait timed out; retained ${dir}`);
+    assert.ok(children.every(ownedRetired), `F-RM1 every owned fixture child must retire before root removal; retained ${dir}`);
+    assert.equal(readFileSync(watchReady + '.ended', 'utf8'), 'control-retained\n', 'release control must remain available to the delayed watch');
+    rmSync(dir, { recursive: true, force: true });
   });
   const locked = () => { try { execFileSync('flock', ['-n', lease, 'true'], { stdio: 'ignore' }); return false; } catch { return true; } };
   await eventually(() => existsSync(pendingClaim ? hookReady : watchReady), 'engine child started');
