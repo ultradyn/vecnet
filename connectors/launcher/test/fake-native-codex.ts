@@ -48,12 +48,13 @@ export async function startFakeNativeCodex(dir: string) {
   const peers = new Set<Peer>();
   const threads = new Map<string, NativeThread>();
   const requests: { method: string; params: Params; connection: number }[] = [];
-  const serverRequests: { id: number; method: string; params: Params }[] = [];
+  const serverRequests: { id: number | string; method: string; params: Params }[] = [];
   const replies: { id: number | string; result?: Params; error?: unknown }[] = [];
   const paths: string[] = [];
   const failures = new Map<string, Failure[]>();
   const unavailable = new Map<string, { code: number; message: string }>();
   const responses = new Map<string, ((result: Params) => Params)[]>();
+  const responseHolds = new Map<string, { reached(): void; ready: Promise<void> }[]>();
   const noRolloutResumeFailures: string[] = [], acceptedResumes: string[] = [];
   let startPolicy: ((policy: Params) => void) | undefined;
   let rejectZeroInputResumes = false;
@@ -80,7 +81,12 @@ export async function startFakeNativeCodex(dir: string) {
     const fail = failures.get(method)?.shift() ?? unavailable.get(method);
     const respond = (result: Params) => {
       if (fail === 'accept-drop') peer.socket.destroy();
-      else peer.send({ id: message.id, result: responses.get(method)?.shift()?.(structuredClone(result)) ?? result });
+      else {
+        const reply = { id: message.id, result: responses.get(method)?.shift()?.(structuredClone(result)) ?? structuredClone(result) };
+        const hold = responseHolds.get(method)?.shift();
+        if (hold) { hold.reached(); void hold.ready.then(() => peer.send(reply)); }
+        else peer.send(reply);
+      }
     };
     const error = (code: number, text: string) => peer.send({ id: message.id, error: { code, message: text } });
     if (fail === 'drop') { peer.socket.destroy(); return; }
@@ -222,9 +228,16 @@ export async function startFakeNativeCodex(dir: string) {
     nextResponse(method: string, transform: (result: Params) => Params) {
       responses.set(method, [...(responses.get(method) ?? []), transform]);
     },
+    holdNextResponse(method: string) {
+      let reached!: () => void, release!: () => void;
+      const received = new Promise<void>(resolve => { reached = resolve; });
+      const ready = new Promise<void>(resolve => { release = resolve; });
+      responseHolds.set(method, [...(responseHolds.get(method) ?? []), { reached, ready }]);
+      return { received, release };
+    },
     setPageSize(value: number) { pageSize = value; },
     disconnect() { for (const p of peers) p.socket.destroy(); },
-    serverRequest(method: string, params: Params, reusedId?: number) {
+    serverRequest(method: string, params: Params, reusedId?: number | string) {
       const id = reusedId ?? ++requestId;
       serverRequests.push({ id, method, params: structuredClone(params) });
       // Broadcast even foreign-thread requests, to exercise ownership filtering.

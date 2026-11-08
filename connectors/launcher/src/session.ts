@@ -177,9 +177,11 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
     }
     sendGeneration++;
     ledger.tx(() => {
-      // A steer may race a backend turn boundary. Prefer its actual send
-      // result, also on an idempotent retry after a crash, over the snapshot.
-      if (mode === 'steer' && result.turnId) batch.targetTurnId = result.turnId;
+      // A steer may race a backend turn boundary. Native starts also need
+      // their actual identity: an earlier initial completion can be unread
+      // after adoption before the first lane attachment. Persist the result
+      // before the serialized completion handler can commit, including retries.
+      if (result.turnId && (mode === 'steer' || mode === 'start' && job().backend === 'codex-app-server')) batch.targetTurnId = result.turnId;
       store.set(`batch:${batchId}`, JSON.stringify(batch));
       ledger.markInputs(ids, { state: 'sent' });
       for (const [id, part] of Object.entries(batch.parts)) store.set(`part:${id}`, String(part));

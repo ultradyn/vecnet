@@ -19,6 +19,8 @@ import type { LaunchDeps } from '../../src/launch.ts';
 import { reattachAll, retryPending } from '../../src/reattach.ts';
 import { sweep } from '../../src/sweep.ts';
 import { createParentBridge } from '../../src/parent-bridge.ts';
+import { createLane } from '../../src/session.ts';
+import { parseQuestion } from '../../src/contract/metadata.ts';
 import { routeApproval } from '../../src/policy.ts';
 import type { Directory } from '../../src/directory.ts';
 import type { LaunchPermission } from '../../src/backend.ts';
@@ -702,6 +704,94 @@ async function launchHarness(t: TestContext, f: Awaited<ReturnType<typeof fixtur
   };
 }
 
+for (const timing of ['history-during-send', 'history-after-send'] as const) {
+  test(`W-I1 native pre-record crash correlates initial and follow-up completions: ${timing}`, timeout, async t => {
+    const f = await fixture(t), h = await launchHarness(t, f);
+    const jobId = h.job().jobId, launchDeliveryId = 'initial-launch-delivery';
+    // Dispatch's initial input row exists before startLaunch; no lane has yet
+    // attached or established awaitingTurn at the process-death seam.
+    h.deps.ledger.addInput({ deliveryId: launchDeliveryId, jobId, messageId: h.job().launchMessageId,
+      sender: h.job().requester, text: '', priority: 'wake', createdAt: f.clock.now() });
+    h.deps.ledger.markInputs([launchDeliveryId], { state: 'sent', mode: 'start', turnSeq: 0 });
+    const lane = async () => createLane(h.job(), {
+      ledger: h.deps.ledger, outbox: createOutbox({ ledger: h.deps.ledger, clock: f.clock, log: f.log,
+        hub: { async send() { throw new Error('no real hub'); }, async receipt() {} } }),
+      jobs: h.deps.jobs, clock: f.clock, log: f.log, self: 'peer_launcher', caps: await h.backend().capabilities(),
+      dir: { name: id => id, isOperator: () => false, operatorPeerId: () => undefined },
+      hub: { async fetchBlob() { throw new Error('no blobs'); }, async putBlob() { throw new Error('no blobs'); } },
+      async deliver() { return { pushed: false }; }, onActivity() {}, onEnded() {},
+    });
+    h.deps.beforeRecordRef = () => { throw new Error('pre-record process death'); };
+    const initialSend = f.daemon.holdNextResponse('turn/start');
+    const launched = startLaunch(h.job(), h.deps);
+    const crash = assert.rejects(launched, /pre-record process death/);
+    await initialSend.received;
+    assert.equal(h.job().state, 'launching');
+    const beforeAttach = await lane();
+    const followup = threadDelivery(h.job().threadId, h.job().requester, 'Follow up after launch', 'wake_idle');
+    assert.equal(await beforeAttach.handleMessage(followup), 'buffered');
+    await beforeAttach.stop();
+    initialSend.release(); await crash;
+    assert.equal(h.job().sessionRef, null);
+    assert.equal(h.deps.ledger.kv(`lane:${jobId}`).get('awaitingTurn'), undefined);
+    assert.equal(h.deps.ledger.kv('launch-failure').get(jobId), undefined);
+    const thread = [...f.daemon.threads.values()][0], initialTurnId = thread.turns[0].id;
+    f.daemon.disconnect();
+    f.daemon.complete(initialTurnId, [final('Initial completion while launcher is down')]);
+    await h.restart();
+    const [adopted] = await reattachAll(h.deps);
+    assert.equal(adopted.outcome, 'adopted');
+    if (!('handle' in adopted)) throw new Error('expected exact native adoption');
+    assert.equal(adopted.handle.ref.id, thread.id);
+    assert.equal(adopted.handle.state().kind, 'idle');
+    assert.equal(h.job().sessionKind, 'idle');
+    const history = f.daemon.holdNextResponse('thread/turns/list');
+    const send = f.daemon.holdNextResponse('turn/start');
+    let sawInitial!: () => void, polled!: () => void;
+    const initialRead = new Promise<void>(resolve => { sawInitial = resolve; });
+    let sleeping = new Promise<void>(resolve => { polled = resolve; });
+    const turns = adopted.handle.turns.bind(adopted.handle);
+    adopted.handle.turns = async function* (after, signal) {
+      for await (const item of turns(after, signal)) {
+        if (item.event.type === 'turn_finished' && item.event.turnId === initialTurnId) sawInitial();
+        yield item;
+      }
+    };
+    f.ctx.sleep = (ms, signal) => { const pending = f.clock.sleep(ms, signal); polled(); return pending; };
+    const resumed = await lane();
+    try {
+      resumed.attach(adopted.handle);
+      await history.received; await send.received;
+      if (timing === 'history-during-send') { history.release(); await initialRead; send.release(); }
+      else { send.release(); await resumed.activity(); history.release(); }
+      await sleeping;
+      const rows = () => h.deps.ledger.pendingOutbox(1000, f.clock.now());
+      const replies = () => rows().filter(row => row.kind === 'send').map(row => row.payload as SendRequest)
+        .filter(row => row.metadata?.['launch.turn_id']);
+      const receipts = () => rows().filter(row => row.kind === 'receipt').map(row => row.payload as { delivery_id: string; state: string });
+      assert.equal(replies().length, 1);
+      assert.deepEqual(replies()[0].metadata!['launch.consumed'], [h.job().launchMessageId], 'initial reply must consume only launch');
+      assert.equal(receipts().some(row => row.delivery_id === followup.delivery_id), false, 'follow-up has no premature processed receipt');
+      assert.equal(h.deps.ledger.inputs(jobId, ['sent']).some(row => row.deliveryId === followup.delivery_id), true);
+      assert.equal(f.methods('thread/start').length, 1);
+      assert.equal(f.methods('turn/start').filter(row => row.params.clientUserMessageId === h.job().tag + '-initial').length, 1);
+      assert.equal(thread.turns.length, 2);
+      const followupTurn = thread.turns[1];
+      sleeping = new Promise<void>(resolve => { polled = resolve; });
+      f.daemon.complete(followupTurn.id, [final('Follow-up completed')]);
+      f.clock.advance(100); await sleeping;
+      assert.deepEqual(replies().map(row => [row.metadata!['launch.turn_id'], row.metadata!['launch.consumed']]),
+        [[initialTurnId, [h.job().launchMessageId]], [followupTurn.id, [followup.message.message_id]]]);
+      assert.deepEqual(receipts(), [{ delivery_id: launchDeliveryId, state: 'processed' }, { delivery_id: followup.delivery_id, state: 'processed' }]);
+      assert.deepEqual(h.deps.ledger.inputs(jobId, ['consumed']).map(row => row.deliveryId), [launchDeliveryId, followup.delivery_id]);
+      assert.equal(f.methods('turn/steer').length, 0);
+      assert.equal(f.methods('thread/archive').length, 0);
+      assert.equal(f.methods('turn/interrupt').length, 0);
+      assert.equal(f.daemon.threads.size, 1);
+    } finally { history.release(); send.release(); await resumed.stop(); }
+  });
+}
+
 test('an accepted but invisible native start stays unresolved through launch, restart, retries and retention sweep', timeout, async t => {
   const f = await fixture(t), h = await launchHarness(t, f);
   f.daemon.failNext('thread/start', 'accept-drop'); f.daemon.setListVisible(false);
@@ -1093,7 +1183,15 @@ async function nativeRoutingHarness(t: TestContext, config: { presets?: Array<'o
   h.deps.ledger.updateJob(spec.jobId, { sessionRef: handle.ref, workspace: String(handle.ref.extra!.workspace), state: 'running' });
   const prompts = () => h.deps.ledger.pendingOutbox(100, f.clock.now()).filter(row => row.kind === 'send')
     .map(row => row.payload as SendRequest).filter(row => row.kind === 'approval_request');
-  return { f, h, handle, canonical, prompts, bridge, hooks,
+  return { f, h, handle, canonical, prompts, bridge, hooks, hooksJobId: spec.jobId,
+    deliverQuestion(prompt: SendRequest) {
+      const row = h.deps.ledger.pendingOutbox(1000, f.clock.now()).find(row => row.key === prompt.idempotency_key)!;
+      const result = { message_id: 'question-card-' + parseQuestion(prompt.metadata)!.question_id,
+        thread_id: prompt.thread_id!, deliveries: [], spilled: false };
+      h.deps.ledger.markOutbox(row.id, 'sent', result);
+      for (const callback of callbacks) callback(row, result);
+      return result;
+    },
     async drain() { await handle.activity(); await handle.activity(); },
     async decide(prompt: SendRequest, actor = 'peer_operator') {
       const row = h.deps.ledger.pendingOutbox(100, f.clock.now()).find(row => row.key === prompt.idempotency_key)!;
@@ -1109,6 +1207,97 @@ async function nativeRoutingHarness(t: TestContext, config: { presets?: Array<'o
     finish() { bridge.abandonAll(spec.jobId, 'session_ended'); },
   };
 }
+
+const questionTimeout = 'no answer from requester; use your best judgement and say what you assumed';
+for (const change of ['question-id', 'text', 'header', 'option-label', 'option-description', 'allow-other', 'turn', 'item', 'reconnect'] as const) {
+  test(`W-I2 native reused question RPC id opens its own real bridge question: ${change}`, timeout, async t => {
+    const s = await nativeRoutingHarness(t, {});
+    const prompts = () => s.h.deps.ledger.pendingOutbox(1000, s.f.clock.now())
+      .filter(row => row.kind === 'send').map(row => row.payload as SendRequest).filter(row => parseQuestion(row.metadata));
+    async function answer(prompt: SendRequest, text: string) {
+      const result = s.deliverQuestion(prompt);
+      const reply = threadDelivery(prompt.thread_id!, s.h.job().requester, text, 'wake');
+      reply.message.in_reply_to = result.message_id;
+      assert.equal(await s.bridge.handleThreadReply(reply), 'consumed');
+      await s.drain();
+    }
+    try {
+      const method = 'item/tool/requestUserInput', id = 7;
+      const a = { threadId: s.handle.ref.id, turnId: s.f.daemon.threads.get(s.handle.ref.id)!.turns[0].id, itemId: 'question-item-A',
+        questions: [{ id: 'choice-A', header: 'Choice', question: 'Choose a color', isOther: false, isSecret: false,
+          options: [{ label: 'Blue', description: 'Use blue' }, { label: 'Green', description: 'Use green' }] }] };
+      s.f.daemon.serverRequest(method, a, id); await s.drain();
+      const first = prompts()[0]; assert.ok(first);
+      assert.deepEqual(parseQuestion(first.metadata)!.questions.map(q => q.id), ['choice-A']);
+      assert.equal(s.f.daemon.replies.length, 0);
+      // Identical live replay is still one bridge row and one pending wire call.
+      s.f.daemon.serverRequest(method, structuredClone(a), id); await s.drain();
+      assert.equal(prompts().length, 1); assert.equal(s.bridge.open(s.hooksJobId).questions, 1);
+      await answer(first, 'Blue');
+      assert.deepEqual(s.f.daemon.replies, [{ id, result: { answers: { 'choice-A': { answers: ['Blue'] } } } }]);
+      // Completed identical replay dedupes to the existing closed bridge row;
+      // it must not publish a second question or replay the old human answer.
+      s.f.daemon.serverRequest(method, structuredClone(a), id); await s.drain();
+      assert.equal(prompts().length, 0);
+      assert.deepEqual(s.f.daemon.replies.at(-1), { id, result: { answers: { 'choice-A': { answers: [questionTimeout] } } } });
+      const b = structuredClone(a);
+      if (change === 'question-id' || change === 'reconnect') b.questions[0].id = 'choice-B';
+      if (change === 'text') b.questions[0].question = 'Choose the next color';
+      if (change === 'header') b.questions[0].header = 'Next choice';
+      if (change === 'option-label') b.questions[0].options[0].label = 'Violet';
+      if (change === 'option-description') b.questions[0].options[0].description = 'Use blue for the next stage';
+      if (change === 'allow-other') b.questions[0].isOther = true;
+      if (change === 'turn') b.turnId += '-B';
+      if (change === 'item') b.itemId = 'question-item-B';
+      if (change === 'reconnect') {
+        s.f.daemon.failNext('thread/read', 'drop'); await assert.rejects(s.handle.activity());
+        await s.drain();
+        assert.equal(s.f.methods('thread/resume').length, 1);
+      }
+      const before = s.f.daemon.replies.length;
+      s.f.daemon.serverRequest(method, b, id); await s.drain();
+      const next = prompts()[0];
+      assert.ok(next, 'distinct logical question sharing a wire id must publish a new requester card');
+      const q = parseQuestion(next.metadata)!;
+      assert.notEqual(q.question_id, parseQuestion(first.metadata)!.question_id);
+      assert.deepEqual(q.questions.map(question => question.id), [b.questions[0].id]);
+      assert.equal(s.f.daemon.replies.length, before, 'B must not immediately receive A fallback');
+      s.f.clock.advance(s.h.deps.cfg.questions.blocking_timeout_ms - 1); await s.drain();
+      assert.equal(s.f.daemon.replies.length, before, 'B owns its full answer window');
+      if (change === 'reconnect') {
+        s.f.clock.advance(1); await s.drain();
+        assert.deepEqual(s.f.daemon.replies.at(-1), { id, result: { answers: { [b.questions[0].id]: { answers: [questionTimeout] } } } });
+      } else {
+        await answer(next, 'Green');
+        assert.deepEqual(s.f.daemon.replies.at(-1), { id, result: { answers: { [b.questions[0].id]: { answers: ['Green'] } } } });
+      }
+      assert.equal(s.f.daemon.replies.length, before + 1);
+    } finally { s.finish(); }
+  });
+}
+
+test('W-I2 native numeric and string question ids remain distinct; secret requests stay refused', timeout, async t => {
+  const s = await nativeRoutingHarness(t, {});
+  try {
+    const method = 'item/tool/requestUserInput';
+    const params = { threadId: s.handle.ref.id, turnId: 'typed-turn', itemId: 'typed-item',
+      questions: [{ id: 'typed-choice', question: 'Choose', isOther: true, isSecret: false }] };
+    s.f.daemon.serverRequest(method, params, 7);
+    s.f.daemon.serverRequest(method, structuredClone(params), '7'); await s.drain();
+    const rows = s.h.deps.ledger.openQuestions();
+    assert.equal(rows.length, 2, 'numeric and string wire ids are distinct logical question identities');
+    assert.notEqual(rows[0].questionId, rows[1].questionId);
+    assert.equal(s.f.daemon.replies.length, 0);
+    s.f.clock.advance(s.h.deps.cfg.questions.blocking_timeout_ms); await s.drain();
+    assert.deepEqual(s.f.daemon.replies.map(row => row.id), [7, '7']);
+    for (const row of s.f.daemon.replies) assert.deepEqual(row.result, { answers: { 'typed-choice': { answers: [questionTimeout] } } });
+    const secret = structuredClone(params); secret.questions[0].isSecret = true; secret.questions[0].question = 'private-secret-question-prose';
+    s.f.daemon.serverRequest(method, secret, 7); await s.drain();
+    assert.deepEqual(s.f.daemon.replies.at(-1), { id: 7, result: { answers: { 'typed-choice': { answers: ['secrets cannot be provided through vecnet'] } } } });
+    assert.equal(s.h.deps.ledger.openQuestions().length, 0);
+    assert.equal(JSON.stringify(s.h.deps.ledger.pendingOutbox(1000, s.f.clock.now())).includes('private-secret-question-prose'), false);
+  } finally { s.finish(); }
+});
 
 for (const kind of ['outside-grant-root', 'sensitive-file-change', 'moved-sensitive-file', 'network-only'] as const) {
   test(`native ${kind} reaches the operator through real canonicalization, routing and parent bridge`, timeout, async t => {
