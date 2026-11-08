@@ -189,7 +189,6 @@ export function mount(root, ctx) {
   const peerTable = table(['Peer', 'Kind', 'Presence', 'Reachability', 'Credential', 'Routes', 'Quota', 'Location', 'Activity · last hour'], []);
   const peerTableWrap = h('div', { class: 'peer-table-scroll', role: 'region', 'aria-label': 'Peers; activity charts share a common scale' }, peerTable);
   const peerRows = new Map();
-  let lastPeers, lastArchived;
   const archivedLabel = h('span');
   const archivedToggle = h('label', { class: 'show-archived' }, h('input', {
     type: 'checkbox', 'aria-label': 'Show archived',
@@ -204,8 +203,6 @@ export function mount(root, ctx) {
     if (showArchived) archivedToggle.querySelector('input').setAttribute('checked', '');
     else archivedToggle.querySelector('input').removeAttribute('checked');
     peerEmpty.textContent = list.archived ? 'Archived peers are hidden.' : 'No peers enrolled.';
-    if (lastPeers === value && lastArchived === showArchived) return [archivedToggle, rows.length ? peerTableWrap : peerEmpty];
-    lastPeers = value; lastArchived = showArchived;
     const nextRows = rows.map(p => {
       const presenceAge = p.presence === 'n/a' ? '' : p.presenceAt ? age(p.presenceAt) : 'never reported';
       const reachSub = [p.via, p.seen ? age(p.seen) : ''].filter(Boolean).join(', ');

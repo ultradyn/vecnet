@@ -44,3 +44,16 @@ test('keyboard and pointer select exact minute, clamp, dismiss and retain select
     assert.doesNotMatch(c.el.textContent, /9 messages/);
   } finally { restore(); }
 });
+
+test('chart labels strip controls and bidi overrides from accessible names and exact-value captions', () => {
+  const restore = installDom();
+  try {
+    const c = module.createSparkline(), s = snapshot();
+    c.update(s, s, { label: 'Peer\u0000\u001b\u007f\u0085\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069<img src=x>' });
+    for (const value of [c.el.querySelector('svg').attrs['aria-label'], c.el.querySelector('caption').textContent]) {
+      assert.doesNotMatch(value, /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/u);
+      assert.match(value, /Peer<img src=x>/);
+    }
+    assert.equal(c.el.querySelectorAll('img').length, 0);
+  } finally { restore(); }
+});

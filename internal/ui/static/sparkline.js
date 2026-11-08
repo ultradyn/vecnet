@@ -1,5 +1,6 @@
 // Persistent, CSP-safe rolling-minute plot. Geometry/labels stay in the reviewed model.
 import { h } from './dom.js';
+import { clean } from './format.js';
 import { bucketLabel, sparklineGeometry } from './sparkline-model.js';
 
 const WIDTH = 240, HEIGHT = 48;
@@ -58,6 +59,7 @@ export function createSparkline() {
   svg.addEventListener('pointerleave', () => { if (document.activeElement !== svg) { index = null; show(); } });
 
   function update(nextSnapshot, nextSeries, { label = 'Messages', max } = {}) {
+    label = clean(label);
     const key = JSON.stringify([nextSnapshot?.window_start, nextSeries?.buckets, label, max]);
     snapshot = nextSnapshot; series = nextSeries;
     if (key === lastRender) { show(); return; }

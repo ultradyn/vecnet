@@ -40,7 +40,7 @@ import (
 // explicit daemon recovery guidance; measured at 664,284 bytes (the smallest
 // 16 KiB increment above the frozen UI). The total-size assertion remains.
 // Raised to 672 KiB on 2026-11-09 when preserving the live dashboard activity
-// charts alongside launcher recovery; measured at 682,651 bytes (the smallest
+// charts alongside launcher recovery; measured at 682,503 bytes (the smallest
 // 16 KiB increment above the combined UI). The total-size assertion remains.
 const uiMaxBytes = 672 << 10
 
