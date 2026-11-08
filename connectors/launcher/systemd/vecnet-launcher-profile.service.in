@@ -1,0 +1,21 @@
+# Managed by vecnet launcher install. Rendered with absolute runtime paths.
+# Launch jobs only; automatic Codex delivery has its own hub-scoped owner.
+[Unit]
+Description=vecnet launcher daemon (coding-agent launch jobs)
+After=network-online.target
+
+[Service]
+Type=simple
+Environment=@ENV_HOME@
+Environment=@ENV_PATH@
+Environment=@ENV_VECNET_BIN@
+Environment=@ENV_VECNET_CONFIG@
+ExecStart=@NODE@ --disable-warning=ExperimentalWarning @ENTRY@ run --config @CONFIG@
+Restart=on-failure
+RestartSec=10
+RestartPreventExitStatus=3
+UMask=0077
+MemoryMax=1G
+
+[Install]
+WantedBy=default.target

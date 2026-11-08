@@ -1,5 +1,7 @@
 # Changelog
 
+- 2026-11-08: add launcher host setup/install/status commands, native Codex background-daemon spawning in per-job worktrees, and web launcher setup/Launch job with project, preset, permissions and deadline choices; retain exact-request retries and the separate automatic-delivery owner.
+
 - 2026-11-08: add sidebar peer-name and thread-title search with participant filtering, pagination, bounded queries and keyboard retry; preserve caseless matching across sigma, sharp-S and Kelvin variants; document the operator flow and raise the UI cap to 624 KiB (internal/ui, scripts/ui/search.mjs, docs/OPERATOR.md).
 - 2026-11-08: bound Linux foreground Codex notices with independent nonblocking pipe/terminal writes and selected profile/as guidance; refresh only authenticated same-caller monitor credential provenance; make native replacement E2E build its second generation; strengthen the private acceptance harness with subreaper containment, pinned handoffs, diagnostic-renewal reconciliation and aggregate route checks. Unsupported notice sinks are best effort; private harness ambiguity remains a retained refusal.
 

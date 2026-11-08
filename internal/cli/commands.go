@@ -74,6 +74,9 @@ messaging:
   codex bind --thread UUID [--codex-home DIR] [--ttl DUR] [--idle-dormant DUR] [--attended] [--renew|--takeover]
        opt in to app-server delivery; ttl defaults to 24h (1h–168h); unattended needs -a never or auto reviewer
   codex unbind [--thread UUID] | codex bindings [--json] | codex status
+  launcher setup --project ALIAS --repo PATH --base-ref REF [--codex-home DIR] [--model M] [--effort E] [--write] [--force]
+  launcher install [--source CHECKOUT] [--node PATH] [--vecnet-bin PATH] [--write] [--enable] [--start]
+  launcher status | launcher check                 selected --net profile; setup/install preview unless --write
   threads [--limit N]
   thread <id> [--after MESSAGE_ID] [--limit N]
   thread budget <id> <n>                          set budget_remaining
@@ -518,6 +521,8 @@ func (a *app) dispatchOnce(cmd string, args []string) error {
 		return a.cmdProfile(args)
 	case "guide":
 		return a.cmdGuide(args)
+	case "launcher":
+		return a.cmdLauncher(args)
 	case "blob":
 		return a.cmdBlob(args)
 	case "send":

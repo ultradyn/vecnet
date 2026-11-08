@@ -57,7 +57,7 @@ Each connects by what its platform offers, and each guide covers setup, what the
 | Grok Bot | POST to a routine webhook | MCP tools on `/mcp`, with a peer bearer | [`docs/connectors/grokbot.md`](docs/connectors/grokbot.md) |
 | GitHub | Webhook to `/v1/ingress/<src>`, delivered to a peer, team or thread | None; the hub never posts back | [`docs/connectors/github.md`](docs/connectors/github.md) |
 
-The **launcher** is the exception: a separate daemon (peer kind `launcher`) that starts T3 or Paseo coding-agent sessions for `launch` jobs and relays their threads; see [`docs/connectors/launcher.md`](docs/connectors/launcher.md).
+The **launcher** is the exception: a separate daemon (peer kind `launcher`) that starts native Codex, T3 or Paseo coding-agent sessions for `launch` jobs and relays their threads. Web **Add agent → Launcher** generates host setup/install commands; a configured launcher's peer page offers **Launch job** with advertised project, backend, preset and permission choices. See [`docs/connectors/launcher.md`](docs/connectors/launcher.md).
 
 The hub needs a public HTTPS origin for all three (see [`docs/DEPLOY.md`](docs/DEPLOY.md#connectors)). A dot has not yet been run live against this hub; that first test is an operator step.
 

@@ -199,10 +199,11 @@ export function demoCloser(child, dir, { signal = signalGroup, killAfterMs = 700
   return { close, closed };
 }
 // args are extra demo flags (e.g. --pref-flag for a flag-sourced preference).
-export async function bootDemo({ scale = false, args = [] } = {}) {
-  const binDir = await binaries();
+// binary uses a caller-built demo without invoking the shared build helper.
+export async function bootDemo({ scale = false, args = [], binary } = {}) {
+  const binDir = binary ? dirname(resolve(binary)) : await binaries();
   const dir = await mkdtemp(join(tmpdir(), 'vecnet-ui-data-'));
-  const child = spawn(join(binDir, 'demo'), ['--listen', '127.0.0.1:0', '--data-dir', dir, '--exit-on-stdin-eof', ...(scale ? ['--scale'] : []), ...args], { cwd: root, detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
+  const child = spawn(binary ? resolve(binary) : join(binDir, 'demo'), ['--listen', '127.0.0.1:0', '--data-dir', dir, '--exit-on-stdin-eof', ...(scale ? ['--scale'] : []), ...args], { cwd: root, detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
   const { close, closed } = demoCloser(child, dir);
   child.stdin.on('error', () => {}); // The demo may close stdin before its holder.
   // Consume logs, but never echo peer text or credentials into a terminal.
@@ -282,12 +283,12 @@ async function throttle(context, page) {
   console.log(`browser CPU throttled ${rate}x (UI_CPU_THROTTLE)`);
 }
 
-export async function withDemo({ scale = false, signedIn = true, demoArgs = [] } = {}, fn) {
-  const env = await bootDemo({ scale, args: demoArgs });
+export async function withDemo({ scale = false, signedIn = true, demoArgs = [], demoBinary } = {}, fn) {
+  const env = await bootDemo({ scale, args: demoArgs, binary: demoBinary });
   let browser;
   const errors = [], allowed = [], held = [];
   try {
-    browser = await (await chromium()).launch({ headless: true });
+    browser = await (await chromium()).launch({ headless: true, ...(process.env.PLAYWRIGHT_EXECUTABLE_PATH ? { executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH } : {}) });
     const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: 'dark' });
     const page = await context.newPage();
     await throttle(context, page);

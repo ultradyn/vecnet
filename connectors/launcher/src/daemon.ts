@@ -452,6 +452,8 @@ export async function startDaemon(o: { cfg: LauncherConfig; hub?: HubApi; stream
           return [id, !h?.ok ? 'down' : h.degraded?.length ? 'degraded' : 'ok'] as const;
         })),
         modes: modes(), presets: [...info].flatMap(([id, i]) => i.caps.presets.map(p => `${id}/${p.id}`)),
+        projects: Object.keys(cfg.projects),
+        backendModes: Object.fromEntries([...info].map(([id, i]) => [id, [...i.caps.permissionModes]])),
       };
     };
     presence = createPresence({ hub, clock, log, host: cfg.host, heartbeatMs: cfg.presence.heartbeat_ms, snapshot });

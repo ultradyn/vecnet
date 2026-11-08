@@ -4,7 +4,8 @@ import type { PermissionMode } from './backend.ts';
 
 export interface PresenceSnapshot {
   running: number; open: number; max: number; perRequester: number;
-  backends: Record<string, 'ok' | 'degraded' | 'down'>; modes: PermissionMode[]; presets: string[];
+  backends: Record<string, 'ok' | 'degraded' | 'down'>; modes: PermissionMode[]; presets: string[]; projects?: string[];
+  backendModes?: Record<string, PermissionMode[]>;
 }
 
 export function presenceBody(s: PresenceSnapshot, host: string): Omit<PresenceBody, 'at'> {
@@ -14,7 +15,8 @@ export function presenceBody(s: PresenceSnapshot, host: string): Omit<PresenceBo
   return {
     state,
     // Self-reported tags: requesters use them to choose, they authorise nothing (PROTOCOL 14.1).
-    capabilities: [...ids.map(id => `launch:${id}`), ...s.presets.map(p => `preset:${p}`), `host:${host}`, ...s.modes.map(m => `mode:${m}`)],
+    capabilities: [...ids.map(id => `launch:${id}`), ...s.presets.map(p => `preset:${p}`), `host:${host}`, ...s.modes.map(m => `mode:${m}`),
+      ...ids.flatMap(id => (s.backendModes?.[id] ?? []).map(m => `mode:${id}/${m}`)), ...(s.projects ?? []).map(p => `project:${p}`)],
     quota: { max_sessions: s.max, running: s.running, open: s.open, per_requester: s.perRequester, backends: { ...s.backends } },
   };
 }

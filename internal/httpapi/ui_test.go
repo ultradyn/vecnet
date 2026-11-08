@@ -34,7 +34,9 @@ import (
 // measured at 612,715 bytes (smallest 16 KiB step above it: 608 KiB);
 // to 624 KiB on 2026-11-08 for the sidebar search A refresh, about 21 KB
 // of search modules and CSS plus shell wiring.
-const uiMaxBytes = 624 << 10
+// Raised to 640 KiB for the launcher host setup and launch forms on 2026-11-08;
+// measured at 651,308 bytes after native backend permission discovery.
+const uiMaxBytes = 640 << 10
 
 var (
 	scriptTag   = regexp.MustCompile(`(?is)<script\b([^>]*)>(.*?)</script>`)
