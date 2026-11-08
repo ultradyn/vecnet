@@ -347,7 +347,7 @@ export function openInvite(ctx, onCreated, opener, prefill) {
       kids.push(...renderExtra(f));
     }
     if (spec.kind === 'launcher') {
-      kids.push(h('p', { class: 'inv-note', text: 'Host-side setup: use absolute directories on the machine running the daemon. Requires vecnet, Node.js 22.18+, Git, a supported Codex CLI with an authenticated route and a running background app-server daemon, and a Linux systemd user service. Backend codex-app-server · preset default (inherits that route). ' + LAUNCHER_HOST_HELP }));
+      kids.push(h('p', { class: 'inv-note', text: 'Host-side setup: use absolute directories on the machine running the daemon. Requires vecnet, Node.js (22.18+ on 22.x, 23.6+ on 23.x, or 24+), Git, a supported Codex CLI with an authenticated route and a running background app-server daemon, and a Linux systemd user service. Backend codex-app-server · preset default (inherits that route). ' + LAUNCHER_HOST_HELP }));
       for (const [label, control] of [['Project alias', setupProject], ['Repository working directory on host', setupRepo], ['Base ref', setupBase], ['Vecnet source checkout on host', setupSource]]) {
         kids.push(h('label', { for: control.id, text: label }), control);
       }

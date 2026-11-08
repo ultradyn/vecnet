@@ -473,7 +473,7 @@ func (a *app) launcherInstall(p launcherPaths, o opts) error {
 	defer cancel()
 	version, err := exec.CommandContext(ctx, node, "--version").Output()
 	if err != nil || !launcherNodeVersion(string(version)) {
-		return usageErr("launcher requires Node 22.18 or newer; pass --node /absolute/path/to/node")
+		return usageErr("launcher requires Node 22.18+ on 22.x, 23.6+ on 23.x, or 24+; pass --node /absolute/path/to/node")
 	}
 	bin := o.str("vecnet-bin")
 	if bin == "" {
