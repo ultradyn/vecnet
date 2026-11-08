@@ -61,12 +61,17 @@ func (s *Server) consentCSS(w http.ResponseWriter, _ *http.Request) {
 }
 
 // writePage renders p. The form may only post here, and may only be
-// redirected on to redirectURI's origin: browsers apply form-action to a
-// form's redirect too, and default-src does not cover form-action.
+// redirected on to redirectURI's origin (and Cursor's known canonical origin):
+// browsers apply form-action to redirects too, and default-src does not cover it.
 func writePage(w http.ResponseWriter, status int, p page, redirectURI string) {
 	formAction := "'self'"
 	if u, err := url.Parse(redirectURI); err == nil && u.Host != "" {
 		formAction += " " + u.Scheme + "://" + u.Host
+		// Cursor's registered www callback redirects to this exact apex origin.
+		// This permits that navigation without changing OAuth redirect authority.
+		if u.Scheme == "https" && u.Host == "www.cursor.com" {
+			formAction += " https://cursor.com"
+		}
 	}
 	if p.Code != "" {
 		oauthReason(w, p.Code)
