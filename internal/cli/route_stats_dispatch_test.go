@@ -147,6 +147,8 @@ func TestRouteStatsDispatchAndHelp(t *testing.T) {
 		{"json-before-verb", t4RouteID, t4RouteReport, []string{"--json", "--net", t4RouteProfile, "route", "stats", t4RouteID}, true},
 		{"json-after-verb-and-no-as-query", t4RouteID, t4RouteIdleReport, []string{"--net", t4RouteProfile, "--as", t4RoutePeer, "route", "stats", t4RouteID, "--json"}, true},
 		{"json-empty-routes", t4RoutePeer, t4RouteEmptyReport, []string{"--net", t4RouteProfile, "route", "stats", t4RoutePeer, "--json"}, true},
+		{"json-route-separator-before-stats", t4RouteID, t4RouteReport, []string{"--net", t4RouteProfile, "--json", "route", "--", "stats", t4RouteID}, true},
+		{"json-stats-separator-before-selector", t4RouteID, t4RouteReport, []string{"--net", t4RouteProfile, "--json", "route", "stats", "--", t4RouteID}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var stats atomic.Int32
@@ -184,6 +186,12 @@ func TestRouteStatsDispatchAndHelp(t *testing.T) {
 		{"missing-selector", []string{"route", "stats"}, 1, true},
 		{"extra-selector", []string{"route", "stats", t4RouteID, t4RoutePeer}, 1, true},
 		{"unknown-flag", []string{"route", "stats", t4RouteID, "--not-a-route-flag"}, 1, false},
+		{"route-separator-missing-selector", []string{"route", "--", "stats"}, 1, true},
+		{"route-separator-extra-selector", []string{"route", "--", "stats", t4RouteID, t4RoutePeer}, 1, true},
+		{"stats-separator-missing-selector", []string{"route", "stats", "--"}, 1, true},
+		{"stats-separator-extra-selector", []string{"route", "stats", "--", t4RouteID, t4RoutePeer}, 1, true},
+		{"unknown-route-flag-before-separator", []string{"route", "--not-a-route-flag", "--", "stats", t4RouteID}, 1, false},
+		{"unknown-stats-flag-before-separator", []string{"route", "stats", "--not-a-route-flag", "--", t4RouteID}, 1, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var stats atomic.Int32
@@ -205,6 +213,35 @@ func TestRouteStatsDispatchAndHelp(t *testing.T) {
 			}
 			if tc.help && !strings.Contains(out+errs, "route stats <peer_id|route_id|sub_id>") {
 				t.Fatal("help/usage must advertise route stats and its exact selector alternatives")
+			}
+		})
+	}
+	// A terminator keeps global-looking arguments literal at either level.
+	// In particular, --help here must reach the service instead of main help.
+	for _, tc := range []struct {
+		name, id string
+		args     []string
+	}{
+		{"route-separator-literal-json", "--json", []string{"route", "--", "stats", "--json"}},
+		{"stats-separator-literal-json", "--json", []string{"route", "stats", "--", "--json"}},
+		{"route-separator-literal-help", "--help", []string{"route", "--", "stats", "--help"}},
+		{"stats-separator-literal-help", "--help", []string{"route", "stats", "--", "--help"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stats atomic.Int32
+			u := t4RouteUser(t, func(w http.ResponseWriter, r *http.Request) {
+				stats.Add(1)
+				t4RouteStatsRequest(t, r, tc.id)
+				w.WriteHeader(http.StatusUnprocessableEntity)
+				_, _ = io.WriteString(w, `{"error":{"code":"invalid_value","message":"literal-selector-remote-canary","details":{"field":"id"}}}`)
+			})
+			args := append([]string{"--net", t4RouteProfile}, tc.args...)
+			code, out, errs := t4RouteRun(u, args...)
+			if code != 2 || out != "" || stats.Load() != 1 || !strings.HasPrefix(errs, "invalid_value:") {
+				t.Fatalf("literal selector: exit=%d stats=%d stdout=%q stderr=%q", code, stats.Load(), out, errs)
+			}
+			if strings.Contains(errs, tc.id) || strings.Contains(errs, "literal-selector-remote-canary") {
+				t.Fatal("literal selector error echoed input or remote text")
 			}
 		})
 	}
@@ -253,6 +290,12 @@ func TestRouteStatsDispatchPreservesRouteVerbs(t *testing.T) {
 			[]string{"route", "rotate", t4RouteID, "--key-file", keyPath}},
 		{"remove", http.MethodDelete, "/v1/admin/routes/" + t4RouteID, "", "", `"ok":true`,
 			[]string{"route", "remove", t4RouteID}},
+		{"list-route-separator", http.MethodGet, "/v1/admin/routes", "", `{"routes":[{"route_id":"route_00000000000000000000000011","owner_kind":"peer","owner_id":"peer_00000000000000000000000001","kind":"http","host":"callback.example","verified_at":null,"runs_per_hour":0}]}`, t4RouteID,
+			[]string{"route", "--", "list"}},
+		{"verify-route-separator", http.MethodPost, "/v1/admin/routes/" + t4RouteID + "/verify", "", "", `"ok":true`,
+			[]string{"route", "--", "verify", t4RouteID}},
+		{"remove-route-separator", http.MethodDelete, "/v1/admin/routes/" + t4RouteID, "", "", `"ok":true`,
+			[]string{"route", "--", "remove", t4RouteID}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var calls atomic.Int32

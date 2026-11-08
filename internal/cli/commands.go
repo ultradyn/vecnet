@@ -1850,6 +1850,9 @@ func (a *app) cmdPeer(args []string) error {
 }
 
 func (a *app) cmdRoute(args []string) error {
+	if len(args) > 1 && args[0] == "--" && args[1] == "stats" {
+		return a.cmdRouteStats(append([]string{"--"}, args[2:]...))
+	}
 	if len(args) > 0 && args[0] == "stats" {
 		return a.cmdRouteStats(args[1:])
 	}
