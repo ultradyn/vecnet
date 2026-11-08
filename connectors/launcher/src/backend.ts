@@ -52,6 +52,11 @@ export interface LocalFile { path: string; name: string; mediaType: string; sha2
 /** Opaque, JSON-serialisable; persisted in the ledger and given back to reattach(). */
 export interface SessionRef { backend: BackendId; host: string; id: string; extra?: Record<string, unknown> }
 
+/** Internal proof attached by an owning backend to the original error. It
+ * preserves RPC error identity and cannot be supplied by a wire error body. */
+export const OWNED_LAUNCH_REFUSAL = Symbol('owned-launch-refusal');
+export interface OwnedLaunchRefusal { ref: SessionRef; reason: 'effective_policy' | 'no_rollout' }
+
 export type SessionState =
   | { kind: "starting" }
   | { kind: "turn_running"; turnId: string; since: string }

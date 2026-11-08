@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, realpath, rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, resolve, isAbsolute, relative } from 'node:path';
-import { definePlugin, MAX_TURN_INPUT_BYTES } from '../../backend.ts';
+import { definePlugin, MAX_TURN_INPUT_BYTES, OWNED_LAUNCH_REFUSAL } from '../../backend.ts';
 import type { Backend, BackendCapabilities, LaunchSpec, PluginContext, SessionHandle, SessionHooks, SessionRef, SessionState, TurnInput, SendMode, TurnCursor, TurnEvent, PermissionMode, PermissionDraft, WorkspaceMode } from '../../backend.ts';
 import { openCodexRpc, CodexRpcError } from './rpc.ts';
 import type { CodexRpc } from './rpc.ts';
@@ -16,6 +16,7 @@ export interface CodexConfig {
 type Obj = Record<string, any>;
 const obj = (v: unknown): Obj => v && typeof v === 'object' && !Array.isArray(v) ? v as Obj : {};
 const modes: PermissionMode[] = ['read-only', 'ask', 'auto', 'full-access'];
+class EffectivePolicyRefusal extends Error {}
 interface Owned {
   tag: string; workspace: string; repo: string; branch: string; preset: string; mode: PermissionMode;
   phase?: 'allocated' | 'start-dispatched' | 'identified' | 'settled';
@@ -83,6 +84,16 @@ export default definePlugin<CodexConfig>({
         extra: { tag: o.tag, branch: o.branch, workspace: o.workspace, link: `codex://threads/${o.id}`, codex_home: home,
           permission_mode: o.mode, workspace_mode: o.workspaceMode ?? 'worktree', ...(o.model ? { model: o.model } : {}), ...(o.provider ? { model_provider: o.provider } : {}), ...(o.effort ? { effort: o.effort } : {}) } };
     }
+    function cleanupOwner(r: SessionRef): Owned & { id: string } {
+      if (r.backend !== 'codex-app-server' || r.host !== ctx.host) throw new Error('Codex cleanup ownership mismatch');
+      const o = owned().find(x => x.id === r.id && x.tag === r.extra?.tag);
+      if (!o || !o.id || !o.threadSource?.startsWith('vecnet-launcher:') ||
+          !['identified', 'settled'].includes(o.phase ?? '')) throw new Error('Codex cleanup provenance unresolved');
+      const expected = ref(o).extra!;
+      if (Object.keys(r.extra ?? {}).length !== Object.keys(expected).length ||
+          Object.entries(expected).some(([key, value]) => r.extra?.[key] !== value)) throw new Error('Codex cleanup reference mismatch');
+      return o as Owned & { id: string };
+    }
     async function history(id: string): Promise<Obj[]> {
       const all: Obj[] = []; let cursor: string | undefined;
       const cursors = new Set<string>();
@@ -125,19 +136,19 @@ export default definePlugin<CodexConfig>({
       if (t.id !== o.id || r.approvalPolicy !== policy.approvalPolicy || r.approvalsReviewer !== policy.approvalsReviewer ||
           typeof r.cwd !== 'string' || typeof t.cwd !== 'string' || await realpath(r.cwd) !== o.workspace || await realpath(t.cwd) !== o.workspace ||
           !Array.isArray(r.runtimeWorkspaceRoots) || r.runtimeWorkspaceRoots.length !== 1 || typeof r.runtimeWorkspaceRoots[0] !== 'string' ||
-          await realpath(r.runtimeWorkspaceRoots[0]) !== o.workspace) throw new Error('Codex effective policy mismatch');
+          await realpath(r.runtimeWorkspaceRoots[0]) !== o.workspace) throw new EffectivePolicyRefusal('Codex effective policy mismatch');
       if (o.mode === 'full-access') {
-        if (sandbox.type !== 'dangerFullAccess') throw new Error('Codex effective sandbox mismatch');
+        if (sandbox.type !== 'dangerFullAccess') throw new EffectivePolicyRefusal('Codex effective sandbox mismatch');
       } else if (o.mode === 'read-only') {
-        if (sandbox.type !== 'readOnly' || sandbox.networkAccess !== undefined && sandbox.networkAccess !== false) throw new Error('Codex effective sandbox mismatch');
+        if (sandbox.type !== 'readOnly' || sandbox.networkAccess !== undefined && sandbox.networkAccess !== false) throw new EffectivePolicyRefusal('Codex effective sandbox mismatch');
       } else {
         if (sandbox.type !== 'workspaceWrite' || sandbox.networkAccess !== undefined && sandbox.networkAccess !== false ||
             sandbox.excludeSlashTmp !== true || sandbox.excludeTmpdirEnvVar !== true ||
-            sandbox.writableRoots !== undefined && !Array.isArray(sandbox.writableRoots)) throw new Error('Codex effective sandbox mismatch');
+            sandbox.writableRoots !== undefined && !Array.isArray(sandbox.writableRoots)) throw new EffectivePolicyRefusal('Codex effective sandbox mismatch');
         for (const root of sandbox.writableRoots ?? []) {
-          if (typeof root !== 'string' || !isAbsolute(root)) throw new Error('Codex effective writable root invalid');
+          if (typeof root !== 'string' || !isAbsolute(root)) throw new EffectivePolicyRefusal('Codex effective writable root invalid');
           const rel = relative(o.workspace, await realpath(root));
-          if (isAbsolute(rel) || rel === '..' || rel.startsWith('../')) throw new Error('Codex effective writable root escapes workspace');
+          if (isAbsolute(rel) || rel === '..' || rel.startsWith('../')) throw new EffectivePolicyRefusal('Codex effective writable root escapes workspace');
         }
       }
     }
@@ -420,16 +431,26 @@ export default definePlugin<CodexConfig>({
         if (r.backend !== 'codex-app-server' || r.host !== ctx.host) return { found: 'none' };
         const o = owned().find(x => x.id === r.id && x.tag === r.extra?.tag);
         if (!o || o.settled) return { found: 'none' };
-        const h = await attach(o, hooks); return { found: h.state().kind === 'parked' ? 'parked' : 'live', handle: h };
+        try {
+          const h = await attach(o, hooks); return { found: h.state().kind === 'parked' ? 'parked' : 'live', handle: h };
+        } catch (error) {
+          // Only a definitive refusal of a proven, still-zero-input launch can
+          // authorize failed-launch recovery. Re-read durable flags after RPC.
+          const reason = error instanceof EffectivePolicyRefusal ? 'effective_policy' :
+            error instanceof CodexRpcError && !error.ambiguous && error.code === -32600 &&
+            error.message === `no rollout found for thread id ${o.id}` ? 'no_rollout' : undefined;
+          if (reason) {
+            let proof: Owned | undefined;
+            try { proof = cleanupOwner(r); } catch { /* No cleanup authority. */ }
+            if (proof && !proof.settled && !proof.initialSent && !proof.initialSending && error instanceof Error) {
+              Object.defineProperty(error, OWNED_LAUNCH_REFUSAL, { value: { ref: ref(proof), reason } });
+            }
+          }
+          throw error;
+        }
       },
       async settleOwned(r, _mode) {
-        if (r.backend !== 'codex-app-server' || r.host !== ctx.host) throw new Error('Codex cleanup ownership mismatch');
-        const o = owned().find(x => x.id === r.id && x.tag === r.extra?.tag);
-        if (!o || !o.id || !o.threadSource?.startsWith('vecnet-launcher:') ||
-            !['identified', 'settled'].includes(o.phase ?? '')) throw new Error('Codex cleanup provenance unresolved');
-        const expected = ref(o).extra!;
-        if (Object.keys(r.extra ?? {}).length !== Object.keys(expected).length ||
-            Object.entries(expected).some(([key, value]) => r.extra?.[key] !== value)) throw new Error('Codex cleanup reference mismatch');
+        const o = cleanupOwner(r);
         if (o.settled) return;
         // Before initial dispatch there is no rollout to resume (or necessarily
         // to read). Archive that exact recorded id directly. An uncertain input

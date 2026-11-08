@@ -2,6 +2,7 @@ import test from 'node:test';
 import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, writeFile, rm, stat, lstat, readlink, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -1092,7 +1093,7 @@ async function nativeRoutingHarness(t: TestContext, config: { presets?: Array<'o
   h.deps.ledger.updateJob(spec.jobId, { sessionRef: handle.ref, workspace: String(handle.ref.extra!.workspace), state: 'running' });
   const prompts = () => h.deps.ledger.pendingOutbox(100, f.clock.now()).filter(row => row.kind === 'send')
     .map(row => row.payload as SendRequest).filter(row => row.kind === 'approval_request');
-  return { f, h, handle, canonical, prompts, bridge,
+  return { f, h, handle, canonical, prompts, bridge, hooks,
     async drain() { await handle.activity(); await handle.activity(); },
     async decide(prompt: SendRequest, actor = 'peer_operator') {
       const row = h.deps.ledger.pendingOutbox(100, f.clock.now()).find(row => row.key === prompt.idempotency_key)!;
@@ -1204,3 +1205,221 @@ test('native reused RPC id cannot replay a prior requester grant onto a changed 
     assert.deepEqual(s.f.daemon.replies.filter(r=>r.id===id).map(r=>r.result),[{decision:'accept'},{decision:'accept'}]);
   } finally {s.finish();}
 });
+
+test('fix3 unchanged native wire replay binds approval to canonical scope after a symlink retarget', timeout, async t => {
+  const s = await nativeRoutingHarness(t, { presets: ['outside-workspace', 'privileged'] });
+  try {
+    const workspace = String(s.handle.ref.extra!.workspace), ordinary = join(workspace, 'ordinary');
+    const sensitive = join(s.f.daemon.home, '.ssh'), link = join(workspace, 'grant-link');
+    await mkdir(ordinary); await mkdir(sensitive); await symlink(ordinary, link);
+    const threadId = s.handle.ref.id, turnId = s.f.daemon.threads.get(threadId)!.turns[0].id;
+    const method = 'item/fileChange/requestApproval';
+    const raw = Object.freeze({ threadId, turnId, itemId: 'unchanged-file-item', grantRoot: link });
+    const id = s.f.daemon.serverRequest(method, raw); await s.drain();
+    const first = s.prompts()[0]; assert.ok(first);
+    assert.deepEqual(first.recipients, [s.h.job().requester]);
+    assert.equal(s.canonical.at(-1)!.outside_workspace, false);
+    assert.equal(s.canonical.at(-1)!.paths![0].path, ordinary);
+    await s.decide(first, s.h.job().requester);
+    assert.equal(s.f.daemon.replies.filter(reply => reply.id === id).length, 1);
+    // An identical completed operation remains an idempotent bridge replay.
+    s.f.daemon.serverRequest(method, raw, id); await s.drain();
+    assert.deepEqual(s.prompts(), []);
+    assert.equal(s.f.daemon.replies.filter(reply => reply.id === id).length, 2);
+    // Every native wire field stays unchanged. Only canonical filesystem scope
+    // changes, independently of the adapter's method/raw-draft fingerprint.
+    await rm(link); await symlink(sensitive, link);
+    s.f.daemon.serverRequest(method, raw, id); await s.drain();
+    assert.deepEqual(s.f.daemon.serverRequests.filter(request => request.id === id),
+      Array.from({ length: 3 }, () => ({ id, method, params: raw })));
+    const operator = s.prompts()[0];
+    assert.ok(operator, 'retargeted canonical scope requires a fresh operator decision');
+    assert.notEqual(operator.approval_request!.approval_id, first.approval_request!.approval_id);
+    assert.deepEqual(operator.recipients, ['peer_operator']);
+    assert.equal(s.canonical.at(-1)!.outside_workspace, true);
+    assert.equal(s.canonical.at(-1)!.paths![0].path, sensitive);
+    assert.equal(s.f.daemon.replies.filter(reply => reply.id === id).length, 2, 'no third response before operator authority');
+    await s.decide(operator);
+    assert.deepEqual(s.f.daemon.replies.filter(reply => reply.id === id).map(reply => reply.result),
+      [{ decision: 'accept' }, { decision: 'accept' }, { decision: 'accept' }]);
+  } finally { s.finish(); }
+});
+
+test('fix3 legacy unscoped request cache cannot authorize an identical replay', timeout, async t => {
+  const s = await nativeRoutingHarness(t, {});
+  try {
+    const options: PermissionRequest['options'] = [
+      { id: 'accept', label: 'Allow once', grants: 'once' }, { id: 'decline', label: 'Deny', grants: 'deny' },
+    ];
+    const request: PermissionRequest = { requestId: 'legacy-opaque-request', summary: 'Write a file', options, defaultOnExpiry: 'decline',
+      permission: { kind: 'edit', backend_method: 'item/fileChange/requestApproval', scope: 'once', options,
+        paths: [{ path: join(String(s.handle.ref.extra!.workspace), 'tracked.txt'), access: 'write' }],
+        fidelity: { kind: 'enforced', command: 'none', paths: 'enforced', host: 'none' }, backend_raw: { unchanged: true } } };
+    const pending = s.hooks.onPermissionRequest(request, new AbortController().signal);
+    const first = s.prompts()[0]; assert.ok(first);
+    await s.decide(first, s.h.job().requester); assert.equal((await pending).optionId, 'accept');
+    const priorId = first.approval_request!.approval_id;
+    const prior = s.h.deps.ledger.approval(priorId)!;
+    const kv = s.h.deps.ledger.kv('parent-bridge');
+    for (const key of kv.keys().filter(key => key.startsWith('request'))) kv.delete(key);
+    const legacyKey = `request.${prior.jobId}.${createHash('sha256').update(request.requestId).digest('hex').slice(0, 24)}`;
+    kv.set(legacyKey, priorId);
+    assert.deepEqual(kv.keys().filter(key => key.startsWith('request')), [legacyKey]);
+    let resolved = false;
+    const replay = s.hooks.onPermissionRequest(request, new AbortController().signal);
+    void replay.then(() => { resolved = true; }); await Promise.resolve();
+    const next = s.prompts()[0];
+    assert.ok(next, 'legacy unscoped cache is insufficient authority even for identical replay');
+    assert.notEqual(next.approval_request!.approval_id, priorId); assert.equal(resolved, false);
+    await s.decide(next, s.h.job().requester); assert.equal((await replay).optionId, 'accept');
+  } finally { s.finish(); }
+});
+
+for (const change of ['option-meaning', 'method', 'scope'] as const) {
+  test(`fix3 bridge cache binds the complete canonical permission when ${change} changes`, timeout, async t => {
+    const s = await nativeRoutingHarness(t, {});
+    try {
+      const options: PermissionRequest['options'] = [
+        { id: 'accept', label: 'Allow once', grants: 'once' }, { id: 'decline', label: 'Deny', grants: 'deny' },
+      ];
+      const request: PermissionRequest = { requestId: 'same-opaque-request', summary: 'Write a file', options, defaultOnExpiry: 'decline',
+        permission: { kind: 'edit', backend_method: 'item/fileChange/requestApproval', scope: 'session', options,
+          paths: [{ path: join(String(s.handle.ref.extra!.workspace), 'tracked.txt'), access: 'write' }],
+          fidelity: { kind: 'enforced', command: 'none', paths: 'enforced', host: 'none' }, backend_raw: { unchanged: true } } };
+      const firstPending = s.hooks.onPermissionRequest(request, new AbortController().signal);
+      const first = s.prompts()[0]; assert.ok(first);
+      await s.decide(first, s.h.job().requester); assert.equal((await firstPending).optionId, 'accept');
+      assert.equal((await s.hooks.onPermissionRequest(request, new AbortController().signal)).optionId, 'accept');
+      assert.deepEqual(s.prompts(), [], 'stable canonical replay creates no new card');
+      const changed = structuredClone(request);
+      if (change === 'option-meaning') {
+        changed.options[0] = { id: 'accept-session', label: 'Allow session', grants: 'session' };
+        changed.permission.options = changed.options;
+      } else if (change === 'method') changed.permission.backend_method = 'item/otherFileChange/requestApproval';
+      else changed.permission.scope = 'once';
+      let resolved = false;
+      const nextPending = s.hooks.onPermissionRequest(changed, new AbortController().signal);
+      void nextPending.then(() => { resolved = true; });
+      await Promise.resolve();
+      const next = s.prompts()[0]; assert.ok(next, 'changed canonical operation cannot use the old decision');
+      assert.notEqual(next.approval_request!.approval_id, first.approval_request!.approval_id);
+      assert.equal(resolved, false);
+      await s.decide(next, s.h.job().requester);
+      assert.equal((await nextPending).optionId, changed.options[0].id);
+    } finally { s.finish(); }
+  });
+}
+
+for (const failure of ['retained-broader-policy', 'zero-input-no-rollout'] as const) {
+  for (const archiveAvailable of [true, false]) {
+    test(`fix3 crash before failure fence: ${failure}, archive ${archiveAvailable ? 'available' : 'unavailable then restored'}`, timeout, async t => {
+      const f = await fixture(t), h = await launchHarness(t, f);
+      const workspace = join(f.workspaceRoot, h.job().jobId);
+      const foreign = { id: 'foreign-fix3', cwd: workspace, threadSource: 'other-owner', name: 'foreign unchanged',
+        status: { type: 'idle' }, archived: false, turns: [] };
+      f.daemon.threads.set(foreign.id, foreign);
+      if (failure === 'retained-broader-policy') f.daemon.retainStartPolicy(policy => { policy.approvalPolicy = 'never'; });
+      else { f.daemon.rejectZeroInputResume(true); f.daemon.failNext('thread/name/set', 'drop'); }
+      if (!archiveAvailable) f.daemon.setMethodUnavailable('thread/archive', { code: -32001, message: 'archive unavailable' });
+      let approvalCalls = 0, questionCalls = 0, settlementChecks = 0;
+      const hooks: SessionHooks = { onEvent() {}, async onPermissionRequest() { approvalCalls++; throw new Error('cleanup must not approve'); },
+        async onQuestion() { questionCalls++; throw new Error('cleanup must not ask'); } };
+      h.deps.hooks = () => hooks;
+      h.deps.ledger.updateJob(h.job().jobId, { state: 'launching' });
+      // Deliberately bypass startLaunch's catch. Native durable identification
+      // survives, but the shared launch-failure fence has never been written.
+      await assert.rejects(h.backend().launch(f.spec(), hooks));
+      const id = h.owned().id;
+      assert.equal(typeof id, 'string'); assert.equal(h.owned().phase, 'identified');
+      assert.ok(h.owned().threadSource); assert.equal(h.job().sessionRef, null);
+      assert.equal(h.deps.ledger.kv('launch-failure').get(h.job().jobId), undefined);
+      const thread = f.daemon.threads.get(id)!; assert.equal(thread.turns.length, 0);
+      function guardTerminalReport() {
+        const report = h.deps.jobs.report.bind(h.deps.jobs);
+        h.deps.jobs.report = (jobId, state, output, text) => {
+          if (state === 'failed') {
+            assert.equal(h.owned().settled, true); assert.equal(h.owned().phase, 'settled');
+            assert.equal(thread.archived, true); settlementChecks++;
+          }
+          report(jobId, state, output, text);
+        };
+      }
+      function assertNoInputOrForeignOperations() {
+        assert.equal(f.methods('thread/start').length, 1); assert.equal(f.methods('turn/start').length, 0);
+        assert.equal(f.methods('turn/steer').length, 0); assert.equal(approvalCalls, 0); assert.equal(questionCalls, 0);
+        assert.deepEqual(f.daemon.replies, []); assert.deepEqual(h.deps.ledger.openApprovals(), []);
+        assert.deepEqual(h.deps.ledger.openQuestions(), []); assert.equal(foreign.archived, false);
+        assert.equal(foreign.name, 'foreign unchanged'); assert.deepEqual(foreign.turns, []);
+        for (const request of f.daemon.requests.filter(request => Object.hasOwn(request.params, 'threadId'))) {
+          assert.equal(request.params.threadId, id, request.method);
+        }
+      }
+      await h.restart(); guardTerminalReport();
+      const [first] = await reattachAll(h.deps);
+      if (!archiveAvailable) {
+        assert.equal(first.outcome, 'unreachable'); assert.equal(h.job().state, 'launching');
+        assert.equal(h.job().terminal, null); assert.equal(h.job().reattachPending, true);
+        assert.ok(h.deps.ledger.kv('launch-failure').get(h.job().jobId), 'definitive pre-input refusal now has a durable recovery fence');
+        assert.equal(h.deps.ledger.counts().open, 1); assert.notEqual(h.owned().settled, true);
+        assert.equal(thread.archived, false); assert.deepEqual(h.reports(), ['accepted']);
+        await h.restart(); guardTerminalReport(); f.clock.advance(8 * 86400000);
+        assert.equal((await retryPending(h.deps))[0].outcome, 'unreachable');
+        assert.equal(h.job().terminal, null); assert.equal(h.deps.ledger.counts().open, 1);
+        assert.deepEqual((await h.sweep()).workspacesRemoved, []);
+        assert.equal((await stat(workspace)).isDirectory(), true);
+        assert.ok(h.backend().cleanupWorkspace);
+        assert.equal((await h.backend().cleanupWorkspace!(h.job().sessionRef!)).removed, false);
+        assertNoInputOrForeignOperations();
+        f.daemon.setMethodUnavailable('thread/archive'); f.clock.advance(600001);
+        assert.equal((await retryPending(h.deps))[0].outcome, 'lost');
+      } else { assert.equal(first.outcome, 'lost'); assert.equal(f.methods('thread/archive').length, 1); }
+      assert.equal(h.job().state, 'ended'); assert.equal(h.job().terminal, 'failed');
+      assert.equal(h.job().reattachPending, false); assert.equal(h.deps.ledger.counts().open, 0);
+      assert.equal(h.deps.ledger.counts().unparked, 0); assert.deepEqual(h.reports(), ['accepted', 'failed']);
+      assert.equal(h.job().sessionRef?.id, id); assert.equal(h.owned().settled, true);
+      assert.equal(h.owned().phase, 'settled'); assert.equal(settlementChecks, 1); assert.equal(thread.archived, true);
+      assert.equal(h.deps.ledger.kv('launch-failure').get(h.job().jobId), undefined);
+      assert.ok(f.methods('thread/archive').every(request => request.params.threadId === id));
+      assertNoInputOrForeignOperations();
+      if (failure === 'zero-input-no-rollout') {
+        assert.ok(f.daemon.noRolloutResumeFailures.includes(id)); assert.deepEqual(f.daemon.acceptedResumes, []);
+      }
+      const archives = f.methods('thread/archive').length;
+      await h.restart(); assert.equal(h.owned().phase, 'settled');
+      assert.deepEqual(await reattachAll(h.deps), []); assert.deepEqual(await retryPending(h.deps), []);
+      f.clock.advance(2); assert.deepEqual((await h.sweep()).workspacesRemoved, [workspace]);
+      await assert.rejects(stat(workspace), { code: 'ENOENT' });
+      assert.equal(f.methods('thread/archive').length, archives); assertNoInputOrForeignOperations();
+    });
+  }
+}
+
+for (const temporary of ['transport-drop', 'unclassified-rpc-error'] as const) {
+  test(`fix3 pre-fence ${temporary} stays pending and later adopts the successful owned launch`, timeout, async t => {
+    const f = await fixture(t), h = await launchHarness(t, f);
+    f.daemon.failNext('thread/name/set', 'drop'); h.deps.ledger.updateJob(h.job().jobId, { state: 'launching' });
+    await assert.rejects(h.backend().launch(f.spec(), f.hooks));
+    const id = h.owned().id; await h.restart();
+    if (temporary === 'transport-drop') f.daemon.failNext('thread/resume', 'drop');
+    else f.daemon.setMethodUnavailable('thread/resume', { code: -32000, message: 'temporary backend unavailable' });
+    assert.equal((await reattachAll(h.deps))[0].outcome, 'unreachable');
+    assert.equal(h.job().terminal, null); assert.equal(h.job().reattachPending, true);
+    assert.equal(h.deps.ledger.kv('launch-failure').get(h.job().jobId), undefined);
+    f.clock.advance(8 * 86400000);
+    if (temporary === 'transport-drop') f.daemon.failNext('thread/resume', 'drop');
+    assert.equal((await retryPending(h.deps))[0].outcome, 'unreachable');
+    assert.equal(h.deps.ledger.counts().open, 1); assert.deepEqual(h.reports(), ['accepted']);
+    assert.deepEqual((await h.sweep()).workspacesRemoved, []);
+    assert.equal(f.methods('thread/archive').length, 0); assert.equal(f.methods('turn/start').length, 0);
+    assert.notEqual(h.owned().settled, true);
+    f.daemon.setMethodUnavailable('thread/resume'); await h.restart(); f.clock.advance(600001);
+    const [result] = await retryPending(h.deps);
+    assert.equal(result.outcome, 'live'); assert.ok('handle' in result);
+    if (!('handle' in result)) throw new Error('valid zero-input ownership should be adopted');
+    assert.equal(result.handle.ref.id, id); assert.equal(h.job().terminal, null);
+    assert.equal(h.job().state, 'running'); assert.equal(h.job().reattachPending, false);
+    assert.deepEqual(h.reports(), ['accepted', 'running']);
+    assert.equal(f.methods('thread/start').length, 1); assert.equal(f.methods('turn/start').length, 0);
+    assert.equal(f.methods('thread/archive').length, 0);
+  });
+}

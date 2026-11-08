@@ -48,6 +48,7 @@ export async function startFakeNativeCodex(dir: string) {
   const peers = new Set<Peer>();
   const threads = new Map<string, NativeThread>();
   const requests: { method: string; params: Params; connection: number }[] = [];
+  const serverRequests: { id: number; method: string; params: Params }[] = [];
   const replies: { id: number | string; result?: Params; error?: unknown }[] = [];
   const paths: string[] = [];
   const failures = new Map<string, Failure[]>();
@@ -117,7 +118,7 @@ export async function startFakeNativeCodex(dir: string) {
     if (method === 'thread/read' || method === 'thread/resume') {
       if (method === 'thread/resume' && rejectZeroInputResumes && t.turns.length === 0) {
         noRolloutResumeFailures.push(t.id);
-        error(-32600, 'thread has no persisted rollout before its first input'); return;
+        error(-32600, `no rollout found for thread id ${t.id}`); return;
       }
       if (method === 'thread/resume') acceptedResumes.push(t.id);
       if (method === 'thread/resume' && t.status.type === 'notLoaded') t.status = { type: 'idle' };
@@ -204,7 +205,7 @@ export async function startFakeNativeCodex(dir: string) {
   await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(target, resolve); });
   await symlink(target, socketPath);
   return {
-    home, socketPath, target, requests, replies, paths, threads, noRolloutResumeFailures, acceptedResumes,
+    home, socketPath, target, requests, serverRequests, replies, paths, threads, noRolloutResumeFailures, acceptedResumes,
     failNext(method: string, failure: Failure) { failures.set(method, [...(failures.get(method) ?? []), failure]); },
     setMethodUnavailable(method: string, failure?: { code: number; message: string }) {
       if (failure) unavailable.set(method, failure); else unavailable.delete(method);
@@ -225,6 +226,7 @@ export async function startFakeNativeCodex(dir: string) {
     disconnect() { for (const p of peers) p.socket.destroy(); },
     serverRequest(method: string, params: Params, reusedId?: number) {
       const id = reusedId ?? ++requestId;
+      serverRequests.push({ id, method, params: structuredClone(params) });
       // Broadcast even foreign-thread requests, to exercise ownership filtering.
       for (const peer of peers) peer.send({ id, method, params });
       return id;

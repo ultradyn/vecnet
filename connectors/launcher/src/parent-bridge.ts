@@ -218,10 +218,11 @@ export function createParentBridge(deps: ParentBridgeDeps): ParentBridge {
   function escalate(row: ApprovalRow, live: LiveApproval) { operatorPrompt(row,live); }
   function requestPermission(job: JobRow, workspaceRoot: string, req: PermissionRequest, signal: AbortSignal): Promise<PermissionDecision> {
     const context = {machineId:cfg.host,jobId:job.jobId,permissionMode:job.permissionMode,preset:job.preset,backend:job.backend,workspaceRoot,home:deps.home};
-    let permission = finishPermission({...req.permission,options:req.options},context);
+    const canonical = canonicalPermission({...req.permission,options:req.options},context);
+    let permission = finishPermission(canonical,context);
     // Route on the complete request, never the published copy: shortening to
     // the 6 KiB cap can drop a privileged command suffix or a sensitive path.
-    const route = deps.route(canonicalPermission({...req.permission,options:req.options},context),job);
+    const route = deps.route(canonical,job);
     const withEscalate = route.to !== 'operator' && route.escalateOption;
     // Normalize labels using local surrogate IDs, then restore the opaque IDs.
     // The launcher control gets a distinct ID even if a backend uses 'escalate'.
@@ -235,12 +236,17 @@ export function createParentBridge(deps: ParentBridgeDeps): ParentBridge {
     // Re-finalize the original draft after reserved-label normalization so the
     // serialized byte cap includes every published suffix. Escalation reuses it.
     const wasRedacted=permission.redacted;
-    permission = finishPermission({...req.permission,options:normalized},context);
+    permission = finishPermission({...canonical,options:normalized},context);
     permission.redacted ||= wasRedacted;
     if (!options.some(o=>o.optionId===req.defaultOnExpiry && ['deny','deny_always','cancel'].includes(o.grants))) throw new Error('invalid permission expiry option');
-    const addressee = route.to === 'operator' ? dir.operatorPeerId() : job.requester;
+    const operator = dir.operatorPeerId();
+    const addressee = route.to === 'operator' ? operator : job.requester;
     if (!addressee) return Promise.resolve({optionId:req.defaultOnExpiry,decidedBy:'expired'});
-    const requestKey = `request.${job.jobId}.${hash(req.requestId)}`;
+    // Bind the complete, unredacted operation and actual routing authority.
+    // Legacy request-id-only cache entries carry no such proof and are ignored.
+    const identity = createHash('sha256').update(JSON.stringify({ requestId:req.requestId,permission:canonical,route,
+      authority:{addressee,operator,relayFrom:job.input.relay_from ?? []},options:req.options,defaultOnExpiry:req.defaultOnExpiry })).digest('hex');
+    const requestKey = `request.v2.${job.jobId}.${identity}`;
     const priorId = kv.get(requestKey), prior = priorId ? ledger.approval(priorId) : undefined;
     if (prior) {
       let row = prior;
