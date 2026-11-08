@@ -1,0 +1,17 @@
+{
+  "pass": true,
+  "job": "job_01M6WJQDT6RSE6XE6BKY165T1Q",
+  "thread": "thr_01M6WJQDT6RSE6XE6BKTZBEE6J",
+  "backend": "codex-app-server",
+  "codex_thread": "01a1b92b-b789-77e1-9493-0817b472388e",
+  "workspace": "/home/xertrov/.local/share/vecnet-launcher/workspaces/job_01M6WJQDT6RSE6XE6BKY165T1Q",
+  "workspace_mode": "worktree",
+  "branch": "launch/job_01M6WJQDT6RSE6XE6BKY165T1Q",
+  "statuses": [
+    "accepted",
+    "running"
+  ],
+  "service_restart": true,
+  "first": "msg_01M6WJQHX7N3BM4GHDBKFV75HY",
+  "followup": "msg_01M6WJQN6NE7W27HNP2A2D0F71"
+}

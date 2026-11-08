@@ -1,0 +1,32 @@
+{
+  "pass": true,
+  "hub": "https://vecnet.xk.io",
+  "launcher": "peer_01M6WG7VWA3M2CYPWPN49TNZTQ",
+  "idempotency_key": "native-live-6a77a18db155482da644a0c9542f8327",
+  "job": "job_01M6WK8MJMJN0MAMAE9RFRGSQB",
+  "thread": "thr_01M6WK8MJMJN0MAMAE9R3215K2",
+  "session_ref": {
+    "backend": "codex-app-server",
+    "host": "x-boss",
+    "id": "01a1b934-53f4-7701-a4d7-ef118f4b4539",
+    "extra": {
+      "tag": "vl-job_01M6WK8MJMJN0MAMAE9RFRGSQB",
+      "branch": "launch/job_01M6WK8MJMJN0MAMAE9RFRGSQB",
+      "workspace": "/home/xertrov/.local/share/vecnet-launcher/workspaces/job_01M6WK8MJMJN0MAMAE9RFRGSQB",
+      "link": "codex://threads/01a1b934-53f4-7701-a4d7-ef118f4b4539",
+      "codex_home": "/home/xertrov/.codex",
+      "permission_mode": "read-only",
+      "workspace_mode": "worktree",
+      "model": "ocx/gpt-6.1-sol",
+      "model_provider": "opencodex",
+      "effort": "high"
+    }
+  },
+  "first": "msg_01M6WK8R1B09D8EAVDZE5BZMH2",
+  "followup": "msg_01M6WK8TZRN53X6QHD98TE35YX",
+  "statuses": [
+    "accepted",
+    "running"
+  ],
+  "cancelled": true
+}

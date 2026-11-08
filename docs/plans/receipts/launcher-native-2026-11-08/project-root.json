@@ -1,0 +1,17 @@
+{
+  "pass": true,
+  "job": "job_01M6WJQQ3H2M428PNHYBYBMTKE",
+  "thread": "thr_01M6WJQQ3H2M428PNHY9JS23ZQ",
+  "backend": "codex-app-server",
+  "codex_thread": "01a1b92b-dcc4-7b41-8b1e-2280016b6fc6",
+  "workspace": "/tmp/vecnet-native-launcher-6RL1EB/repo",
+  "workspace_mode": "project-root",
+  "branch": "master",
+  "statuses": [
+    "accepted",
+    "running"
+  ],
+  "service_restart": true,
+  "first": "msg_01M6WJQV76XG2M3PEWHFWGRSR6",
+  "followup": "msg_01M6WJQYER9V571SR48N7EKE8J"
+}
