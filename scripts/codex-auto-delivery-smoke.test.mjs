@@ -400,7 +400,13 @@ else if(!args.includes('hook'))process.stdout.write('{}');
   f.ports.tuiClosed = async () => true; // Fake TUI shares the test PID; this attests no native TUI drain.
   if (options.startup) delete f.ports.tuiClosed; // New startup cases require actual fixture process retirement.
   f.ports.rpc = { async call(method, params) {
-    const s = JSON.parse(readFileSync(flow)), own = Object.values(s.sessions).find(v => v.id === params.threadId);
+    const s = JSON.parse(readFileSync(flow));
+    if (method === 'configRequirements/read') {
+      assert.deepEqual(params, {}, 'requirements query does not need or discover a thread');
+      if (s.startup) { s.events.push({ kind: 'rpc', method }); writeFileSync(flow, JSON.stringify(s)); }
+      return { requirements: null, supportsIndependentSpeedModes: true };
+    }
+    const own = Object.values(s.sessions).find(v => v.id === params.threadId);
     assert.ok(own, 'only owned UUIDs may be observed');
     if (s.startup) {
       assert.ok(own.seeded && own.statusExposed, 'RPC cannot discover or observe a pre-seed/pre-status UUID');
@@ -933,7 +939,7 @@ for (const screen of ['', 'Permissions ReadOnly(never)']) test(`startup lazy UUI
     assert.equal(j.threads[name].cwd, join(f.m.runRoot, 'ws-' + name));
   }
   for (const e of s.events.filter(e => e.kind === 'tmux' && e.args.includes('new-session'))) assertNativeLaunchPolicy(f.m, [f.m.tools.tmux, ...e.args], f.ports.runtime);
-  assert.ok(s.events.filter(e => e.kind === 'rpc').every(e => ['thread/read', 'thread/turns/list', 'turn/start'].includes(e.method)));
+  assert.ok(s.events.filter(e => e.kind === 'rpc').every(e => ['configRequirements/read', 'thread/read', 'thread/turns/list', 'turn/start'].includes(e.method)));
   assert.equal(j.completed.includes('evidence_complete'), false); assert.deepEqual(j.owners, {});
   assert.equal((await f.harness().cleanup()).count, 5); await restoredStartup(f);
 });
@@ -992,7 +998,7 @@ for (const question of ['Do you trust this directory?', 'Sign in to continue', '
   'Would you like to run the following command?', 'Would you like to apply the following changes?', 'Permission required: allow access?']) test('startup refuses actual setup interaction: ' + question, async t => {
   const f = await startupFixture(t, { screen: 'Permissions ReadOnly(never)\n' + question });
   await assert.rejects(f.harness().run(), { code: 'tui_setup_refused' });
-  assert.deepEqual(inputEvents(f), []); assert.equal(startupState(f).events.some(e => e.kind === 'rpc'), false);
+  assert.deepEqual(inputEvents(f), []); assert.equal(startupState(f).events.some(e => e.kind === 'rpc' && e.method !== 'configRequirements/read'), false);
   assert.equal((await f.harness().cleanup()).count, 5); await restoredStartup(f);
 });
 async function interruptedStartup(t, session = 'a') {
@@ -1528,47 +1534,75 @@ test('NAP actor permission is explicit, fixed and cannot contain caller-supplied
 });
 function assertNativeLaunchPolicy(m, launch, runtime = planHarness(m).paths.runtime) {
   assert.equal(launch.filter(value => value === m.tools.codex).length, 1);
-  const argv = launch.slice(launch.indexOf(m.tools.codex) + 1);
-  const selected = argv.find(value => value.startsWith('default_permissions='));
-  assert.equal(typeof selected, 'string', 'root CLI uses default_permissions, never sandbox-only -P');
-  const profile = JSON.parse(selected.slice('default_permissions='.length));
-  assert.match(profile, /^[a-z][a-z0-9_-]+$/);
-  const base = 'permissions.' + profile;
+  const session = launch[launch.indexOf('-s') + 1];
+  assert.ok(['a', 'b'].includes(session));
   const receivers = m.peers.filter(p => p.role === 'receiver');
   const expected = [...new Set([...receivers.flatMap(p => [join(dirname(p.config), 'codex'), join(dirname(p.config), 'state')]),
     runtime, join(m.approval.home, '.local/share/vecnet/codex-delivery'), join(m.approval.home, '.local/share/vecnet/codex-notices')])].sort();
-  const filesystem = '{' + expected.map(root => JSON.stringify(root) + '="write"').join(',') + '}';
-  const canonical = ['-a', 'never', '--disable', 'code_mode_host', '--disable', 'code_mode',
-    '-c', 'default_permissions=' + JSON.stringify(profile), '-c', base + '.extends=":read-only"', '-c', base + '.network.enabled=true',
-    '-c', base + '.filesystem=' + filesystem];
-  assert.deepEqual(argv, canonical, 'consume the ENTIRE canonical argv: no aliases, unparsed grants, duplicate options or duplicate keys');
+  const canonical = [m.tools.tmux, '-S', join(m.runRoot, 'tmux.sock'), 'new-session', '-d', '-s', session, '-c', join(m.runRoot, 'ws-' + session),
+    m.tools.codex, '-a', 'never', '--disable', 'code_mode_host', '--disable', 'code_mode',
+    '-c', 'sandbox_mode="workspace-write"', '-c', 'sandbox_workspace_write.writable_roots=' + JSON.stringify(expected),
+    '-c', 'sandbox_workspace_write.network_access=true', '-c', 'sandbox_workspace_write.exclude_tmpdir_env_var=true',
+    '-c', 'sandbox_workspace_write.exclude_slash_tmp=true'];
+  assert.deepEqual(launch, canonical, 'consume the ENTIRE canonical argv and own cwd: no aliases, extra roots, duplicate options or keys');
 }
 test('NAP launch oracle rejects extra aliases, duplicate options and broad grants in identical vectors', t => {
   const f = fixture(t), launch = planHarness(f.m).operations.tuis[0];
   assertNativeLaunchPolicy(f.m, launch);
-  const profile = JSON.parse(launch.find(value => value.startsWith('default_permissions=')).slice('default_permissions='.length));
-  const broad = 'permissions.' + profile + '.filesystem."/"="write"';
-  const existing = launch[launch.indexOf('-c', launch.indexOf(f.m.tools.codex)) + 1];
+  const broad = 'sandbox_workspace_write.writable_roots=["/"]';
+  const roots = launch.find(value => value.startsWith('sandbox_workspace_write.writable_roots='));
+  const exact = JSON.parse(roots.slice(roots.indexOf('=') + 1));
+  const forbidden = [f.m.approval.home, f.m.approval.codexHome, f.m.runRoot, join(f.m.runRoot, 'ws-b'),
+    f.m.peers[0].config, f.m.peers[0].config + '.lock', dirname(f.m.operators.fly.credentialFile),
+    f.m.generations.a.assetSource, f.m.generations.a.root];
   for (const extra of [['--config', broad], ['--config=' + broad], ['-c', broad],
-    ['--config', 'permissions.' + profile + '.filesystem.' + JSON.stringify(f.m.approval.home) + '="write"'],
-    ['--config', 'permissions.' + profile + '.filesystem.' + JSON.stringify(f.m.runRoot) + '="write"'],
-    ['-c', 'permissions.' + profile + '.filesystem.' + JSON.stringify(f.m.peers[0].config + '.lock') + '="write"'],
-    ['-c', 'permissions.' + profile + '.filesystem.' + JSON.stringify(f.m.peers[0].config) + '="write"'],
-    ['-c', 'permissions.' + profile + '.filesystem.' + JSON.stringify(dirname(f.m.operators.fly.credentialFile)) + '="write"'],
-    ['-c', existing], ['-P', profile], ['-a', 'always'], ['--sandbox', 'danger-full-access'], ['--add-dir', f.m.runRoot]]) {
+    ...forbidden.map(root => ['-c', 'sandbox_workspace_write.writable_roots=' + JSON.stringify([...exact, root])]),
+    ['-c', roots], ['-c', 'sandbox_mode="workspace-write"'], ['-P', 'ambient'], ['--profile', 'ambient'],
+    ['-c', 'default_permissions="ambient"'], ['-c', 'permissions.ambient.filesystem={"/"="write"}'],
+    ['-a', 'always'], ['--sandbox', 'danger-full-access'], ['--add-dir', f.m.runRoot],
+    ['-c', 'sandbox_workspace_write.network_access=false'], ['-c', 'sandbox_workspace_write.exclude_tmpdir_env_var=false'],
+    ['-c', 'sandbox_workspace_write.exclude_slash_tmp=false']]) {
     const planned = [...launch, ...extra], dispatched = [...planned];
     assert.deepEqual(planned, dispatched);
     assert.throws(() => assertNativeLaunchPolicy(f.m, planned));
     assert.throws(() => assertNativeLaunchPolicy(f.m, dispatched));
   }
+  for (const root of forbidden) {
+    const widened = launch.map(value => value === roots ? 'sandbox_workspace_write.writable_roots=' + JSON.stringify([...exact, root]) : value);
+    assert.throws(() => assertNativeLaunchPolicy(f.m, widened), 'reject a widened replacement array, not only appended options');
+  }
+  for (const setting of ['sandbox_mode="workspace-write"', roots, 'sandbox_workspace_write.network_access=true',
+    'sandbox_workspace_write.exclude_tmpdir_env_var=true', 'sandbox_workspace_write.exclude_slash_tmp=true']) {
+    const at = launch.indexOf(setting), omitted = [...launch]; omitted.splice(at - 1, 2);
+    assert.throws(() => assertNativeLaunchPolicy(f.m, omitted), 'each explicit workspace setting is required');
+  }
 });
-test('NAP dry-run declares invocation-only exact write scopes and never approvals', t => {
+test('NAP dry-run declares derived directory roots plus only its own empty cwd and never approvals', t => {
   const f = fixture(t), before = snapshot(f.root), plan = planHarness(f.m);
-  for (const launch of plan.operations.tuis) assertNativeLaunchPolicy(f.m, launch);
+  for (const [i, launch] of plan.operations.tuis.entries()) {
+    assertNativeLaunchPolicy(f.m, launch);
+    const session = i ? 'b' : 'a', cwd = join(f.m.runRoot, 'ws-' + session);
+    const roots = JSON.parse(launch.find(value => value.startsWith('sandbox_workspace_write.writable_roots=')).split('=')[1]);
+    assert.deepEqual(plan.operations.tuiScopes[i], { session, cwd, writableRoots: roots, implicitWritableRoots: [cwd] });
+    assert.equal(roots.some(root => [f.m.runRoot, f.m.approval.home, f.m.approval.codexHome, cwd, join(f.m.runRoot, 'ws-' + (i ? 'a' : 'b'))].includes(root)), false);
+    assert.equal(existsSync(cwd), false, 'dry-run discloses a future owned empty workspace without creating it');
+  }
   assert.deepEqual(snapshot(f.root), before, 'planning cannot rewrite configuration or create permission roots');
 });
 test('NAP dispatched owned TUI argv equals the reviewed plan', async t => {
   const f = await startupFixture(t, { eager: true, stopAtControl: 'b', staleSocket: true });
+  const run = f.ports.run, prepared = [];
+  f.ports.run = async (command, args, options) => {
+    if (command === f.m.tools.tmux && args.includes('new-session')) {
+      const session = args[args.indexOf('-s') + 1], cwd = join(f.m.runRoot, 'ws-' + session), stat = lstatSync(cwd);
+      assert.deepEqual(readdirSync(cwd), [], 'the implicit workspace is empty BEFORE native launch');
+      assert.equal(stat.mode & 0o7777, 0o700); assert.equal(stat.uid, process.geteuid());
+      const journal = startupJournal(f); assert.equal(journal.threadIntent.cwd, cwd);
+      assert.ok(journal.dirs.some(row => row.path === cwd && row.dev === stat.dev && row.ino === stat.ino));
+      prepared.push(session);
+    }
+    return run(command, args, options);
+  };
   await assert.rejects(f.harness().run(), { code: 'fixture_startup_stop' });
   const launches = startupState(f).events.filter(e => e.kind === 'tmux' && e.args.includes('new-session')).map(e => e.args);
   const planned = planHarness(f.m), runtime = planned.paths.runtime;
@@ -1578,6 +1612,7 @@ test('NAP dispatched owned TUI argv equals the reviewed plan', async t => {
     const expected = planned.operations.tuis[i].slice(1).map(value => value.replaceAll(runtime, f.ports.runtime));
     assert.deepEqual(launch, expected); assertNativeLaunchPolicy(f.m, [f.m.tools.tmux, ...launch], f.ports.runtime);
   }
+  assert.deepEqual(prepared, ['a', 'b']);
 });
 for (const fault of ['missing event', 'wrong command', 'wrong cwd', 'exit3', 'duplicate event', 'wrong turn']) test('NAP native capability ' + fault + ' stops before effectful actor and allows ordinary owned cleanup', async t => {
   const f = await startupFixture(t, { eager: true, stopAtControl: false, staleSocket: true, actorOutcome: 'no-execution' }), run = f.ports.run;
@@ -1677,4 +1712,121 @@ test('NAP required permission directories are precreated, journal-owned and remo
   }
   assert.equal((await f.harness().cleanup()).code, 'cleaned'); await restoredStartup(f);
   for (const root of roots.filter(root => !root.endsWith('/codex'))) assert.equal(existsSync(root), false, 'unused journal-owned directory must be rolled back');
+});
+
+// R-C67a managed-requirements TESTS ONLY: the constructor above is implemented,
+// but the production requirements query/refusal/recheck is deliberately absent.
+// This finite fake uses the same RPC object for requirements and owned history.
+function observeRequirementsBoundary(f, { response, stopLaunch = false, stopEffect = false } = {}) {
+  const trace = [], requests = [], launches = [], effects = [], base = f.ports.rpc, run = f.ports.run;
+  const rpc = { async call(method, params, ...rest) {
+    const row = { kind: 'rpc', method, params: structuredClone(params), connection: this, journal: startupJournal(f) };
+    trace.push(row);
+    if (method === 'configRequirements/read') {
+      requests.push(row);
+      const fallback = await base.call(method, params, ...rest);
+      row.result = response ? await response(row, requests.length, fallback) : fallback;
+      return row.result;
+    }
+    return base.call(method, params, ...rest);
+  } };
+  f.ports.rpc = rpc;
+  f.ports.run = async (command, args, settings) => {
+    if (command === f.m.tools.tmux && args.includes('new-session')) {
+      const row = { kind: 'launch', session: args[args.indexOf('-s') + 1], journal: startupJournal(f) };
+      launches.push(row); trace.push(row);
+      if (stopLaunch) throw Object.assign(Error('fixture_requirements_launch_reached'), { code: 'fixture_requirements_launch_reached', drained: true });
+    }
+    if (command === f.m.tools.tmux && args.includes('send-keys') && args.includes('-l') && args.at(-1).startsWith('Run exactly')) {
+      const requestedScript = args.at(-1).split('approvals: ')[1]?.split('\n')[0];
+      if (!requestedScript.startsWith('printf ')) {
+        const row = { kind: 'effect', session: args[args.indexOf('-t') + 1], requestedScript, journal: startupJournal(f) };
+        effects.push(row); trace.push(row);
+        if (stopEffect) throw Object.assign(Error('fixture_requirements_effect_reached'), { code: 'fixture_requirements_effect_reached', drained: true });
+      }
+    }
+    return run(command, args, settings);
+  };
+  return { rpc, trace, requests, launches, effects };
+}
+function assertNoPolicyActorEffects(f, before) {
+  const journal = startupJournal(f);
+  assert.equal(journal.actorIntent, undefined); assert.equal(journal.sourceIntent, undefined);
+  assert.deepEqual(journal.inputs, before.inputs); assert.deepEqual(journal.owners, {});
+  assert.deepEqual(journal.inputs.sources, []); assert.ok(Object.values(journal.inputs.bindings).every(value => value === null));
+  assert.deepEqual(JSON.parse(readFileSync(f.peers)), {}); assert.deepEqual(JSON.parse(readFileSync(f.trace)), []);
+  assert.equal(existsSync(planHarness(f.m).paths.registry), false); assert.equal(existsSync(actorOpenPath(f)), false);
+  for (const root of new Set(f.m.peers.filter(p => p.role === 'receiver').map(p => join(dirname(p.config), 'codex')))) {
+    assert.equal(existsSync(join(root, 'bindings.json')), false);
+  }
+  assert.equal(journal.completed.some(step => step.startsWith('actor-') || step.startsWith('wake-') || step === 'evidence_complete'), false);
+}
+for (const [name, response] of [
+  ['undefined response', () => undefined],
+  ['null response', () => null],
+  ['string response', () => 'unknown'],
+  ['array response', () => []],
+  ['missing requirements field', () => ({ supportsIndependentSpeedModes: true })],
+  ['undefined requirements field', () => ({ requirements: undefined })],
+  ['non-null empty requirements', () => ({ requirements: {} })],
+  ['boolean requirements', () => ({ requirements: false })],
+  ['array requirements', () => ({ requirements: [] })],
+  ['forced named profile', () => ({ requirements: { allowedPermissionProfiles: ['ambient'] } })],
+  ['approval constraint', () => ({ requirements: { allowedApprovalPolicies: ['on-request'] } })],
+  ['sandbox constraint', () => ({ requirements: { allowedSandboxModes: ['danger-full-access'] } })],
+  ['RPC error', () => { throw Object.assign(Error('fixture_requirements_rpc_error'), { code: 'ECONNRESET' }); }],
+  ['unsupported method', () => { throw Object.assign(Error('Method not found'), { code: -32601 }); }],
+]) test('NAP requirements admission refuses ' + name + ' before any owned launch or actor effect', async t => {
+  const f = await startupFixture(t, { eager: true, stopAtControl: false, staleSocket: true }), before = startupJournal(f);
+  const probe = observeRequirementsBoundary(f, { response, stopLaunch: true, stopEffect: true });
+  const outcome = await f.harness().run().then(value => ({ value }), error => ({ error }));
+  assert.ok(['native_policy_unproved', 'fixture_requirements_launch_reached'].includes(outcome.error?.code), 'unexpected setup/fake failure: ' + outcome.error?.code);
+  assert.equal(probe.launches.length, 0, 'requirements refusal must occur before the reached new-session trap');
+  assert.equal(probe.requests.length, 1, 'the same owned RPC must actually be queried before refusing');
+  assert.deepEqual(probe.requests[0].params, {}); assert.equal(probe.requests[0].connection, probe.rpc);
+  assert.equal(outcome.error.code, 'native_policy_unproved'); assert.equal(probe.effects.length, 0);
+  assert.deepEqual(startupState(f).sessions, {}); assert.deepEqual(startupJournal(f).threads, {});
+  assert.equal(startupJournal(f).threadIntent, undefined); assert.equal(startupJournal(f).tmux, undefined);
+  assert.equal(probe.trace.some(row => row.kind === 'rpc' && row.method !== 'configRequirements/read'), false, 'requirements admission never discovers a thread');
+  assertNoPolicyActorEffects(f, before);
+  assert.equal((await f.harness().cleanup()).code, 'cleaned'); await restoredStartup(f);
+});
+test('NAP requirements null with additive metadata is freshly queried on the owned RPC before each launch and actor command', async t => {
+  const f = await startupFixture(t, { eager: true, stopAtControl: false, staleSocket: true });
+  const immutableNull = Object.freeze({ requirements: null, supportsIndependentSpeedModes: true });
+  const probe = observeRequirementsBoundary(f, { response: () => immutableNull });
+  assert.equal((await f.harness().run()).code, 'evidence_complete');
+  assert.deepEqual(probe.launches.map(row => row.session), ['a', 'b']);
+  assert.ok(probe.effects.length >= 3, 'positive fixture reaches multiple real fake actor submissions, not only a canary');
+  const reads = probe.trace.filter(row => row.kind === 'rpc' && ['thread/read', 'thread/turns/list'].includes(row.method));
+  assert.ok(reads.length > 0); assert.ok(reads.every(row => row.connection === probe.rpc));
+  let previousBoundary = -1;
+  for (const [at, row] of probe.trace.entries()) if (row.kind === 'launch' || row.kind === 'effect') {
+    const fresh = probe.trace.slice(previousBoundary + 1, at).filter(row => row.kind === 'rpc' && row.method === 'configRequirements/read');
+    assert.ok(fresh.length > 0, 'fresh requirements query must precede ' + row.kind + ' ' + row.session);
+    for (const query of fresh) {
+      assert.equal(query.connection, probe.rpc, 'policy admission and owned history use the exact same connection');
+      assert.deepEqual(query.params, {}); assert.equal(query.result, immutableNull);
+    }
+    previousBoundary = at;
+  }
+  assert.equal((await f.harness().cleanup()).code, 'cleaned'); await restoredStartup(f);
+});
+test('NAP requirements changing after both canaries refuses before actor intent and cannot reuse earlier immutable null', async t => {
+  const f = await startupFixture(t, { eager: true, stopAtControl: false, staleSocket: true }), before = startupJournal(f);
+  const immutableNull = Object.freeze({ requirements: null, supportsIndependentSpeedModes: true });
+  const changed = Object.freeze({ requirements: Object.freeze({ allowedPermissionProfiles: ['ambient'] }) });
+  const bothCanaries = journal => ['a', 'b'].every(session => journal.nativeCapabilities?.[session]?.proof?.kind === 'owned-tui-command');
+  const probe = observeRequirementsBoundary(f, { stopEffect: true,
+    response: row => bothCanaries(row.journal) ? changed : immutableNull });
+  const outcome = await f.harness().run().then(value => ({ value }), error => ({ error }));
+  assert.ok(['native_policy_unproved', 'fixture_requirements_effect_reached'].includes(outcome.error?.code), 'unexpected setup/fake failure: ' + outcome.error?.code);
+  assert.deepEqual(probe.launches.map(row => row.session), ['a', 'b']);
+  assert.equal(bothCanaries(startupJournal(f)), true, 'valid native probes were both completed before the managed-state change');
+  assert.equal(probe.effects.length, 0, 'a successful canary and old null response cannot authorize the reached actor submission trap');
+  const earlier = probe.requests.filter(row => row.result === immutableNull), later = probe.requests.filter(row => row.result === changed);
+  assert.ok(earlier.length >= 2, 'separate null queries admitted both launches'); assert.ok(later.length >= 1, 'state was freshly read after both probes');
+  assert.equal(immutableNull.requirements, null, 'the prior metadata remains unchanged; only a fresh query can observe drift');
+  assert.equal(outcome.error.code, 'native_policy_unproved'); assertNoPolicyActorEffects(f, before);
+  assert.equal((await f.harness().cleanup()).code, 'cleaned'); await restoredStartup(f);
 });

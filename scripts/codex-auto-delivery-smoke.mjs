@@ -77,9 +77,14 @@ function nativeWriteDirectories(m, runtime = `/run/user/${m.approval.uid}/vecnet
     runtime, join(m.approval.home, '.local/share/vecnet/codex-delivery'), join(m.approval.home, '.local/share/vecnet/codex-notices')])].sort();
 }
 function nativeTuiLaunch(m, session, runtime) {
-  // Controller HOLD: root Codex0.167 rejects -P, and the default_permissions
-  // candidate merges ambient rules. No supported isolated launch is approved.
-  fail('native_policy_unproved');
+  const cwd = join(m.runRoot, 'ws-' + session);
+  return [m.tools.tmux, '-S', join(m.runRoot, 'tmux.sock'), 'new-session', '-d', '-s', session, '-c', cwd,
+    m.tools.codex, '-a', 'never', '--disable', 'code_mode_host', '--disable', 'code_mode',
+    '-c', 'sandbox_mode="workspace-write"',
+    '-c', 'sandbox_workspace_write.writable_roots=' + JSON.stringify(nativeWriteDirectories(m, runtime)),
+    '-c', 'sandbox_workspace_write.network_access=true',
+    '-c', 'sandbox_workspace_write.exclude_tmpdir_env_var=true',
+    '-c', 'sandbox_workspace_write.exclude_slash_tmp=true'];
 }
 export function planHarness(input, manifestPath = join(input.runRoot, 'manifest.json')) {
   const m = validateManifest(input, manifestPath), home = m.approval.home, share = join(home, '.local/share/vecnet-launcher');
@@ -99,6 +104,8 @@ export function planHarness(input, manifestPath = join(input.runRoot, 'manifest.
       assets: Object.values(m.generations).map(g => ({ source: g.assetSource, destination: g.root, treeHash: g.treeHash })),
       managerReload: [m.tools.systemctl, '--user', 'daemon-reload'], managerStop: [m.tools.systemctl, '--user', 'stop', ...Object.values(hubs).map(h => `vecnet-delivery@${h.slug}.service`)],
       tuis: ['a', 'b'].map(session => nativeTuiLaunch(m, session, paths.runtime)),
+      tuiScopes: ['a', 'b'].map(session => ({ session, cwd: join(m.runRoot, 'ws-' + session),
+        writableRoots: nativeWriteDirectories(m, paths.runtime), implicitWritableRoots: [join(m.runRoot, 'ws-' + session)] })),
       actorCommands: m.peers.filter(p => p.role === 'receiver').map(p => ({ session: p.session, argv: [m.generations.a.binary, '--net', p.profile, '--json', 'peers'], config: p.config, threadIdentity: 'inherited-from-own-tui' })),
       peerDisables: m.peers.map(p => ({ hub: hubs[p.hub].url, argv: [m.generations.b.binary, '--net', m.operators[p.hub].profile, 'peer', 'disable', p.peerId], config: m.operators[p.hub].config,
         verification: { url: hubs[p.hub].url + '/v1/admin/peers', exactPeerId: p.peerId, credentialFile: m.operators[p.hub].credentialFile } })) },
