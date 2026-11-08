@@ -2,18 +2,18 @@ package mcpserver
 
 // Discovery wording is separate from the HTTP schema and call validators.
 var toolDescriptions = map[string]string{
-	"vecnet_send":               "Send to recipients (new thread) or thread_id. Prefer vecnet_reply for answers. Require priority. Use wake_idle for grokbot. See vecnet_guide topic replying.",
-	"vecnet_reply":              "Reply in-thread to inbox data.message.message_id. Require priority. Use wake_idle for grokbot. New thread: vecnet_send. See vecnet_guide topic replying.",
+	"vecnet_send":               "Send using recipients or thread_id; answers use vecnet_reply. Require priority; grokbot uses wake_idle. See vecnet_guide topic replying.",
+	"vecnet_reply":              "Reply to inbox message_id in-thread. Priority required; grokbot uses wake_idle. New threads: vecnet_send. See vecnet_guide topic replying.",
 	"vecnet_react":              "Add or remove a reaction. For text use vecnet_reply. Defaults and wake limits: vecnet_guide topic replying.",
-	"vecnet_inbox":              "Read events from ack or owner retention floor. Handle page, then vecnet_ack(next_cursor). See vecnet_guide topic events.",
+	"vecnet_inbox":              "Read from ack/retention floor; handle page, then vecnet_ack(next_cursor). See vecnet_guide topic events.",
 	"vecnet_subscriptions":      "Check MCP Events subscriptions and their push health. Use vecnet_inbox while the list is empty. This tool cannot subscribe (see vecnet_guide topic events).",
 	"vecnet_ack":                "Ack handled events through next_cursor. Report each delivery with vecnet_receipt. See vecnet_guide topic events.",
 	"vecnet_receipt":            "Report processed or failed for one delivery_id. Ack handled pages with vecnet_ack. See vecnet_guide topic events.",
 	"vecnet_presence":           "Report your presence. Use vecnet_presence_subscribe to choose which presence updates you receive. See vecnet_guide topic events.",
 	"vecnet_presence_subscribe": "Choose whose presence updates you receive. Read them with vecnet_inbox. See vecnet_guide topic events.",
 	"vecnet_threads":            "List threads by newest activity. Read with vecnet_thread. See vecnet_guide topic replying.",
-	"vecnet_thread":             "Read retained messages oldest first; expired IDs still page. Find via vecnet_threads. See vecnet_guide topic replying.",
-	"vecnet_peers":              "List peers and recipient IDs. Names are not addresses. See vecnet_guide topic start.",
+	"vecnet_thread":             "Read retained history oldest first; expired IDs still page. See vecnet_guide topic replying.",
+	"vecnet_peers":              "List peers and IDs; names are not addresses. See vecnet_guide topic start.",
 	"vecnet_peer_create":        "Create a peer as a principal. Use vecnet_peer_set_disabled to disable it later. No credential is issued (see vecnet_guide topic start).",
 	"vecnet_peer_set_disabled":  "Disable or enable a peer you own as a principal. Use vecnet_peer_create to create one. See vecnet_guide topic start.",
 	"vecnet_peer_lifecycle":     "Change peer state as the operator. Archive revokes credentials and pending invites. Unarchive leaves the peer disabled and needing a new invite.",
@@ -101,7 +101,7 @@ var propertyDescriptions = map[string]string{
 
 var toolPropertyDescriptions = map[string]map[string]string{
 	"vecnet_ack":            {"cursor": "Event cursor: next_cursor from the inbox page you have fully handled."},
-	"vecnet_inbox":          {"after": "Event cursor e<epoch>.<seq>. head skips existing backlog. Omit for last ack."},
+	"vecnet_inbox":          {"after": "Event cursor e<epoch>.<seq>. head skips backlog; omit for last ack.", "include_sender_chain": "Include loop ancestry."},
 	"vecnet_thread":         {"id": "Thread ID.", "after": "Message ID: next_after; locators also accept expired anchors."},
 	"vecnet_threads":        {"cursor": "Opaque cursor: next from the previous page."},
 	"vecnet_react":          {"priority": "Optional. The default depends on the emoji. wake costs the recipient a run."},
