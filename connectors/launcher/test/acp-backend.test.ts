@@ -2,7 +2,7 @@ import test from 'node:test';
 import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, rm, realpath, symlink, writeFile, readdir, lstat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import fsPromises from 'node:fs/promises';
 import { syncBuiltinESMExports } from 'node:module';
@@ -361,4 +361,57 @@ test('fix2 registers unique-child cleanup before a later awaited fixture initial
       assert.deepEqual(await readdir(join(sandbox, 'vecnet-launcher', 'acp-tests')), []);
     });
   } finally { mock.mock.restore(); }
+});
+
+
+for (const source of ['xdg', 'home', 'override'] as const) {
+  test(`fix3 symlink/.. preserves the independently known fixture parent (${source})`, async t => {
+    const sandbox = await rootSandbox(t), target = `${sandbox}/persistent-target`, link = `${sandbox}/cache-link`;
+    await mkdir(`${target}/inner`, { recursive: true });
+    await symlink(`${target}/inner`, link);
+    // Keep the literal parent traversal: joining this spelling would erase the regression.
+    const selected = `${link}/../cache`;
+    const expected = source === 'home'
+      ? `${target}/cache/.cache/vecnet-launcher/acp-tests`
+      : `${target}/cache/vecnet-launcher/acp-tests`;
+    await withRootEnv(t, sandbox, false, async () => {
+      if (source === 'home') {
+        delete process.env.XDG_CACHE_HOME;
+        process.env.HOME = selected;
+      } else {
+        process.env.XDG_CACHE_HOME = selected;
+        if (source === 'override') process.env.ACP_TEST_ROOT = `${selected}/vecnet-launcher/acp-tests`;
+      }
+      const dir = await acpTestDir(t, 'acp-fix3-');
+      assert.equal(dirname(dir), expected, 'allocation must use the real symlink target followed by the literal parent traversal');
+      assert.equal(dir, await realpath(dir), 'allocated child must retain its canonical spelling');
+    });
+  });
+}
+
+test('fix3 default symlink-to-/tmp/../tmp root is refused with zero attempted mkdir', async t => {
+  const sandbox = await rootSandbox(t), link = `${sandbox}/cache-link`;
+  await symlink('/tmp', link);
+  const unique = 'acp-fix3-never-create-' + sandbox.split('/').at(-1);
+  const selected = `${link}/../tmp/${unique}`;
+  const attempted: string[] = [];
+  // Intercept EVERY mkdir after sandbox setup, including a wrongly normalized
+  // persistent destination, so an authorized RED cannot write to /tmp at all.
+  const mock = t.mock.method(fsPromises, 'mkdir', async (...args: Parameters<typeof fsPromises.mkdir>) => {
+    attempted.push(String(args[0]));
+    throw new Error('synthetic mkdir intercept: fixture ancestry was not refused before mkdir');
+  });
+  syncBuiltinESMExports();
+  try {
+    await withRootEnv(t, sandbox, false, async () => {
+      process.env.XDG_CACHE_HOME = selected;
+      let refusal: unknown;
+      try { await acpTestDir(t, 'acp-fix3-'); }
+      catch (error) { refusal = error; }
+      assert.deepEqual(attempted, [], 'canonical /tmp ancestry must be refused before any mkdir attempt');
+      assert.ok(refusal instanceof Error, 'the canonical /tmp root must be refused');
+      assert.match(refusal.message, /ACP test root must be persistent and outside \/tmp/);
+      await assert.rejects(lstat(`/tmp/${unique}`), { code: 'ENOENT' });
+    });
+  } finally { mock.mock.restore(); syncBuiltinESMExports(); }
 });
