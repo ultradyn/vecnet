@@ -1547,7 +1547,7 @@ function assertNativeLaunchPolicy(m, launch, runtime = planHarness(m).paths.runt
   const receivers = m.peers.filter(p => p.role === 'receiver');
   const expected = [...new Set([...receivers.flatMap(p => [join(dirname(p.config), 'codex'), join(dirname(p.config), 'state')]),
     runtime, join(m.approval.home, '.local/share/vecnet/codex-delivery'), join(m.approval.home, '.local/share/vecnet/codex-notices')])].sort();
-  const canonical = [m.tools.tmux, '-S', join(m.runRoot, 'tmux.sock'), 'new-session', '-d', '-s', session, '-c', join(m.runRoot, 'ws-' + session),
+  const canonical = [m.tools.tmux, '-f', '/dev/null', '-S', join(m.runRoot, 'tmux.sock'), 'new-session', '-d', '-s', session, '-x', '220', '-y', '50', '-c', join(m.runRoot, 'ws-' + session),
     m.tools.codex, '-a', 'never', '--disable', 'code_mode_host', '--disable', 'code_mode',
     '-c', 'sandbox_mode="workspace-write"', '-c', 'sandbox_workspace_write.writable_roots=' + JSON.stringify(expected),
     '-c', 'sandbox_workspace_write.network_access=true', '-c', 'sandbox_workspace_write.exclude_tmpdir_env_var=true',
@@ -1583,6 +1583,12 @@ test('NAP launch oracle rejects extra aliases, duplicate options and broad grant
     'sandbox_workspace_write.exclude_tmpdir_env_var=true', 'sandbox_workspace_write.exclude_slash_tmp=true']) {
     const at = launch.indexOf(setting), omitted = [...launch]; omitted.splice(at - 1, 2);
     assert.throws(() => assertNativeLaunchPolicy(f.m, omitted), 'each explicit workspace setting is required');
+  }
+  for (const [option, replacement] of [['-f', join(f.m.approval.home, '.tmux.conf')], ['-x', '80'], ['-y', '24']]) {
+    const at = launch.indexOf(option), omitted = [...launch], changed = [...launch];
+    omitted.splice(at, 2); changed[at + 1] = replacement;
+    assert.throws(() => assertNativeLaunchPolicy(f.m, omitted), 'original tmux isolation and geometry cannot be omitted: ' + option);
+    assert.throws(() => assertNativeLaunchPolicy(f.m, changed), 'original tmux isolation and geometry cannot be replaced: ' + option);
   }
 });
 test('NAP dry-run declares derived directory roots plus only its own empty cwd and never approvals', t => {

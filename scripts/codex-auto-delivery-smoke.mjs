@@ -78,7 +78,7 @@ function nativeWriteDirectories(m, runtime = `/run/user/${m.approval.uid}/vecnet
 }
 function nativeTuiLaunch(m, session, runtime) {
   const cwd = join(m.runRoot, 'ws-' + session);
-  return [m.tools.tmux, '-S', join(m.runRoot, 'tmux.sock'), 'new-session', '-d', '-s', session, '-c', cwd,
+  return [m.tools.tmux, '-f', '/dev/null', '-S', join(m.runRoot, 'tmux.sock'), 'new-session', '-d', '-s', session, '-x', '220', '-y', '50', '-c', cwd,
     m.tools.codex, '-a', 'never', '--disable', 'code_mode_host', '--disable', 'code_mode',
     '-c', 'sandbox_mode="workspace-write"',
     '-c', 'sandbox_workspace_write.writable_roots=' + JSON.stringify(nativeWriteDirectories(m, runtime)),
