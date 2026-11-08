@@ -271,16 +271,21 @@ async function withLocks(paths, m, env, fn) {
   }
 }
 
-// The controller supplies this narrow canonical TOML form. Unsupported syntax
-// refuses instead of guessing a profile identity or logging credential bytes.
+// Accept the narrow controller form and the CLI encoder's optional [profiles]
+// container. Unsupported syntax refuses without guessing an identity or logging
+// credential bytes; assignments in the container itself are never profile data.
 function configProfiles(raw) {
-  const profiles = {}, metadata = {}; let section;
+  const profiles = {}, metadata = {}; let section, containerSeen = false;
   for (const input of raw.split('\n')) {
     const line = input.trim(); if (!line || line.startsWith('#')) continue;
+    if (line === '[profiles]') {
+      if (containerSeen || Object.keys(profiles).length) fail('ownership_changed');
+      containerSeen = true; continue;
+    }
     const table = /^\[profiles\.([A-Za-z0-9_-]+)\]$/.exec(line);
     if (table) { if (Object.hasOwn(profiles, table[1])) fail('ownership_changed'); section = profiles[table[1]] = {}; continue; }
     const pair = /^([a-z_]+)\s*=\s*(.*)$/.exec(line);
-    if (!pair) fail('ownership_changed');
+    if (!pair || (containerSeen && !section)) fail('ownership_changed');
     const target = section ?? metadata, allowed = section ? ['hub', 'secret', 'peer_id', 'hub_pubkey', 'allow_insecure_http'] : ['operator_profile', 'default'];
     if (!allowed.includes(pair[1]) || Object.hasOwn(target, pair[1])) fail('ownership_changed');
     try { target[pair[1]] = JSON.parse(pair[2]); } catch { fail('ownership_changed'); }
@@ -976,13 +981,13 @@ export function createHarness(raw, ports = {}) {
         const raw = readPrivate(a.config), rotation = JSON.parse(readPrivate(m.rotationFile));
         if (hash(raw) !== journal.inputs.configs[a.config].hash) fail('ownership_changed');
         keys(rotation, ['version', 'peerId', 'hub', 'secret']); if (rotation.version !== 1 || rotation.peerId !== a.peerId || rotation.hub !== hubs.fly.url || typeof rotation.secret !== 'string' || !/^vn_/.test(rotation.secret)) fail('rotation_refused');
-        const section = new RegExp(`(\\[profiles\\.${a.profile}\\][^]*?)(?=\\n\\[|$)`), found = section.exec(raw);
-        if (!found || (found[1].match(/^secret\s*=/gm) ?? []).length !== 1) fail('rotation_refused');
+        const section = new RegExp(`(\\[profiles\\.${a.profile}\\][^]*?)(?=\\n[\\t ]*\\[|$)`), found = section.exec(raw);
+        if (!found || (found[1].match(/^[\t ]*secret[\t ]*=/gm) ?? []).length !== 1) fail('rotation_refused');
         // Only disposable profile secret bytes change; original caller/hub remain pinned.
         const lock = a.config + '.lock'; if (!existsSync(lock)) { const fd = openSync(lock, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600); closeSync(fd); }
         await locked([lock], async () => {
           if (readPrivate(a.config) !== raw) fail('ownership_changed');
-          const updated = raw.replace(section, () => found[1].replace(/^secret\s*=.*$/m, () => 'secret = ' + JSON.stringify(rotation.secret)));
+          const updated = raw.replace(section, () => found[1].replace(/^([\t ]*)secret[\t ]*=.*$/m, (_, indent) => indent + 'secret = ' + JSON.stringify(rotation.secret)));
           atomic(a.config, updated);
         });
         const next = sourceSnapshot(), prior = journal.inputs;

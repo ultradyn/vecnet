@@ -396,6 +396,61 @@ test('fake TUI, CLI and separate manager processes rehearse the full sequence wi
   // Owner FD verification and diagnostics are explicitly fixture ports. No real native/managed/model proof follows.
 });
 
+// Match internal/cli/config.go saveConfig: BurntSushi/toml emits the map's
+// [profiles] container and indents both child tables and profile assignments.
+function goConfigFormat(raw) {
+  const start = raw.indexOf('[profiles.');
+  const metadata = raw.slice(0, start), tables = raw.slice(start).split(/(?=\[profiles\.)/);
+  return metadata + '[profiles]\n' + tables.map(table => table.trimEnd().split('\n')
+    .map((line, i) => (i ? '    ' : '  ') + line).join('\n') + '\n').join('\n');
+}
+test('Go config container supports first action, shared-profile rotation and fresh cleanup/rollback', async t => {
+  const f = await flowRehearsal(t);
+  const configs = [...new Set([...f.m.peers.map(p => p.config), ...Object.values(f.m.operators).map(p => p.config)])];
+  for (const config of configs) writeFileSync(config, goConfigFormat(readFileSync(config, 'utf8')));
+  const receiver = f.m.peers.find(p => p.hub === 'fly' && p.session === 'a');
+  const before = readFileSync(receiver.config, 'utf8');
+  assert.match(before, /^\[profiles\]\n  \[profiles\.a\]\n    hub =/);
+  assert.equal((await f.harness().install()).code, 'installed');
+  assert.equal((await f.harness().run()).code, 'evidence_complete');
+  const journal = JSON.parse(readFileSync(join(f.m.runRoot, 'journal.json')));
+  for (const step of ['initial-a', 'initial-b', 'initial-a-dev', 'upgrade-binary', 'upgrade-assets', 'rotation', 'opt-out', 'diagnostics'])
+    assert.ok(journal.completed.includes(step), step);
+  assert.ok(journal.proofs.some(p => p.kind === 'owned-tui-command'), 'first CLI action is proved through the fixture TUI');
+  const expected = before.replace('secret = "vn_fixture_old"', 'secret = "vn_fixture_rotated"');
+  assert.equal(readFileSync(receiver.config, 'utf8'), expected, 'rotation changes only the selected indented profile secret');
+  for (const config of configs.filter(c => c !== receiver.config)) assert.match(readFileSync(config, 'utf8'), /^\[profiles\]\n/);
+  assert.equal((await f.harness().cleanup()).code, 'cleaned');
+  assert.equal((await f.harness().rollback()).code, 'rollback_residuals');
+  for (const config of configs) assert.equal(existsSync(config), false);
+  // This is a private subprocess fixture, not real daemon/model acceptance.
+});
+
+for (const [name, mutate] of Object.entries({
+  'duplicate container': raw => '[profiles]\n' + raw,
+  'container after child': raw => raw + '\n[profiles]\n',
+  'root metadata inside container': raw => raw.replace('[profiles]\n', '[profiles]\noperator_profile = "a"\n'),
+  'profile fields inside container': raw => raw.replace('[profiles]\n', '[profiles]\nhub = "https://vecnet.xk.io"\n'),
+  'unknown container': raw => raw.replace('[profiles]', '[foreign]'),
+  'nested container': raw => raw.replace('[profiles]', '[profiles.extra]'),
+  'array container': raw => raw.replace('[profiles]', '[[profiles]]'),
+  'scalar container': raw => raw.replace('[profiles]', 'profiles = {}'),
+  'duplicate child': raw => raw + raw.slice(raw.indexOf('  [profiles.')),
+  'duplicate field': raw => raw.replace('    hub =', '    hub = "https://vecnet.xk.io"\n    hub ='),
+  'unknown field': raw => raw + '    foreign = "value"\n',
+  'wrong field type': raw => raw.replace('secret = "vn_fixture_old"', 'secret = true'),
+  'wrong boolean type': raw => raw + '    allow_insecure_http = "true"\n',
+})) test('Go config malformed ' + name + ' refuses before journal or installation', async t => {
+  const f = rehearsal(t), target = f.m.peers[0].config, paths = planHarness(f.m).paths;
+  writeFileSync(target, mutate(goConfigFormat(readFileSync(target, 'utf8'))));
+  const before = readFileSync(target);
+  await assert.rejects(f.harness().install(), { code: 'ownership_changed' });
+  assert.deepEqual(readFileSync(target), before);
+  assert.equal(existsSync(join(f.m.runRoot, 'journal.json')), false);
+  for (const path of [paths.template, paths.installation, paths.current, f.m.generations.a.binary]) assert.equal(existsSync(path), false);
+  assert.deepEqual(JSON.parse(readFileSync(f.trace)), [], 'no CLI operation is dispatched');
+});
+
 test('R52 FI6 actual diagnostics renews B then fresh cleanup and rollback', async t => {
   const f = await flowRehearsal(t, { diagnostics: true });
   await f.harness().install();
