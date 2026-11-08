@@ -24,7 +24,7 @@ func projectTools(c auth.Caller, listed []map[string]any) []map[string]any {
 			if hub.RequirePeerLifecycle(c) != nil {
 				continue
 			}
-		case "vecnet_peer_invite_get", "vecnet_peer_invite_revoke":
+		case "vecnet_peer_invite_get", "vecnet_peer_invite_revoke", "vecnet_route_stats":
 			if operatorOnly(c) != nil {
 				continue
 			}

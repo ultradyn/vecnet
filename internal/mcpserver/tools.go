@@ -1593,7 +1593,7 @@ func buildTools() *toolTable {
 	}
 	narrowAttachments(doc.Defs)
 	t := &toolTable{byName: map[string]*tool{}}
-	for _, spec := range append(append(toolSpecs(doc.Defs), guideSpec()), agentToolSpecs()...) {
+	for _, spec := range append(append(toolSpecs(doc.Defs), guideSpec(), routeStatsSpec()), agentToolSpecs()...) {
 		input, sch, err := compileInput(spec.name, spec.input, doc.Defs)
 		if err != nil {
 			panic("mcpserver: tool " + spec.name + ": " + err.Error())

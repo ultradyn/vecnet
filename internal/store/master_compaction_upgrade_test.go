@@ -36,8 +36,8 @@ func TestCompactionMigrationsFreshAndUpgradeFromMaster0026(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(migs) != 34 {
-				t.Fatalf("migration count=%d, want 34", len(migs))
+			if len(migs) < 34 {
+				t.Fatalf("migration count=%d, want at least 34", len(migs))
 			}
 			want := make([]string, len(migs))
 			for i, m := range migs {
@@ -78,7 +78,7 @@ func TestCompactionMigrationsFreshAndUpgradeFromMaster0026(t *testing.T) {
 				for _, table := range []string{"peers", "events", "blob_r2_storage", "hub_preferences", "hub_preferences_state"} {
 					before[table] = r2Snapshot(t, db, table)
 				}
-				want = pending
+				want = append(append([]string(nil), pending...), want[34:]...)
 			}
 			applied, err := Migrate(ctx, db)
 			if err != nil || !reflect.DeepEqual(applied, want) {

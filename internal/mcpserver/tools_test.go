@@ -23,6 +23,7 @@ import (
 	"github.com/XertroV/vecnet/internal/hub"
 	"github.com/XertroV/vecnet/internal/mcpserver"
 	"github.com/XertroV/vecnet/internal/oauth"
+	"github.com/XertroV/vecnet/internal/opapi"
 	"github.com/XertroV/vecnet/internal/testhub"
 	"github.com/XertroV/vecnet/internal/webhook"
 )
@@ -750,6 +751,9 @@ func TestSchemaValidationPath(t *testing.T) {
 
 	// The same arguments with a valid state go through.
 	toolOK(t, env, bSecret, "vecnet_receipt", map[string]any{"delivery_id": dly, "state": "processed", "note": "done"}, nil)
+	if p := invalidPath(t, env, env.OperatorSecret, "vecnet_route_stats", map[string]any{"id": 17}); p != "/id" {
+		t.Fatalf("route stats data.path = %q, want /id", p)
+	}
 }
 
 func TestReplyTargetIsChecked(t *testing.T) {
@@ -1217,6 +1221,46 @@ func TestToolsOnLegacySession(t *testing.T) {
 	if r.Error != nil || json.Unmarshal(r.Result, &res) != nil || res.IsError {
 		t.Fatalf("result: %+v %s", r.Error, r.Result)
 	}
+	t.Run("route_stats", func(t *testing.T) {
+		route, _, err := env.Hub.AddRoute(context.Background(), "peer", env.OperatorPeer, "https://legacy-stats.example/hook")
+		if err != nil {
+			t.Fatal(err)
+		}
+		env.Hub.NoteRouteAttempt(context.Background(), hub.RouteAttemptObservation{
+			RouteID: route, DeliveryID: "legacy-stats-delivery", Kind: hub.RouteKindHTTP,
+			Attempted: true, HTTPStatus: 202, BodyBytes: 7, Elapsed: 3 * time.Millisecond, CompletedAt: env.Now.Now(),
+		})
+		body := mcpCallRaw(t, env, env.OperatorSecret,
+			mcpEraHeaders(t, env, env.OperatorSecret, mcpserver.ProtoLegacy), "tools/call",
+			map[string]any{"name": "vecnet_route_stats", "arguments": map[string]any{"id": route}})
+		rpc := decodeRPC(t, body)
+		var result toolResult
+		if rpc.Error != nil || json.Unmarshal(rpc.Result, &result) != nil || result.IsError {
+			t.Fatalf("legacy route stats failed: %+v", rpc.Error)
+		}
+		if len(result.Content) != 1 || result.Content[0].Type != "text" {
+			t.Fatal("route stats must retain the standard text result")
+		}
+		var structured, text, fromHTTP opapi.RouteStats
+		if err := json.Unmarshal(result.StructuredContent, &structured); err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal([]byte(result.Content[0].Text), &text); err != nil {
+			t.Fatal(err)
+		}
+		resp, raw := env.Do(env.OperatorSecret, http.MethodGet, "/v1/admin/route-stats?id="+route, nil)
+		if resp.StatusCode != http.StatusOK || json.Unmarshal(raw, &fromHTTP) != nil {
+			t.Fatal("route stats HTTP fixture failed")
+		}
+		if !reflect.DeepEqual(structured, text) || !reflect.DeepEqual(structured, fromHTTP) {
+			t.Fatal("route stats shared DTO differs between legacy text, structured content and HTTP")
+		}
+		if len(structured.Routes) != 1 || structured.Routes[0].Requests != 1 || structured.Routes[0].LastStatus == nil || *structured.Routes[0].LastStatus != 202 {
+			t.Fatal("legacy route stats lost its populated sample")
+		}
+		t.Logf("route stats DTO (one populated route): structured=%d compact bytes, text=%d bytes, HTTP=%d bytes including newline",
+			len(result.StructuredContent), len(result.Content[0].Text), len(raw))
+	})
 }
 
 func TestToolSendKicksPushWorker(t *testing.T) {
