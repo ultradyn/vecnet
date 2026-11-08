@@ -148,6 +148,107 @@ test('all spawn modes send explicit native policy while inherited model configur
   assert.deepEqual((await backend.capabilities()).permissionModes, cases.map(row => row[0]));
 });
 
+test('project-root launches in the exact existing cwd and branch, and cleanup always retains that root', timeout, async t => {
+  const f = await fixture(t), backend = await f.create(), spec = f.spec('root', { workspaceMode: 'project-root' });
+  await writeFile(join(f.repo, 'tracked.txt'), 'existing project edit\n');
+  const handle = await backend.launch(spec, f.hooks), launchCalls = [...f.calls];
+  assert.equal(handle.ref.extra?.workspace, f.repo);
+  assert.equal(handle.ref.extra?.workspace_mode, 'project-root');
+  assert.equal(handle.ref.extra?.branch, 'base');
+  assert.equal(f.owned(spec.tag).branch, 'base');
+  assert.equal(f.methods('thread/start')[0].params.cwd, f.repo);
+  assert.deepEqual(f.methods('thread/start')[0].params.runtimeWorkspaceRoots, [f.repo]);
+  assert.equal(launchCalls.some(argv => argv.some(arg => ['worktree', 'init', 'checkout', 'switch', 'commit'].includes(arg))), false);
+  assert.equal(await f.git('-C', f.repo, 'branch', '--show-current'), 'base');
+  assert.equal(await f.git('-C', f.repo, 'rev-parse', 'HEAD'), f.head);
+  assert.equal(await readFile(join(f.repo, 'tracked.txt'), 'utf8'), 'existing project edit\n');
+  assert.ok(backend.cleanupWorkspace);
+  assert.deepEqual(await backend.cleanupWorkspace(handle.ref), { removed: false, reason: 'project_root_retained' });
+  const settled = await handle.settle('requested');
+  assert.equal(settled.branch, 'base'); assert.equal(settled.workspaceKept, true);
+  await f.git('-C', f.repo, 'restore', 'tracked.txt');
+  assert.deepEqual(await backend.cleanupWorkspace(handle.ref), { removed: false, reason: 'project_root_retained' });
+  assert.equal((await stat(join(f.repo, '.git'))).isDirectory(), true);
+  assert.equal(await f.git('-C', f.repo, 'branch', '--show-current'), 'base');
+  assert.equal(await readFile(join(f.repo, 'tracked.txt'), 'utf8'), 'base contents\n');
+  await assert.rejects(stat(f.workspaceRoot), { code: 'ENOENT' });
+});
+
+test('temp with temporary alias creates a fresh Git repo and empty initial commit on its own branch', timeout, async t => {
+  const f = await fixture(t), backend = await f.create();
+  const spec = f.spec('temporary', { workspaceMode: 'temp',
+    project: { alias: 'temporary', repoRoot: f.repo, baseRef: 'unused-base-ref' } });
+  const handle = await backend.launch(spec, f.hooks), workspace = join(f.workspaceRoot, spec.jobId);
+  assert.deepEqual((await backend.capabilities()).workspaceModes, ['worktree', 'project-root', 'temp']);
+  assert.equal(handle.ref.extra?.workspace, workspace);
+  assert.equal(handle.ref.extra?.workspace_mode, 'temp');
+  assert.equal(handle.ref.extra?.branch, spec.branch);
+  assert.equal(f.methods('thread/start')[0].params.cwd, workspace);
+  assert.deepEqual(f.methods('thread/start')[0].params.runtimeWorkspaceRoots, [workspace]);
+  assert.equal((await stat(join(workspace, '.git'))).isDirectory(), true);
+  assert.equal(await f.git('-C', workspace, 'rev-parse', '--show-toplevel'), workspace);
+  assert.equal(await f.git('-C', workspace, 'branch', '--show-current'), spec.branch);
+  assert.equal(await f.git('-C', workspace, 'rev-list', '--count', 'HEAD'), '1');
+  assert.equal(await f.git('-C', workspace, 'ls-tree', '-r', '--name-only', 'HEAD'), '');
+  assert.equal(await f.git('-C', workspace, 'status', '--porcelain'), '');
+  assert.notEqual(await f.git('-C', workspace, 'rev-parse', 'HEAD'), f.head);
+  await assert.rejects(stat(join(workspace, 'tracked.txt')), { code: 'ENOENT' });
+  assert.equal(await f.git('-C', f.repo, 'branch', '--show-current'), 'base');
+  assert.equal(await f.git('-C', f.repo, 'branch', '--list', spec.branch), '');
+  assert.equal(await readFile(join(f.repo, 'tracked.txt'), 'utf8'), 'base contents\n');
+  const resumed = await f.restart(handle);
+  assert.equal(resumed.handle.ref.extra?.workspace_mode, 'temp');
+  await resumed.handle.settle('requested');
+  assert.ok(resumed.backend.cleanupWorkspace);
+  assert.deepEqual(await resumed.backend.cleanupWorkspace(resumed.handle.ref), { removed: true });
+  await assert.rejects(stat(workspace), { code: 'ENOENT' });
+  assert.equal(await f.git('-C', f.repo, 'rev-parse', 'HEAD'), f.head);
+});
+
+test('invalid workspace modes and temporary-alias combinations reject before Git or workspace mutation', timeout, async t => {
+  const f = await fixture(t), backend = await f.create();
+  const choices: [LaunchSpec['workspaceMode'], string][] = [
+    ['invalid' as LaunchSpec['workspaceMode'], 'isolated'], ['temp', 'isolated'],
+    ['project-root', 'temporary'], ['worktree', 'temporary'], [undefined, 'temporary'],
+  ];
+  for (const [index, [workspaceMode, alias]] of choices.entries()) {
+    await assert.rejects(backend.launch(f.spec(`invalid_workspace_${index}`, { workspaceMode,
+      project: { alias, repoRoot: f.repo, baseRef: 'base' } }), f.hooks), /Invalid workspace choice/);
+  }
+  assert.deepEqual(f.calls, []);
+  assert.equal(f.store.size, 0); assert.equal(f.methods('thread/start').length, 0);
+  await assert.rejects(stat(f.workspaceRoot), { code: 'ENOENT' });
+  assert.equal(await f.git('-C', f.repo, 'branch', '--show-current'), 'base');
+  assert.equal(await f.git('-C', f.repo, 'rev-parse', 'HEAD'), f.head);
+  assert.equal(await readFile(join(f.repo, 'tracked.txt'), 'utf8'), 'base contents\n');
+});
+
+test('unknown project-root launch never adopts a foreign thread with the same cwd or starts a duplicate', timeout, async t => {
+  const f = await fixture(t), backend = await f.create();
+  const foreign = { id: 'foreign-project-root', cwd: f.repo, status: { type: 'idle' }, archived: false,
+    name: 'foreign owner title', turns: [] };
+  f.daemon.threads.set(foreign.id, foreign);
+  const spec = f.spec('root_lost', { workspaceMode: 'project-root' });
+  f.daemon.failNext('thread/start', 'drop');
+  await assert.rejects(backend.launch(spec, f.hooks), error => error instanceof CodexRpcError && error.ambiguous);
+  assert.equal(f.owned(spec.tag).id, undefined);
+  assert.equal(f.owned(spec.tag).workspaceMode, 'project-root');
+  for (let i = 0; i < 2; i++) {
+    const restarted = await f.create();
+    await assert.rejects(restarted.findByTag(spec.tag), /project-root launch outcome unknown/);
+    await assert.rejects(restarted.launch(spec, f.hooks), /project-root launch outcome unknown/);
+    assert.deepEqual(await restarted.listOwned(), []);
+  }
+  assert.equal(f.methods('thread/start').length, 1);
+  for (const method of ['thread/list', 'thread/resume', 'thread/name/set', 'turn/start', 'thread/archive']) {
+    assert.equal(f.methods(method).length, 0, method);
+  }
+  assert.equal(f.daemon.threads.size, 1); assert.equal(foreign.name, 'foreign owner title');
+  assert.equal(f.owned(spec.tag).id, undefined);
+  assert.equal(await f.git('-C', f.repo, 'branch', '--show-current'), 'base');
+  assert.equal(await f.git('-C', f.repo, 'rev-parse', 'HEAD'), f.head);
+});
+
 test('history hydrates final answers and consumed deliveries in chronological order across pages and restart cursors', timeout, async t => {
   const f = await fixture(t), backend = await f.create(), handle = await backend.launch(f.spec(), f.hooks);
   const first = f.daemon.threads.get(handle.ref.id)!.turns[0];

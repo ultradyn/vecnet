@@ -2,31 +2,38 @@
 // allowlists; requester input never contains a repository path.
 const ALIAS = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const MODES = ['read-only', 'ask', 'auto', 'full-access'];
+const WORKSPACES = ['worktree', 'project-root', 'temp'];
 const strings = xs => Array.isArray(xs) ? xs.filter(x => typeof x === 'string') : [];
 const unique = xs => [...new Set(xs)];
 
 export function launcherChoices(row) {
   const p = row?.peer || {}, caps = strings(p.capabilities);
   const tags = prefix => unique(caps.filter(x => x.startsWith(prefix)).map(x => x.slice(prefix.length)));
-  const projects = tags('project:').filter(x => ALIAS.test(x));
+  const aliases = tags('project:').filter(x => ALIAS.test(x));
+  const projects = aliases.filter(x => x !== 'temporary');
+  const temporary = aliases.includes('temporary');
   const modes = tags('mode:').filter(x => MODES.includes(x));
   // Only a legacy peer without any scoped tags uses the global union. A
   // backend missing modes on a new peer must not inherit another's modes.
   const hasBackendModes = tags('mode:').some(x => x.includes('/'));
+  const hasWorkspaces = tags('workspace:').some(x => x.includes('/'));
   const backends = tags('launch:').filter(x => ALIAS.test(x) && x !== 'any').map(id => ({
     id, health: p.quota?.backends?.[id] || 'unknown',
     presets: tags('preset:' + id + '/').filter(Boolean),
     modes: hasBackendModes ? tags('mode:' + id + '/').filter(x => MODES.includes(x)) : modes,
+    workspaces: (hasWorkspaces ? tags('workspace:' + id + '/').filter(x => WORKSPACES.includes(x)) : ['worktree'])
+      .filter(x => x === 'temp' ? temporary : projects.length > 0),
   }));
   let reason = '';
   if (p.kind !== 'launcher') reason = 'This peer is not a launcher.';
   else if (row.disabled || row.archived_at) reason = 'Enable this launcher before launching a job.';
   else if (row.credential !== 'active') reason = 'Complete launcher installation and enrolment first.';
   else if (!['idle', 'working'].includes(p.presence)) reason = 'Launcher is ' + (p.presence || 'unknown') + '. Wait for a healthy presence report.';
-  else if (!projects.length) reason = 'No project aliases advertised. Configure projects on the launcher host and restart the daemon.';
+  else if (!aliases.length) reason = 'No project aliases advertised. Configure projects on the launcher host and restart the daemon.';
   else if (!backends.some(b => b.health === 'ok' && b.presets.length)) reason = 'No healthy backend with an advertised preset is available.';
   else if (!backends.some(b => b.health === 'ok' && b.presets.length && b.modes.length)) reason = 'No permission modes advertised for a healthy backend.';
-  return { projects, backends, modes, reason };
+  else if (!backends.some(b => b.health === 'ok' && b.presets.length && b.modes.length && b.workspaces.length)) reason = 'No supported workspace is configured for a healthy backend.';
+  return { projects, temporary, backends, modes, reason };
 }
 
 export function buildLaunch(row, values, key, now) {
@@ -34,7 +41,9 @@ export function buildLaunch(row, values, key, now) {
   if (choices.reason) throw new Error(choices.reason);
   const backend = choices.backends.find(b => b.id === values.backend && b.health === 'ok');
   if (!backend || !backend.presets.includes(values.preset)) throw new Error('Choose an advertised preset on a healthy backend.');
-  if (!choices.projects.includes(values.project)) throw new Error('Choose a project alias advertised by this launcher.');
+  const workspace = values.workspace || 'worktree';
+  if (!backend.workspaces.includes(workspace)) throw new Error('Choose a workspace mode advertised for the selected backend.');
+  if (workspace !== 'temp' && !choices.projects.includes(values.project)) throw new Error('Choose a project alias advertised by this launcher.');
   if (!backend.modes.includes(values.mode)) throw new Error('Choose a permission mode advertised for the selected backend.');
   const prompt = String(values.prompt || '').trim(), title = String(values.title || '').trim();
   if (!prompt || prompt.length > 16384 || new TextEncoder().encode(prompt).length > 16384) throw new Error('Enter a job prompt of at most 16 KiB.');
@@ -47,7 +56,8 @@ export function buildLaunch(row, values, key, now) {
     content: { text: prompt }, ...(title ? { thread_title: title } : {}),
     expires_at: new Date(deadline).toISOString(),
     job_request: { version: 1, job_key: key, operation: 'launch', instructions: prompt,
-      input: { backend: values.backend, project: values.project, preset: values.preset, permission_mode: values.mode, ...(title ? { title } : {}) } },
+      input: { backend: values.backend, project: workspace === 'temp' ? 'temporary' : values.project, workspace_mode: workspace,
+        preset: values.preset, permission_mode: values.mode, ...(title ? { title } : {}) } },
   };
 }
 

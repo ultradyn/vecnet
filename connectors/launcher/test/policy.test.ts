@@ -36,6 +36,24 @@ function permission(patch: Partial<LaunchPermission> = {}): LaunchPermission {
 }
 function denied(reason: string) { return {ok:false,error:'policy_denied',reason}; }
 
+test('workspace choices require backend support and the configured temporary project policy', async () => {
+  const a = await setup();
+  a.req.input.workspace_mode = 'project-root';
+  assert.deepEqual(gateLaunch(a), denied('workspace_mode'));
+  a.backends.get('t3')!.caps.workspaceModes = ['worktree', 'project-root', 'temp'];
+  assert.equal(gateLaunch(a).ok, true);
+  a.req.input.workspace_mode = 'temp';
+  assert.deepEqual(gateLaunch(a), denied('workspace_project'));
+  a.req.input.project = 'temporary';
+  assert.deepEqual(gateLaunch(a), denied('project'));
+  a.cfg.projects.temporary = { repo_root: '/host/cache', base_ref: 'HEAD' };
+  assert.deepEqual(gateLaunch(a), denied('project'));
+  a.cfg.policies.default.projects = [...a.cfg.policies.default.projects ?? [], 'temporary'];
+  assert.equal(gateLaunch(a).ok, true);
+  a.req.input.workspace_mode = 'project-root';
+  assert.deepEqual(gateLaunch(a), denied('workspace_project'));
+});
+
 test('policyKeyFor: peer entry beats principal entry; principal entry matches a new peer by created_by with no config change; default otherwise', async () => {
   const peers = [directoryEntry({peer_id:peer,created_by:principal})];
   const a = await setup(peers);

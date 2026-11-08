@@ -1,11 +1,12 @@
 import type { Delivery, Priority } from '../../../hub-client/src/wire.ts';
-import type { PermissionMode } from '../backend.ts';
+import type { PermissionMode, WorkspaceMode } from '../backend.ts';
 import { parseDuration } from '../config.ts';
 import { readSchema, validateSchema } from './metadata.ts';
 import type { Schema } from './metadata.ts';
 
 export interface LaunchInput {
   backend: string; project: string; preset: string; permission_mode: PermissionMode;
+  workspace_mode?: WorkspaceMode;
   base_ref?: string; title?: string; idle?: { wrapup_after?: string | number; wrapup_turn?: boolean };
   relay_from?: string[]; reply_priority?: Priority; deliver?: { push_branch?: boolean };
 }

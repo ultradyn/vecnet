@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto';
-import { mkdir, realpath } from 'node:fs/promises';
+import { mkdir, realpath, rm } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { definePlugin, MAX_TURN_INPUT_BYTES } from '../../backend.ts';
-import type { Backend, BackendCapabilities, LaunchSpec, PluginContext, SessionHandle, SessionHooks, SessionRef, SessionState, TurnInput, SendMode, TurnCursor, TurnEvent, PermissionMode, PermissionDraft } from '../../backend.ts';
+import type { Backend, BackendCapabilities, LaunchSpec, PluginContext, SessionHandle, SessionHooks, SessionRef, SessionState, TurnInput, SendMode, TurnCursor, TurnEvent, PermissionMode, PermissionDraft, WorkspaceMode } from '../../backend.ts';
 import { openCodexRpc, CodexRpcError } from './rpc.ts';
 import type { CodexRpc } from './rpc.ts';
 
@@ -21,6 +22,7 @@ interface Owned {
   model?: string; provider?: string; effort?: string;
   title?: string;
   parked?: boolean;
+  workspaceMode?: WorkspaceMode;
 }
 const schema = {
   type: 'object', additionalProperties: false, required: ['codex_home', 'presets'],
@@ -77,7 +79,7 @@ export default definePlugin<CodexConfig>({
       if (!o.id) throw new Error('Codex launch outcome unknown');
       return { backend: 'codex-app-server', host: ctx.host, id: o.id,
         extra: { tag: o.tag, branch: o.branch, workspace: o.workspace, link: `codex://threads/${o.id}`, codex_home: home,
-          permission_mode: o.mode, ...(o.model ? { model: o.model } : {}), ...(o.provider ? { model_provider: o.provider } : {}), ...(o.effort ? { effort: o.effort } : {}) } };
+          permission_mode: o.mode, workspace_mode: o.workspaceMode ?? 'worktree', ...(o.model ? { model: o.model } : {}), ...(o.provider ? { model_provider: o.provider } : {}), ...(o.effort ? { effort: o.effort } : {}) } };
     }
     async function history(id: string): Promise<Obj[]> {
       const all: Obj[] = []; let cursor: string | undefined;
@@ -94,6 +96,9 @@ export default definePlugin<CodexConfig>({
     }
     async function recover(o: Owned): Promise<Owned | undefined> {
       if (o.id) return o;
+      // A shared project cwd cannot prove ownership of a thread whose start
+      // response was lost. Never adopt another client's thread by that path.
+      if (o.workspaceMode === 'project-root') throw new Error('Codex project-root launch outcome unknown');
       let cursor: string | undefined;
       const seen = new Set<string>();
       do {
@@ -155,6 +160,7 @@ export default definePlugin<CodexConfig>({
         const r = await rpc();
         if (r !== this.subscribedTo) {
           const result = await r.call<Obj>('thread/resume', { threadId: this.ref.id, excludeTurns: true }, 15000);
+          if (this.o.parked) { this.o.parked = false; save(this.o); }
           this.subscribedTo = r; this.update(obj(result.thread));
         }
         if (this.o.parked) { this.o.parked = false; save(this.o); }
@@ -290,6 +296,7 @@ export default definePlugin<CodexConfig>({
     const caps: BackendCapabilities = { maxInputBytes: MAX_TURN_INPUT_BYTES, steer: true, queue: 'launcher', interrupt: true,
       approvals: 'typed', questions: 'typed', resume: 'transcript', backgroundTasks: 'opaque', attachments: false,
       workspace: 'launcher-dir', branchName: 'settable', permissionModes: modes,
+      workspaceModes: ['worktree', 'project-root', 'temp'],
       presets: Object.entries(config.presets).map(([id, p]) => ({ id, provider: 'codex', model: p.model ?? 'configured default', ...(p.effort ? { effort: p.effort } : {}) })) };
     const backend: Backend = {
       id: 'codex-app-server', async capabilities() { return caps; },
@@ -305,12 +312,19 @@ export default definePlugin<CodexConfig>({
           return attach(found, hooks);
         }
         await rpc(); // Do not create a workspace when no background daemon is available.
+        const workspaceMode = spec.workspaceMode ?? 'worktree';
+        if (!['worktree', 'project-root', 'temp'].includes(workspaceMode) || ((workspaceMode === 'temp') !== (spec.project.alias === 'temporary'))) throw new Error('Invalid workspace choice');
         const repo = await realpath(spec.project.repoRoot);
-        const workspace = resolve(config.workspace_root ?? join(repo, '.worktrees', 'vecnet'), spec.jobId);
+        const workspace = workspaceMode === 'project-root' ? repo : resolve(config.workspace_root ?? (workspaceMode === 'temp' ? join(homedir(), '.cache', 'vecnet-launcher', 'workspaces') : join(repo, '.worktrees', 'vecnet')), spec.jobId);
         await mkdir(resolve(workspace, '..'), { recursive: true, mode: 0o700 });
-        const o: Owned = { tag: spec.tag, workspace, repo, branch: spec.branch, preset: spec.preset, mode: spec.permissionMode, prompt: spec.prompt, title: spec.title };
+        const o: Owned = { tag: spec.tag, workspace, repo, branch: spec.branch, preset: spec.preset, mode: spec.permissionMode, prompt: spec.prompt, title: spec.title, workspaceMode };
         save(o); // Intent also preserves workspace provenance if Git exits ambiguously.
-        await git(['-C', repo, 'worktree', 'add', '-b', spec.branch, '--', workspace, spec.project.baseRef], signal);
+        if (workspaceMode === 'worktree') await git(['-C', repo, 'worktree', 'add', '-b', spec.branch, '--', workspace, spec.project.baseRef], signal);
+        else if (workspaceMode === 'temp') {
+          await mkdir(workspace, { mode: 0o700 });
+          await git(['init', '-b', spec.branch, workspace], signal);
+          await git(['-C', workspace, '-c', 'user.name=vecnet launcher', '-c', 'user.email=launcher@localhost', 'commit', '--allow-empty', '-m', 'Initialize temporary launcher workspace'], signal);
+        } else { o.branch = await git(['-C', repo, 'branch', '--show-current']); save(o); }
         const result = await call('thread/start', { cwd: workspace, ...policy, ...(preset.model ? { model: preset.model } : {}),
           ...(preset.effort ? { config: { model_reasoning_effort: preset.effort } } : {}), ephemeral: false, runtimeWorkspaceRoots: [workspace] });
         if (typeof obj(result.thread).id !== 'string') throw new Error('Codex returned no thread id');
@@ -335,6 +349,7 @@ export default definePlugin<CodexConfig>({
         if (r.backend !== 'codex-app-server' || r.host !== ctx.host) return { removed: false, reason: 'foreign_session' };
         const o = owned().find(x => x.tag === r.extra?.tag && (!r.id || x.id === r.id));
         if (!o) return { removed: false, reason: 'missing_workspace_metadata' };
+        if (o.workspaceMode === 'project-root') return { removed: false, reason: 'project_root_retained' };
         if (!o.settled && o.id) return { removed: false, reason: 'session_not_settled' };
         let workspace: string;
         try { workspace = await realpath(o.workspace); }
@@ -342,8 +357,9 @@ export default definePlugin<CodexConfig>({
         if (workspace !== o.workspace || await git(['-C', workspace, 'rev-parse', '--show-toplevel']) !== workspace) return { removed: false, reason: 'workspace_mismatch' };
         if (await git(['-C', workspace, 'status', '--porcelain'])) return { removed: false, reason: 'dirty_workspace' };
         if (await git(['-C', workspace, 'branch', '--show-current']) !== o.branch) return { removed: false, reason: 'branch_mismatch' };
-        await git(['-C', o.repo, 'show-ref', '--verify', '--quiet', 'refs/heads/' + o.branch]);
-        await git(['-C', o.repo, 'worktree', 'remove', '--', workspace]);
+        await git(['-C', o.workspaceMode === 'temp' ? workspace : o.repo, 'show-ref', '--verify', '--quiet', 'refs/heads/' + o.branch]);
+        if (o.workspaceMode === 'temp') await rm(workspace, { recursive: true });
+        else await git(['-C', o.repo, 'worktree', 'remove', '--', workspace]);
         return { removed: true };
       },
     };

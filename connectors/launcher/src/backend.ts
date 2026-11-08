@@ -11,6 +11,8 @@ export type PermissionMode =
   | "auto"         // backend-mediated: sandboxed workspace writes, backend's own auto-review
   | "full-access"; // permissions bypassed (paseo presets today, codex full-access, claude bypassPermissions)
 
+export type WorkspaceMode = 'worktree' | 'project-root' | 'temp';
+
 export interface BackendCapabilities {
   maxInputBytes?: number;
   steer: boolean;                              // can change an in-flight turn
@@ -22,6 +24,7 @@ export interface BackendCapabilities {
   backgroundTasks: "observable" | "opaque" | "none";
   attachments: boolean;                        // can pass files into a turn
   workspace: "backend-worktree" | "launcher-dir";
+  workspaceModes?: readonly WorkspaceMode[]; // absent = legacy isolated worktree only
   branchName: "settable" | "backend-chosen";
   permissionModes: readonly PermissionMode[];
   presets: readonly PresetInfo[];
@@ -35,6 +38,7 @@ export interface LaunchSpec {
   title: string;
   prompt: string;                // job_request.instructions, plus the launcher's footer
   project: ResolvedProject;      // launcher-side alias resolved to repo root + base ref
+  workspaceMode?: WorkspaceMode;
   branch: string;                // "launch/<job_id>" when branchName is settable
   preset: string;
   permissionMode: PermissionMode;

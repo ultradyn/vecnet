@@ -50,6 +50,9 @@ export function gateLaunch(a: { sender: string; req: LaunchRequest; dir: Directo
   if (!backend.health.ok) return {ok:false,error:'backend_unhealthy',reason:'backend unavailable'};
   if (!backend.caps.presets.some(p => p.id === input.preset)) return deny('preset');
   if (!ceiling.permission_modes.includes(input.permission_mode) || !backend.caps.permissionModes.includes(input.permission_mode)) return deny('permission_mode');
+  const workspaceMode = input.workspace_mode ?? 'worktree';
+  if (!(backend.caps.workspaceModes ?? ['worktree']).includes(workspaceMode)) return deny('workspace_mode');
+  if ((workspaceMode === 'temp') !== (input.project === 'temporary')) return deny('workspace_project');
   const project = Object.hasOwn(a.cfg.projects,input.project) ? a.cfg.projects[input.project] : undefined;
   if (!project || (!ceiling.projects.includes('*') && !ceiling.projects.includes(input.project)) ||
       (project.backends !== undefined && !project.backends.includes(input.backend))) return deny('project');

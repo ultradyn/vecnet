@@ -45,7 +45,7 @@ test('launcher discovery keeps aliases and native Codex route default; health an
   assert.equal(c.reason, '');
   assert.deepEqual(c.projects, ['vecnet']);
   assert.deepEqual(c.modes, ['ask', 'auto']);
-  assert.deepEqual(c.backends[0], { id: 'codex-app-server', health: 'ok', presets: ['default'], modes: ['ask', 'auto'] });
+  assert.deepEqual(c.backends[0], { id: 'codex-app-server', health: 'ok', presets: ['default'], modes: ['ask', 'auto'], workspaces: ['worktree'] });
   for (const presence of ['unknown', 'offline', 'blocked']) {
     const r = row(); r.peer.presence = presence;
     assert.match(launcherChoices(r).reason, /Wait for a healthy presence/);
@@ -114,7 +114,7 @@ test('UI launch payload uses existing message API, one daemon recipient, launch 
     idempotency_key: 'launch-123', recipients: [peer], kind: 'message', priority: 'wake',
     content: { text: 'Implement and verify the launcher.' }, thread_title: 'Fix launcher', expires_at: '2026-11-08T01:00:00.000Z',
     job_request: { version: 1, job_key: 'launch-123', operation: 'launch', instructions: 'Implement and verify the launcher.',
-      input: { backend: 'codex-app-server', project: 'vecnet', preset: 'default', permission_mode: 'ask', title: 'Fix launcher' } },
+      input: { backend: 'codex-app-server', project: 'vecnet', workspace_mode: 'worktree', preset: 'default', permission_mode: 'ask', title: 'Fix launcher' } },
   });
   assert.equal('model' in body.job_request.input, false, 'existing Codex route is inherited');
   for (const patch of [{ project: '/tmp/repo' }, { project: 'other' }, { backend: 't3', preset: 'sol' }, { preset: 'unadvertised' }, { mode: 'full-access' }, { deadline: 'bad' }, { deadline: '2026-11-07' }, { prompt: '' }, { prompt: '🌍'.repeat(5000) }, { title: 'x'.repeat(201) }]) {
@@ -122,6 +122,78 @@ test('UI launch payload uses existing message API, one daemon recipient, launch 
   }
   const changed = row(); changed.peer.capabilities = changed.peer.capabilities.filter(x => x !== 'project:vecnet');
   assert.throws(() => buildLaunch(changed, values(), 'launch-123', now), /project aliases/);
+});
+
+function workspaceRow() {
+  const r = mixedRow();
+  r.peer.capabilities.push('project:temporary', 'workspace:codex-app-server/worktree',
+    'workspace:codex-app-server/project-root', 'workspace:codex-app-server/temp', 'workspace:t3/worktree');
+  return r;
+}
+
+test('workspace choices use backend tags, keep legacy worktree, and hide the reserved temporary project', () => {
+  const r = workspaceRow(), c = launcherChoices(r);
+  assert.deepEqual(c.projects, ['vecnet']);
+  assert.equal(c.temporary, true);
+  assert.deepEqual(c.backends[0].workspaces, ['worktree', 'project-root', 'temp']);
+  assert.deepEqual(c.backends[1].workspaces, ['worktree']);
+  assert.deepEqual(launcherChoices(row()).backends[0].workspaces, ['worktree']);
+  r.peer.capabilities = r.peer.capabilities.filter(x => x !== 'project:temporary');
+  assert.deepEqual(launcherChoices(r).backends[0].workspaces, ['worktree', 'project-root']);
+  r.peer.capabilities = r.peer.capabilities.filter(x => !x.startsWith('workspace:t3/'));
+  assert.deepEqual(launcherChoices(r).backends[1].workspaces, [], 'modern peers do not inherit another backend’s workspace modes');
+});
+
+test('workspace payload contains only an advertised alias and mode; temp routes to reserved configured alias', () => {
+  const r = workspaceRow();
+  for (const workspace of ['worktree', 'project-root', 'temp']) {
+    const input = buildLaunch(r, { ...values(), workspace, ...(workspace === 'temp' ? { project: '' } : {}),
+      path: '/untrusted/path', repo: '/untrusted/repo' }, 'launch-workspace', now).job_request.input;
+    assert.equal(input.workspace_mode, workspace);
+    assert.equal(input.project, workspace === 'temp' ? 'temporary' : 'vecnet');
+    assert.deepEqual(Object.keys(input).sort(), ['backend', 'permission_mode', 'preset', 'project', 'title', 'workspace_mode']);
+  }
+  for (const patch of [{ workspace: 'project-root', backend: 't3', preset: 'sol' }, { workspace: 'temp', backend: 't3', preset: 'sol' },
+    { workspace: '/tmp/custom' }, { workspace: 'worktree', project: '' }, { workspace: 'project-root', project: 'temporary' }, { project: '/tmp/custom' }]) {
+    assert.throws(() => buildLaunch(r, { ...values(), ...patch }, 'launch-invalid', now));
+  }
+  r.peer.capabilities = r.peer.capabilities.filter(x => x !== 'project:temporary');
+  assert.throws(() => buildLaunch(r, { ...values(), workspace: 'temp', project: '' }, 'launch-temp', now), /workspace mode/);
+  const tempOnly = workspaceRow();
+  tempOnly.peer.capabilities = tempOnly.peer.capabilities.filter(x => x !== 'project:vecnet');
+  assert.equal(launcherChoices(tempOnly).reason, '');
+  assert.deepEqual(launcherChoices(tempOnly).backends[0].workspaces, ['temp']);
+});
+
+test('rendered workspace controls default to worktree, map No project to temp, and refresh on backend changes', () => {
+  const previous = globalThis.document;
+  globalThis.document = { createElement: tag => new FormEl(tag) };
+  try {
+    const section = launcherSection({ store: { hubNow: () => now } });
+    section.draw(workspaceRow());
+    const nodes = formNodes(section.el), field = id => nodes.find(x => x.id === id);
+    const project = field('launch-project'), workspace = field('launch-workspace'), backend = field('launch-backend');
+    assert.equal(workspace.value, 'worktree');
+    assert.equal(project.value, 'vecnet');
+    assert.ok(!project.kids.some(x => x.value === 'temporary'));
+    assert.ok(project.kids.some(x => x.value === '' && x.textContent === 'No project'));
+    project.value = ''; project.on.change();
+    assert.equal(workspace.value, 'temp');
+    assert.equal(project.disabled, true);
+    workspace.value = 'project-root'; workspace.on.change();
+    assert.equal(project.disabled, false);
+    assert.equal(project.value, 'vecnet');
+    backend.value = 't3'; backend.on.change();
+    assert.deepEqual(workspace.kids.map(x => x.value), ['worktree']);
+    assert.equal(workspace.value, 'worktree');
+    assert.ok(!project.kids.some(x => x.value === ''), 'No project requires backend temp support');
+    const tempOnly = workspaceRow();
+    tempOnly.peer.capabilities = tempOnly.peer.capabilities.filter(x => x !== 'project:vecnet');
+    section.draw(tempOnly);
+    assert.equal(workspace.value, 'temp');
+    assert.equal(project.value, '');
+    assert.equal(project.disabled, true);
+  } finally { globalThis.document = previous; }
 });
 
 test('launcher installation commands quote host paths and use the confirmed setup/install split', () => {
