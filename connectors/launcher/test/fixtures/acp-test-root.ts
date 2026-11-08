@@ -30,8 +30,10 @@ function persistent(path: string): void {
   if (!isAbsolute(path) || path === '/tmp' || path.startsWith('/tmp/')) throw new Error('ACP test root must be persistent and outside /tmp');
 }
 export async function acpTestParent(env: RootEnv = process.env): Promise<string> {
-  const requested = env.ACP_TEST_ROOT ?? join(env.XDG_CACHE_HOME ?? join(env.HOME ?? homedir(), '.cache'), 'vecnet-launcher', 'acp-tests');
-  if (!isAbsolute(requested)) throw new Error('ACP test root must be absolute');
+  const selected = env.ACP_TEST_ROOT ?? env.XDG_CACHE_HOME ?? env.HOME ?? homedir();
+  if (!isAbsolute(selected)) throw new Error('ACP test root must be absolute');
+  // Append the default suffix without collapsing the selected base's symlink/.. spelling.
+  const requested = env.ACP_TEST_ROOT ?? `${selected}/${env.XDG_CACHE_HOME == null ? '.cache/' : ''}vecnet-launcher/acp-tests`;
   const canonical = await prospective(requested);
   persistent(canonical);
   return canonical;
