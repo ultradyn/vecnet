@@ -58,6 +58,11 @@ func newAppHookFixture(t *testing.T) *appHookFixture {
 	f.env, f.path = hookFixture(t, func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
+		// Ordinary CLI inbox reads also exercise the legacy hub-identity probe.
+		if r.URL.Path == "/v1/hub/identity" {
+			http.NotFound(w, r)
+			return
+		}
 		if r.URL.Path != "/v1/events" {
 			t.Errorf("unexpected request %s", r.URL)
 			http.NotFound(w, r)
