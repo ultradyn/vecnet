@@ -48,8 +48,8 @@ export async function acpTestDir(t: Pick<TestContext, 'after'>, prefix: string, 
   persistent(canonicalParent);
   const child = await mkdtemp(join(canonicalParent, prefix));
   t.after(async () => {
-    try { await beforeRemove?.(); }
-    finally { await rm(child, { recursive: true, force: true }); }
+    await beforeRemove?.();
+    await rm(child, { recursive: true, force: true });
   });
   return child;
 }

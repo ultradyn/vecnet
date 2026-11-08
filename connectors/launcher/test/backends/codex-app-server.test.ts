@@ -1193,14 +1193,14 @@ async function nativeRoutingHarness(t: TestContext, config: { presets?: Array<'o
       return result;
     },
     async drain() { await handle.activity(); await handle.activity(); },
-    async decide(prompt: SendRequest, actor = 'peer_operator') {
+    async decide(prompt: SendRequest, actor = 'peer_operator', option = 0) {
       const row = h.deps.ledger.pendingOutbox(100, f.clock.now()).find(row => row.key === prompt.idempotency_key)!;
       const sent = { message_id: 'approval-card', thread_id: prompt.thread_id ?? 'operator-thread', deliveries: [], spilled: false };
       h.deps.ledger.markOutbox(row.id, 'sent', sent);
       for (const callback of callbacks) callback(row, sent);
       const response = threadDelivery(sent.thread_id, actor, '', 'wake');
       response.message.kind = 'approval_response';
-      response.message.approval_response = { approval_id: prompt.approval_request!.approval_id, decision: prompt.approval_request!.options[0] };
+      response.message.approval_response = { approval_id: prompt.approval_request!.approval_id, decision: prompt.approval_request!.options[option] };
       assert.equal(await bridge.handleApprovalResponse(response), 'consumed');
       await handle.activity(); await handle.activity();
     },
@@ -1298,6 +1298,142 @@ test('W-I2 native numeric and string question ids remain distinct; secret reques
     assert.equal(JSON.stringify(s.h.deps.ledger.pendingOutbox(1000, s.f.clock.now())).includes('private-secret-question-prose'), false);
   } finally { s.finish(); }
 });
+
+for (const kind of ['command', 'file'] as const) {
+  for (const timing of ['concurrent', 'completed'] as const) {
+    for (const order of ['number-first', 'string-first'] as const) {
+      test(`F-RI1 native ${kind} typed permission ids require independent once decisions: ${timing}, ${order}`, timeout, async t => {
+        const s = await nativeRoutingHarness(t, {});
+        try {
+          const threadId = s.handle.ref.id, turnId = s.f.daemon.threads.get(threadId)!.turns[0].id;
+          const workspace = String(s.handle.ref.extra!.workspace);
+          const method = kind === 'command' ? 'item/commandExecution/requestApproval' : 'item/fileChange/requestApproval';
+          const params = { threadId, turnId, itemId: 'typed-approval-item',
+            ...(kind === 'command' ? { command: 'git status', cwd: workspace } : {}) };
+          if (kind === 'file') s.f.daemon.notify('item/started', { threadId, turnId,
+            item: { id: params.itemId, type: 'fileChange', status: 'inProgress',
+              changes: [{ path: join(workspace, 'tracked.txt'), kind: { type: 'update' }, diff: '+typed approval' }] } });
+          const firstId = order === 'number-first' ? 7 : '7', secondId = order === 'number-first' ? '7' : 7;
+          s.f.daemon.serverRequest(method, params, firstId); await s.drain();
+          const first = s.prompts()[0]; assert.ok(first);
+          assert.deepEqual(first.recipients, [s.h.job().requester]);
+          assert.equal(s.canonical[0].scope, 'once');
+          assert.deepEqual(s.canonical[0].options, [
+            { id: 'accept', label: 'Allow once', grants: 'once' },
+            { id: 'decline', label: 'Deny', grants: 'deny' },
+          ]);
+          assert.deepEqual([...s.f.daemon.replies], []);
+          // The same typed request while pending still owns one card and one reply.
+          s.f.daemon.serverRequest(method, structuredClone(params), firstId); await s.drain();
+          assert.equal(s.prompts().length, 1);
+          assert.equal(s.bridge.open(s.hooksJobId).approvals, 1);
+          if (timing === 'completed') {
+            await s.decide(first, s.h.job().requester);
+            assert.deepEqual([...s.f.daemon.replies], [{ id: firstId, result: { decision: 'accept' } }]);
+            // An identical completed typed replay retains its original decision.
+            s.f.daemon.serverRequest(method, structuredClone(params), firstId); await s.drain();
+            assert.deepEqual(s.prompts(), []);
+            assert.deepEqual([...s.f.daemon.replies], [
+              { id: firstId, result: { decision: 'accept' } },
+              { id: firstId, result: { decision: 'accept' } },
+            ]);
+          }
+          const before = s.f.daemon.replies.length;
+          // Only the top-level wire id type changes; operation, scope and authority are identical.
+          s.f.daemon.serverRequest(method, structuredClone(params), secondId); await s.drain();
+          assert.deepEqual(s.canonical.at(-1), s.canonical[0]);
+          assert.equal(s.f.daemon.replies.length, before, 'the distinct typed id must wait for its own decision');
+          const second = s.prompts().find(prompt => prompt.idempotency_key !== first.idempotency_key);
+          assert.ok(second, 'a numeric/string RPC id pair needs two independent approval cards');
+          assert.notEqual(second.approval_request!.approval_id, first.approval_request!.approval_id);
+          assert.deepEqual(second.recipients, [s.h.job().requester]);
+          assert.equal(s.bridge.open(s.hooksJobId).approvals, timing === 'concurrent' ? 2 : 1);
+          if (timing === 'concurrent') {
+            await s.decide(first, s.h.job().requester);
+            assert.deepEqual([...s.f.daemon.replies], [{ id: firstId, result: { decision: 'accept' } }]);
+            assert.equal(s.bridge.open(s.hooksJobId).approvals, 1);
+          }
+          const firstReplies = s.f.daemon.replies.filter(reply => reply.id === firstId);
+          assert.deepEqual(s.f.daemon.replies.filter(reply => reply.id === secondId), []);
+          await s.decide(second, s.h.job().requester);
+          assert.deepEqual(s.f.daemon.replies.filter(reply => reply.id === secondId), [{ id: secondId, result: { decision: 'accept' } }]);
+          assert.equal(s.bridge.open(s.hooksJobId).approvals, 0);
+          // Deduplication applies independently to the second typed identity too.
+          s.f.daemon.serverRequest(method, structuredClone(params), secondId); await s.drain();
+          assert.deepEqual(s.prompts(), []);
+          assert.deepEqual(s.f.daemon.replies.filter(reply => reply.id === secondId), [
+            { id: secondId, result: { decision: 'accept' } },
+            { id: secondId, result: { decision: 'accept' } },
+          ]);
+          assert.deepEqual(s.f.daemon.replies.filter(reply => reply.id === firstId), firstReplies);
+        } finally { s.finish(); }
+      });
+    }
+  }
+}
+
+for (const historicalStringId of ['7', 'typed-v1:7', 'codex-approval-v2-' + 'a'.repeat(64)]) {
+  for (const historicalDecision of ['accept', 'decline'] as const) {
+    const originalCase = historicalStringId === '7' && historicalDecision === 'accept';
+    const name = originalCase ? 'F-RI1 native typed permission cannot reuse a historical untyped string-id grant after upgrade'
+      : `F-RI1 native typed permission ignores historical ${historicalDecision} for old string id ${historicalStringId}`;
+    test(name, timeout, async t => {
+      const s = await nativeRoutingHarness(t, {});
+      try {
+        const threadId = s.handle.ref.id, turnId = s.f.daemon.threads.get(threadId)!.turns[0].id;
+        const method = 'item/commandExecution/requestApproval';
+        const params = { threadId, turnId, itemId: 'historical-approval-item', command: 'git status', cwd: String(s.handle.ref.extra!.workspace) };
+        const options: PermissionRequest['options'] = [
+          { id: 'accept', label: 'Allow once', grants: 'once' }, { id: 'decline', label: 'Deny', grants: 'deny' },
+        ];
+        // Preserve the historical adapter's draft and serialization order. Seed
+        // its arbitrary string-id decision through the real bridge, not by inventing a memo.
+        const permission: PermissionRequest['permission'] = {
+          kind: 'exec', backend_method: method, tool: 'shell', command: { line: params.command, cwd: params.cwd },
+          scope: 'once', options, reason: undefined, backend_raw: params,
+          fidelity: { kind: 'reported', command: 'line', paths: 'none', host: 'none' },
+        };
+        const historicalRequestId = historicalStringId + ':' + createHash('sha256').update(JSON.stringify([method, permission])).digest('hex');
+        const historical = s.hooks.onPermissionRequest({ requestId: historicalRequestId,
+          summary: 'Codex requests command execution', permission, options, defaultOnExpiry: 'decline' }, new AbortController().signal);
+        const prior = s.prompts()[0]; assert.ok(prior);
+        assert.deepEqual(prior.recipients, [s.h.job().requester]);
+        assert.equal(s.canonical[0].scope, 'once');
+        await s.decide(prior, s.h.job().requester, historicalDecision === 'accept' ? 0 : 1);
+        assert.equal((await historical).optionId, historicalDecision);
+        const priorId = prior.approval_request!.approval_id, stored = s.h.deps.ledger.approval(priorId)!;
+        assert.equal(stored.backendRequestId, historicalRequestId); assert.equal(stored.decision, historicalDecision);
+        const memo = s.h.deps.ledger.kv('parent-bridge'), keys = memo.keys().filter(key => key.startsWith('request.v2.'));
+        assert.equal(keys.length, 1); assert.equal(memo.get(keys[0]), priorId);
+        assert.equal(s.bridge.open(s.hooksJobId).approvals, 0);
+        assert.deepEqual([...s.f.daemon.replies], []);
+        // Upgrade the producing adapter: a real numeric 7 request has the same
+        // operation, canonical scope and authority, but is not the old string id.
+        s.f.daemon.serverRequest(method, structuredClone(params), 7); await s.drain();
+        assert.deepEqual(s.canonical.at(-1), s.canonical[0]);
+        assert.deepEqual([...s.f.daemon.replies], [], originalCase
+          ? 'a historical untyped string-id grant must not accept a new numeric-id request'
+          : 'a historical untyped decision must not answer a new numeric-id request');
+        const next = s.prompts()[0]; assert.ok(next, 'upgraded typed identity requires a fresh approval card');
+        assert.notEqual(next.approval_request!.approval_id, priorId);
+        assert.deepEqual(next.recipients, [s.h.job().requester]);
+        const nextStored = s.h.deps.ledger.approval(next.approval_request!.approval_id)!;
+        assert.doesNotMatch(nextStored.backendRequestId, /:/, 'new native identity must be structurally disjoint from every historical prefix:hash identity');
+        assert.equal(s.bridge.open(s.hooksJobId).approvals, 1);
+        const decision = originalCase || historicalDecision === 'decline' ? 'accept' : 'decline';
+        await s.decide(next, s.h.job().requester, decision === 'accept' ? 0 : 1);
+        assert.deepEqual([...s.f.daemon.replies], [{ id: 7, result: { decision } }]);
+        // A fresh decision still deduplicates a subsequent identical typed replay.
+        s.f.daemon.serverRequest(method, structuredClone(params), 7); await s.drain();
+        assert.deepEqual(s.prompts(), []);
+        assert.deepEqual([...s.f.daemon.replies], [
+          { id: 7, result: { decision } }, { id: 7, result: { decision } },
+        ]);
+        assert.equal(s.bridge.open(s.hooksJobId).approvals, 0);
+      } finally { s.finish(); }
+    });
+  }
+}
 
 for (const kind of ['outside-grant-root', 'sensitive-file-change', 'moved-sensitive-file', 'network-only'] as const) {
   test(`native ${kind} reaches the operator through real canonicalization, routing and parent bridge`, timeout, async t => {

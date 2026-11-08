@@ -1,6 +1,7 @@
 import test from 'node:test';
+import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, writeFile, readFile, symlink } from 'node:fs/promises';
+import { mkdir, writeFile, readFile, symlink, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { execFile } from 'node:child_process';
 import type { PluginContext } from '../src/backend.ts';
@@ -9,6 +10,41 @@ import type { AcpLaunchSpec } from '../src/backends/acp/workspace.ts';
 import { acpTestDir } from './fixtures/acp-test-root.ts';
 
 const base = 'a'.repeat(40);
+for (const failure of ['throw', 'reject'] as const) {
+  test(`F-RM1 ACP fixture retains its control root when retirement callbacks ${failure}`, async t => {
+    let cleanup!: () => Promise<void>;
+    const captured: Pick<TestContext, 'after'> = { after(fn) { assert.ok(fn); cleanup = async () => { await fn(t, () => {}); }; } };
+    const unconfirmed = new Error('owned child retirement remains unconfirmed');
+    // No process is created here: exercise the teardown failure boundary directly.
+    const dir = await acpTestDir(captured, 'vecnet-acp-retained-', () => {
+      if (failure === 'throw') throw unconfirmed;
+      return Promise.reject(unconfirmed);
+    });
+    t.after(() => rm(dir, { recursive: true, force: true }));
+    const control = join(dir, 'release'); await writeFile(control, 'owned cooperative release\n');
+    await assert.rejects(cleanup(), error => error === unconfirmed);
+    assert.equal(await readFile(control, 'utf8'), 'owned cooperative release\n', 'failed retirement must retain the private control path');
+    assert.equal((await stat(dir)).isDirectory(), true);
+  });
+}
+
+test('F-RM1 ACP fixture keeps its root until asynchronous retirement is confirmed', async t => {
+  let cleanup!: () => Promise<void>, entered!: () => void, retire!: () => void;
+  const reached = new Promise<void>(resolve => { entered = resolve; });
+  const retired = new Promise<void>(resolve => { retire = resolve; });
+  const captured: Pick<TestContext, 'after'> = { after(fn) { assert.ok(fn); cleanup = async () => { await fn(t, () => {}); }; } };
+  const dir = await acpTestDir(captured, 'vecnet-acp-delayed-', async () => { entered(); await retired; });
+  // This gate models an asynchronous retirement callback; it owns no child.
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const control = join(dir, 'release'); await writeFile(control, 'release stays available\n');
+  const removing = cleanup();
+  try {
+    await reached;
+    assert.equal(await readFile(control, 'utf8'), 'release stays available\n');
+  } finally { retire(); await removing; }
+  await assert.rejects(stat(dir), { code: 'ENOENT' });
+});
+
 test('workspace allocation owns worktree creation; root mode never changes branch/files; temp needs no alias repo', async t => {
   const dir = await acpTestDir(t, 'vecnet-acp-workspace-');
   const repo = join(dir, 'repo'), root = join(dir, 'allocated'); await mkdir(repo);
