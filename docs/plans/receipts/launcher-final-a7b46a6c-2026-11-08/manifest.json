@@ -1,0 +1,13 @@
+{
+  "source_revision": "a7b46a6c4c46c05c531cb348f0c8ac05ae2eae44",
+  "files": {
+    "acp-temp.public-receipt.json": "2a288c92defd9b0ead538501a770dadc8ff3e37c6ec04fcea13111a676f91ff4",
+    "fly-final-acceptance.json": "b70ff36338d8736883cfb30e2bfb8a81854400f620452edf4610e56d3df9f445",
+    "fly-runtime.public-receipt.json": "10abf02b033c524f78758bada8c1ab54d7a12d9b29b05030e5ccd85c1d9eb09d",
+    "local-runtime-summary.json": "eeb5bda1210432a264586c2b29439e4a47d160ddf9f673ee97113ad4db3d97ab",
+    "native-project-root.public-receipt.json": "1e2979c56a30398350a73a8b4e5d7a624606c3805163490efba36b6730d5d989",
+    "native-temp.public-receipt.json": "22e8447f6a084e87c01b68b22a1fc51207df2de87d80dd006cd31e311a596785",
+    "native-worktree.public-receipt.json": "6241873230dacf243af73bb3a1aa0f95d5811830a07d91278e7e614e464e4141",
+    "operator-disabled-verified.json": "2d602f407daa53c244e00f749a0c35a607c7edef9499d3228e1003e87969f6a6"
+  }
+}

@@ -1,0 +1,86 @@
+{
+  "job": "job_01M6WZQHJ24EEYKFMNWH4S5F5K",
+  "thread": "thr_01M6WZQHJ24EEYKFMNWGB0FS21",
+  "backend": "acp",
+  "backend_session": "b114a6e9-67e1-4a4c-aefe-97f2818601e7",
+  "workspace": "/home/xertrov/.local/share/vecnet-launcher/workspaces/job_01M6WZQHJ24EEYKFMNWH4S5F5K",
+  "workspace_mode": "temp",
+  "model": null,
+  "provider": null,
+  "effort": null,
+  "permission_mode": "ask",
+  "statuses": [
+    "accepted",
+    "running"
+  ],
+  "service_restart": false,
+  "runtime": "/work/package-cache/xertrov/fleet/vecnet-acp/claude-agent-acp-0.101.0/bin/claude-agent-acp",
+  "resume": "none",
+  "first": "msg_01M6WZQMMC258YCKSTY3KM9A9T",
+  "followup": "msg_01M6WZQQ4C0Y3RZJJ4GYTHR3P0",
+  "pass": true,
+  "launch": {
+    "job_id": "job_01M6WZQHJ24EEYKFMNWH4S5F5K",
+    "thread_id": "thr_01M6WZQHJ24EEYKFMNWGB0FS21",
+    "message_id": "msg_01M6WZQHJ24EEYKFMNWHZSFNN1"
+  },
+  "cancellation": {
+    "state": "cancelled",
+    "request_message_id": "msg_01M6WZQQAXJJ4CXJ68XGYDJSB9",
+    "acknowledgement": {
+      "message_id": "msg_01M6WZQQDN5CDYZ9C6BGWXAZ0A",
+      "job_id": "job_01M6WZQHJ24EEYKFMNWH4S5F5K",
+      "sender": "peer_01M6WZQGX5JBRB95V74MCRWN9N",
+      "thread_id": "thr_01M6WZQHJ24EEYKFMNWGB0FS21"
+    }
+  },
+  "teardown": {
+    "complete": true
+  },
+  "provenance": {
+    "approval_sha256": "94b35ab7fda3ee60109c78cd2316971f22129dc0f5a8011c5b15ac623dab28c2",
+    "source_revision": "a7b46a6c4c46c05c531cb348f0c8ac05ae2eae44",
+    "snapshot_sha256": "6650e5e3a4c5757101c56c77112ea419921360f14e331198eb545a1306b43ca0",
+    "cli_sha256": "7267a2a6efbd0bac45d28b676de8603eadd06cdcf14e2476103b46e479f79db7",
+    "demo_sha256": "7c72eaabf0c3ce2fe8dacb1c8f195f3c141f9b1d95eecd9d30f5f32eefb96305",
+    "runtime": {
+      "executable": "/work/package-cache/xertrov/fleet/vecnet-acp/claude-agent-acp-0.101.0/bin/claude-agent-acp",
+      "executable_sha256": "d1b962b58a59967dc9846211968718f7abef5f63330b3f956e98bf8b2a7e7bbb",
+      "package_json": "/work/package-cache/xertrov/fleet/vecnet-acp/claude-agent-acp-0.101.0/node_modules/@agentclientprotocol/claude-agent-acp/package.json",
+      "package_name": "@agentclientprotocol/claude-agent-acp",
+      "package_version": "0.101.0",
+      "entry": "/work/package-cache/xertrov/fleet/vecnet-acp/claude-agent-acp-0.101.0/node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js",
+      "entry_sha256": "a588a38be1121345a70345196476801c5a57cba5671812d51803dd2a91044cce",
+      "node_executable": "/home/xertrov/.local/opt/node-v22.23.3-linux-x64/bin/node",
+      "node_sha256": "fde6a4bf8d0562f7751d1a2d6cb9b417c4cfe107bbcb0aa3e9a24e125e348f48",
+      "agent_name": "@agentclientprotocol/claude-agent-acp",
+      "agent_version": "0.101.0",
+      "protocol_version": 1
+    },
+    "provider_availability": "model-turns-observed",
+    "effective_provider": null,
+    "effective_model": null,
+    "effective_effort": null,
+    "attestation_limit": "ACP does not attest the effective provider, model or effort; approved package/bytes and actual handshake bind the adapter only.",
+    "snapshot_path": "/home/xertrov/.local/share/vecnet-launcher/snapshots/6650e5e3a4c5757101c56c77112ea419921360f14e331198eb545a1306b43ca0"
+  },
+  "workspace_proof": {
+    "backend": "acp",
+    "mode": "temp",
+    "git_expected": false,
+    "before": {
+      "branch": "master",
+      "head": "fa3a873a76e8b5ad097686ea582524964555ede2",
+      "status": " M README.md\u0000?? sentinel.untracked\u0000",
+      "tracked": "6bb909f357441bd5385860e6535b49a9be14cd1ae827882b6a69fad23d9e83d6",
+      "untracked": "6e876785cd64f8f73f66782493f3a1a28ec16b06207fb309440250cb81f96ea9"
+    },
+    "after": {
+      "branch": "master",
+      "head": "fa3a873a76e8b5ad097686ea582524964555ede2",
+      "status": " M README.md\u0000?? sentinel.untracked\u0000",
+      "tracked": "6bb909f357441bd5385860e6535b49a9be14cd1ae827882b6a69fad23d9e83d6",
+      "untracked": "6e876785cd64f8f73f66782493f3a1a28ec16b06207fb309440250cb81f96ea9"
+    }
+  }
+}
