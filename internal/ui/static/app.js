@@ -24,6 +24,7 @@ import { createNotices } from './notice.js';
 import { peerHref } from './peer-model.js';
 import * as peer from './peer.js';
 import * as presence from './presence.js';
+import { createSearchBox, renderResults } from './search.js';
 import * as settings from './settings.js';
 import { OTHER_PAGE, nextLimit, otherThreads, yourThreads } from './sidebar-model.js';
 import { createStore } from './store.js';
@@ -95,6 +96,19 @@ function renderNav(s, route) {
   $('nav-settings').className = route.name === 'settings' ? 'on' : '';
   $('nav-add').disabled = !s.ctx; // the invite needs the session's api
   const now = s.store.hubNow(), mineRes = s.mine;
+  if (s.search) s.search.refresh(); // a directory rename also updates the scope chip
+  // Search replaces the thread lists; closing it redraws their current state.
+  const open = !!(s.search && s.search.state().open);
+  $('lists').hidden = open;
+  $('results').hidden = !open;
+  if (open) {
+    renderResults($('results'), {
+      box: s.search, directory: s.peers.get(), me: s.me, nameOf: s.nameOf, now, unread: head.unread_by_thread,
+      lastAt: lastActive(s), avatarCtx: s.ctx, threadLink: r => threadLink(r, route, s.nameOf),
+    });
+    return;
+  }
+  $('results').replaceChildren();
   const yours = yourThreads({
     page: mineRes && mineRes.get(), summaries: s.threads.get() ? threads : null,
     error: s.threads.error() || (mineRes && mineRes.error()), me: s.me, nameOf: s.nameOf, now,
@@ -102,6 +116,16 @@ function renderNav(s, route) {
   });
   $('threads').replaceChildren(...(yours.rows.length ? yours.rows.map(r => threadLink(r, route, s.nameOf)) : [h('div', { class: 'none', text: yours.note })]));
   renderOthers(s, route, threads, now);
+}
+
+// Search summaries (§2.8) have no activity time. Reuse ThreadRows from
+// the sidebar's admin pages (§2.13), without another request.
+function lastActive(s) {
+  const at = new Map();
+  for (const res of [s.mine, s.others]) {
+    for (const r of ((res && res.get()) || {}).threads || []) if (r && r.thread) at.set(r.thread.thread_id, r.last_message_at || '');
+  }
+  return id => at.get(id) || '';
 }
 
 // One sidebar thread row, two lines (sidebar-model threadRow). Peer strings
@@ -223,7 +247,7 @@ function start(secret) {
   const pruneAvatars = () => { const d = peers.get(); if (d) avatars.prune((d.peers || []).map(avatarHash).filter(Boolean)); };
 
   const s = {
-    threads, inboxHead, nameOf, store, mine: null, others: null, otherLimit: OTHER_PAGE,
+    threads, inboxHead, peers, nameOf, store, mine: null, others: null, otherLimit: OTHER_PAGE, search: null,
     me: '', ctx: null, mounted: '', matrixHash: '', addAgentHash: '', unmount: () => {}, offs: [],
     // leaveGuard: a screen with unsaved work (Settings) names what leaving loses.
     leaveGuard: null, shownHash: '',
@@ -238,9 +262,15 @@ function start(secret) {
       $('me').replaceChildren();
       $('threads').replaceChildren();
       $('others').replaceChildren();
+      $('results').replaceChildren();
+      $('results').hidden = true;
+      $('lists').hidden = false;
     },
   };
   session = s;
+  // Peer names use the shared directory (PROTOCOL §2.10); titles use §2.8.
+  s.search = createSearchBox($('search'), { api, nameOf, results: $('results'), onChange: () => { if (session === s) renderNav(s, parseRoute(s.shownHash || location.hash)); } });
+  s.offs.push(() => s.search.close());
 
   const ready = () => {
     if (s.ctx) return;
