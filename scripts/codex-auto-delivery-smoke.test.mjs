@@ -20,6 +20,11 @@ test.before(t => {
     t.diagnostic('source-sha256 ' + createHash('sha256').update(readFileSync(p)).digest('hex') + ' ' + p);
   }
 });
+test.beforeEach(t => {
+  // Standard supported Linux fixture: trusted ancestors, /etc/codex absent.
+  // All metadata is synthetic; no test needs the host's managed-policy file.
+  const metadata = installManagedMetadataFixture(); t.after(() => metadata.restore());
+});
 const hash = 'a'.repeat(64), hashB = 'b'.repeat(64);
 const uuid = n => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 function fixture(t) {
@@ -414,7 +419,10 @@ else if(!args.includes('hook'))process.stdout.write('{}');
       s.events.push({ kind: 'rpc', method, threadId: params.threadId }); writeFileSync(flow, JSON.stringify(s));
       if (method === 'turn/start' && s.startup.stopAtControl !== false && params.threadId === uuid(s.startup.stopAtControl === 'a' ? 1 : 2)) throw Object.assign(Error('fixture_startup_stop'), { code: 'fixture_startup_stop' });
     }
-    if (method === 'thread/read') return { thread: { cwd: own.cwd, status: { type: 'idle' } } };
+    if (method === 'thread/read') {
+      assert.equal(params.includeTurns, false);
+      return { thread: { id: own.id, cwd: own.cwd, status: { type: 'idle' } } };
+    }
     if (method === 'turn/start') { s.turns[params.threadId].push({ id: 't'+(++s.counter),status:'completed',items:[{type:'userMessage',clientId:params.clientUserMessageId},{type:'agentMessage',text:'FACT none'}] }); writeFileSync(flow,JSON.stringify(s)); return {}; }
     assert.equal(method, 'thread/turns/list'); const all = s.turns[params.threadId], offset = Number(params.cursor ?? 0);
     return { data: all.slice(offset, offset + 5), nextCursor: offset + 5 < all.length ? String(offset + 5) : null };
@@ -1609,7 +1617,10 @@ test('NAP dispatched owned TUI argv equals the reviewed plan', async t => {
   assert.equal(launches.length, 2);
   for (const [i, launch] of launches.entries()) {
     // The existing fixture remaps /run/user to its own scratch runtime only.
-    const expected = planned.operations.tuis[i].slice(1).map(value => value.replaceAll(runtime, f.ports.runtime));
+    const expected = planned.operations.tuis[i].slice(1).map(value => {
+      const substituted = value.replaceAll(runtime, f.ports.runtime), key = 'sandbox_workspace_write.writable_roots=';
+      return substituted.startsWith(key) ? key + JSON.stringify(JSON.parse(substituted.slice(key.length)).sort()) : substituted;
+    });
     assert.deepEqual(launch, expected); assertNativeLaunchPolicy(f.m, [f.m.tools.tmux, ...launch], f.ports.runtime);
   }
   assert.deepEqual(prepared, ['a', 'b']);
@@ -1714,13 +1725,13 @@ test('NAP required permission directories are precreated, journal-owned and remo
   for (const root of roots.filter(root => !root.endsWith('/codex'))) assert.equal(existsSync(root), false, 'unused journal-owned directory must be rolled back');
 });
 
-// R-C67a managed-requirements TESTS ONLY: the constructor above is implemented,
-// but the production requirements query/refusal/recheck is deliberately absent.
+// R-C67a's parent-observed RED released the production null-requirements query.
+// R-C69 metadata and exact loaded-thread admission below remain TESTS ONLY.
 // This finite fake uses the same RPC object for requirements and owned history.
-function observeRequirementsBoundary(f, { response, stopLaunch = false, stopEffect = false } = {}) {
-  const trace = [], requests = [], launches = [], effects = [], base = f.ports.rpc, run = f.ports.run;
+function observeRequirementsBoundary(f, { response, stopLaunch = false, stopCapability = false, stopEffect = false } = {}) {
+  const trace = [], requests = [], launches = [], capabilities = [], effects = [], base = f.ports.rpc, run = f.ports.run;
   const rpc = { async call(method, params, ...rest) {
-    const row = { kind: 'rpc', method, params: structuredClone(params), connection: this, journal: startupJournal(f) };
+    const row = { kind: 'rpc', method, params: structuredClone(params), timeoutMs: rest[0], connection: this, journal: startupJournal(f) };
     trace.push(row);
     if (method === 'configRequirements/read') {
       requests.push(row);
@@ -1728,7 +1739,7 @@ function observeRequirementsBoundary(f, { response, stopLaunch = false, stopEffe
       row.result = response ? await response(row, requests.length, fallback) : fallback;
       return row.result;
     }
-    return base.call(method, params, ...rest);
+    row.result = await base.call(method, params, ...rest); return row.result;
   } };
   f.ports.rpc = rpc;
   f.ports.run = async (command, args, settings) => {
@@ -1739,7 +1750,11 @@ function observeRequirementsBoundary(f, { response, stopLaunch = false, stopEffe
     }
     if (command === f.m.tools.tmux && args.includes('send-keys') && args.includes('-l') && args.at(-1).startsWith('Run exactly')) {
       const requestedScript = args.at(-1).split('approvals: ')[1]?.split('\n')[0];
-      if (!requestedScript.startsWith('printf ')) {
+      if (requestedScript.startsWith('printf ')) {
+        const row = { kind: 'capability', session: args[args.indexOf('-t') + 1], requestedScript, journal: startupJournal(f) };
+        capabilities.push(row); trace.push(row);
+        if (stopCapability) throw Object.assign(Error('fixture_policy_capability_reached'), { code: 'fixture_policy_capability_reached', drained: true });
+      } else {
         const row = { kind: 'effect', session: args[args.indexOf('-t') + 1], requestedScript, journal: startupJournal(f) };
         effects.push(row); trace.push(row);
         if (stopEffect) throw Object.assign(Error('fixture_requirements_effect_reached'), { code: 'fixture_requirements_effect_reached', drained: true });
@@ -1747,7 +1762,7 @@ function observeRequirementsBoundary(f, { response, stopLaunch = false, stopEffe
     }
     return run(command, args, settings);
   };
-  return { rpc, trace, requests, launches, effects };
+  return { rpc, trace, requests, launches, capabilities, effects };
 }
 function assertNoPolicyActorEffects(f, before) {
   const journal = startupJournal(f);
@@ -1801,7 +1816,7 @@ test('NAP requirements null with additive metadata is freshly queried on the own
   const reads = probe.trace.filter(row => row.kind === 'rpc' && ['thread/read', 'thread/turns/list'].includes(row.method));
   assert.ok(reads.length > 0); assert.ok(reads.every(row => row.connection === probe.rpc));
   let previousBoundary = -1;
-  for (const [at, row] of probe.trace.entries()) if (row.kind === 'launch' || row.kind === 'effect') {
+  for (const [at, row] of probe.trace.entries()) if (['launch', 'capability', 'effect'].includes(row.kind)) {
     const fresh = probe.trace.slice(previousBoundary + 1, at).filter(row => row.kind === 'rpc' && row.method === 'configRequirements/read');
     assert.ok(fresh.length > 0, 'fresh requirements query must precede ' + row.kind + ' ' + row.session);
     for (const query of fresh) {
@@ -1828,5 +1843,179 @@ test('NAP requirements changing after both canaries refuses before actor intent 
   assert.ok(earlier.length >= 2, 'separate null queries admitted both launches'); assert.ok(later.length >= 1, 'state was freshly read after both probes');
   assert.equal(immutableNull.requirements, null, 'the prior metadata remains unchanged; only a fresh query can observe drift');
   assert.equal(outcome.error.code, 'native_policy_unproved'); assertNoPolicyActorEffects(f, before);
+  assert.equal((await f.harness().cleanup()).code, 'cleaned'); await restoredStartup(f);
+});
+
+// R-C69 TESTS ONLY: production fixed-path metadata and exact loaded-idle
+// thread admission are intentionally absent until parent-observed RED.
+function managedDirectory(overrides = {}) {
+  return { uid: 0, mode: 0o40755, isDirectory: () => true, isSymbolicLink: () => false, isFile: () => false, ...overrides };
+}
+function managedFile(overrides = {}) {
+  return { uid: 0, mode: 0o100600, size: 0, isDirectory: () => false, isSymbolicLink: () => false, isFile: () => true, ...overrides };
+}
+function metadataError(code) { throw Object.assign(Error('fixture managed-policy metadata ' + code), { code }); }
+function installManagedMetadataFixture({ reply, onCall } = {}) {
+  const file = '/etc/codex/managed_config.toml', targets = ['/etc', '/etc/codex', file];
+  const original = { lstatSync: fs.lstatSync, openSync: fs.openSync, readFileSync: fs.readFileSync }, calls = [], contents = [];
+  fs.lstatSync = function(p, ...rest) {
+    const target = String(p);
+    if (!targets.includes(target)) return original.lstatSync.call(fs, p, ...rest);
+    calls.push(target); onCall?.(target);
+    const healthy = () => target === '/etc' ? managedDirectory() : metadataError('ENOENT');
+    return reply ? reply(target, healthy) : healthy();
+  };
+  for (const name of ['openSync', 'readFileSync']) fs[name] = function(p, ...rest) {
+    if (String(p) === file) { contents.push(name); throw Error('managed-policy contents must never be opened'); }
+    return original[name].call(fs, p, ...rest);
+  };
+  syncBuiltinESMExports();
+  return { calls, contents, restore() { for (const [name, value] of Object.entries(original)) fs[name] = value; syncBuiltinESMExports(); } };
+}
+const nativeCanariesComplete = journal => ['a', 'b'].every(session => journal.nativeCapabilities?.[session]?.proof?.kind === 'owned-tui-command');
+
+for (const [name, target, respond] of [
+  ['present empty policy file', '/etc/codex/managed_config.toml', () => managedFile()],
+  ['present directory at policy path', '/etc/codex/managed_config.toml', () => managedDirectory()],
+  ['policy symlink', '/etc/codex/managed_config.toml', () => managedFile({ isSymbolicLink: () => true })],
+  ['ancestor symlink', '/etc/codex', () => managedDirectory({ isSymbolicLink: () => true })],
+  ['non-root ancestor', '/etc', () => managedDirectory({ uid: 12345 })],
+  ['group-writable ancestor', '/etc/codex', () => managedDirectory({ mode: 0o40775 })],
+  ['other-writable ancestor', '/etc', () => managedDirectory({ mode: 0o40757 })],
+  ['non-directory ancestor', '/etc/codex', () => managedFile()],
+  ['policy EACCES', '/etc/codex/managed_config.toml', () => metadataError('EACCES')],
+  ['policy EIO', '/etc/codex/managed_config.toml', () => metadataError('EIO')],
+  ['ancestor ENOTDIR', '/etc/codex', () => metadataError('ENOTDIR')],
+  ['ancestor EACCES', '/etc/codex', () => metadataError('EACCES')],
+]) test('R69 metadata admission refuses ' + name + ' before launch and effects', async t => {
+  const f = await startupFixture(t, { eager: true, stopAtControl: false, staleSocket: true }), before = startupJournal(f);
+  const boundary = observeRequirementsBoundary(f, { stopLaunch: true, stopCapability: true, stopEffect: true });
+  const metadata = installManagedMetadataFixture({ reply: (path, healthy) => path === target ? respond() : path === '/etc/codex' ? managedDirectory() : healthy() });
+  try {
+    const error = await f.harness().run().then(() => undefined, error => error);
+    assert.ok(['native_policy_unproved', 'fixture_requirements_launch_reached'].includes(error?.code), 'unexpected setup/fake failure: ' + error?.code);
+    assert.equal(boundary.launches.length, 0, 'fixed-path admission must refuse before the reached new-session trap');
+    assert.ok(metadata.calls.includes(target), 'the exact adverse metadata must actually be observed');
+    assert.equal(error.code, 'native_policy_unproved'); assert.deepEqual(metadata.contents, []);
+    assert.equal(boundary.capabilities.length, 0); assert.equal(boundary.effects.length, 0);
+    assert.equal(startupJournal(f).threadIntent, undefined); assert.deepEqual(startupJournal(f).threads, {});
+    assertNoPolicyActorEffects(f, before);
+    assert.equal((await f.harness().cleanup()).code, 'cleaned'); await restoredStartup(f);
+  } finally { metadata.restore(); }
+});
+test('R69 metadata admission refuses a non-Linux host before launch and effects', async t => {
+  const f = await startupFixture(t, { eager: true, stopAtControl: false, staleSocket: true }), before = startupJournal(f);
+  const boundary = observeRequirementsBoundary(f, { stopLaunch: true, stopCapability: true, stopEffect: true });
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+  Object.defineProperty(process, 'platform', { ...platform, value: 'darwin' });
+  try {
+    const error = await f.harness().run().then(() => undefined, error => error);
+    assert.ok(['native_policy_unproved', 'fixture_requirements_launch_reached'].includes(error?.code), 'unexpected setup/fake failure: ' + error?.code);
+    assert.equal(boundary.launches.length, 0, 'unsupported platform cannot reach the native launch trap');
+    assert.equal(error.code, 'native_policy_unproved'); assert.equal(startupJournal(f).threadIntent, undefined);
+    assertNoPolicyActorEffects(f, before);
+  } finally { Object.defineProperty(process, 'platform', platform); }
+  assert.equal((await f.harness().cleanup()).code, 'cleaned'); await restoredStartup(f);
+});
+test('R69 metadata appearing after both canaries refuses before actor intent and binding effects', async t => {
+  const f = await startupFixture(t, { eager: true, stopAtControl: false, staleSocket: true }), before = startupJournal(f);
+  const boundary = observeRequirementsBoundary(f, { stopEffect: true }); let changedObserved = false;
+  const metadata = installManagedMetadataFixture({ reply(path, healthy) {
+    if (!nativeCanariesComplete(startupJournal(f))) return healthy();
+    if (path === '/etc/codex') return managedDirectory();
+    if (path === '/etc/codex/managed_config.toml') { changedObserved = true; return managedFile(); }
+    return healthy();
+  } });
+  try {
+    const error = await f.harness().run().then(() => undefined, error => error);
+    assert.ok(['native_policy_unproved', 'fixture_requirements_effect_reached'].includes(error?.code), 'unexpected setup/fake failure: ' + error?.code);
+    assert.equal(nativeCanariesComplete(startupJournal(f)), true); assert.deepEqual(boundary.launches.map(row => row.session), ['a', 'b']);
+    assert.equal(boundary.effects.length, 0, 'prior absence and successful canaries cannot authorize the reached actor trap');
+    assert.equal(changedObserved, true, 'metadata must be checked again after both successful probes');
+    assert.equal(error.code, 'native_policy_unproved'); assert.deepEqual(metadata.contents, []); assertNoPolicyActorEffects(f, before);
+    assert.equal((await f.harness().cleanup()).code, 'cleaned'); await restoredStartup(f);
+  } finally { metadata.restore(); }
+});
+
+for (const [name, edit] of [
+  ['missing response', () => undefined],
+  ['missing thread', () => ({})],
+  ['missing returned id', out => { delete out.thread.id; return out; }],
+  ['wrong returned id', out => { out.thread.id = uuid(99); return out; }],
+  ['missing returned cwd', out => { delete out.thread.cwd; return out; }],
+  ['wrong returned cwd', out => { out.thread.cwd = '/foreign'; return out; }],
+  ['notLoaded status', out => { out.thread.status = { type: 'notLoaded' }; return out; }],
+  ['active status', out => { out.thread.status = { type: 'active' }; return out; }],
+  ['missing status', out => { delete out.thread.status; return out; }],
+  ['unknown status', out => { out.thread.status = { type: 'unknown' }; return out; }],
+  ['RPC error', () => { throw Object.assign(Error('fixture owned-thread read failed'), { code: 'ECONNRESET' }); }],
+]) test('R69 loaded-thread admission refuses ' + name + ' before capability intent and native submission', async t => {
+  const f = await startupFixture(t, { eager: true, stopAtControl: false, staleSocket: true }), before = startupJournal(f), base = f.ports.rpc;
+  const adverseReads = [];
+  f.ports.rpc = { async call(method, params, ...rest) {
+    const out = await base.call(method, params, ...rest), journal = startupJournal(f);
+    if (method === 'thread/read' && ['a', 'b'].every(session => journal.threads[session])) {
+      adverseReads.push({ params: structuredClone(params), expected: journal.threads.a });
+      return edit(structuredClone(out));
+    }
+    return out;
+  } };
+  const boundary = observeRequirementsBoundary(f, { stopCapability: true, stopEffect: true });
+  const error = await f.harness().run().then(() => undefined, error => error);
+  assert.ok(['native_policy_unproved', 'fixture_policy_capability_reached'].includes(error?.code), 'unexpected setup/fake failure: ' + error?.code);
+  assert.deepEqual(boundary.launches.map(row => row.session), ['a', 'b']);
+  assert.equal(boundary.capabilities.length, 0, 'unproved current loaded-thread state must refuse before the reached native canary trap');
+  assert.ok(adverseReads.length > 0, 'fresh thread/read must actually observe the adverse response');
+  for (const row of adverseReads) assert.deepEqual(row.params, { threadId: row.expected.id, includeTurns: false });
+  assert.equal(error.code, 'native_policy_unproved'); assert.equal(boundary.effects.length, 0);
+  assert.equal(startupJournal(f).nativeCapabilityIntent, undefined); assertNoPolicyActorEffects(f, before);
+  assert.equal((await f.harness().cleanup()).code, 'cleaned'); await restoredStartup(f);
+});
+test('R69 loaded thread becoming active after both canaries refuses before actor intent without cold loading', async t => {
+  const f = await startupFixture(t, { eager: true, stopAtControl: false, staleSocket: true }), before = startupJournal(f), base = f.ports.rpc;
+  let driftReads = 0;
+  f.ports.rpc = { async call(method, params, ...rest) {
+    const out = await base.call(method, params, ...rest);
+    if (method === 'thread/read' && nativeCanariesComplete(startupJournal(f))) {
+      driftReads++; return { ...out, thread: { ...out.thread, status: { type: 'active' } } };
+    }
+    return out;
+  } };
+  const boundary = observeRequirementsBoundary(f, { stopEffect: true });
+  const error = await f.harness().run().then(() => undefined, error => error);
+  assert.ok(['native_policy_unproved', 'fixture_requirements_effect_reached'].includes(error?.code), 'unexpected setup/fake failure: ' + error?.code);
+  assert.equal(nativeCanariesComplete(startupJournal(f)), true); assert.equal(boundary.effects.length, 0, 'old idle samples cannot authorize the reached actor trap');
+  assert.ok(driftReads > 0); assert.equal(error.code, 'native_policy_unproved'); assertNoPolicyActorEffects(f, before);
+  assert.equal(boundary.trace.some(row => row.kind === 'rpc' && /resume|load|settings/.test(row.method)), false);
+  assert.equal((await f.harness().cleanup()).code, 'cleaned'); await restoredStartup(f);
+});
+test('R69 healthy metadata absence and exact owned idle reads are fresh on the same RPC before every native command', async t => {
+  const f = await startupFixture(t, { eager: true, stopAtControl: false, staleSocket: true });
+  const boundary = observeRequirementsBoundary(f);
+  const metadata = installManagedMetadataFixture({
+    onCall: path => boundary.trace.push({ kind: 'metadata', path }),
+    reply(path, healthy) { return path === '/etc/codex' && nativeCanariesComplete(startupJournal(f)) ? managedDirectory() : healthy(); },
+  });
+  try {
+    assert.equal((await f.harness().run()).code, 'evidence_complete');
+    assert.equal(boundary.launches.length, 2); assert.equal(boundary.capabilities.length, 2); assert.ok(boundary.effects.length >= 3);
+    let previous = -1;
+    for (const [at, row] of boundary.trace.entries()) if (['launch', 'capability', 'effect'].includes(row.kind)) {
+      const fresh = boundary.trace.slice(previous + 1, at);
+      assert.ok(fresh.some(row => row.kind === 'metadata' && row.path === '/etc/codex'), 'fixed-path absence must be freshly checked before ' + row.kind);
+      const requirements = fresh.filter(row => row.kind === 'rpc' && row.method === 'configRequirements/read');
+      assert.ok(requirements.length > 0); assert.ok(requirements.every(row => row.connection === boundary.rpc && row.timeoutMs === 5000 && row.result.requirements === null));
+      if (row.kind !== 'launch') {
+        const own = row.journal.threads[row.session], reads = fresh.filter(row => row.kind === 'rpc' && row.method === 'thread/read');
+        assert.ok(reads.length > 0, 'a previous idle sample cannot replace the current exact loaded-thread read');
+        const read = reads.at(-1); assert.equal(read.connection, boundary.rpc);
+        assert.deepEqual(read.params, { threadId: own.id, includeTurns: false });
+        assert.equal(read.result.thread.id, own.id); assert.equal(read.result.thread.cwd, own.cwd); assert.equal(read.result.thread.status.type, 'idle');
+      }
+      previous = at;
+    }
+    assert.ok(metadata.calls.includes('/etc/codex/managed_config.toml'), 'both missing-ancestor and missing-leaf ENOENT shapes are supported');
+    assert.deepEqual(metadata.contents, []);
+  } finally { metadata.restore(); }
   assert.equal((await f.harness().cleanup()).code, 'cleaned'); await restoredStartup(f);
 });
