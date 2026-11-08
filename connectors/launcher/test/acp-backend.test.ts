@@ -1,0 +1,242 @@
+import test from 'node:test';
+import type { TestContext } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtemp, mkdir, readFile, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import plugin from '../src/backends/acp/index.ts';
+import type { AcpConfig } from '../src/backends/acp/index.ts';
+import type { AcpLaunchSpec } from '../src/backends/acp/workspace.ts';
+import type { PluginContext, SessionHandle, SessionHooks, TurnEvent, TurnInput } from '../src/backend.ts';
+import { redactText } from '../src/redact.ts';
+
+const fixturePath = fileURLToPath(new URL('./fixtures/fake-acp-agent.mjs', import.meta.url));
+const input = (text = 'follow-up', id = 'dly_one'): TurnInput => ({ items: [{ deliveryId: id, messageId: 'msg_one', from: 'peer_one', text, attachments: [] }] });
+async function fixture(t: TestContext, scenario = 'normal') {
+  // Explicit build-cache root; never create test artifacts under /tmp.
+  const parent = process.env.ACP_TEST_ROOT ?? process.env.TMPDIR ?? '/mnt/build-cache/tmp';
+  assert.ok(parent.startsWith('/') && parent !== '/tmp' && !parent.startsWith('/tmp/'));
+  await mkdir(parent, { recursive: true });
+  const dir = await mkdtemp(join(parent, 'vecnet-acp-'));
+  const values = new Map<string, string>(), execs: string[][] = [], log = join(dir, 'wire.jsonl');
+  const ctx: PluginContext = {
+    host: 'test-host', now: () => new Date(), redact: text => redactText(text).text,
+    log: { info() {}, warn() {}, error() {} },
+    store: { get: k => values.get(k), set: (k, v) => { values.set(k, v); }, delete: k => { values.delete(k); }, keys: p => [...values.keys()].filter(k => k.startsWith(p ?? '')) },
+    checkRoute: async () => { throw new Error('route mutation prohibited'); }, readSecretFile: async () => { throw new Error('secret access prohibited'); },
+    sleep: (ms, signal) => new Promise((resolve, reject) => {
+      if (signal?.aborted) { reject(new Error('aborted')); return; }
+      const done = () => { clearTimeout(timer); signal?.removeEventListener('abort', abort); resolve(); };
+      const abort = () => { clearTimeout(timer); signal?.removeEventListener('abort', abort); reject(new Error('aborted')); };
+      const timer = setTimeout(done, ms); signal?.addEventListener('abort', abort, { once: true });
+    }),
+    exec: async argv => { execs.push(argv); return { code: 0, stdout: '', stderr: '' }; },
+  };
+  const config: AcpConfig = { workspace_root: join(dir, 'workspaces'), request_timeout_ms: 1000,
+    presets: { fake: { argv: [process.execPath, fixturePath, scenario, log], provider: 'fixture', mode_id: 'ask' } } };
+  const hooks: SessionHooks = { onEvent() {}, onPermissionRequest: async () => ({ optionId: 'no', decidedBy: 'test' }), onQuestion: async () => { throw new Error('not advertised'); } };
+  const spec = (over: Partial<AcpLaunchSpec> = {}): AcpLaunchSpec => ({ jobId: 'job_test', tag: 'vl-job_test', title: 'test', prompt: 'Hello',
+    project: { alias: 'temporary', repoRoot: '/not/preallocated', baseRef: 'master' }, branch: 'launch/job_test', workspaceMode: 'temp',
+    preset: 'fake', permissionMode: 'ask', attachments: [], env: { VECNET_CREDENTIAL: 'test-secret-must-be-scrubbed' }, ...over });
+  const backend = await plugin.create(config, ctx), handles = new Set<SessionHandle>();
+  const launch = async (over: Partial<AcpLaunchSpec> = {}, useHooks = hooks) => { const h = await backend.launch(spec(over), useHooks); handles.add(h); return h; };
+  t.after(async () => { for (const h of handles) await h.settle('cancel'); await rm(dir, { recursive: true, force: true }); });
+  const calls = async (): Promise<Array<Record<string, any>>> => (await readFile(log, 'utf8')).trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
+  return { dir, ctx, config, hooks, backend, spec, launch, calls, values, execs };
+}
+async function eventsUntil(h: SessionHandle, predicate: (e: TurnEvent) => boolean): Promise<TurnEvent[]> {
+  const controller = new AbortController(), events: TurnEvent[] = [];
+  const timeout = setTimeout(() => controller.abort(), 2000);
+  try {
+    for await (const { event } of h.turns(undefined, controller.signal)) { events.push(event); if (predicate(event)) return events; }
+    throw new Error('expected event not received');
+  } finally { clearTimeout(timeout); controller.abort(); }
+}
+const finished = (event: TurnEvent) => event.type === 'turn_finished';
+
+test('ACP v1 initialize/new/set_mode/prompt order, streamed final text, no thoughts, no filesystem or terminal capability', async t => {
+  const f = await fixture(t), h = await f.launch(), events = await eventsUntil(h, finished);
+  const final = events.find(e => e.type === 'turn_finished');
+  assert.equal(final?.type === 'turn_finished' && final.finalText, 'Hi 🌊 there');
+  assert.equal(final?.type === 'turn_finished' && final.outcome, 'completed');
+  assert.equal(JSON.stringify(events).includes('private thought'), false);
+  assert.ok(events.some(e => e.type === 'progress' && e.summary.includes('🌊')));
+  const calls = await f.calls();
+  assert.deepEqual(calls.slice(0, 4).map(c => c.method), ['initialize', 'session/new', 'session/set_mode', 'session/prompt']);
+  assert.deepEqual(calls[0].params.clientCapabilities, {});
+  assert.equal(calls[1].params.cwd, join(f.dir, 'workspaces', 'job_test'));
+  assert.deepEqual(calls[1].params.mcpServers, []);
+  assert.equal(f.execs.length, 0);
+  const caps = await f.backend.capabilities();
+  assert.equal(caps.resume, 'none'); assert.equal(caps.steer, false); assert.equal(caps.queue, 'launcher');
+  assert.equal(caps.approvals, 'typed'); assert.deepEqual(caps.permissionModes, ['ask']);
+  assert.deepEqual((caps as typeof caps & { workspaceModes: string[] }).workspaceModes, ['worktree', 'project-root', 'temp']);
+});
+
+test('same-owner reattach and launch retries do not spawn or prompt twice; foreign ownership is rejected', async t => {
+  const f = await fixture(t), h = await f.launch(); await eventsUntil(h, finished);
+  assert.equal(await f.launch(), h);
+  const attached = await f.backend.reattach(h.ref, f.hooks); assert.equal(attached.found, 'live');
+  assert.equal(attached.handle, h);
+  assert.deepEqual(await f.backend.findByTag('vl-job_test'), h.ref);
+  assert.equal((await f.backend.listOwned()).length, 1);
+  assert.equal((await f.backend.reattach({ ...h.ref, host: 'foreign' }, f.hooks)).found, 'none');
+  assert.equal((await f.backend.reattach({ ...h.ref, id: 'foreign-session' }, f.hooks)).found, 'none');
+  assert.equal((await f.calls()).filter(c => c.method === 'session/new').length, 1);
+});
+
+test('a new backend owner cannot adopt persisted stdio or respawn its job', async t => {
+  const f = await fixture(t), h = await f.launch(); await eventsUntil(h, finished);
+  const restarted = await plugin.create(f.config, f.ctx);
+  await assert.rejects(restarted.reattach(h.ref, f.hooks), /outcome_unknown/);
+  await assert.rejects(restarted.launch(f.spec(), f.hooks), /outcome_unknown/);
+  await assert.rejects(restarted.findByTag('vl-job_test'), /outcome_unknown/);
+  await assert.rejects(restarted.listOwned(), /ownership_unknown/);
+  assert.equal((await f.calls()).filter(c => c.method === 'session/new').length, 1);
+});
+
+test('launch reserves tag before await; simultaneous calls share one spawn', async t => {
+  const f = await fixture(t);
+  const [a, b] = await Promise.all([f.launch(), f.launch()]);
+  assert.equal(a, b); await eventsUntil(a, finished);
+  assert.equal((await f.calls()).filter(c => c.method === 'session/new').length, 1);
+});
+
+test('delivery retries are scoped to session and payload, with no second prompt or partial-overlap replay', async t => {
+  const f = await fixture(t), h = await f.launch(); await eventsUntil(h, finished);
+  const r = await h.send(input(), 'start');
+  assert.deepEqual(await h.send(input(), 'start'), r);
+  await assert.rejects(h.send(input('changed'), 'start'), /conflict/);
+  await assert.rejects(h.send({ items: [...input().items, ...input('new', 'dly_two').items] }, 'start'), /conflict/);
+  await assert.rejects(h.send(input('new', 'dly_two'), 'queue'), /native_queue/);
+  await assert.rejects(h.send(input('new', 'dly_two'), 'steer'), /no_steer/);
+  await eventsUntil(h, e => e.type === 'turn_finished' && e.turnId === r.turnId);
+  assert.equal((await f.calls()).filter(c => c.method === 'session/prompt').length, 2);
+});
+
+test('permission option mapping, reported fidelity, hook selection preserves exact ACP option id', async t => {
+  const f = await fixture(t, 'permission');
+  let seen: Parameters<SessionHooks['onPermissionRequest']>[0] | undefined;
+  f.hooks.onPermissionRequest = async req => { seen = req; return { optionId: 'yes', decidedBy: 'peer_parent' }; };
+  const h = await f.launch(); await eventsUntil(h, finished);
+  assert.equal(seen?.permission.kind, 'edit'); assert.equal(seen?.permission.fidelity.paths, 'reported');
+  assert.equal(seen?.permission.fidelity.kind, 'reported'); assert.equal(seen?.permission.command?.line, 'touch /outside/file');
+  assert.equal(seen?.permission.paths?.[0].access, 'write');
+  const response = (await f.calls()).find(c => c.id === 1001 && c.result);
+  assert.deepEqual(response?.result, { outcome: { outcome: 'selected', optionId: 'yes' } });
+});
+
+test('cancel aborts a hanging permission hook, returns cancelled outcome, and awaits real prompt stop reason', async t => {
+  const f = await fixture(t, 'permission');
+  let received!: () => void, permissionSignal: AbortSignal | undefined;
+  const requested = new Promise<void>(resolve => { received = resolve; });
+  f.hooks.onPermissionRequest = async (_req, signal) => { permissionSignal = signal; received(); return new Promise(() => {}); };
+  const h = await f.launch(); await requested;
+  assert.equal(h.state().kind, 'waiting_approval');
+  await h.interrupt('test'); assert.equal(permissionSignal?.aborted, true);
+  const events = await eventsUntil(h, finished), final = events.find(finished);
+  assert.equal(final?.type === 'turn_finished' && final.outcome, 'interrupted');
+  const calls = await f.calls();
+  assert.ok(calls.some(c => c.method === 'session/cancel' && !Object.hasOwn(c, 'id')));
+  assert.deepEqual(calls.find(c => c.id === 1001 && c.result)?.result, { outcome: { outcome: 'cancelled' } });
+});
+
+for (const scenario of ['unknown-option', 'foreign']) test(`ACP refuses unsafe permission or foreign traffic: ${scenario}`, async t => {
+  const f = await fixture(t, scenario), h = await f.launch(), events = await eventsUntil(h, finished);
+  assert.equal(JSON.stringify(events).includes('foreign-text'), false);
+  const response = (await f.calls()).find(c => c.id === 1001 && c.result);
+  assert.deepEqual(response?.result, { outcome: { outcome: 'cancelled' } });
+});
+
+for (const [stop, outcome] of [['end_turn', 'completed'], ['max_tokens', 'max_tokens'], ['max_turn_requests', 'failed'], ['refusal', 'refused'], ['cancelled', 'interrupted']]) {
+  test(`ACP stop reason ${stop} maps to ${outcome}`, async t => {
+    const f = await fixture(t, 'stop:' + stop), h = await f.launch();
+    const final = (await eventsUntil(h, finished)).find(finished);
+    assert.equal(final?.type === 'turn_finished' && final.outcome, outcome);
+  });
+}
+
+for (const scenario of ['v2', 'auth', 'no-mode', 'new-exit', 'init-hold']) test(`handshake rejects ${scenario} and persisted fence forbids retry spawn`, async t => {
+  const f = await fixture(t, scenario);
+  await assert.rejects(f.launch(), /acp_launch_failed/);
+  await assert.rejects(f.launch(), /outcome_unknown/);
+  assert.equal((await f.calls()).filter(c => c.method === 'initialize').length, 1);
+});
+
+for (const scenario of ['bad-stdout', 'exit', 'mode-change']) test(`transport or permission-policy loss ends unknown, without synthetic completed turn: ${scenario}`, async t => {
+  const f = await fixture(t, scenario), h = await f.launch();
+  const events = await eventsUntil(h, e => e.type === 'state' && e.state.kind === 'ended');
+  assert.equal(events.some(e => e.type === 'turn_finished'), false);
+  assert.equal(h.state().kind, 'ended');
+  await assert.rejects(f.backend.reattach(h.ref, f.hooks), /outcome_unknown/);
+  await assert.rejects(f.launch(), /outcome_unknown/);
+});
+
+test('unknown client request receives JSON-RPC method-not-found; no terminal code executes', async t => {
+  const f = await fixture(t, 'unsupported-client'), h = await f.launch(); await eventsUntil(h, finished);
+  const calls = await f.calls(); assert.ok(calls.some(c => c.id === 1001 && c.error?.code === -32601));
+  assert.equal(f.execs.length, 0);
+});
+
+test('turn cursors replay only unseen events; invalid/foreign cursors fail closed', async t => {
+  const f = await fixture(t), h = await f.launch(); await eventsUntil(h, finished);
+  const controller = new AbortController(); let cursor: { value: string } | undefined;
+  for await (const entry of h.turns(undefined, controller.signal)) { cursor = entry.cursor; if (entry.event.type === 'turn_finished') break; }
+  const result = await h.send(input(), 'start');
+  const seen: TurnEvent[] = [];
+  for await (const entry of h.turns(cursor, controller.signal)) {
+    seen.push(entry.event); if (entry.event.type === 'turn_finished' && entry.event.turnId === result.turnId) break;
+  }
+  controller.abort();
+  assert.equal(seen.filter(e => e.type === 'turn_finished').length, 1);
+  const bad = h.turns({ value: JSON.stringify({ tag: 'foreign', n: 0 }) })[Symbol.asyncIterator]();
+  await assert.rejects(bad.next(), /cursor_invalid/);
+});
+
+test('settle retains workspace, terminates process, excludes owned discovery and never cleans project files', async t => {
+  const f = await fixture(t, 'hold'), h = await f.launch();
+  const result = await h.settle('cancel'); assert.equal(result.workspaceKept, true);
+  assert.equal(h.state().kind, 'ended'); assert.equal(await f.backend.findByTag('vl-job_test'), null);
+  assert.deepEqual(await f.backend.listOwned(), []);
+  assert.equal((await f.backend.reattach(h.ref, f.hooks)).found, 'none');
+  await assert.rejects(h.send(input(), 'start'));
+  assert.equal(f.execs.length, 0);
+});
+
+test('unsupported permission modes and attachment inputs fail before spawn', async t => {
+  const f = await fixture(t);
+  for (const permissionMode of ['read-only', 'auto', 'full-access'] as const) await assert.rejects(f.launch({ permissionMode }), /unsupported/);
+  await assert.rejects(f.launch({ attachments: [{ path: '/file', name: 'file', mediaType: 'text/plain', sha256: '0' }] }), /unsupported/);
+  assert.equal(f.values.size, 0);
+});
+
+
+test('interrupt stops a running turn and permits a follow-up; queued work remains launcher-owned', async t => {
+  const f = await fixture(t, 'hold-after-first'), h = await f.launch(); await eventsUntil(h, finished);
+  const result = await h.send(input(), 'start');
+  assert.equal(h.state().kind, 'turn_running');
+  await assert.rejects(h.send(input('second', 'dly_two'), 'start'), /busy/);
+  await h.interrupt('requested');
+  const final = (await eventsUntil(h, e => e.type === 'turn_finished' && e.turnId === result.turnId)).find(e => e.type === 'turn_finished' && e.turnId === result.turnId);
+  assert.equal(final?.type === 'turn_finished' && final.outcome, 'interrupted');
+  assert.equal(h.state().kind, 'idle');
+  const again = await h.send(input('after interrupt', 'dly_three'), 'start');
+  await h.interrupt('cleanup');
+  await eventsUntil(h, e => e.type === 'turn_finished' && e.turnId === again.turnId);
+});
+
+test('different launch payload cannot attach to the same reserved job', async t => {
+  const f = await fixture(t);
+  const first = f.launch();
+  await assert.rejects(f.launch({ prompt: 'a different task' }), /identity_conflict/);
+  const h = await first; await eventsUntil(h, finished);
+  await assert.rejects(f.launch({ prompt: 'a different task' }), /identity_conflict/);
+});
+
+
+test('permission mode change while idle also closes the session before any new input', async t => {
+  const f = await fixture(t, 'mode-change-idle'), h = await f.launch();
+  await eventsUntil(h, e => e.type === 'state' && e.state.kind === 'ended');
+  await assert.rejects(h.send(input(), 'start'), /unsupported/);
+  assert.equal((await f.calls()).filter(c => c.method === 'session/prompt').length, 1);
+});
