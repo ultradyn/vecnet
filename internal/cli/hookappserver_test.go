@@ -29,6 +29,7 @@ type appHookFixture struct {
 	purged    map[string]bool
 	polls     []string
 	failure   string
+	acked     string // fake hub's shared default cursor; explicit after bypasses it
 }
 type appHookOutput struct {
 	Version int    `json:"version"`
@@ -58,6 +59,11 @@ func newAppHookFixture(t *testing.T) *appHookFixture {
 	f.env, f.path = hookFixture(t, func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
+		// Ordinary CLI inbox reads also exercise the legacy hub-identity probe.
+		if r.URL.Path == "/v1/hub/identity" {
+			http.NotFound(w, r)
+			return
+		}
 		if r.URL.Path != "/v1/events" {
 			t.Errorf("unexpected request %s", r.URL)
 			http.NotFound(w, r)
@@ -65,6 +71,9 @@ func newAppHookFixture(t *testing.T) *appHookFixture {
 		}
 		after := r.URL.Query().Get("after")
 		f.polls = append(f.polls, after)
+		if after == "" {
+			after = f.acked
+		}
 		if f.failure == "500" {
 			http.Error(w, "unavailable", 500)
 			return
@@ -411,7 +420,7 @@ func TestHookAppServerPointerWhenTooBig(t *testing.T) {
 	f.mu.Unlock()
 	got, _, _ := f.run(t, "c1", "wake")
 	appHookIDs(t, got, strings.Repeat("d", 80))
-	if !got.Pointer || len(got.Entries) != 0 || !strings.Contains(got.Stub, "inbox") {
+	if !got.Pointer || len(got.Entries) != 0 || !strings.Contains(got.Stub, "inbox --since 'e1.0'") || strings.Contains(got.Stub, "1 more") || !strings.Contains(got.Stub, "bodies were omitted") {
 		t.Fatalf("pointer %+v", got)
 	}
 }
@@ -564,11 +573,65 @@ func TestHookAppServerCapsLeaveRemainder(t *testing.T) {
 	}
 	got, _, _ := f.run(t, "c1", "wake")
 	appHookIDs(t, got, "dly_1", "dly_2", "dly_3", "dly_4", "dly_5", "dly_6", "dly_7", "dly_8")
-	if got.More != 2 || !strings.Contains(got.Stub, "inbox for 2 more") || f.state(t).AppCursor != "e1.8" {
+	if got.More != 2 || !strings.Contains(got.Stub, "inbox --since 'e1.0'") || !strings.Contains(got.Stub, "2 additional message(s)") || f.state(t).AppCursor != "e1.8" {
 		t.Fatalf("cap %+v state %+v", got, f.state(t))
 	}
 	got, _, _ = f.run(t, "c2", "wake")
 	appHookIDs(t, got, "dly_9", "dly_10")
+}
+
+func TestHookAppServerBacklogHintReplaysPastHubAck(t *testing.T) {
+	for _, tc := range []struct{ name, cursor, quoted string }{
+		{"opaque", "opaque-z-before", "'opaque-z-before'"},
+		{"shell-metacharacters", "opaque-$HOME;'quoted'", "'opaque-$HOME;'\"'\"'quoted'\"'\"''"},
+		{"control-character", "opaque\ncontrol", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newAppHookFixture(t)
+			for n := range 10 {
+				f.add(t, "wake_idle", fmt.Sprintf("queued-%02d", n+1), "")
+			}
+			// A non-delivery predecessor carries a deliberately opaque cursor.
+			// No numerical/lexical comparison can recover this starting point.
+			f.events = append([]envelope.Event{{Cursor: tc.cursor, Type: "receipt", Data: json.RawMessage(`{"state":"processed"}`)}}, f.events...)
+			if err := (stateFile{f.path}).update(t.Context(), func(s *hookState) error { s.AppCursor = tc.cursor; return nil }); err != nil {
+				t.Fatal(err)
+			}
+			got, _, _ := f.run(t, "busy", "wake")
+			appHookIDs(t, got)
+			if len(f.state(t).Replay) != 10 {
+				t.Fatal("fixture did not defer ten deliveries")
+			}
+			f.acked = f.events[len(f.events)-1].Cursor
+			var ordinary bytes.Buffer
+			if code, stderr := runDisplayInbox(t, f.env, &ordinary, "--json", "inbox"); code != 0 || strings.Contains(ordinary.String(), "queued-") {
+				t.Fatalf("default inbox should be empty behind hub ack: %d %s %s", code, stderr, ordinary.String())
+			}
+			got, _, _ = f.run(t, "idle", "wake,wake_idle")
+			appHookIDs(t, got, "dly_1", "dly_2", "dly_3", "dly_4", "dly_5", "dly_6", "dly_7", "dly_8")
+			if got.More != 2 || strings.Contains(got.Stub, "inbox for") || !strings.Contains(got.Stub, "2 additional message(s)") {
+				t.Fatalf("misleading backlog count/command: %s", got.Stub)
+			}
+			if tc.quoted == "" {
+				if strings.Contains(got.Stub, "inbox --since") || strings.ContainsAny(got.Stub, "\r\n") {
+					t.Fatalf("unsafe cursor rendered into command: %q", got.Stub)
+				}
+				return
+			}
+			if !strings.Contains(got.Stub, "inbox --since "+tc.quoted) {
+				t.Fatalf("hint lost exact safely quoted predecessor: %s", got.Stub)
+			}
+			before := readHookState(t, f.path)
+			var replay bytes.Buffer
+			if code, stderr := runDisplayInbox(t, f.env, &replay, "--json", "inbox", "--since", tc.cursor); code != 0 || !strings.Contains(replay.String(), "queued-01") || !strings.Contains(replay.String(), "queued-10") {
+				t.Fatalf("suggested explicit replay did not expose backlog: %d %s", code, stderr)
+			}
+			after := readHookState(t, f.path)
+			if len(after.Replay) != 0 || !reflect.DeepEqual(before.Claims, after.Claims) || after.AppCursor != before.AppCursor {
+				t.Fatal("manual replay lost claims/cursor or failed to retire printed unread remainder")
+			}
+		})
+	}
 }
 func TestHookAppServerPipeCap(t *testing.T) {
 	f := newAppHookFixture(t)

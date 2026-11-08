@@ -437,13 +437,12 @@ func TestWatchReplayFailedDisplayNeverAcknowledges(t *testing.T) {
 	}
 }
 
-func TestWatchConcurrentCommandsDoNotClaimDisplay(t *testing.T) {
+func TestWatchConcurrentNonDisplayCommandsDoNotClaimDisplay(t *testing.T) {
 	f := newDisplayFixture(t)
 	out := new(hookWatchOutput)
 	stream, stop := f.watch(t, out, true)
 	ev := f.delivery()
 	commands := [][]string{
-		{"--json", "inbox", "--since", "e1.0"},
 		{"thread", "thr_X"},
 		{"reply", "msg_1", "reply", "--thread", "thr_X", "--hold"},
 		{"receipt", "dly_1", "read"},
@@ -467,6 +466,30 @@ func TestWatchConcurrentCommandsDoNotClaimDisplay(t *testing.T) {
 	stop()
 	if strings.Count(out.String(), "live delivery") != 1 {
 		t.Fatalf("concurrent commands suppressed delivery: %q", out.String())
+	}
+}
+
+// Complete inbox output now supplies the same positive display proof as a
+// successful hook/monitor. An explicit inbox replay must still print, while
+// an already-connected live monitor must not call it a new delivery again.
+func TestWatchInboxOutputSuppressesLiveDuplicate(t *testing.T) {
+	f := newDisplayFixture(t)
+	out := new(hookWatchOutput)
+	stream, stop := f.watch(t, out, true)
+	ev := f.delivery()
+	for i := 0; i < 2; i++ {
+		var manual bytes.Buffer
+		if code, stderr := runDisplayInbox(t, f.env, &manual, "--json", "inbox", "--since", "e1.0"); code != 0 || !strings.Contains(manual.String(), "live delivery") {
+			t.Fatalf("explicit inbox did not print: %d %s", code, stderr)
+		}
+	}
+	stream.frames <- []envelope.Event{ev}
+	if cursor := f.ack(t); cursor != ev.Cursor {
+		t.Fatalf("ack=%q", cursor)
+	}
+	stop()
+	if out.String() != "" {
+		t.Fatalf("live monitor duplicated successful inbox output: %q", out.String())
 	}
 }
 

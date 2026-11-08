@@ -1163,7 +1163,7 @@ func (a *app) cmdInbox(args []string) error {
 			return usageErr("inbox: --limit must be a positive whole number")
 		}
 	}
-	c, _, ch, err := a.connect()
+	c, name, ch, err := a.connect()
 	if err != nil {
 		return err
 	}
@@ -1185,16 +1185,23 @@ func (a *app) cmdInbox(args []string) error {
 		next = evs[len(evs)-1].Cursor
 	}
 	a.rememberEvents(ch, evs)
+	var output bytes.Buffer
 	if a.json {
-		if err := a.emitValue(pollBody{Events: evs, NextCursor: next}); err != nil {
+		raw, err := json.Marshal(pollBody{Events: evs, NextCursor: next})
+		if err != nil {
 			return err
 		}
+		output.Write(raw)
+		output.WriteByte('\n')
 	} else {
-		fmt.Fprintln(a.stdout, inboxHeader)
+		fmt.Fprintln(&output, inboxHeader)
 		names := ch.peerNames()
 		for _, ev := range evs {
-			fmt.Fprintln(a.stdout, inboxLine(ev, names))
+			fmt.Fprintln(&output, inboxLine(ev, names))
 		}
+	}
+	if err := a.displayInbox(c, name, evs, output.Bytes()); err != nil {
+		return err
 	}
 	if o.has("ack") && len(evs) > 0 {
 		if err := a.ack(c, next); err != nil {
