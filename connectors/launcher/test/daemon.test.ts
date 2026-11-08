@@ -5,6 +5,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { DatabaseSync } from 'node:sqlite';
 import type { BackendCapabilities, BackendHealth } from '../src/backend.ts';
 import { createHubClient } from '../../hub-client/src/client.ts';
 import type { HubApi } from '../../hub-client/src/ports.ts';
@@ -73,9 +74,63 @@ test('a kill between launch and recording the ref adopts the session by tag on r
   assert.equal(h.inspect(l => l.job(jobId)!.sessionRef!.id), jobId);
 });
 
+test('a crash after HTTP status acceptance but before durable acknowledgement replays the same outbox row and lifecycle sequence', async t => {
+  const h = await harness(t);
+  const push = h.hub.requests.push.bind(h.hub.requests);
+  let crashed = false;
+  // Stop synchronously at the fake hub's request boundary, before the HTTP
+  // response can acknowledge the running report in the launcher's ledger.
+  h.hub.requests.push = (...rows) => {
+    const count = push(...rows);
+    if (!crashed && rows.some(row => row.path === '/v1/messages'
+      && (row.body as { job_status?: { state?: string } })?.job_status?.state === 'running')) {
+      crashed = true;
+      h.daemon.crash();
+    }
+    return count;
+  };
+  const { jobId } = await launched(h);
+  assert.equal(crashed, true);
+  const snapshot = () => {
+    const db = new DatabaseSync(join(h.dir, 'ledger.sqlite'), { readOnly: true });
+    try {
+      return {
+        statusSeq: h.inspect(l => l.job(jobId)!.statusSeq),
+        rows: db.prepare("SELECT id, key, payload, state FROM outbox WHERE kind = 'send' AND json_extract(payload, '$.job_status.job_id') = ? ORDER BY id").all(jobId),
+      };
+    } finally { db.close(); }
+  };
+  const before = snapshot();
+  assert.equal(before.statusSeq, 2);
+  assert.equal(before.rows.length, 2);
+  assert.deepEqual(before.rows.map(row => row.state), ['sent', 'pending']);
+  await h.restart();
+  await until(() => h.statuses(jobId).length >= 3, 'the pending status retried');
+  await until(() => !h.inspect(l => l.pendingOutbox(100, Number.MAX_SAFE_INTEGER).some(row =>
+    row.kind === 'send' && 'job_status' in row.payload && row.payload.job_status?.job_id === jobId)), 'durable status acknowledgement');
+  await settle();
+  const after = snapshot();
+  const attempts = h.sends().filter(row => row.job_status?.job_id === jobId);
+  assert.equal(attempts.length, 3);
+  assert.deepEqual(attempts[1], attempts[2], 'retry preserves the exact key and request body');
+  assert.deepEqual(attempts.map(row => row.job_status!.sequence), [1, 2, 2]);
+  assert.equal(new Set(attempts.map(row => row.idempotency_key)).size, 2);
+  assert.equal(after.statusSeq, 2);
+  assert.equal(after.rows.length, 2);
+  const identity = ({ id, key, payload }: typeof before.rows[number]) => ({ id, key, payload });
+  assert.deepEqual(after.rows.map(identity), before.rows.map(identity), 'same persisted outbox rows, keys and serialized payloads');
+  assert.deepEqual(after.rows.map(row => row.state), ['sent', 'sent']);
+  assert.equal(h.launches(), 1);
+  assert.equal(h.backend.sessions().length, 1);
+});
+
 test('crash() then a new daemon on the same ledger: open job reattached, no duplicate launch; a backend down at start keeps the job running and reattaches when it returns', async t => {
   const h = await harness(t);
   const { jobId, thread } = await launched(h);
+  // This case restarts an acknowledged running job. launched() observes HTTP
+  // arrival only; the separate pre-ack crash case above covers exact retries.
+  await until(() => !h.inspect(l => l.pendingOutbox(Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER).some(row =>
+    row.kind === 'send' && 'job_status' in row.payload && row.payload.job_status?.job_id === jobId)), 'running status durably acknowledged before restart');
   await h.restart();
   await settle();
   assert.equal(h.launches(), 1);
