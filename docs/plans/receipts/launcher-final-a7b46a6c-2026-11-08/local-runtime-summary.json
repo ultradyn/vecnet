@@ -1,0 +1,114 @@
+{
+  "source_revision": "a7b46a6c4c46c05c531cb348f0c8ac05ae2eae44",
+  "source_inventory_sha256": "c3a76e9a594067a69c4c77a546804837da20df410339b8c86017e947bbc7e20a",
+  "clearance_message": "msg_01M6WZCM2J66YKWSYQ9GVAS8XE",
+  "local_runtime_pass": true,
+  "results": [
+    {
+      "label": "native-worktree",
+      "actual_exit": 0,
+      "started": "2026-11-08T07:04:21.488927+00:00",
+      "ended": "2026-11-08T07:04:30.214718+00:00",
+      "public_receipt_sha256": "6241873230dacf243af73bb3a1aa0f95d5811830a07d91278e7e614e464e4141",
+      "raw_log_sha256": "4af775935b26da0ee35be14d9ce4a01b40849fa83c77270b1ce6ba5f256c63fe",
+      "source_inventory_sha256": "c3a76e9a594067a69c4c77a546804837da20df410339b8c86017e947bbc7e20a",
+      "job": "job_01M6WZHX6D5D9Q4WGNWTWW2YWK",
+      "thread": "thr_01M6WZHX6D5D9Q4WGNWTKKRASB",
+      "backend_session": "01a1b9f8-f514-79f0-a6e2-a135e49293fe",
+      "cancellation_ack": {
+        "message_id": "msg_01M6WZJ3SNWJNGYZY9FZD3D3W1",
+        "job_id": "job_01M6WZHX6D5D9Q4WGNWTWW2YWK",
+        "sender": "peer_01M6WZHWHGDHZ7Y9DE29C6GG44",
+        "thread_id": "thr_01M6WZHX6D5D9Q4WGNWTKKRASB"
+      },
+      "runtime_version": "0.166.0",
+      "effective_model": "ocx/gpt-6.1-sol",
+      "effective_provider": "opencodex",
+      "effective_effort": "high",
+      "restart": true,
+      "workspace_mode": "worktree",
+      "authority_retired": true
+    },
+    {
+      "label": "native-project-root",
+      "actual_exit": 0,
+      "started": "2026-11-08T07:06:00.155859+00:00",
+      "ended": "2026-11-08T07:06:08.888948+00:00",
+      "public_receipt_sha256": "1e2979c56a30398350a73a8b4e5d7a624606c3805163490efba36b6730d5d989",
+      "raw_log_sha256": "618442cf54f01bb53d864cf7e30b8db94acdb0e2170e8872e62e11ca3b7962aa",
+      "source_inventory_sha256": "c3a76e9a594067a69c4c77a546804837da20df410339b8c86017e947bbc7e20a",
+      "job": "job_01M6WZMXHKAB531KP8N3R20RF2",
+      "thread": "thr_01M6WZMXHKAB531KP8N072D431",
+      "backend_session": "01a1b9fa-7683-7ea1-92cd-6c142bc182e3",
+      "cancellation_ack": {
+        "message_id": "msg_01M6WZN450G0WHBHF09XWJPXPC",
+        "job_id": "job_01M6WZMXHKAB531KP8N3R20RF2",
+        "sender": "peer_01M6WZMWWQ58XV57Y7A537DM6F",
+        "thread_id": "thr_01M6WZMXHKAB531KP8N072D431"
+      },
+      "runtime_version": "0.166.0",
+      "effective_model": "ocx/gpt-6.1-sol",
+      "effective_provider": "opencodex",
+      "effective_effort": "high",
+      "restart": true,
+      "workspace_mode": "project-root",
+      "authority_retired": true
+    },
+    {
+      "label": "native-temp",
+      "actual_exit": 0,
+      "started": "2026-11-08T07:06:49.427535+00:00",
+      "ended": "2026-11-08T07:06:58.107894+00:00",
+      "public_receipt_sha256": "22e8447f6a084e87c01b68b22a1fc51207df2de87d80dd006cd31e311a596785",
+      "raw_log_sha256": "ac19c85a22535e1d6e6336a76a992d3f26c511afbeef83308f4aa402b6d363b0",
+      "source_inventory_sha256": "c3a76e9a594067a69c4c77a546804837da20df410339b8c86017e947bbc7e20a",
+      "job": "job_01M6WZPDM54NQDRDQVGH7GTPE9",
+      "thread": "thr_01M6WZPDM54NQDRDQVGEAMA05M",
+      "backend_session": "01a1b9fb-36dd-79d3-9ede-7df0caaea36e",
+      "cancellation_ack": {
+        "message_id": "msg_01M6WZPM7PBT7KE4GQFSXAM1AY",
+        "job_id": "job_01M6WZPDM54NQDRDQVGH7GTPE9",
+        "sender": "peer_01M6WZPCZRCW6A4N62ZWB02YHH",
+        "thread_id": "thr_01M6WZPDM54NQDRDQVGEAMA05M"
+      },
+      "runtime_version": "0.166.0",
+      "effective_model": "ocx/gpt-6.1-sol",
+      "effective_provider": "opencodex",
+      "effective_effort": "high",
+      "restart": true,
+      "workspace_mode": "temp",
+      "authority_retired": true
+    },
+    {
+      "label": "acp-temp",
+      "actual_exit": 0,
+      "started": "2026-11-08T07:07:26.151463+00:00",
+      "ended": "2026-11-08T07:07:34.125734+00:00",
+      "public_receipt_sha256": "2a288c92defd9b0ead538501a770dadc8ff3e37c6ec04fcea13111a676f91ff4",
+      "raw_log_sha256": "46393f4cfc5d0a25ca1dc1af1ee105853d2d97e9b86b9166d41591f7ffb4020c",
+      "source_inventory_sha256": "c3a76e9a594067a69c4c77a546804837da20df410339b8c86017e947bbc7e20a",
+      "job": "job_01M6WZQHJ24EEYKFMNWH4S5F5K",
+      "thread": "thr_01M6WZQHJ24EEYKFMNWGB0FS21",
+      "backend_session": "b114a6e9-67e1-4a4c-aefe-97f2818601e7",
+      "cancellation_ack": {
+        "message_id": "msg_01M6WZQQDN5CDYZ9C6BGWXAZ0A",
+        "job_id": "job_01M6WZQHJ24EEYKFMNWH4S5F5K",
+        "sender": "peer_01M6WZQGX5JBRB95V74MCRWN9N",
+        "thread_id": "thr_01M6WZQHJ24EEYKFMNWGB0FS21"
+      },
+      "runtime_version": "0.101.0",
+      "effective_model": null,
+      "effective_provider": null,
+      "effective_effort": null,
+      "restart": false,
+      "workspace_mode": "temp",
+      "authority_retired": true
+    }
+  ],
+  "limits": [
+    "Only local loopback/disposable scopes. No Fly acceptance or persistent installation/deployment.",
+    "ACP effective model/provider/effort explicitlyunknown/null; actual model turns prove availability only.",
+    "Nativeactualdaemon executable/listener inventory plus actualRPC0.166.0; actual route reported by native session."
+  ],
+  "slot": "RETURNED"
+}

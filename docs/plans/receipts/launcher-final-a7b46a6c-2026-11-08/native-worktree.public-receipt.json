@@ -1,0 +1,80 @@
+{
+  "job": "job_01M6WZHX6D5D9Q4WGNWTWW2YWK",
+  "thread": "thr_01M6WZHX6D5D9Q4WGNWTKKRASB",
+  "backend": "codex-app-server",
+  "backend_session": "01a1b9f8-f514-79f0-a6e2-a135e49293fe",
+  "codex_thread": "01a1b9f8-f514-79f0-a6e2-a135e49293fe",
+  "workspace": "/home/xertrov/.local/share/vecnet-launcher/workspaces/job_01M6WZHX6D5D9Q4WGNWTWW2YWK",
+  "workspace_mode": "worktree",
+  "branch": "launch/job_01M6WZHX6D5D9Q4WGNWTWW2YWK",
+  "model": "ocx/gpt-6.1-sol",
+  "provider": "opencodex",
+  "effort": "high",
+  "permission_mode": "read-only",
+  "statuses": [
+    "accepted",
+    "running"
+  ],
+  "service_restart": true,
+  "first": "msg_01M6WZJ0ADMFM5JTM6B03B77AZ",
+  "followup": "msg_01M6WZJ3JGVES25TA869GZHQMP",
+  "pass": true,
+  "launch": {
+    "job_id": "job_01M6WZHX6D5D9Q4WGNWTWW2YWK",
+    "thread_id": "thr_01M6WZHX6D5D9Q4WGNWTKKRASB",
+    "message_id": "msg_01M6WZHX6D5D9Q4WGNWWP40N4X"
+  },
+  "cancellation": {
+    "state": "cancelled",
+    "request_message_id": "msg_01M6WZJ3QBG08YE6T9VS5WYT67",
+    "acknowledgement": {
+      "message_id": "msg_01M6WZJ3SNWJNGYZY9FZD3D3W1",
+      "job_id": "job_01M6WZHX6D5D9Q4WGNWTWW2YWK",
+      "sender": "peer_01M6WZHWHGDHZ7Y9DE29C6GG44",
+      "thread_id": "thr_01M6WZHX6D5D9Q4WGNWTKKRASB"
+    }
+  },
+  "teardown": {
+    "complete": true
+  },
+  "provenance": {
+    "approval_sha256": "94b35ab7fda3ee60109c78cd2316971f22129dc0f5a8011c5b15ac623dab28c2",
+    "source_revision": "a7b46a6c4c46c05c531cb348f0c8ac05ae2eae44",
+    "snapshot_sha256": "6650e5e3a4c5757101c56c77112ea419921360f14e331198eb545a1306b43ca0",
+    "cli_sha256": "7267a2a6efbd0bac45d28b676de8603eadd06cdcf14e2476103b46e479f79db7",
+    "demo_sha256": "7c72eaabf0c3ce2fe8dacb1c8f195f3c141f9b1d95eecd9d30f5f32eefb96305",
+    "runtime": {
+      "executable": "/agent-state/data/xertrov/codex/packages/app-server-daemon/releases/0.166.0-x86_64-unknown-linux-musl/bin/codex",
+      "executable_sha256": "b8a11fedf24b2dfb59a70c9e52b030f9a508dcd49cd2dd0d41956f4c785156b8",
+      "version": "0.166.0",
+      "model": "ocx/gpt-6.1-sol",
+      "model_provider": "opencodex",
+      "effort": "high"
+    },
+    "provider_availability": "model-turns-observed",
+    "effective_provider": "opencodex",
+    "effective_model": "ocx/gpt-6.1-sol",
+    "effective_effort": "high",
+    "attestation_limit": "RPC reports the daemon version and selected route; the approved executable digest records the controller-inventoried daemon binary.",
+    "snapshot_path": "/home/xertrov/.local/share/vecnet-launcher/snapshots/6650e5e3a4c5757101c56c77112ea419921360f14e331198eb545a1306b43ca0"
+  },
+  "workspace_proof": {
+    "backend": "codex-app-server",
+    "mode": "worktree",
+    "git_expected": true,
+    "before": {
+      "branch": "master",
+      "head": "f966d5e3d0f2a9d788a85d26bd53aa63cf9a7b46",
+      "status": " M README.md\u0000?? sentinel.untracked\u0000",
+      "tracked": "6bb909f357441bd5385860e6535b49a9be14cd1ae827882b6a69fad23d9e83d6",
+      "untracked": "6e876785cd64f8f73f66782493f3a1a28ec16b06207fb309440250cb81f96ea9"
+    },
+    "after": {
+      "branch": "master",
+      "head": "f966d5e3d0f2a9d788a85d26bd53aa63cf9a7b46",
+      "status": " M README.md\u0000?? sentinel.untracked\u0000",
+      "tracked": "6bb909f357441bd5385860e6535b49a9be14cd1ae827882b6a69fad23d9e83d6",
+      "untracked": "6e876785cd64f8f73f66782493f3a1a28ec16b06207fb309440250cb81f96ea9"
+    }
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "hub": "https://vecnet.xk.io",
+  "verified_at": "2026-11-08T07:17:49.883462+00:00",
+  "verification_endpoint": "/v1/admin/peers",
+  "peers": [
+    {
+      "peer_id": "peer_01M6WZT8RH75E3JTSQQ6ZZ2SKD",
+      "role": "launcher",
+      "disabled": true,
+      "disable_cli_exit": 0
+    },
+    {
+      "peer_id": "peer_01M6WZT8WH8TJKHXS3WVEGGPCP",
+      "role": "sender",
+      "disabled": true,
+      "disable_cli_exit": 0
+    }
+  ],
+  "count": 2,
+  "no_config_changes": true
+}

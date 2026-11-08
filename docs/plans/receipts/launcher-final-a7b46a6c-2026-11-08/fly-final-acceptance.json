@@ -1,0 +1,46 @@
+{
+  "pass": true,
+  "runtime_pass": true,
+  "operator_disable_verified": true,
+  "operator_proof_sha256": "2d602f407daa53c244e00f749a0c35a607c7edef9499d3228e1003e87969f6a6",
+  "runtime_receipt_sha256": "10abf02b033c524f78758bada8c1ab54d7a12d9b29b05030e5ccd85c1d9eb09d",
+  "job": {
+    "job_id": "job_01M6WZZSMH90S9K77PXF1BWA78",
+    "thread_id": "thr_01M6WZZSMH90S9K77PXDKEG54V",
+    "message_id": "msg_01M6WZZSMH90S9K77PXJEJ5RM5"
+  },
+  "cancellation": {
+    "state": "cancelled",
+    "request_message_id": "msg_01M6X0007G04FVZMA49HZMP0V7",
+    "acknowledgement": {
+      "message_id": "msg_01M6X0009WDPSWTKW42H8PS2FA",
+      "job_id": "job_01M6WZZSMH90S9K77PXF1BWA78",
+      "sender": "peer_01M6WZT8RH75E3JTSQQ6ZZ2SKD",
+      "thread_id": "thr_01M6WZZSMH90S9K77PXDKEG54V"
+    }
+  },
+  "disabled_peers": [
+    "peer_01M6WZT8RH75E3JTSQQ6ZZ2SKD",
+    "peer_01M6WZT8WH8TJKHXS3WVEGGPCP"
+  ],
+  "unit_before": {
+    "LoadState": "not-found",
+    "ActiveState": "inactive",
+    "MainPID": "0"
+  },
+  "unit_after": {
+    "LoadState": "not-found",
+    "ActiveState": "inactive",
+    "MainPID": "0"
+  },
+  "private_authority_retired": true,
+  "retired_paths": [
+    "/tmp/vecnet-fly-launcher-LkjwKT/config.toml",
+    "/tmp/vecnet-fly-launcher-LkjwKT/config.toml.lock",
+    "/tmp/vecnet-fly-launcher-LkjwKT/recovery.json",
+    "/work/package-cache/xertrov/vecnet-final-fly-authority-20261108/fly-invitations.json",
+    "/tmp/vecnet-fly-launcher-LkjwKT/launcher"
+  ],
+  "public_receipt_preserved": true,
+  "completed_at": "2026-11-08T07:25:15.660321+00:00"
+}
