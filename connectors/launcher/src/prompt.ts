@@ -15,7 +15,7 @@ export function buildLaunchSpec(job: JobRow, project: ResolvedProject, caps: Bac
   // closed on legacy rows rather than silently launch with the job's title.
   if (typeof job.instructions !== 'string') throw new Error('launch instructions missing');
   const workspaceMode = job.input.workspace_mode ?? 'worktree';
-  const prompt = caps.branchName === 'settable' && workspaceMode !== 'project-root' ? buildPrompt(job.instructions,job) :
+  const prompt = caps.branchName === 'settable' && workspaceMode === 'worktree' ? buildPrompt(job.instructions,job) :
     appendFooter(job.instructions,`${PROMPT_FOOTER}\nDo not push.`);
   return {
     jobId:job.jobId,tag:`vl-${job.jobId}`,title:`vl-${job.jobId} ${job.title}`,prompt,

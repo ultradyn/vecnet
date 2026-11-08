@@ -243,7 +243,11 @@ export default definePlugin<CodexConfig>({
               ...(edit ? { paths } : {}), ...(network ? { host: { name: net.host, protocol: net.protocol } } : {}),
               scope: sessionScope ? 'session' : 'once', options, reason: typeof p.reason === 'string' ? p.reason : undefined, backend_raw: p,
               fidelity: { kind: edit || network ? 'enforced' : 'reported', command: edit ? 'none' : typeof p.command === 'string' ? 'line' : 'none', paths: edit ? 'enforced' : 'none', host: network ? 'enforced' : 'none' } };
-            const decision = await this.hooks.onPermissionRequest({ requestId: key, summary: edit ? 'Codex requests file changes' : 'Codex requests command execution', permission, options, defaultOnExpiry: 'decline' }, controller.signal);
+            // RPC ids can be reused after a completed callback or reconnect.
+            // A changed operation or grant scope must never inherit a cached
+            // parent-bridge decision for the earlier wire id.
+            const approvalId = key + ':' + createHash('sha256').update(JSON.stringify([method, permission])).digest('hex');
+            const decision = await this.hooks.onPermissionRequest({ requestId: approvalId, summary: edit ? 'Codex requests file changes' : 'Codex requests command execution', permission, options, defaultOnExpiry: 'decline' }, controller.signal);
             r.respond(id, { decision: decision.optionId === 'accept' ? 'accept' : 'decline' });
           } else { r.respond(id, { decision: 'decline' }); ctx.log.warn('codex_launcher_request_refused', { method }); }
         } catch { try { r.respond(id, method === 'item/tool/requestUserInput' ? { answers: {} } : { decision: 'decline' }); } catch { /* connection closed */ } }

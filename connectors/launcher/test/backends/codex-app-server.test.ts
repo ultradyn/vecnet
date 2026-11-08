@@ -961,12 +961,12 @@ async function nativeRoutingHarness(t: TestContext, config: { presets?: Array<'o
     .map(row => row.payload as SendRequest).filter(row => row.kind === 'approval_request');
   return { f, h, handle, canonical, prompts, bridge,
     async drain() { await handle.activity(); await handle.activity(); },
-    async decide(prompt: SendRequest) {
+    async decide(prompt: SendRequest, actor = 'peer_operator') {
       const row = h.deps.ledger.pendingOutbox(100, f.clock.now()).find(row => row.key === prompt.idempotency_key)!;
       const sent = { message_id: 'approval-card', thread_id: prompt.thread_id ?? 'operator-thread', deliveries: [], spilled: false };
       h.deps.ledger.markOutbox(row.id, 'sent', sent);
       for (const callback of callbacks) callback(row, sent);
-      const response = threadDelivery(sent.thread_id, 'peer_operator', '', 'wake');
+      const response = threadDelivery(sent.thread_id, actor, '', 'wake');
       response.message.kind = 'approval_response';
       response.message.approval_response = { approval_id: prompt.approval_request!.approval_id, decision: prompt.approval_request!.options[0] };
       assert.equal(await bridge.handleApprovalResponse(response), 'consumed');
@@ -1048,4 +1048,26 @@ test('standalone native launcher check prints health and exits without leaving i
   const report = JSON.parse(stdout);
   assert.equal(report.backends[0].ok, true); assert.equal(report.backends[0].version, '0.166.0');
   assert.equal(f.methods('thread/resume').length, 0); assert.equal(f.methods('thread/start').length, 0);
+});
+
+
+test('native reused RPC id cannot replay a prior requester grant onto a changed operator scope', timeout, async t => {
+  const s = await nativeRoutingHarness(t,{presets:['outside-workspace','privileged']});
+  try {
+    const threadId=s.handle.ref.id,turnId=s.f.daemon.threads.get(threadId)!.turns[0].id;
+    const method='item/fileChange/requestApproval';
+    const initial={threadId,turnId,itemId:'first-file-approval',grantRoot:String(s.handle.ref.extra!.workspace)};
+    const id=s.f.daemon.serverRequest(method,initial);await s.drain();
+    const first=s.prompts()[0];assert.ok(first);assert.deepEqual(first.recipients,[s.h.job().requester]);
+    await s.decide(first,s.h.job().requester);
+    assert.equal(s.f.daemon.replies.filter(r=>r.id===id).length,1);
+    const changed={...initial,itemId:'second-file-approval',grantRoot:join(s.f.daemon.home,'.ssh')};
+    s.f.daemon.serverRequest(method,changed,id);await s.drain();
+    const next=s.prompts().find(prompt=>prompt.idempotency_key!==first.idempotency_key);
+    assert.ok(next,'changed scope must open a distinct approval instead of replaying the old grant');
+    assert.deepEqual(next.recipients,['peer_operator']);
+    assert.equal(s.f.daemon.replies.filter(r=>r.id===id).length,1,'no cached acceptance before operator decision');
+    await s.decide(next);
+    assert.deepEqual(s.f.daemon.replies.filter(r=>r.id===id).map(r=>r.result),[{decision:'accept'},{decision:'accept'}]);
+  } finally {s.finish();}
 });

@@ -206,8 +206,8 @@ export async function startFakeNativeCodex(dir: string) {
     },
     setPageSize(value: number) { pageSize = value; },
     disconnect() { for (const p of peers) p.socket.destroy(); },
-    serverRequest(method: string, params: Params) {
-      const id = ++requestId;
+    serverRequest(method: string, params: Params, reusedId?: number) {
+      const id = reusedId ?? ++requestId;
       // Broadcast even foreign-thread requests, to exercise ownership filtering.
       for (const peer of peers) peer.send({ id, method, params });
       return id;
