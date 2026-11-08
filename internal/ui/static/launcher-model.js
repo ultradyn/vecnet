@@ -6,12 +6,21 @@ const WORKSPACES = ['worktree', 'project-root', 'temp'];
 const strings = xs => Array.isArray(xs) ? xs.filter(x => typeof x === 'string') : [];
 const unique = xs => [...new Set(xs)];
 
+export const LAUNCHER_HOST_HELP = 'On the launcher host, run vecnet --net PROFILE launcher status and vecnet --net PROFILE launcher check. Native Codex requires a supported, running background app-server daemon, using the same configured CODEX_HOME as launcher setup. If it is stopped, explicitly run CODEX_HOME="${CODEX_HOME:-$HOME/.codex}" codex app-server daemon start, then run launcher check again. These are host operator actions; health checks do not start Codex or load existing threads.';
+
+export function launcherHostRecovery(profile) {
+  return 'CODEX_HOME="${CODEX_HOME:-$HOME/.codex}" codex app-server daemon start\n' +
+    'vecnet --net ' + quote(profile) + ' launcher check\nvecnet --net ' + quote(profile) + ' launcher status';
+}
+
 export function launcherChoices(row) {
   const p = row?.peer || {}, caps = strings(p.capabilities);
   const tags = prefix => unique(caps.filter(x => x.startsWith(prefix)).map(x => x.slice(prefix.length)));
   const aliases = tags('project:').filter(x => ALIAS.test(x));
-  const projects = aliases.filter(x => x !== 'temporary');
-  const temporary = aliases.includes('temporary');
+  const scratch = tags('scratch:').filter(x => aliases.includes(x));
+  const scratchProject = scratch[0] || '';
+  const projects = aliases.filter(x => !scratch.includes(x));
+  const temporary = !!scratchProject;
   const modes = tags('mode:').filter(x => MODES.includes(x));
   // Only a legacy peer without any scoped tags uses the global union. A
   // backend missing modes on a new peer must not inherit another's modes.
@@ -28,12 +37,12 @@ export function launcherChoices(row) {
   if (p.kind !== 'launcher') reason = 'This peer is not a launcher.';
   else if (row.disabled || row.archived_at) reason = 'Enable this launcher before launching a job.';
   else if (row.credential !== 'active') reason = 'Complete launcher installation and enrolment first.';
-  else if (!['idle', 'working'].includes(p.presence)) reason = 'Launcher is ' + (p.presence || 'unknown') + '. Wait for a healthy presence report.';
+  else if (!['idle', 'working'].includes(p.presence)) reason = 'Launcher is ' + (p.presence || 'unknown') + '. ' + LAUNCHER_HOST_HELP;
   else if (!aliases.length) reason = 'No project aliases advertised. Configure projects on the launcher host and restart the daemon.';
-  else if (!backends.some(b => b.health === 'ok' && b.presets.length)) reason = 'No healthy backend with an advertised preset is available.';
+  else if (!backends.some(b => b.health === 'ok' && b.presets.length)) reason = 'No healthy backend with an advertised preset is available. ' + LAUNCHER_HOST_HELP;
   else if (!backends.some(b => b.health === 'ok' && b.presets.length && b.modes.length)) reason = 'No permission modes advertised for a healthy backend.';
   else if (!backends.some(b => b.health === 'ok' && b.presets.length && b.modes.length && b.workspaces.length)) reason = 'No supported workspace is configured for a healthy backend.';
-  return { projects, temporary, backends, modes, reason };
+  return { projects, scratchProject, temporary, backends, modes, reason };
 }
 
 export function buildLaunch(row, values, key, now) {
@@ -56,7 +65,7 @@ export function buildLaunch(row, values, key, now) {
     content: { text: prompt }, ...(title ? { thread_title: title } : {}),
     expires_at: new Date(deadline).toISOString(),
     job_request: { version: 1, job_key: key, operation: 'launch', instructions: prompt,
-      input: { backend: values.backend, project: workspace === 'temp' ? 'temporary' : values.project, workspace_mode: workspace,
+      input: { backend: values.backend, project: workspace === 'temp' ? choices.scratchProject : values.project, workspace_mode: workspace,
         preset: values.preset, permission_mode: values.mode, ...(title ? { title } : {}) } },
   };
 }
@@ -78,4 +87,74 @@ export function launcherSetupCommands(output, v) {
   const prefix = 'vecnet --net ' + quote(enrol[2]) + ' launcher ';
   return [enrol[1], prefix + 'setup --project ' + quote(v.project) + ' --repo ' + quote(v.repo) + ' --base-ref ' + quote(v.baseRef) + ' --write',
     prefix + 'install --source ' + quote(v.source) + ' --write --enable --start'].join('\n');
+}
+
+// Only submitted requests, public identity pins and safe result ids live in
+// tab storage. No API client, bearer, enrolment token or unsent draft is saved.
+const recoveries = new Map(), pins = new Map();
+const RECOVERY_PREFIX = 'vecnet.ui.launcher.recovery.v1:';
+const clone = value => JSON.parse(JSON.stringify(value));
+const only = (value, keys) => value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).every(k => keys.includes(k));
+function recoveryBody(body, launcher) {
+  const j = body?.job_request, i = j?.input;
+  return only(body, ['idempotency_key', 'recipients', 'kind', 'priority', 'content', 'thread_title', 'expires_at', 'job_request']) &&
+    /^launch-[a-z0-9-]+$/.test(body.idempotency_key) && body.recipients?.length === 1 && body.recipients[0] === launcher &&
+    body.kind === 'message' && body.priority === 'wake' && only(body.content, ['text']) && typeof body.content.text === 'string' &&
+    Number.isFinite(Date.parse(body.expires_at)) && only(j, ['version', 'job_key', 'operation', 'instructions', 'input']) &&
+    j.version === 1 && j.operation === 'launch' && j.job_key === body.idempotency_key && j.instructions === body.content.text &&
+    only(i, ['backend', 'project', 'workspace_mode', 'preset', 'permission_mode', 'title']) && ALIAS.test(i.backend) && ALIAS.test(i.project) &&
+    typeof i.preset === 'string' && MODES.includes(i.permission_mode) && WORKSPACES.includes(i.workspace_mode);
+}
+
+export function createLaunchRecovery({ storage, origin, pubkey, caller, launcher }) {
+  if (!origin || !pubkey || !caller || !launcher) throw new Error('Authenticated launcher recovery identity is unavailable. Reconnect before launching.');
+  const pinKey = 'vecnet.ui.launcher.pin.v1:' + origin;
+  let pinned = pins.get(origin);
+  try { pinned = storage?.getItem(pinKey) || pinned; } catch { /* memory pin */ }
+  if (pinned && pinned !== pubkey) throw new Error('The hub identity changed. Verify the hub before continuing; the original launch recovery is retained in this tab.');
+  pins.set(origin, pubkey);
+  try { storage?.setItem(pinKey, pubkey); } catch { /* memory pin */ }
+  const key = RECOVERY_PREFIX + JSON.stringify([origin, pubkey, caller, launcher]);
+  let entry = recoveries.get(key);
+  if (!entry) {
+    entry = { value: null, persisted: false, invalid: false, listeners: new Set() };
+    let raw;
+    try { raw = storage?.getItem(key); } catch { /* memory-only recovery */ }
+    try {
+      if (raw) {
+        const value = JSON.parse(raw);
+        if (!only(value, ['v', 'at', 'body', 'result']) || value.v !== 1 || !Number.isFinite(value.at) || !recoveryBody(value.body, launcher) ||
+          (value.result && (!only(value.result, ['thread_id', 'message_id', 'job_id']) || !['thread_id', 'message_id', 'job_id'].every(k => typeof value.result[k] === 'string')))) throw new Error('invalid recovery');
+        entry.value = value; entry.persisted = true;
+      }
+    } catch { entry.invalid = true; }
+    recoveries.set(key, entry);
+  }
+  function save() {
+    entry.persisted = false;
+    try {
+      if (storage) {
+        if (entry.value) storage.setItem(key, JSON.stringify(entry.value)); else storage.removeItem(key);
+        entry.persisted = true;
+      }
+    } catch { /* retain the exact operation in memory and guard leaving */ }
+    for (const notify of entry.listeners) notify();
+  }
+  return {
+    snapshot: () => ({ value: entry.value && clone(entry.value), persisted: entry.persisted, invalid: entry.invalid }),
+    subscribe(fn) { entry.listeners.add(fn); return () => entry.listeners.delete(fn); },
+    begin(body, at) {
+      if (entry.invalid || entry.value) throw new Error('Resolve the previous launch before starting another job.');
+      if (!recoveryBody(body, launcher)) throw new Error('Invalid launch recovery request.');
+      entry.value = { v: 1, at, body: clone(body) }; save();
+    },
+    resolve(body, result) {
+      if (entry.value?.body.idempotency_key !== body.idempotency_key) return;
+      entry.value.result = { thread_id: result.thread_id, message_id: result.message_id, job_id: result.job_id }; save();
+    },
+    discard(expected) {
+      if (expected && entry.value?.body.idempotency_key !== expected.idempotency_key) return;
+      entry.value = null; entry.invalid = false; save();
+    },
+  };
 }

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { buildLaunch, launcherChoices, launcherSetupCommands, launcherSetupIssue } from '../static/launcher-model.js';
+import { buildLaunch, createLaunchRecovery, launcherChoices, launcherHostRecovery, launcherSetupCommands, launcherSetupIssue } from '../static/launcher-model.js';
 import { inviteBlock, submitBody } from '../static/invite-model.js';
 import { launcherSection } from '../static/launcher.js';
 
@@ -22,6 +22,158 @@ class FormEl {
   replaceChildren(...xs) { this.kids = xs; }
 }
 const formNodes = el => [el, ...(el.kids || []).flatMap(x => typeof x === 'object' ? formNodes(x) : [])];
+
+test('I1 unresolved launch survives component replacement with its exact body/key/deadline', async () => {
+  const previous = globalThis.document;
+  globalThis.document = { createElement: tag => new FormEl(tag) };
+  const records = new Map(), sent = [];
+  const recoveryStorage = { getItem: k => records.get(k) || null, setItem: (k, v) => records.set(k, v), removeItem: k => records.delete(k) };
+  const ctx = { peerId: peer, me: 'peer_operator', recoveryStorage, recoveryOrigin: 'https://hub.example',
+    api: { hubIdentity: async () => ({ pubkey: 'public-hub-key' }), async send(body) { sent.push(structuredClone(body)); throw Object.assign(new Error('response lost'), { status: 503 }); } },
+    store: { hubNow: () => now }, setLeaveGuard() {} };
+  try {
+    let section = launcherSection(ctx);
+    await section.ready;
+    section.draw(mixedRow());
+    let nodes = formNodes(section.el);
+    nodes.find(x => x.id === 'launch-prompt').value = 'Run exactly once';
+    await nodes.find(x => x.tag === 'form').on.submit({ preventDefault() {} });
+    section.unmount();
+    section = launcherSection(ctx);
+    await section.ready;
+    section.draw(mixedRow());
+    nodes = formNodes(section.el);
+    assert.equal(nodes.find(x => x.tag === 'button' && x.attrs.type === 'submit').textContent, 'Retry launch');
+    await nodes.find(x => x.tag === 'form').on.submit({ preventDefault() {} });
+    assert.equal(sent.length, 2);
+    assert.deepEqual(sent[1], sent[0]);
+    assert.ok([...records.values()].some(v => v.includes(sent[0].idempotency_key)), 'recovery must survive a reload too');
+    section.unmount();
+  } finally { globalThis.document = previous; }
+});
+
+test('I4 unavailable launcher explains explicit supported Codex daemon start and host diagnostics', () => {
+  const r = mixedRow(); r.peer.presence = 'blocked';
+  const reason = launcherChoices(r).reason;
+  assert.match(reason, /CODEX_HOME/);
+  assert.match(reason, /codex app-server daemon start/);
+  assert.match(reason, /launcher check/);
+  assert.match(reason, /launcher status/);
+  const commands = launcherHostRecovery('host-profile');
+  assert.match(commands, /CODEX_HOME="\$\{CODEX_HOME:-\$HOME\/\.codex\}" codex app-server daemon start/);
+  assert.match(commands, /vecnet --net 'host-profile' launcher check/);
+  assert.match(commands, /vecnet --net 'host-profile' launcher status/);
+});
+
+test('I1 reload restores exact operation and isolates authenticated sender, launcher, origin and pinned hub', async () => {
+  const records = new Map();
+  const storage = { getItem: k => records.get(k) || null, setItem: (k, v) => records.set(k, v), removeItem: k => records.delete(k) };
+  const scope = { storage, origin: 'https://reload.example', pubkey: 'reload-hub-public-key', caller: 'operator-A', launcher: peer };
+  const body = buildLaunch(mixedRow(), values(), 'launch-reload', now);
+  const recovery = createLaunchRecovery(scope);
+  recovery.begin(body, now);
+  const fresh = await import('../static/launcher-model.js?recovery-reload'); // no process-local recovery map survives
+  const loaded = fresh.createLaunchRecovery(scope);
+  assert.deepEqual(loaded.snapshot().value, { v: 1, at: now, body });
+  for (const patch of [{ caller: 'operator-B' }, { launcher: 'peer_other' }, { origin: 'https://other.example' }]) {
+    assert.equal(fresh.createLaunchRecovery({ ...scope, ...patch }).snapshot().value, null);
+  }
+  assert.throws(() => fresh.createLaunchRecovery({ ...scope, pubkey: 'replacement-hub' }), /hub identity changed/);
+  assert.deepEqual(loaded.snapshot().value.body, body, 'identity mismatch preserves original recovery');
+  assert.throws(() => loaded.begin(body, now), /previous launch/);
+  loaded.resolve(body, { thread_id: 'thr_original', message_id: 'msg_original', job_id: 'job_original' });
+  assert.equal(loaded.snapshot().value.result.job_id, 'job_original');
+  loaded.discard();
+  assert.ok(![...records.values()].some(v => v.includes('Implement and verify')), 'explicit clear removes submitted prompt');
+});
+
+test('I1 navigation during held response retains the request and a late success reconciles the remounted form', async () => {
+  const previous = globalThis.document;
+  globalThis.document = { createElement: tag => new FormEl(tag) };
+  let finish;
+  const held = new Promise(resolve => { finish = resolve; });
+  const ctx = { peerId: peer, me: 'operator-held', recoveryStorage: null, recoveryOrigin: 'https://held.example',
+    api: { hubIdentity: async () => ({ pubkey: 'held-public-key' }), send: () => held },
+    store: { hubNow: () => now, invalidate() {} }, setLeaveGuard() {}, nav() { throw new Error('unmounted request navigated'); } };
+  try {
+    const first = launcherSection(ctx); await first.ready; first.draw(mixedRow());
+    const nodes = formNodes(first.el);
+    nodes.find(x => x.id === 'launch-prompt').value = 'Held request';
+    const submitting = nodes.find(x => x.tag === 'form').on.submit({ preventDefault() {} });
+    first.unmount();
+    const second = launcherSection(ctx); await second.ready; second.draw(mixedRow());
+    const button = () => formNodes(second.el).find(x => x.tag === 'button' && x.attrs.type === 'submit');
+    assert.equal(button().textContent, 'Retry launch');
+    finish({ thread_id: 'thr_held', message_id: 'msg_held', job_id: 'job_held' }); await submitting;
+    assert.equal(button().textContent, 'Open job thread');
+    second.unmount();
+  } finally { globalThis.document = previous; }
+});
+
+test('I1 storage denial guards leaving/reload and discard warns that it cannot cancel an existing job', async () => {
+  const previous = globalThis.document;
+  globalThis.document = { createElement: tag => new FormEl(tag) };
+  const events = {}, confirms = []; let guard, accept = false;
+  const ctx = { peerId: peer, me: 'operator-private', recoveryOrigin: 'https://private.example',
+    recoveryStorage: { getItem() { throw new Error('denied'); }, setItem() { throw new Error('denied'); }, removeItem() { throw new Error('denied'); } },
+    recoveryWindow: { addEventListener: (k, f) => events[k] = f, removeEventListener: k => delete events[k], confirm: msg => { confirms.push(msg); return accept; } },
+    api: { hubIdentity: async () => ({ pubkey: 'private-public-key' }), async send() { throw Object.assign(new Error('lost'), { status: 503 }); } },
+    store: { hubNow: () => now }, setLeaveGuard: f => { guard = f; } };
+  try {
+    const section = launcherSection(ctx); await section.ready; section.draw(mixedRow());
+    const nodes = formNodes(section.el);
+    nodes.find(x => x.id === 'launch-prompt').value = 'Private recovery';
+    await nodes.find(x => x.tag === 'form').on.submit({ preventDefault() {} });
+    assert.match(guard(), /already be running/);
+    let prevented = false; events.beforeunload({ preventDefault: () => { prevented = true; } });
+    assert.equal(prevented, true);
+    const discard = nodes.find(x => x.tag === 'button' && x.attrs.type === 'button');
+    discard.on.click();
+    assert.match(confirms[0], /does not cancel/);
+    assert.match(formNodes(section.el).find(x => x.id === 'launch-recovery').textContent, /Unresolved/);
+    accept = true; discard.on.click();
+    assert.equal(guard(), '');
+    section.unmount(); assert.equal(guard, null); assert.equal(events.beforeunload, undefined);
+  } finally { globalThis.document = previous; }
+});
+
+test('I1 recovery refuses credential-shaped extra fields and never silently replaces malformed records', async () => {
+  const records = new Map(), storage = { getItem: k => records.get(k) || null, setItem: (k, v) => records.set(k, v), removeItem: k => records.delete(k) };
+  const scope = { storage, origin: 'https://corrupt.example', pubkey: 'corrupt-public-key', caller: 'operator-corrupt', launcher: peer };
+  const body = buildLaunch(mixedRow(), values(), 'launch-corrupt', now), recovery = createLaunchRecovery(scope);
+  assert.throws(() => recovery.begin({ ...body, authorization: 'must-not-store' }, now), /Invalid launch recovery/);
+  assert.ok(![...records.values()].some(v => v.includes('must-not-store')));
+  recovery.begin(body, now);
+  const key = [...records.keys()].find(k => k.includes('.recovery.'));
+  records.set(key, '{broken');
+  const fresh = await import('../static/launcher-model.js?recovery-corrupt');
+  const loaded = fresh.createLaunchRecovery(scope);
+  assert.equal(loaded.snapshot().invalid, true);
+  assert.throws(() => loaded.begin(body, now), /previous launch/);
+  loaded.discard(); loaded.begin(body, now);
+  assert.deepEqual(loaded.snapshot().value.body, body);
+});
+
+test('I1 expired retry window never resubmits and a rejected recovery retry keeps its original operation', async () => {
+  const previous = globalThis.document;
+  globalThis.document = { createElement: tag => new FormEl(tag) };
+  let clock = now, sends = 0;
+  const ctx = { peerId: peer, me: 'operator-expired', recoveryStorage: null, recoveryOrigin: 'https://expired.example',
+    api: { hubIdentity: async () => ({ pubkey: 'expired-public-key' }), async send() { sends++; throw Object.assign(new Error('request failed'), { status: sends === 1 ? 503 : 422 }); } },
+    store: { hubNow: () => clock }, setLeaveGuard() {} };
+  try {
+    const section = launcherSection(ctx); await section.ready; section.draw(mixedRow());
+    const nodes = formNodes(section.el), submit = () => nodes.find(x => x.tag === 'form').on.submit({ preventDefault() {} });
+    nodes.find(x => x.id === 'launch-prompt').value = 'Do not duplicate after expiry';
+    await submit(); await submit();
+    assert.equal(nodes.find(x => x.tag === 'button' && x.attrs.type === 'submit').textContent, 'Retry launch');
+    clock += 24 * 60 * 60 * 1000;
+    await submit();
+    assert.equal(sends, 2, 'the hub may have expired its dedupe entry; do not replay');
+    assert.match(nodes.find(x => x.attrs.role === 'alert').textContent, /safe retry window/);
+    section.unmount();
+  } finally { globalThis.document = previous; }
+});
 
 test('rendered default deadline gives native launch at least its 2 h 10 min admission window', () => {
   const previous = globalThis.document;
@@ -48,7 +200,7 @@ test('launcher discovery keeps aliases and native Codex route default; health an
   assert.deepEqual(c.backends[0], { id: 'codex-app-server', health: 'ok', presets: ['default'], modes: ['ask', 'auto'], workspaces: ['worktree'] });
   for (const presence of ['unknown', 'offline', 'blocked']) {
     const r = row(); r.peer.presence = presence;
-    assert.match(launcherChoices(r).reason, /Wait for a healthy presence/);
+    assert.match(launcherChoices(r).reason, /launcher status/);
   }
   for (const modify of [r => r.disabled = true, r => r.archived_at = '2026-11-08', r => r.credential = 'none', r => r.peer.capabilities = [], r => r.peer.quota.backends['codex-app-server'] = 'degraded']) {
     const r = row(); modify(r);
@@ -126,12 +278,12 @@ test('UI launch payload uses existing message API, one daemon recipient, launch 
 
 function workspaceRow() {
   const r = mixedRow();
-  r.peer.capabilities.push('project:temporary', 'workspace:codex-app-server/worktree',
+  r.peer.capabilities.push('project:temporary', 'scratch:temporary', 'workspace:codex-app-server/worktree',
     'workspace:codex-app-server/project-root', 'workspace:codex-app-server/temp', 'workspace:t3/worktree');
   return r;
 }
 
-test('workspace choices use backend tags, keep legacy worktree, and hide the reserved temporary project', () => {
+test('workspace choices use backend tags, keep legacy worktree, and hide scratch-tagged projects', () => {
   const r = workspaceRow(), c = launcherChoices(r);
   assert.deepEqual(c.projects, ['vecnet']);
   assert.equal(c.temporary, true);
@@ -144,7 +296,7 @@ test('workspace choices use backend tags, keep legacy worktree, and hide the res
   assert.deepEqual(launcherChoices(r).backends[1].workspaces, [], 'modern peers do not inherit another backend’s workspace modes');
 });
 
-test('workspace payload contains only an advertised alias and mode; temp routes to reserved configured alias', () => {
+test('workspace payload contains only an advertised alias and mode; temp routes to configured scratch alias', () => {
   const r = workspaceRow();
   for (const workspace of ['worktree', 'project-root', 'temp']) {
     const input = buildLaunch(r, { ...values(), workspace, ...(workspace === 'temp' ? { project: '' } : {}),
@@ -163,6 +315,24 @@ test('workspace payload contains only an advertised alias and mode; temp routes 
   tempOnly.peer.capabilities = tempOnly.peer.capabilities.filter(x => x !== 'project:vecnet');
   assert.equal(launcherChoices(tempOnly).reason, '');
   assert.deepEqual(launcherChoices(tempOnly).backends[0].workspaces, ['temp']);
+});
+
+test('scratch metadata preserves an ordinary temporary project and selects only an advertised scratch alias', () => {
+  const r = workspaceRow();
+  r.peer.capabilities = r.peer.capabilities.filter(x => x !== 'scratch:temporary');
+  let c = launcherChoices(r);
+  assert.deepEqual(c.projects, ['vecnet', 'temporary'], 'a legacy ordinary temporary repo remains selectable');
+  assert.equal(c.scratchProject, '');
+  assert.ok(!c.backends[0].workspaces.includes('temp'), 'a project name alone grants no scratch workspace');
+  r.peer.capabilities.push('scratch:not-advertised', 'project:vecnet-scratch', 'scratch:vecnet-scratch');
+  c = launcherChoices(r);
+  assert.deepEqual(c.projects, ['vecnet', 'temporary']);
+  assert.equal(c.scratchProject, 'vecnet-scratch');
+  assert.equal(buildLaunch(r, { ...values(), workspace: 'temp', project: '' }, 'launch-scratch', now).job_request.input.project, 'vecnet-scratch');
+  assert.equal(buildLaunch(r, { ...values(), project: 'temporary' }, 'launch-ordinary', now).job_request.input.project, 'temporary');
+  assert.throws(() => buildLaunch(r, { ...values(), project: 'vecnet-scratch' }, 'launch-repo', now), /project alias/);
+  r.peer.capabilities.push('project:scratch-two', 'scratch:scratch-two');
+  assert.equal(launcherChoices(r).scratchProject, 'vecnet-scratch', 'the first valid scratch tag is stable');
 });
 
 test('rendered workspace controls default to worktree, map No project to temp, and refresh on backend changes', () => {

@@ -5,7 +5,7 @@
 // console. Copy puts the invite, the link code or the authorization prompt
 // on the clipboard, and nothing else. PROTOCOL §§2.12, 4.5–4.6, 12, 13.3 and 20.1.
 import { copyText, h, toast } from './dom.js';
-import { launcherSetupCommands, launcherSetupIssue } from './launcher-model.js';
+import { LAUNCHER_HOST_HELP, launcherHostRecovery, launcherSetupCommands, launcherSetupIssue } from './launcher-model.js';
 import { kindLabel, when } from './format.js';
 import {
   BEARER_CONFIRM, BEARER_WARN, DEFAULT_TTL, GATEWAY_NOTE, QUOTA_NOTE,
@@ -347,7 +347,7 @@ export function openInvite(ctx, onCreated, opener, prefill) {
       kids.push(...renderExtra(f));
     }
     if (spec.kind === 'launcher') {
-      kids.push(h('p', { class: 'inv-note', text: 'Host-side setup: use absolute directories on the machine running the daemon. Requires vecnet, Node.js 22.18+, Git, Codex CLI with an existing authenticated route, and a Linux systemd user service. Backend codex-app-server · preset default (inherits that route).' }));
+      kids.push(h('p', { class: 'inv-note', text: 'Host-side setup: use absolute directories on the machine running the daemon. Requires vecnet, Node.js 22.18+, Git, a supported Codex CLI with an authenticated route and a running background app-server daemon, and a Linux systemd user service. Backend codex-app-server · preset default (inherits that route). ' + LAUNCHER_HOST_HELP }));
       for (const [label, control] of [['Project alias', setupProject], ['Repository working directory on host', setupRepo], ['Base ref', setupBase], ['Vecnet source checkout on host', setupSource]]) {
         kids.push(h('label', { for: control.id, text: label }), control);
       }
@@ -655,11 +655,16 @@ export function openInvite(ctx, onCreated, opener, prefill) {
     const block = h('pre', { class: 'inv-block mono', tabindex: '0', 'aria-label': 'Launcher installation commands' });
     try { block.textContent = launcherSetupCommands(output, setup); }
     catch (x) { block.textContent = output; err.textContent = x.message; }
+    const profile = (output.match(/--profile ([A-Za-z0-9._-]+)/) || [])[1] || 'PROFILE';
+    const recovery = h('pre', { class: 'inv-block mono', tabindex: '0', 'aria-label': 'Launcher host recovery commands' });
+    recovery.textContent = launcherHostRecovery(profile);
     body.replaceChildren(
       h('p', { class: 'inv-warn', role: 'note', text: 'Shown once — the enrolment command grants this launcher identity. Copy only to the host you control.' }),
-      h('p', { class: 'inv-note', text: '1. Enrol the daemon identity. 2. Write its private project configuration. 3. Install and start the user service. Keep the host’s Codex route configured before starting.' }),
+      h('p', { class: 'inv-note', text: 'First ensure the supported Codex background app-server daemon is running with the same configured CODEX_HOME and authenticated route. Then: 1. Enrol the launcher identity. 2. Write its private project configuration. 3. Install and start the launcher service.' }),
       block,
-      h('p', { class: 'inv-note', text: 'After the daemon reports healthy presence, open its peer page to launch a job using its advertised project alias. Creating this identity alone does not start the daemon.' }),
+      h('p', { class: 'inv-note', text: LAUNCHER_HOST_HELP }),
+      recovery,
+      h('p', { class: 'inv-note', text: 'After launcher check passes and the launcher reports healthy presence, open its peer page to launch a job using its advertised project alias. Creating this identity alone does not start either daemon.' }),
       h('div', { class: 'inv-acts' },
         h('button', { type: 'button', class: 'btn', text: 'Done', onclick: () => close() }),
         h('a', { class: 'btn', href: '#peer/' + res.peer_id, text: 'Open launcher', onclick: () => close() }),
