@@ -19,6 +19,8 @@ export interface FakeCodex {
   setThread(t: ThreadInput): void;
   notify(method: string, params: unknown): void;
   notifySubscribers(threadId: string, method: string, params: unknown): void;
+  /** Opt-in terminal-only event: update native history/read state without a status notice. */
+  completeTurnOnly(threadId: string, turnId: string, nextStatus: unknown): void;
   serverRequest(threadId: string, method: string, params: unknown): number;
   resolve(requestId: number): void;
   replies: unknown[];
@@ -27,6 +29,8 @@ export interface FakeCodex {
   attachOther(threadId: string): void;
   detachOther(threadId: string): void;
   failNext(method: string, err: { code: number; message: string } | 'drop'): void;
+  /** Opt-in: capture the next read now, but send its response only on release. */
+  gateNextRead(): { entered: boolean; released: boolean; release(): void };
   /** Drop only the requesting connection after successful turn/item acceptance. */
   acceptThenDropNextTurn(): void;
   close(): Promise<void>;
@@ -65,6 +69,7 @@ export async function startFakeCodexAppServer(o: { dir: string; clock?: Clock; u
   const peers = new Map<number, Peer>(), threads = new Map<string, Thread>();
   const pending = new Map<number, { threadId: string; method: string; params: unknown }>();
   const failures = new Map<string, ({ code: number; message: string } | 'drop')[]>();
+  const readGates: ((answer: () => void) => void)[] = [];
   const withheld = new Map<string, { thread: Thread; turn: Turn; item: Item }>();
   const timers = new Set<{ cancel(): void }>();
   const reservedTurnIds = new Set<string>();
@@ -131,7 +136,12 @@ export async function startFakeCodexAppServer(o: { dir: string; clock?: Clock; u
     if (method === 'initialized') return;
     const t = threads.get(String(args.threadId));
     if (!t) { error(-32600, 'thread not found'); return; }
-    if (method === 'thread/read') { respond({ thread: snapshot(t) }); return; }
+    if (method === 'thread/read') {
+      const gate = readGates.shift();
+      if (gate) { const result = structuredClone({ thread: snapshot(t) }); gate(() => respond(result)); }
+      else respond({ thread: snapshot(t) });
+      return;
+    }
     if (method === 'thread/turns/list') {
       const limit = typeof args.limit === 'number' && Number.isInteger(args.limit) && args.limit > 0 ? args.limit : 5;
       let offset = 0;
@@ -275,6 +285,14 @@ export async function startFakeCodexAppServer(o: { dir: string; clock?: Clock; u
       broadcast(method, params);
     },
     notifySubscribers: subscribers,
+    completeTurnOnly(threadId, turnId, nextStatus) {
+      const t = get(threadId), turn = t.turns.find(x => x.id === turnId);
+      if (!turn) throw new Error(`unknown fake turn: ${turnId}`);
+      turn.status = 'completed';
+      if (t.activeTurnId === turnId) t.activeTurnId = undefined;
+      t.status = nextStatus; schedule(t);
+      subscribers(threadId, 'turn/completed', { threadId, turn: { ...turn } });
+    },
     serverRequest(threadId, method, params) {
       const id = ++serverId; pending.set(id, { threadId, method, params });
       for (const member of get(threadId).members) peers.get(member)?.send({ id, method, params });
@@ -289,6 +307,15 @@ export async function startFakeCodexAppServer(o: { dir: string; clock?: Clock; u
     attachOther(threadId) { const t = get(threadId); t.other++; schedule(t); },
     detachOther(threadId) { const t = get(threadId); t.other = Math.max(0, t.other - 1); schedule(t); },
     failNext(method, err) { failures.set(method, [...(failures.get(method) ?? []), err]); },
+    gateNextRead() {
+      let answer: (() => void) | undefined;
+      const gate = { entered: false, released: false, release() {
+        if (gate.released) return;
+        gate.released = true; answer?.();
+      } };
+      readGates.push(reply => { gate.entered = true; answer = reply; if (gate.released) reply(); });
+      return gate;
+    },
     addTurns(threadId, n) {
       const t = get(threadId);
       for (let k = 0; k < n; k++) t.turns.push({ id: nextTurnId(), items: [], status: 'completed', error: null });

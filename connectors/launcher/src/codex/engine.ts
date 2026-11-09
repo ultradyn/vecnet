@@ -84,6 +84,9 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
   let reconnect: { cancel(): void } | undefined, minute: { cancel(): void } | undefined;
   let claimRecovery: { cancel(): void } | undefined, warmCheck: { cancel(): void } | undefined;
   let historyRetry: { cancel(): void } | undefined, historyRetryIndex = 0;
+  let completionPending = false, completionAgain = false, completionProbe: CodexRpc | undefined;
+  let completionNeeded = false, completionRetryIndex = 0, completionRetry: { cancel(): void } | undefined;
+  const completionRows = new Set<string>();
   let settlementRetryAt = -Infinity, settlementRetryIndex = 0;
   const children = new Set<ChildProcess>();
   const unresolvedLogged = new Set<string>(), pendingLogged = new Set<string>();
@@ -300,12 +303,14 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     }
   }
   async function unsubscribe() {
+    cancelCompletionRecovery();
     if (!attached && !attaching) return;
     attached = false; attaching = false;
     try { await call('thread/unsubscribe', buildThreadUnsubscribe(b.threadId)); }
     catch { const previous = rpc; rpc = undefined; previous?.close(); retry(); }
   }
   function retry() {
+    cancelCompletionRecovery();
     if (!running || reconnect || connectionState === 'refused_version') return;
     const ms = [1000, 2000, 4000, 8000, 15000][Math.min(retryIndex++, 4)];
     reconnect = clock.timer(ms, () => { reconnect = undefined; enqueue(connect); });
@@ -343,8 +348,10 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
       });
     });
   }
-  function updateStatus(value: unknown) {
-    const before = mapStatus(status); status = value; lastActivity = clock.now();
+  function updateStatus(value: unknown, schedule = true, recordActivity = true) {
+    if (schedule) cancelCompletionRecovery();
+    const before = mapStatus(status); status = value;
+    if (recordActivity) lastActivity = clock.now();
     const s = mapStatus(status);
     if (s === 'not_loaded') {
       closedEpoch++; attached = false; independentResumeActivity = false;
@@ -370,7 +377,83 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     if (s === 'waiting_approval' || s === 'waiting_input') {
       if (waitingSince === undefined) { waitingSince = clock.now(); blockedLogged = false; }
     } else { waitingSince = undefined; blockedLogged = false; }
-    if (s === 'idle' || (before !== s && (s === 'turn_running'))) arm(0);
+    if (schedule && (s === 'idle' || (before !== s && (s === 'turn_running')))) arm(0);
+  }
+  function cancelCompletionRecovery() {
+    completionRetry?.cancel(); completionRetry = undefined; completionRetryIndex = 0;
+    completionNeeded = completionAgain = false;
+  }
+  function scheduleCompletionRetry(connection: CodexRpc | undefined) {
+    if (!running || !completionNeeded || rpc !== connection || reason()) { cancelCompletionRecovery(); return; }
+    if (completionRetry) return;
+    const ms = [1000, 2000, 4000, 8000, 15000][Math.min(completionRetryIndex++, 4)];
+    completionRetry = clock.timer(ms, () => {
+      completionRetry = undefined;
+      if (running && completionNeeded && rpc === connection && !reason()) recoverCompletion();
+      else cancelCompletionRecovery();
+    });
+  }
+  function recoverCompletion(turnId?: unknown) {
+    if (!running) return;
+    completionNeeded = true;
+    // Retain only existing inflight keys, not an unbounded list of event ids.
+    for (const r of rows()) if (!waitingRetry.has(r.key) && (r.attemptTurnId === turnId || r.state === 'unresolved' ||
+        (r.state === 'sending' && r.attemptTurnId === null))) completionRows.add(r.key);
+    // One queued/in-flight recovery plus one coalesced trailing request.
+    // A retry timer also coalesces notices; failures retain the observation
+    // obligation without allowing a burst to bypass the backoff.
+    if (completionRetry) return;
+    if (completionPending) { completionAgain = true; return; }
+    completionPending = true; completionAgain = false;
+    enqueue(async () => {
+      const connection = rpc, epoch = closedEpoch, observedStatus = status;
+      let refreshed = false;
+      try {
+        completionAgain = false; // Notifications queued before this read are already covered.
+        if (completionNeeded && connection && attached && !cold && !reason()) {
+          completionProbe = connection;
+          try {
+            const read = await call('thread/read', { threadId: b.threadId });
+            // Status/started/closed notices run outside the lane. A read must
+            // not overwrite newer activity or resurrect a stopped subscription.
+            if (running && completionNeeded && rpc === connection && closedEpoch === epoch && status === observedStatus &&
+                attached && !cold && !reason()) {
+              const next = obj(read.thread).status;
+              // The first authoritative running-to-idle transition is activity.
+              // Unchanged idle reads, including settlement polls, retain its age.
+              updateStatus(next, false, mapStatus(observedStatus) === 'turn_running' && mapStatus(next) === 'idle');
+              archived = obj(read.thread).archived === true;
+              refreshed = true; completionRetryIndex = 0;
+            }
+          } catch {
+            if (running) log.warn('codex_engine_operation_failed', { threadId: b.threadId });
+          } finally { completionProbe = undefined; }
+        }
+        if (!running || rpc !== connection) return;
+        // This recovery observes loaded threads only, including when the read
+        // discovers an unload. It never invokes the launcher's cold-load hook.
+        await reconcile(false);
+        if (!running) return;
+        // Preserve matching/unresolved scans across the burst, including a
+        // start whose turn id was still awaiting acceptance at notification time.
+        // History proof, never the completion payload, settles each attempt.
+        const completedRows = new Set(completionRows); completionRows.clear();
+        for (const r of rows()) if (!waitingRetry.has(r.key) && (completedRows.has(r.key) || r.state === 'unresolved')) {
+          await scan(r);
+          if (!running) return;
+        }
+        await recoverClaims();
+        if (completionNeeded && refreshed && !completionAgain && running && rpc === connection && !reason() && !settlements().length) {
+          cancelCompletionRecovery(); arm(0);
+        }
+      } finally {
+        completionPending = false;
+        if (!running || !completionNeeded || rpc !== connection || reason()) cancelCompletionRecovery();
+        else if (refreshed && completionAgain) recoverCompletion();
+        else scheduleCompletionRetry(connection);
+        if (!completionNeeded) completionRows.clear();
+      }
+    });
   }
   function notice(method: string, raw: unknown) {
     const p = obj(raw);
@@ -392,6 +475,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
       // erase independent activity consumed during or after its pending resume.
       if (!rejectedResume) scheduleWarmCheck();
     }
+    if (reason()) cancelCompletionRecovery();
     if ((method === 'item/started' || method === 'item/completed') && obj(p.item).type === 'userMessage' && typeof p.item.clientId === 'string') {
       const key = p.item.clientId;
       // A receipt may arrive before the RPC's acceptance response.
@@ -400,20 +484,16 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
         beginSettlement(r, 'receipt');
       }
     }
-    enqueue(async () => {
-      await reconcile();
-      if (method === 'turn/completed') {
-        const id = obj(p.turn).id ?? p.turnId;
-        for (const r of rows()) if (!waitingRetry.has(r.key) && (r.attemptTurnId === id || r.state === 'unresolved')) await scan(r);
-      }
-    });
+    if (method === 'turn/completed') { recoverCompletion(obj(p.turn).id ?? p.turnId); return; }
+    enqueue(reconcile);
   }
-  async function reconcile() {
+  async function reconcile(allowLoad = true) {
     if (!running) return;
+    if (reason()) cancelCompletionRecovery();
     await releaseDormantRetries();
     if (!rpc) return;
     let r = reason(false);
-    if (r === 'not_loaded' && b.origin === 'launcher' && b.ensureLoaded && clock.now() - lastEnsure >= 60_000 &&
+    if (allowLoad && r === 'not_loaded' && b.origin === 'launcher' && b.ensureLoaded && clock.now() - lastEnsure >= 60_000 &&
       mapStatus(status) === 'not_loaded') {
       lastEnsure = clock.now();
       if (await b.ensureLoaded()) {
@@ -429,6 +509,8 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     }
     if (r && r !== 'waiting_approval' && r !== 'waiting_input') { await unsubscribe(); return; }
     if (!attached) {
+      // Completion recovery can retire a subscription, never create one.
+      if (!allowLoad) return;
       const s = mapStatus(status);
       if (!['idle', 'turn_running', 'waiting_approval', 'waiting_input'].includes(s)) return;
       const epoch = closedEpoch; attaching = true; independentResumeActivity = false;
@@ -727,6 +809,8 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
   }
   return {
     start() { if (running) { enqueue(async () => { await recover(); arm(0); }); return; }
+      cancelCompletionRecovery();
+      completionPending = completionAgain = false; completionRows.clear();
       running = true; reconnect = undefined; gap = undefined; claimRecovery = undefined; settlementRetryAt = -Infinity; settlementRetryIndex = 0; warmCheck = undefined; historyRetry = undefined; historyRetryIndex = 0; watchStopped = undefined; startWatch(); heartbeat();
       // Unsent claims need only Go, including when Codex is unreachable or
       // refused by the version gate. Release them before any RPC recovery.
@@ -734,6 +818,9 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     async stop() {
       if (!running) return;
       running = false; debounce?.cancel(); gap?.cancel(); reconnect?.cancel(); minute?.cancel(); watchRetry?.cancel(); claimRecovery?.cancel(); warmCheck?.cancel(); historyRetry?.cancel();
+      cancelCompletionRecovery();
+      // close() cancels the bounded RPC before stop waits for the serial lane.
+      completionProbe?.close();
       const child = watch; watch = undefined;
       const exits = [...children, ...(child ? [child] : [])].map(c => new Promise<void>(resolve => {
         if (c.exitCode !== null || c.signalCode !== null) { resolve(); return; }
@@ -747,6 +834,6 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
       await unsubscribe(); const connection = rpc; rpc = undefined; connection?.close();
     },
     state: () => connectionState, liveness, subscribed: () => attached,
-    setOverLimit(value) { overLimit = value; enqueue(async () => { await reconcile(); if (!value) arm(0); }); },
+    setOverLimit(value) { overLimit = value; if (value) cancelCompletionRecovery(); enqueue(async () => { await reconcile(); if (!value) arm(0); }); },
   };
 }
