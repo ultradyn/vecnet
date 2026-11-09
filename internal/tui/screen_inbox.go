@@ -14,6 +14,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/hubnotice"
 	"github.com/XertroV/vecnet/internal/opapi"
 	"github.com/XertroV/vecnet/internal/opclient"
 	"github.com/XertroV/vecnet/internal/tui/theme"
@@ -1108,8 +1109,8 @@ func (s *inboxScreen) viewInboxLog(peers inboxPeers, m *Model, w, h int) string 
 	return strings.Join(lines, "\n")
 }
 
-// inboxEventText is one event's payload on one line. A type it does not know,
-// or data that does not decode, shows as cleaned raw text.
+// inboxEventText is one event's payload on one line. Invalid hub notices show a
+// fixed label; unknown types and other undecodable data show cleaned raw text.
 func inboxEventText(ev envelope.Event, peers inboxPeers) string {
 	raw := Clean(string(ev.Data))
 	switch ev.Type {
@@ -1186,9 +1187,12 @@ func inboxEventText(ev envelope.Event, peers inboxPeers) string {
 		}
 		return strings.TrimSpace(peers.name(d.PeerID) + " " + Clean(d.Change) + " " + Clean(strings.Join(d.Fields, ", ")))
 	case "hub_notice":
+		if hubnotice.ValidateEvent(ev, true) != nil {
+			return "invalid hub notice"
+		}
 		var e envelope.HubNoticeEvent
 		if json.Unmarshal(ev.Data, &e) != nil {
-			return raw
+			return "invalid hub notice"
 		}
 		n := e.Notice
 		text := Clean(e.Change) + " " + Clean(n.Kind) + " " + inboxShort(n.NoticeID)

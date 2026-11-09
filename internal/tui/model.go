@@ -8,6 +8,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/hubnotice"
 	"github.com/XertroV/vecnet/internal/tui/theme"
 )
 
@@ -306,8 +307,12 @@ func (m *Model) quit() tea.Cmd {
 
 // hubHost is the host of the hub URL, without credentials or path.
 func hubHost(hub string) string {
+	// Presentation preserves the operator client's public HTTP allowance.
+	if hubnotice.ValidateNotice(envelope.HubNotice{Hub: hub}, true) != nil {
+		return "invalid hub"
+	}
 	if u, err := url.Parse(hub); err == nil && u.Host != "" {
 		return Clean(u.Host)
 	}
-	return Clean(hub)
+	return "invalid hub"
 }

@@ -1,4 +1,5 @@
 # Changelog
+- 2026-11-09: TUI hub host labels and known notice summaries reject invalid structured URLs before displaying received values (`internal/tui/model.go`, `internal/tui/screen_inbox.go`; issue #47).
 - 2026-11-09: operator notice lists/tail pages validate received hub URLs before effects; relocation errors expose only fixed safe text and validated recovery fields (`internal/hubnotice/received.go`, `internal/opclient`).
 
 - 2026-11-09: Render CLI/operator transport diagnostics from the checked request URL and fixed failure text while preserving original typed causes, including redirects and upload discovery (internal/cli, internal/opclient, internal/httpdiag; issue #47).
