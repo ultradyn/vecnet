@@ -1,6 +1,22 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chromium, networkQuiet, scrollMessageIntoView } from './lib.mjs';
+import { paneText } from './tmux.mjs';
+
+test('tmux pane matching accepts tab-compressed status spacing', () => {
+  // capture-pane can return live\tapr even though the rendered cells are spaces.
+  for (const output of [' local  live\tapr 2 ', ' local  live  apr 2 ', ' local \x1b[32m live\x1b[0m\tapr 2 ']) {
+    assert.ok(paneText(output).includes(' live '), 'a visibly live pane must satisfy the live-status wait');
+    assert.ok(paneText(output).includes('apr 2'));
+  }
+});
+
+test('tmux pane matching preserves status boundaries and line breaks', () => {
+  for (const status of ['reconnecting', 'offline', 'lively']) {
+    assert.equal(paneText(` local \x1b[31m ${status} \x1b[0m apr 2\nnext line`).includes(' live '), false);
+  }
+  assert.equal(paneText('\x1b[31m offline \x1b[0m\nnext line'), ' offline \nnext line');
+});
 
 test('message scroll reaches the viewport while live updates replace message nodes', async () => {
   const browser = await (await chromium()).launch({ headless: true });
