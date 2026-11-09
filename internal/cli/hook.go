@@ -18,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/hubnotice"
 )
 
 var hookBudget = 1500 * time.Millisecond
@@ -634,7 +635,10 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 				return nil
 			}
 			body, e = poll(oldest)
-			// Persist the resumption point even if the one retry fails.
+			if errors.Is(e, hubnotice.ErrInvalidNotice) {
+				return e // Abort this transaction's cursor reset on protocol refusal.
+			}
+			// Persist the resumption point for ordinary retry failures.
 			if e != nil {
 				return nil
 			}

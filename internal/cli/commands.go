@@ -1172,7 +1172,13 @@ func (a *app) poll(c *client, after string, wait int) (pollBody, error) {
 	ctx, cancel := context.WithTimeout(a.ctx, requestTimeout+time.Duration(wait)*time.Second)
 	defer cancel()
 	err := c.doNoTimeout(ctx, http.MethodGet, "/v1/events", q, nil, &body)
-	return body, err
+	if err != nil {
+		return body, err
+	}
+	if err := hubnotice.ValidateBatch(body.Events, c.allowInsecureHTTP); err != nil {
+		return pollBody{}, err
+	}
+	return body, nil
 }
 
 // oldestCursor returns details.oldest_cursor of a 409 cursor_purged.

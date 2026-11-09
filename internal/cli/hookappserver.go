@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"cmp"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/hubnotice"
 )
 
 const appServerEntryBytes = 1000
@@ -461,6 +463,9 @@ func (a *app) hookAppServer(o opts, afterPoll func(), publish func([]byte) error
 			}
 			after = oldest
 			body, e = poll(after)
+			if errors.Is(e, hubnotice.ErrInvalidNotice) {
+				return e // Abort this transaction's cursor reset on protocol refusal.
+			}
 			if e != nil {
 				appServerOrder(s)
 				return a.ctx.Err()
