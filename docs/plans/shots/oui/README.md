@@ -41,6 +41,10 @@ Task 23 runs both clients against one disposable hub. Its assertions verify cros
 - [11-matrix-initial.png](11-matrix-initial.png) — Per-recipient delivery matrix — initial state.
 - [11-matrix-progress.png](11-matrix-progress.png) — Per-recipient delivery matrix — progress state.
 - [11-matrix-success.png](11-matrix-success.png) — Per-recipient delivery matrix — success state.
+- [12-dash-audit-head.png](12-dash-audit-head.png) — Dashboard audit — bounded live head.
+- [12-dash-audit-head-controls.png](12-dash-audit-head-controls.png) — Dashboard audit — live-head navigation controls.
+- [12-dash-audit-history.png](12-dash-audit-history.png) — Dashboard audit — selected historical page.
+- [12-dash-audit-history-controls.png](12-dash-audit-history-controls.png) — Dashboard audit — historical navigation controls.
 - [12-dash-error.png](12-dash-error.png) — Read-only dashboard — error state.
 - [12-dash-initial.png](12-dash-initial.png) — Read-only dashboard — initial state.
 - [12-dash-progress.png](12-dash-progress.png) — Read-only dashboard — progress state.
@@ -406,3 +410,61 @@ Fixture services only: the demo hub, routed R2 grant endpoints and a local fake 
 - [sr-narrow.png](sr-narrow.png) — Search in the 220 px sidebar at a 1000 px viewport.
 - [sr-phone.png](sr-phone.png) — Search in the phone sidebar at a 390 px viewport.
 - [sr-cleared.png](sr-cleared.png) — Cleared search with the ordinary thread lists restored.
+
+
+## Dashboard activity
+
+- [activity dark 1440](activity-dark-1440.png)
+- [activity dark 320](activity-dark-320.png)
+- [activity dark 390](activity-dark-390.png)
+- [activity empty 1440](activity-empty-1440.png)
+- [activity initial loading 1440](activity-initial-loading-1440.png)
+- [activity isolated error 1440](activity-isolated-error-1440.png)
+- [activity keyboard 1440](activity-keyboard-1440.png)
+- [activity keyboard 320](activity-keyboard-320.png)
+- [activity keyboard 390](activity-keyboard-390.png)
+- [activity layout dark 1440 home](activity-layout-dark-1440-home.png)
+- [activity layout dark 1440 quiet](activity-layout-dark-1440-quiet.png)
+- [activity layout dark 320 home](activity-layout-dark-320-home.png)
+- [activity layout dark 320 quiet](activity-layout-dark-320-quiet.png)
+- [activity layout dark 390 home](activity-layout-dark-390-home.png)
+- [activity layout dark 390 quiet](activity-layout-dark-390-quiet.png)
+- [activity layout light 1440 home](activity-layout-light-1440-home.png)
+- [activity layout light 1440 quiet](activity-layout-light-1440-quiet.png)
+- [activity layout light 320 home](activity-layout-light-320-home.png)
+- [activity layout light 320 quiet](activity-layout-light-320-quiet.png)
+- [activity layout light 390 home](activity-layout-light-390-home.png)
+- [activity layout light 390 quiet](activity-layout-light-390-quiet.png)
+- [activity light 1440](activity-light-1440.png)
+- [activity peer 1440](activity-peer-1440.png)
+- [activity peer 320](activity-peer-320.png)
+- [activity peer 390](activity-peer-390.png)
+- [activity peer last dark 1440 home](activity-peer-last-dark-1440-home.png)
+- [activity peer last dark 1440 pointer](activity-peer-last-dark-1440-pointer.png)
+- [activity peer last dark 320 home](activity-peer-last-dark-320-home.png)
+- [activity peer last dark 320 pointer](activity-peer-last-dark-320-pointer.png)
+- [activity peer last dark 390 home](activity-peer-last-dark-390-home.png)
+- [activity peer last dark 390 pointer](activity-peer-last-dark-390-pointer.png)
+- [activity peer last light 1440 home](activity-peer-last-light-1440-home.png)
+- [activity peer last light 1440 pointer](activity-peer-last-light-1440-pointer.png)
+- [activity peer last light 320 home](activity-peer-last-light-320-home.png)
+- [activity peer last light 320 pointer](activity-peer-last-light-320-pointer.png)
+- [activity peer last light 390 home](activity-peer-last-light-390-home.png)
+- [activity peer last light 390 pointer](activity-peer-last-light-390-pointer.png)
+- [activity peer one dark 1440 home](activity-peer-one-dark-1440-home.png)
+- [activity peer one dark 1440 pointer](activity-peer-one-dark-1440-pointer.png)
+- [activity peer one dark 320 home](activity-peer-one-dark-320-home.png)
+- [activity peer one dark 320 pointer](activity-peer-one-dark-320-pointer.png)
+- [activity peer one dark 390 home](activity-peer-one-dark-390-home.png)
+- [activity peer one dark 390 pointer](activity-peer-one-dark-390-pointer.png)
+- [activity peer one light 1440 home](activity-peer-one-light-1440-home.png)
+- [activity peer one light 1440 pointer](activity-peer-one-light-1440-pointer.png)
+- [activity peer one light 320 home](activity-peer-one-light-320-home.png)
+- [activity peer one light 320 pointer](activity-peer-one-light-320-pointer.png)
+- [activity peer one light 390 home](activity-peer-one-light-390-home.png)
+- [activity peer one light 390 pointer](activity-peer-one-light-390-pointer.png)
+- [activity pointer 1440](activity-pointer-1440.png)
+- [activity refreshing 1440](activity-refreshing-1440.png)
+- [activity stale 1440](activity-stale-1440.png)
+
+- [Launcher peer table header](ln04-dash-header.png)

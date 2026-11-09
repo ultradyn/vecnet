@@ -204,11 +204,23 @@ export function createStore({ api, now = Date.now, sleep = waitFor, random = Mat
   // delivery events it covered; nothing else would ever correct them.
   async function pump(signal) {
     const aborted = () => !!signal && signal.aborted;
-    const interrupted = new Promise(resolve => {
-      if (aborted()) resolve();
-      else if (signal) signal.addEventListener('abort', resolve, { once: true });
-    });
-    const resync = () => Promise.race([settled(), interrupted]);
+    // Each wait owns its abort listener. Completed waits must not accumulate
+    // reactions on a shared, pending abort promise for the pump's lifetime.
+    const resync = () => {
+      if (!signal) return settled();
+      if (aborted()) return Promise.resolve();
+      return new Promise((resolve, reject) => {
+        const cleanup = () => signal.removeEventListener('abort', onAbort);
+        const onAbort = () => { cleanup(); resolve(); };
+        signal.addEventListener('abort', onAbort, { once: true });
+        // Also cover an abort between the initial check and registration.
+        if (aborted()) { onAbort(); return; }
+        settled().then(
+          () => { cleanup(); resolve(); },
+          e => { cleanup(); reject(e); },
+        );
+      });
+    };
     let after, first = true, owed, backoff = BACKOFF_FIRST, quietUntil = 0;
     let unshown; // { cursor, rs }: a batch whose snapshots have not all loaded
     const accepting = new Set(); // thread tags of delivery events no paid ack covers yet

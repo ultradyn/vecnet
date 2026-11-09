@@ -61,15 +61,25 @@ try {
       const dot = tr?.querySelector('i.kd.k-launcher');
       return !!dot && getComputedStyle(dot).backgroundColor === want;
     }, [LAUNCHER, BLUE], { timeout: 10000 }).catch(() => { throw new Error(`launcher kind dot never became ${BLUE}`); });
-    // Keep the Peers heading and thead in view, with the launcher row below.
+    // Activity charts make peer rows taller. Capture the header and the
+    // launcher row separately so both remain legible at the standard viewport.
     await page.waitForFunction(name => {
       const main = document.getElementById('main'), sec = document.getElementById('d-peers');
       const tr = [...document.querySelectorAll('.dash-peers tbody tr')].find(el => el.querySelector('td:first-child > .pn')?.textContent === name);
       if (!main || !sec || !tr) return false;
       main.scrollTop += sec.getBoundingClientRect().top - main.getBoundingClientRect().top - 16;
-      const head = sec.querySelector('thead')?.getBoundingClientRect(), r = tr.getBoundingClientRect();
-      return !!head && head.top >= 0 && r.top > head.bottom && r.bottom < innerHeight;
-    }, LAUNCHER, { timeout: 10000 }).catch(() => { throw new Error('the Peers thead and the launcher row do not fit one screen'); });
+      const head = sec.querySelector('thead')?.getBoundingClientRect(), bounds = main.getBoundingClientRect();
+      return !!head && head.top >= bounds.top && head.bottom < Math.min(bounds.bottom, innerHeight);
+    }, LAUNCHER, { timeout: 10000 }).catch(() => { throw new Error('the Peers thead is not visible'); });
+    await shot('ln04-dash-header');
+    await page.waitForFunction(name => {
+      const main = document.getElementById('main');
+      const tr = [...document.querySelectorAll('.dash-peers tbody tr')].find(el => el.querySelector('td:first-child > .pn')?.textContent === name);
+      if (!main || !tr) return false;
+      main.scrollTop += tr.getBoundingClientRect().top - main.getBoundingClientRect().top - 16;
+      const r = tr.getBoundingClientRect(), bounds = main.getBoundingClientRect();
+      return r.top >= bounds.top && r.bottom < Math.min(bounds.bottom, innerHeight);
+    }, LAUNCHER, { timeout: 10000 }).catch(() => { throw new Error('the launcher row is not fully visible'); });
     await shot('ln04-dash-initial');
 
     // Principals: one principal at its cap of two created peers, with empty

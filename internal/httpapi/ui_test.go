@@ -33,8 +33,17 @@ import (
 // 612,715 bytes); confirmed on 2026-11-07 after the DB/master merge,
 // measured at 612,715 bytes (smallest 16 KiB step above it: 608 KiB);
 // to 624 KiB on 2026-11-08 for the sidebar search A refresh, about 21 KB
-// of search modules and CSS plus shell wiring.
-const uiMaxBytes = 624 << 10
+// of search modules and CSS plus shell wiring; to 640 KiB on 2026-11-09 for
+// the dashboard activity model and API wiring, measured at 641,458 bytes
+// (smallest 16 KiB step above it: 640 KiB); confirmed on 2026-11-09
+// after the activity dashboard renderer and styles, measured at 654,896 bytes
+// (smallest 16 KiB step above it remains 640 KiB); refined on 2026-11-09
+// after removing raw-minute disclosures and compacting activity styles,
+// measured at 653,887 bytes including in-flow overview and peer inspection
+// (cap and all-files coverage unchanged); to 656 KiB on 2026-11-09 for the
+// integrated dashboard, event-pump and Markdown memory fixes, measured by
+// the parent at 657,219 bytes (smallest 16 KiB step above it: 656 KiB).
+const uiMaxBytes = 656 << 10
 
 var (
 	scriptTag   = regexp.MustCompile(`(?is)<script\b([^>]*)>(.*?)</script>`)

@@ -20,6 +20,7 @@ func (s *server) opRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/admin/loop-cuts", s.opLoopCuts)
 	mux.HandleFunc("GET /v1/admin/delivery-health", s.opDeliveryHealth)
 	mux.HandleFunc("GET /v1/admin/activity", s.opActivity)
+	mux.HandleFunc("GET /v1/admin/activity-stats", s.opActivityStats)
 }
 
 func opResult(w http.ResponseWriter, value any, err error) {
@@ -125,4 +126,19 @@ func (s *server) opLoopCuts(w http.ResponseWriter, r *http.Request) {
 func (s *server) opDeliveryHealth(w http.ResponseWriter, r *http.Request) {
 	value, err := s.op.DeliveryHealth(r.Context())
 	opResult(w, value, err)
+}
+
+func (s *server) opActivityStats(w http.ResponseWriter, r *http.Request) {
+	value, err := s.op.ActivityStats(r.Context())
+	opResult(w, value, err)
+}
+
+// Outside authentication and body limiting so failures cannot be cached either.
+func activityStatsNoStore(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/admin/activity-stats" {
+			w.Header().Set("Cache-Control", "no-store")
+		}
+		next.ServeHTTP(w, r)
+	})
 }
