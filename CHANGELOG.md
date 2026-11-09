@@ -1,4 +1,6 @@
 # Changelog
+- 2026-11-10: Implement snapshotted destination names beside full canonical IDs in send/reply receipts and compact CLI/MCP inbox views; validators and client loop breakers must opt into ancestry (`--include-sender-chain` / `include_sender_chain=true`) or use canonical transport, and resource consumers needing ancestry must migrate to the tool with the same owner scope.
+
 - 2026-11-10: Document operator route statistics across HTTP, MCP and CLI JSON, with bounded route-wide request samples, separate retained-delivery evidence, null/last-status semantics and fixed private errors (docs/PROTOCOL.md §§2.12–2.13,3,4.3–4.4,5.3,13.7).
 
 - 2026-11-10: Hub URL environment defaults stay out of flag help and parse diagnostics; explicit URL flags, including empty overrides, retain precedence (`cmd/vecnet-hub/main.go`).
