@@ -1,5 +1,7 @@
 # Web UI memory: bounded dashboard retention and measured diagnosis
 
+> **Integration amendment, 2026-11-09:** PR #63 integrates the dashboard, event-pump and Markdown retention components onto merged master `ac85db36`. Preserve PR #62's SVG, cursor and minute readout; historical references below to expanded minute tables describe the component base and do not require restoring those removed tables. Native launcher/actor policy and thumbnail demand/viewer activation remain separate. Current combined gates and screenshot provenance are recorded in [the integration receipt](receipts/2026-11-09-webui-memory-integration.md).
+
 **Goal:** reduce the unnecessary retained memory Max reports across multiple pages on vecnet.xk.io, while preserving history, live updates, focus and attachments. Track WEB-MEM-1 / issue #60.
 
 **Base:** `fix/webui-memory` at `3d06953f21299b268d84649ea3a488b62807ddad`. Source diagnosis: `.superpowers/sdd/2026-11-09-webui-memory/diagnosis.md`. Synthetic retained-JavaScript and DOM observations are recorded in the component receipt; renderer RSS/PSS and production incident attribution remain open.
