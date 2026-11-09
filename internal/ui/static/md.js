@@ -7,14 +7,22 @@ import { needsHost, parse } from './md-model.js';
 
 // The thread rebuilds every message on each update, so parsed blocks (plain
 // data, never mutated here) are kept per body text, oldest dropped first.
-const memo = new Map(), MEMO = 1000;
+// Bound logical retained key units (UTF-16), not AST heap or native/tab RAM.
+const memo = new Map(), MEMO = 1000, MEMO_UNITS = 256 * 1024;
+let memoUnits = 0;
 function blocksOf(text) {
-  const key = String(text == null ? '' : text);
+  const key = String(text == null ? '' : text), units = key.length;
   let b = memo.get(key);
   if (!b) {
     b = parse(key);
+    if (units > MEMO_UNITS) return b;
     memo.set(key, b);
-    if (memo.size > MEMO) memo.delete(memo.keys().next().value);
+    memoUnits += units;
+    while (memo.size > MEMO || memoUnits > MEMO_UNITS) {
+      const oldest = memo.keys().next().value;
+      memoUnits -= oldest.length;
+      memo.delete(oldest);
+    }
   }
   return b;
 }

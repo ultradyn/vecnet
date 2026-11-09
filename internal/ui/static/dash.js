@@ -24,6 +24,19 @@ const COUNTER_LABELS = { dead_letters: 'dead-lettered' };
 
 const errText = e => (e && e.message) || String(e);
 
+// Keep each answer bounded and the hub's decimal cursor a string. A bad
+// answer follows the resource's usual error/last-good-value path.
+function auditPage(value, before = null) {
+  const entries = value.entries ?? [], next = value.next ?? null;
+  if (!Array.isArray(entries) || entries.length > AUDIT_PAGE
+      || entries.some(e => !e || !Number.isInteger(e.id) || e.id < 1)
+      || (next !== null && (typeof next !== 'string' || !/^[1-9]\d*$/.test(next)
+        || !entries.length || (before !== null && BigInt(next) >= BigInt(before))))) {
+    throw new Error('Invalid audit page');
+  }
+  return { entries: [...new Map(entries.map(e => [e.id, e])).values()].sort((a, b) => b.id - a.id), next };
+}
+
 // The cell shows the short form, but the whole id is in its text (a copy
 // is whole) and its title, with a copy button on hover (dom.js idCopy).
 function idCell(id, what) {
@@ -64,7 +77,10 @@ export function mount(root, ctx) {
     health: store.resource('peers', () => api.deliveryHealth()),
     dead: store.resource('peers', () => api.deadLetters()),
     cuts: store.resource('peers', () => api.loopCuts(24)),
-    audit: store.resource('peers', () => api.audit({ limit: AUDIT_PAGE })),
+    audit: store.resource('peers', async () => {
+      const page = await api.audit({ limit: AUDIT_PAGE });
+      return audit.alive ? auditPage(page) : undefined;
+    }),
     // The subscriptions table is subs.js's, under its own `subs` tag. This
     // `peers` resource reloads it whenever the rest of the page reloads: on
     // the peers tag (operator_view "subscription" names it) and every 30 s.
@@ -84,9 +100,9 @@ export function mount(root, ctx) {
   const threadLink = id => h('a', { href: '#thread/' + id, text: threadName(id), title: id });
   const peerCell = id => peerLink(id, peerName(id));
 
-  // The audit tail keeps every entry it has shown, so "Load older" pages on
-  // from the oldest one and a reload of the head does not drop them.
-  const audit = { seen: new Map(), olderNext: undefined, busy: false, err: null, alive: true };
+  // The resource owns one live head; page owns only the selected history page.
+  // trail contains request cursors only, with null denoting the live head.
+  const audit = { page: null, before: null, trail: [], busy: null, err: null, generation: 0, alive: true };
   // Archived peers stay out of the operator list until this is on. It is
   // local to the page: a #peer/<id> link still loads that peer from the
   // unfiltered admin directory.
@@ -329,10 +345,8 @@ export function mount(root, ctx) {
   }
 
   function drawAudit(value, s) {
-    for (const e of value.entries || []) audit.seen.set(e.id, e);
-    const entries = [...audit.seen.values()].sort((a, b) => b.id - a.id);
-    const next = audit.olderNext === undefined ? value.next : audit.olderNext;
-    s.count.textContent = entries.length + ' newest, no bodies or secrets';
+    const { entries, next } = audit.page || value;
+    s.count.textContent = entries.length + (audit.page ? ' historical' : ' newest') + ', no bodies or secrets';
     const out = [];
     out.push(entries.length
       ? h('div', { class: 'audit mono' }, entries.map(e => h('div', { class: 'ln' },
@@ -341,31 +355,65 @@ export function mount(root, ctx) {
         h('span', { class: 'act', text: e.action }),
         h('span', { class: 't' }, (e.target_ids || []).map(id => idText(id, 'tg'))))))
       : none('No audit entries.'));
-    if (audit.err) out.push(h('p', { class: 'err', text: 'Could not load older entries: ' + errText(audit.err) }));
-    if (next) out.push(h('button', { type: 'button', class: 'btn older', disabled: audit.busy, text: audit.busy ? 'Loading…' : 'Load older', onclick: loadOlder }));
+    if (audit.err) out.push(h('p', { class: 'err', text: 'Could not load audit entries: ' + errText(audit.err) }));
+    if (audit.busy) out.push(h('p', { role: 'status', text: 'Loading ' + audit.busy + ' entries…' }));
+    out.push(
+      h('button', { type: 'button', class: 'btn older', disabled: !next || !!audit.busy, text: 'Older', onclick: loadOlder }),
+      h('button', { type: 'button', class: 'btn', disabled: !audit.trail.length && !audit.busy, text: 'Newer', onclick: loadNewer }),
+      h('button', { type: 'button', class: 'btn', disabled: !audit.page && !audit.busy, text: 'Latest', onclick: latestAudit }));
     return out;
   }
 
-  async function loadOlder() {
-    if (audit.busy) return;
-    const ids = [...audit.seen.keys()];
-    if (!ids.length) return;
-    audit.busy = true;
+  function latestAudit() {
+    if (!audit.alive) return;
+    ++audit.generation;
+    audit.page = null;
+    audit.before = null;
+    audit.trail.length = 0;
+    audit.busy = null;
+    audit.err = null;
+    render();
+  }
+
+  function loadOlder() {
+    if (!audit.alive || audit.busy) return;
+    const next = (audit.page || res.audit.get())?.next;
+    if (next) return loadAuditPage(next, 'older');
+  }
+
+  function loadNewer() {
+    if (!audit.alive) return;
+    const before = audit.trail.at(-1);
+    // Also cancels a pending Older from the live head immediately.
+    if (before == null) { latestAudit(); return; }
+    return loadAuditPage(before, 'newer');
+  }
+
+  async function loadAuditPage(before, direction) {
+    const generation = ++audit.generation;
+    audit.busy = direction;
     audit.err = null;
     render();
     try {
-      const page = await api.audit({ limit: AUDIT_PAGE, before: Math.min(...ids) });
-      for (const e of page.entries || []) audit.seen.set(e.id, e);
-      audit.olderNext = page.next || null;
+      const value = await api.audit({ limit: AUDIT_PAGE, before });
+      if (!audit.alive || generation !== audit.generation) return;
+      const page = auditPage(value, before);
+      if (direction === 'older') audit.trail.push(audit.before);
+      else audit.trail.pop();
+      audit.page = page;
+      audit.before = before;
     } catch (e) {
-      audit.err = e;
+      if (audit.alive && generation === audit.generation) audit.err = e;
     } finally {
-      audit.busy = false;
-      if (audit.alive) render();
+      if (audit.alive && generation === audit.generation) {
+        audit.busy = null;
+        render();
+      }
     }
   }
 
   function render() {
+    if (!audit.alive) return;
     renderCounters();
     fill('peers', res.peers, 'Peers', drawPeers);
     renderActivity();
@@ -391,10 +439,19 @@ export function mount(root, ctx) {
     }));
   }
   return () => {
+    audit.alive = false;
+    ++audit.generation;
     closeInvite();
     stopSubs();
-    audit.alive = false;
     clearInterval(timer);
     for (const off of offs) off();
+    audit.page = null;
+    audit.before = null;
+    audit.trail.length = 0;
+    audit.busy = null;
+    audit.err = null;
+    res.audit.set(undefined);
+    peerRows.clear();
+    peerCharts.clear();
   };
 }

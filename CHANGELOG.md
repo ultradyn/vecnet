@@ -1,5 +1,11 @@
 # Changelog
 
+- 2026-11-09: Bound the Web UI parsed-message memo to 256 Ki UTF-16 key units while preserving full rendering; see docs/plans/2026-11-09-markdown-cache-memory.md.
+
+- 2026-11-09: Release event-pump abort bookkeeping after every resource wait and normal terminal stop, preserving accepted-once-shown acknowledgement and prompt abort semantics (issue #60; docs/plans/2026-11-09-webui-pump-lifetime.md).
+
+- 2026-11-09: Bound dashboard audit retention to one navigable fifty-entry page and release retired peer chart owners; preserve Older/Newer/Latest history, focus and last-good error recovery (issue #60; docs/plans/2026-11-09-webui-memory.md).
+
 - 2026-11-08: add sidebar peer-name and thread-title search with participant filtering, pagination, bounded queries and keyboard retry; preserve caseless matching across sigma, sharp-S and Kelvin variants; document the operator flow and raise the UI cap to 624 KiB (internal/ui, scripts/ui/search.mjs, docs/OPERATOR.md).
 - 2026-11-07: merge per-kind onboarding into DB compaction, retaining kind-scoped MCP discovery, wake_idle and history/cursor guidance within existing budgets; verify setup delivery hydration and retention through restart and ack in inline/reference modes; confirm migrations 0027-0034 and the measured 612,715-byte UI cap of 608 KiB.
 - 2026-11-07: renumber unpublished compaction migrations 0026-0033 to 0027-0034 after master's deployed 0026 peer archive, preserving SQL bytes; test fresh migration and upgrade from master 0026, update migration inventories and historical receipt filename metadata.

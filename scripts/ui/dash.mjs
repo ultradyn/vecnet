@@ -109,13 +109,86 @@ try {
       await sec('subs').locator(`tr.sub[data-sub="${okSub.sub_id}"][data-health="${health}"]`).waitFor();
     }
 
-    // Load older appears only when the tail has more; it is a read.
-    const older = sec('audit').getByRole('button', { name: 'Load older' });
-    if (await older.count()) {
-      const lines = await sec('audit').locator('.audit .ln').count();
-      await older.click();
-      await page.waitForFunction(n => document.querySelectorAll('.dash-audit .audit .ln').length > n, lines);
-    }
+    // Mandatory bounded-page fixture: only audit replies are synthetic. Keep a
+    // real seed entry's timestamp/actor/targets/detail and use exclusive cursors.
+    const auditSeed = await asPeer('operator', 'GET', '/v1/admin/audit?limit=1');
+    assert(auditSeed.ok, `audit fixture seed read: ${auditSeed.status}`);
+    const seedEntry = (await auditSeed.json()).entries?.[0];
+    assert(seedEntry?.at && seedEntry.actor, 'audit fixture needs a current server entry');
+    let auditTop = 150, servedHead = 0;
+    await page.route('**/v1/admin/audit*', async route => {
+      const req = route.request(), url = new URL(req.url());
+      assert(req.method() === 'GET' && url.searchParams.get('limit') === '50', 'audit fixture expects GET limit=50');
+      const before = url.searchParams.get('before');
+      assert(before === null || /^[1-9]\d*$/.test(before), 'audit fixture received invalid cursor');
+      const top = before === null ? auditTop : Math.min(auditTop, Number(before) - 1);
+      const entries = Array.from({ length: Math.min(50, top) }, (_, i) => ({
+        ...seedEntry, id: top - i, action: `fixture-audit-${top - i}`,
+      }));
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
+        entries, next: entries.at(-1)?.id > 1 ? String(entries.at(-1).id) : null,
+      }) });
+      if (before === null) servedHead = top;
+    });
+    const auditButton = name => sec('audit').getByRole('button', { name, exact: true });
+    const expectAudit = async (top, mode, label) => {
+      try {
+        await sec('audit').locator('.act', { hasText: new RegExp(`^fixture-audit-${top}$`) }).waitFor();
+      } catch (error) {
+        throw new Error(`${label}: audit fixture never rendered page ${top}: ${error.message}`);
+      }
+      await ctx.quiet();
+      const actions = await sec('audit').locator('.audit .ln .act').allTextContents();
+      const expected = Array.from({ length: 50 }, (_, i) => `fixture-audit-${top - i}`);
+      assert(await sec('audit').locator('.audit .ln').count() === 50, `${label}: exactly 50 rows, never an appended union`);
+      assert(JSON.stringify(actions) === JSON.stringify(expected), `${label}: wrong page/order: ${actions.join(',')}`);
+      assert((await sec('audit').locator('h2 .n').textContent()).startsWith(`50 ${mode},`), `${label}: wrong selection label`);
+      assert(await sec('audit').locator('.err, .error, [role="status"]').count() === 0, `${label}: audit error or pending navigation`);
+    };
+    const refreshAudit = async quota => {
+      const [response, changed] = await Promise.all([
+        page.waitForResponse(r => {
+          const u = new URL(r.url());
+          return u.pathname === '/v1/admin/audit' && !u.searchParams.has('before');
+        }),
+        asPeer('codex', 'POST', '/v1/presence', { state: 'working', at: new Date().toISOString(), quota: { weekly_remaining_pct: quota } }),
+      ]);
+      assert(changed.ok && response.ok(), 'audit fixture: directory update must refresh live head');
+      await ctx.quiet();
+      assert(servedHead === auditTop, `audit fixture: head ${auditTop} not served`);
+      await peerRow('codex-hark').locator('td', { hasText: new RegExp(`^${quota}%$`) }).waitFor();
+    };
+    const auditShots = async name => {
+      await scrollIntoViewStable(page, '.dash-audit h2');
+      await page.locator('#main').evaluate(el => {
+        el.scrollTop += document.querySelector('.dash-audit').getBoundingClientRect().top - el.getBoundingClientRect().top - 16;
+      });
+      await shot(name);
+      await scrollIntoViewStable(page, '.dash-audit button.older');
+      await shot(name + '-controls');
+    };
+    await refreshAudit(43);
+    await expectAudit(150, 'newest', 'fixture initial head');
+    assert(await auditButton('Newer').isDisabled() && await auditButton('Latest').isDisabled(), 'audit initial head: history controls disabled');
+    await auditButton('Older').click();
+    await expectAudit(100, 'historical', 'Older replaces head');
+    await auditButton('Older').click();
+    await expectAudit(50, 'historical', 'Older reaches third page');
+    assert(await auditButton('Older').isDisabled(), 'audit fixture terminal page: Older disabled');
+    auditTop = 200;
+    await refreshAudit(42);
+    await expectAudit(50, 'historical', 'fresh head preserves selected history');
+    await auditShots('12-dash-audit-history');
+    await auditButton('Newer').click();
+    await expectAudit(100, 'historical', 'Newer refetches preceding history page');
+    await auditButton('Latest').click();
+    await expectAudit(200, 'newest', 'Latest selects refreshed head');
+    assert(await auditButton('Newer').isDisabled() && await auditButton('Latest').isDisabled(), 'audit Latest: history controls disabled');
+    await auditShots('12-dash-audit-head');
+    await auditButton('Older').click();
+    await expectAudit(150, 'historical', 'Older starts from refreshed head cursor');
+    await auditButton('Newer').click();
+    await expectAudit(200, 'newest', 'Newer returns to refreshed live head');
 
     // one failing section shows its own error while the others render
     await fail('**/v1/admin/delivery-health', 500, 'internal', 'Delivery health query failed');
