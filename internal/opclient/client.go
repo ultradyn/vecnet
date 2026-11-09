@@ -19,6 +19,7 @@ import (
 	"github.com/XertroV/vecnet/internal/blobclient"
 	"github.com/XertroV/vecnet/internal/blobwire"
 	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/httpdiag"
 	"github.com/XertroV/vecnet/internal/hubid"
 	"github.com/XertroV/vecnet/internal/opapi"
 )
@@ -101,7 +102,7 @@ func (c *Client) requestMatch(ctx context.Context, method, path string, body any
 	}
 	resp, err := c.hc.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, httpdiag.TransportError(err)
 	}
 	return checkedResponse(resp)
 }
@@ -438,7 +439,7 @@ func (c *Client) UploadWithProgress(ctx context.Context, r io.Reader, size int64
 	req.Header.Set("Content-Type", mediaType)
 	resp, err := c.uploadHC.Do(req)
 	if err != nil {
-		return envelope.Attachment{}, err
+		return envelope.Attachment{}, httpdiag.TransportError(err)
 	}
 	resp, err = checkedResponse(resp)
 	if err != nil {
@@ -525,7 +526,7 @@ func (t *blobTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 func (t *blobTransport) outcome(err error) error {
 	var e *blobclient.Error
 	if errors.As(err, &e) && e.HubTransport && t.failure != nil {
-		return t.failure
+		return httpdiag.TransportError(t.failure)
 	}
 	return transferError(err)
 }

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/httpdiag"
 	"github.com/XertroV/vecnet/internal/hubid"
 )
 
@@ -137,7 +138,7 @@ func (c *client) send(req *http.Request) (*http.Response, error) {
 		if ctxErr := req.Context().Err(); ctxErr != nil && errors.Is(err, ctxErr) {
 			return nil, ctxErr
 		}
-		return nil, &netError{err: err}
+		return nil, &netError{err: httpdiag.TransportError(err)}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		defer resp.Body.Close()
