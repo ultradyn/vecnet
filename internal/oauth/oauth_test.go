@@ -1471,6 +1471,84 @@ func TestDeniedConsent(t *testing.T) {
 	fresh.code(verifierA, good)
 }
 
+func TestConsentCursorCanonicalOrigin(t *testing.T) {
+	const cursor = "https://www.cursor.com/agents/mcp/oauth/callback"
+	for _, tc := range []struct {
+		name, redirect string
+		extend         bool
+		origins        []string
+	}{
+		{"Cursor", cursor, false, []string{"'self'", "https://www.cursor.com", "https://cursor.com"}},
+		{"ChatGPT", chatgptRedirect, false, []string{"'self'", "https://chatgpt.com"}},
+		{"other www", "https://www.example.com/cb", true, []string{"'self'", "https://www.example.com"}},
+		{"lookalike", "https://www.cursor.com.evil.example/cb", true, []string{"'self'", "https://www.cursor.com.evil.example"}},
+		{"explicit default port", "https://www.cursor.com:443/cb", true, []string{"'self'", "https://www.cursor.com:443"}},
+		{"other port", "https://www.cursor.com:8443/cb", true, []string{"'self'", "https://www.cursor.com:8443"}},
+		{"apex extension without inverse", "https://cursor.com/cb", true, []string{"'self'", "https://cursor.com"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := testhub.Start(t)
+			if tc.extend {
+				// An explicit operator extension must not acquire inferred hosts.
+				env.OAuth.AllowedRedirects = append(env.OAuth.AllowedRedirects, tc.redirect)
+			}
+			b := &browser{t: t, env: env, client: register(t, env, tc.redirect), redirect: tc.redirect}
+			resp, page := b.authorize(b.query(verifierA))
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("consent HTTP %d", resp.StatusCode)
+			}
+			want := "default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action " + strings.Join(tc.origins, " ")
+			if resp.Header.Get("Content-Security-Policy") != want {
+				t.Error("consent policy differs from exact permitted origin set and hardening directives")
+			}
+			if resp.Header.Get("Cache-Control") != "no-store" || resp.Header.Get("Referrer-Policy") != "no-referrer" {
+				t.Error("consent cache or referrer protection changed")
+			}
+			// Denial still returns automatically to exactly the registered URI,
+			// even when the form policy includes a canonical navigation companion.
+			denied, _ := postForm(t, env, "/oauth/authorize", url.Values{"request": {sealedRequest(t, page)}}, nil)
+			loc, err := url.Parse(denied.Header.Get("Location"))
+			if err != nil || denied.StatusCode != http.StatusFound {
+				t.Fatal("denial did not retain the automatic 302 contract")
+			}
+			q := loc.Query()
+			loc.RawQuery = ""
+			if loc.String() != tc.redirect || q.Get("error") != "access_denied" || q.Get("code") != "" || q.Get("state") != "st-123" || q.Get("iss") != env.OAuth.Issuer {
+				t.Error("denial changed exact destination, error, state, or issuer")
+			}
+		})
+	}
+}
+
+func TestConsentCursorCompanionDoesNotAuthorizeRedirects(t *testing.T) {
+	env := testhub.Start(t)
+	const cursor = "https://www.cursor.com/agents/mcp/oauth/callback"
+	b := &browser{t: t, env: env, client: register(t, env, cursor), redirect: cursor}
+	for _, redirect := range []string{
+		"https://cursor.com/agents/mcp/oauth/callback",
+		"http://www.cursor.com/agents/mcp/oauth/callback",
+		"https://www.cursor.com:8443/agents/mcp/oauth/callback",
+		"https://www.cursor.com.evil.example/agents/mcp/oauth/callback",
+		"https://www.cursor.com/agents/mcp/oauth/callback/extra",
+	} {
+		resp, _ := env.Do("", "POST", "/oauth/register", map[string]any{
+			"redirect_uris": []string{redirect}, "token_endpoint_auth_method": "none",
+		})
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("unlisted redirect registration HTTP %d", resp.StatusCode)
+		}
+		q := b.query(verifierA)
+		q.Set("redirect_uri", redirect)
+		resp, page := b.authorize(q)
+		if resp.StatusCode != http.StatusBadRequest || resp.Header.Get("Location") != "" || len(resp.Cookies()) != 0 || requestField.MatchString(page) {
+			t.Error("unregistered redirect gained a navigation, cookie, or sealed consent form")
+		}
+		if resp.Header.Get("Content-Security-Policy") != "default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'" {
+			t.Error("refused redirect widened dead-end form policy")
+		}
+	}
+}
+
 func TestConsentPageHardening(t *testing.T) {
 	env := testhub.Start(t)
 	b := newBrowser(t, env)
