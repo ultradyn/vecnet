@@ -37,7 +37,10 @@ import (
 // the dashboard activity model and API wiring, measured at 641,458 bytes
 // (smallest 16 KiB step above it: 640 KiB); confirmed on 2026-11-09
 // after the activity dashboard renderer and styles, measured at 654,896 bytes
-// (smallest 16 KiB step above it remains 640 KiB).
+// (smallest 16 KiB step above it remains 640 KiB); refined on 2026-11-09
+// after removing raw-minute disclosures and compacting activity styles,
+// measured at 653,833 bytes including in-flow overview inspection
+// (cap and all-files coverage unchanged).
 const uiMaxBytes = 640 << 10
 
 var (

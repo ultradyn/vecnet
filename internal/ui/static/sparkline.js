@@ -18,13 +18,8 @@ export function createSparkline() {
   const svg = svgNode('svg', { viewBox: `0 0 ${WIDTH} ${HEIGHT}`, preserveAspectRatio: 'none', tabindex: 0, role: 'img' });
   svg.append(baseline, area, line, cursor);
   const readout = h('p', { class: 'spark-readout', 'aria-live': 'polite', hidden: true });
-  const tbody = h('tbody');
-  const caption = h('caption');
-  const details = h('details', { class: 'spark-details' }, h('summary', { text: 'Minute values' }),
-    h('div', { class: 'spark-table-scroll' }, h('table', null, caption,
-      h('thead', null, h('tr', null, ['Start (UTC, inclusive)', 'End (UTC, exclusive)', 'Messages'].map(text => h('th', { text })))), tbody)));
-  const hint = h('p', { class: 'spark-hint', text: '60 minutes · arrows / Home / End to inspect; Esc to dismiss' });
-  const el = h('div', { class: 'sparkline' }, svg, readout, hint, details);
+  const axis = h('div', { class: 'spark-axis', 'aria-hidden': 'true' }, h('span', { text: '1 hour ago' }), h('span', { text: 'Now' }));
+  const el = h('div', { class: 'sparkline' }, svg, readout, axis);
 
   function show() {
     const label = bucketLabel(snapshot, index);
@@ -63,17 +58,13 @@ export function createSparkline() {
     if (key === lastRender) { show(); return; }
     lastRender = key;
     if (series) svg.removeAttribute('hidden'); else svg.setAttribute('hidden', '');
-    details.hidden = !series; hint.hidden = !series;
-    if (!series) { tbody.replaceChildren(); show(); return; }
+    axis.hidden = !series;
+    if (!series) { show(); return; }
     const geometry = sparklineGeometry(series.buckets, { max });
     line.setAttribute('points', geometry.points); area.setAttribute('d', geometry.area);
     svg.setAttribute('data-max', geometry.max);
     svg.setAttribute('aria-label', `${label}: ${series.messages} messages in the last hour; minute counts, zero to ${geometry.max}. Use arrows, Home or End to inspect.`);
-    caption.textContent = `${label} · exact one-minute counts; [start, end), UTC`;
-    tbody.replaceChildren(...series.buckets.map((n, i) => {
-      const b = bucketLabel(snapshot, i);
-      return h('tr', null, h('td', { text: b.start }), h('td', { text: b.end }), h('td', { text: String(n) }));
-    }));
+    svg.setAttribute('title', 'Hover or use arrows, Home / End to inspect each minute; Esc to dismiss.');
     show();
   }
   update(null, null);

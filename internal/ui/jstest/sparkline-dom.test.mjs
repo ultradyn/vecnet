@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { installDom, snapshot } from './activity-dom-fixture.mjs';
 const module = await import('../static/sparkline.js').catch(e => { if (e.code !== 'ERR_MODULE_NOT_FOUND') throw e; return {}; });
 
-test('sparkline uses namespaced SVG and one keyboard plot stop with exact table alternative', () => {
+test('sparkline provides a named keyboard plot without raw-value disclosures or hidden tables', () => {
   assert.equal(typeof module.createSparkline, 'function', 'sparkline renderer is missing');
   const restore = installDom();
   try {
@@ -13,14 +13,12 @@ test('sparkline uses namespaced SVG and one keyboard plot stop with exact table 
     assert.equal(svg.attrs.tabindex, '0');
     assert.equal(svg.attrs['data-max'], '5');
     assert.equal(c.el.querySelectorAll('img').length, 0);
-    assert.equal(c.el.querySelector('tbody').children.length, 60);
-    const first = c.el.querySelector('tbody').children[0].textContent;
-    assert.match(first, /2026-11-09T11:00:30.000Z/); assert.match(first, /2026-11-09T11:01:30.000Z/);
-    assert.match(first, /1$/);
+    for (const tag of ['details', 'summary', 'table']) assert.equal(c.el.querySelectorAll(tag).length, 0, `no ${tag} in a chart`);
     assert.match(svg.attrs['aria-label'], /4 messages.*hour/);
-    const row = c.el.querySelector('tbody').children[0];
+    assert.match(svg.attrs['aria-label'], /arrows.*Home.*End/);
+    assert.equal(c.el.querySelector('.spark-axis').textContent, '1 hour agoNow');
     c.update(s, s, { label: '<img src=x>', max: 5 });
-    assert.equal(c.el.querySelector('tbody').children[0], row, 'unchanged snapshots retain table rows');
+    assert.equal(c.el.querySelector('svg'), svg, 'unchanged snapshots retain the keyboard plot');
   } finally { restore(); }
 });
 

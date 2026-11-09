@@ -35,20 +35,31 @@ test('activity mounts unknown, then joins immutable ids with shared-scale zero-f
   });
 });
 
-test('activity refresh retains charts, open table, keyboard selection and focus across unrelated resources', async () => {
+test('activity refresh retains exact keyboard selection and focus without minute disclosures', async () => {
   await dashboard(async ({ root, store, tick, answer }) => {
     await store.settled();
-    const chart = root.querySelector('.activity-chart'), svg = chart.querySelector('svg'), details = chart.querySelector('details');
-    svg.focus(); svg.on.keydown({ key: 'Home', preventDefault() {} }); details.open = true;
+    const chart = root.querySelector('.activity-chart'), svg = chart.querySelector('svg');
+    svg.focus(); svg.on.keydown({ key: 'Home', preventDefault() {} });
     store.invalidate('peers'); await store.settled();
     assert.equal(root.querySelector('.activity-chart'), chart);
     assert.equal(document.activeElement, svg);
     answer(snapshot({ peer_a: [8] })); await tick();
     assert.equal(root.querySelector('.activity-chart'), chart);
     assert.equal(document.activeElement, svg);
-    assert.equal(details.open, true);
-    assert.match(chart.querySelector('.spark-readout').textContent, /8 messages/);
-    assert.equal(chart.querySelectorAll('tbody')[0].children.length, 60);
+    assert.match(chart.querySelector('.spark-readout').textContent, /8 messages.*11:00:30/);
+    for (const c of root.querySelectorAll('.sparkline')) {
+      for (const tag of ['details', 'summary', 'table']) assert.equal(c.querySelectorAll(tag).length, 0);
+    }
+  });
+});
+
+test('overview labels the hourly average and keeps exact timestamps out of routine metadata', async () => {
+  await dashboard(async ({ root, store }) => {
+    await store.settled();
+    assert.match(root.querySelector('.activity-overview').textContent, /Messages \/ min.*Hourly average/);
+    assert.match(root.querySelector('.activity-active').parentNode.textContent, /Sent in last hour/);
+    assert.doesNotMatch(root.querySelector('.activity-status').textContent, /2026-11-09T|Snapshot/);
+    assert.match(root.querySelector('.activity-status').textContent, /sources and hub/);
   });
 });
 

@@ -122,7 +122,7 @@ export function mount(root, ctx) {
     activityRate.textContent = value ? rate(value.messages_per_minute) : '—';
     activityActive.textContent = value ? String(value.active_peers) : '—';
     activityStatus.textContent = value
-      ? `${err ? 'Stale · ' + errText(err) + ' · ' : res.activity.loading() ? 'Refreshing · ' : ''}Snapshot ${value.window_end} · rolling hour; non-reactions, including sources and hub. Active peers includes operator and dots.`
+      ? `${err ? 'Stale · ' + errText(err) + ' · ' : res.activity.loading() ? 'Refreshing · ' : ''}Non-reactions, including sources and hub. Active peers includes operator and dots.`
       : err ? 'Activity unavailable: ' + errText(err) + ' · retries every 30 seconds.' : 'Loading activity…';
     activityPanel.setAttribute('data-state', err ? value ? 'stale' : 'error' : value ? 'ready' : 'loading');
     overviewChart.update(value, value, { label: 'Hub messages' });
