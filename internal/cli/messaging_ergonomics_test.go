@@ -1,19 +1,25 @@
 package cli_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 
 	"github.com/XertroV/vecnet/internal/auth"
+	"github.com/XertroV/vecnet/internal/cli"
+	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/hub"
 	"github.com/XertroV/vecnet/internal/testhub"
 )
 
@@ -176,4 +182,291 @@ func TestSendReceiptMissingNameAndHostileLabel(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestInboxJSONSenderChainDefaultAndOptIn(t *testing.T) {
+	for _, references := range []bool{false, true} {
+		t.Run(fmt.Sprintf("references=%t", references), func(t *testing.T) {
+			env := testhub.StartWith(t, func(cfg *hub.Config) { cfg.DeliveryReferences = references })
+			a, secret := env.NewPeer("session", "Alpha")
+			b, bSecret := env.NewPeer("session", "Bravo")
+			sender, reader := profileUser(t, env.URL, secret), profileUser(t, env.URL, bSecret)
+			first := sender.send(b, "first", "--hold")
+			middle := reader.send2("reply", first.MessageID, "middle", "--thread", first.ThreadID, "--hold")
+			resp, raw := env.Do(secret, http.MethodPost, "/v1/messages", map[string]any{
+				"idempotency_key": "compact-final", "thread_id": first.ThreadID, "in_reply_to": middle.MessageID,
+				"priority": "hold", "content": map[string]any{"text": "compact inbox"},
+				"metadata": json.RawMessage(`{"sender_chain":["keep"],"large":9007199254740993,"precise":1.2300}`),
+			})
+			var sent sendResp
+			if resp.StatusCode != http.StatusAccepted || json.Unmarshal(raw, &sent) != nil || sent.MessageID == "" {
+				t.Fatalf("final fixture send: %d %s", resp.StatusCode, raw)
+			}
+			sender.mustRun("receipt", middle.Deliveries[0].DeliveryID, "read")
+			canonicalBefore := ergCanonicalPage(t, env, bSecret)
+			stored := func() [4]string {
+				var fields [4]string
+				err := env.Hub.DB.QueryRow(`SELECT m.body,d.body_sha256,e.data,e.payload_format FROM messages m JOIN deliveries d ON d.msg_id=m.msg_id JOIN events e ON e.seq=d.event_seq WHERE m.msg_id=?`, sent.MessageID).Scan(&fields[0], &fields[1], &fields[2], &fields[3])
+				if err != nil {
+					t.Fatal(err)
+				}
+				return fields
+			}
+			storedBefore := stored()
+			compact := []byte(reader.mustRun("--json", "inbox"))
+			if _, present := ergCLILoop(t, compact, sent.MessageID)["sender_chain"]; present {
+				t.Error("default inbox JSON still contains delivery message.loop.sender_chain")
+			}
+			expected := ergCLIJSONValue(t, canonicalBefore).(map[string]any)
+			hasReceipt := false
+			for _, item := range expected["events"].([]any) {
+				event := item.(map[string]any)
+				if event["type"] == "delivery" {
+					delete(event["data"].(map[string]any)["message"].(map[string]any)["loop"].(map[string]any), "sender_chain")
+				}
+				hasReceipt = hasReceipt || event["type"] == "receipt"
+			}
+			if !hasReceipt || !reflect.DeepEqual(expected, ergCLIJSONValue(t, compact)) {
+				t.Errorf("compact must change only the delivery ancestry key, preserving metadata, other loop fields, events and cursor: %s", compact)
+			}
+			cached := ergCLICache(t, reader)
+			if cached[sent.MessageID] != first.ThreadID || cached["next_cursor"] != "" {
+				t.Fatalf("compact view poisoned message/thread cache or cached an inbox cursor: %#v", cached)
+			}
+			code, full, stderr := reader.run("--json", "inbox", "--include-sender-chain")
+			if code != 0 {
+				t.Fatalf("full-view flag/admission failure, not a projection assertion: code=%d stderr=%s", code, stderr)
+			}
+			var chain []string
+			if err := json.Unmarshal(ergCLILoop(t, []byte(full), sent.MessageID)["sender_chain"], &chain); err != nil || !reflect.DeepEqual(chain, []string{a, b, a}) {
+				t.Fatalf("opt-in lost ordered ancestry: %s %v", full, err)
+			}
+			if !reflect.DeepEqual(ergCLIJSONValue(t, canonicalBefore), ergCLIJSONValue(t, []byte(full))) {
+				t.Fatal("full view differs from canonical HTTP event values or cursor")
+			}
+			if storedBefore != stored() || !bytes.Equal(canonicalBefore, ergCanonicalPage(t, env, bSecret)) {
+				t.Fatal("inbox reads changed stored Message, delivery hash, event data/format or canonical HTTP bytes")
+			}
+		})
+	}
+}
+
+func TestInboxTextSenderChainOptIn(t *testing.T) {
+	env := testhub.Start(t)
+	a, secret := env.NewPeer("session", "Alpha")
+	b, bSecret := env.NewPeer("session", "Bravo")
+	sender, reader := profileUser(t, env.URL, secret), profileUser(t, env.URL, bSecret)
+	first := sender.send(b, "text inbox", "--hold")
+	reader.send2("reply", first.MessageID, "ordered answer", "--thread", first.ThreadID, "--hold")
+	reader.mustRun("receipt", first.Deliveries[0].DeliveryID, "read")
+	plain := sender.mustRun("inbox")
+	code, full, stderr := sender.run("inbox", "--include-sender-chain")
+	if code != 0 {
+		t.Fatalf("text opt-in flag/admission failure: code=%d stderr=%s", code, stderr)
+	}
+	chain, err := json.Marshal([]string{a, b})
+	if err != nil {
+		t.Fatal(err)
+	}
+	suffix := " sender_chain=" + string(chain)
+	if !strings.Contains(plain, "receipt") || strings.Contains(plain, "sender_chain=") || strings.Count(full, suffix) != 1 || strings.Replace(full, suffix, "", 1) != plain {
+		t.Fatalf("opt-in must append only the exact ordered JSON chain to the delivery row: plain=%q full=%q", plain, full)
+	}
+}
+
+type ergFailedOutput struct {
+	calls int
+	short bool
+}
+
+func (writer *ergFailedOutput) Write(data []byte) (int, error) {
+	writer.calls++
+	if writer.short && len(data) > 0 {
+		return len(data) - 1, nil
+	}
+	return 0, io.ErrClosedPipe
+}
+
+func TestInboxChainOptInFailedOutputNeverAcknowledges(t *testing.T) {
+	for _, asJSON := range []bool{false, true} {
+		for _, include := range []bool{false, true} {
+			for _, short := range []bool{false, true} {
+				t.Run(fmt.Sprintf("json=%t/include=%t/short=%t", asJSON, include, short), func(t *testing.T) {
+					env := testhub.Start(t)
+					_, secret := env.NewPeer("session", "Alpha")
+					b, bSecret := env.NewPeer("session", "Bravo")
+					sent := profileUser(t, env.URL, secret).send(b, "must remain unread", "--hold")
+					reader := profileUser(t, env.URL, bSecret)
+					canonicalBefore := ergCanonicalPage(t, env, bSecret)
+					var beforePage ergCLIPage
+					if err := json.Unmarshal(canonicalBefore, &beforePage); err != nil {
+						t.Fatal(err)
+					}
+					args := []string{"inbox", "--ack"}
+					if asJSON {
+						args = append([]string{"--json"}, args...)
+					}
+					if include {
+						args = append(args, "--include-sender-chain")
+					}
+					writer := &ergFailedOutput{short: short}
+					var stderr bytes.Buffer
+					code := cli.Run(args, strings.NewReader(""), writer, &stderr, reader.getenv)
+					if include && strings.Contains(stderr.String(), "unknown flag --include-sender-chain") {
+						t.Fatalf("flag prerequisite rejected before stdout; not writer-path RED: %s", stderr.String())
+					}
+					if code == 0 || writer.calls != 1 {
+						t.Fatalf("failed/short complete-page write must fail once before ack: code=%d calls=%d stderr=%s", code, writer.calls, stderr.String())
+					}
+					var state string
+					if err := env.Hub.DB.QueryRow("SELECT state FROM deliveries WHERE dly_id=?", sent.Deliveries[0].DeliveryID).Scan(&state); err != nil {
+						t.Fatal(err)
+					}
+					cached := ergCLICache(t, reader)
+					if state != "queued" || cached[sent.MessageID] != sent.ThreadID || cached["next_cursor"] != "" || !bytes.Equal(canonicalBefore, ergCanonicalPage(t, env, bSecret)) {
+						t.Fatal("failed output acknowledged, poisoned the cache/cursor or changed canonical delivery data")
+					}
+					recoveredRaw := []byte(reader.mustRun("--json", "inbox"))
+					var recovered ergCLIPage
+					if err := json.Unmarshal(recoveredRaw, &recovered); err != nil || len(recovered.Events) == 0 || recovered.NextCursor != beforePage.NextCursor {
+						t.Fatalf("unacknowledged page could not be read again: %+v %v", recovered, err)
+					}
+					ergCLILoop(t, recoveredRaw, sent.MessageID)
+				})
+			}
+		}
+	}
+}
+
+func TestInboxProjectionMalformedPageNeverAcknowledges(t *testing.T) {
+	for _, mode := range []struct {
+		name string
+		args []string
+	}{
+		{"compact-json", []string{"--json", "inbox", "--ack"}},
+		{"compact-text", []string{"inbox", "--ack"}},
+		{"full-text", []string{"inbox", "--include-sender-chain", "--ack"}},
+	} {
+		t.Run(mode.name, func(t *testing.T) {
+			var acks, polls atomic.Int32
+			var repaired, explicitAfter atomic.Bool
+			page := `{"events":[{"cursor":"e1.1","type":"delivery","data":{"delivery_id":"dly_one","message":{"message_id":"msg_one","thread_id":"thr_one","loop":{"sender_chain":["peer_test"]},"content":{"text":"first"}}}},{"cursor":"e1.2","type":"delivery","data":{"delivery_id":"dly_bad","message":{"message_id":"msg_bad","thread_id":"thr_one","loop":[]}}}],"next_cursor":"e1.2"}`
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/v1/peers/me":
+					fmt.Fprint(w, `{"kind":"peer","peer_id":"peer_test"}`)
+				case "/v1/events":
+					polls.Add(1)
+					if r.URL.Query().Get("after") != "" {
+						explicitAfter.Store(true)
+					}
+					body := page
+					if repaired.Load() {
+						body = strings.Replace(body, `"loop":[]`, `"loop":{"sender_chain":[]}`, 1)
+					}
+					fmt.Fprint(w, body)
+				case "/v1/ack":
+					acks.Add(1)
+					fmt.Fprint(w, "{}")
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+			u := profileUser(t, srv.URL, "synthetic-secret")
+			cachePath := filepath.Join(u.env["XDG_CACHE_HOME"], "vecnet", "messages.json")
+			if err := os.MkdirAll(filepath.Dir(cachePath), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(cachePath, []byte(`{"msg_cached":"thr_cached"}`), 0600); err != nil {
+				t.Fatal(err)
+			}
+			code, out, stderr := u.run(mode.args...)
+			if strings.Contains(stderr, "unknown flag --include-sender-chain") {
+				t.Fatalf("flag prerequisite rejected before malformed-page rendering: %s", stderr)
+			}
+			if code == 0 || out != "" || acks.Load() != 0 || polls.Load() != 1 {
+				t.Fatalf("late malformed event must produce no page/ack: code=%d output=%q acks=%d polls=%d stderr=%s", code, out, acks.Load(), polls.Load(), stderr)
+			}
+			cached := ergCLICache(t, u)
+			if cached["msg_cached"] != "thr_cached" || (cached["msg_one"] != "" && cached["msg_one"] != "thr_one") || cached["next_cursor"] != "" {
+				t.Fatalf("failed projection poisoned existing cache or persisted a cursor: %#v", cached)
+			}
+			repaired.Store(true)
+			raw := []byte(u.mustRun("--json", "inbox"))
+			var recovered ergCLIPage
+			if err := json.Unmarshal(raw, &recovered); err != nil || len(recovered.Events) != 2 || recovered.NextCursor != "e1.2" || acks.Load() != 0 || explicitAfter.Load() {
+				t.Fatalf("failed page advanced/replaced the cursor or lost replayable events: %+v %v", recovered, err)
+			}
+			ergCLILoop(t, raw, "msg_one")
+			ergCLILoop(t, raw, "msg_bad")
+		})
+	}
+}
+
+type ergCLIPage struct {
+	Events     []envelope.Event `json:"events"`
+	NextCursor string           `json:"next_cursor"`
+}
+
+func ergCLILoop(t *testing.T, raw []byte, messageID string) map[string]json.RawMessage {
+	t.Helper()
+	var page ergCLIPage
+	if err := json.Unmarshal(raw, &page); err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range page.Events {
+		if event.Type != "delivery" {
+			continue
+		}
+		var data struct {
+			Message struct {
+				ID   string                     `json:"message_id"`
+				Loop map[string]json.RawMessage `json:"loop"`
+			} `json:"message"`
+		}
+		if err := json.Unmarshal(event.Data, &data); err != nil {
+			t.Fatal(err)
+		}
+		if data.Message.ID == messageID {
+			return data.Message.Loop
+		}
+	}
+	t.Fatalf("page has no delivery for %s: %s", messageID, raw)
+	return nil
+}
+
+func ergCanonicalPage(t *testing.T, env *testhub.Env, secret string) []byte {
+	t.Helper()
+	resp, raw := env.Do(secret, http.MethodGet, "/v1/events?after=e1.0&wait=0", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("canonical inbox: %d %s", resp.StatusCode, raw)
+	}
+	return raw
+}
+
+func ergCLIJSONValue(t *testing.T, raw []byte) any {
+	t.Helper()
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		t.Fatal(err)
+	}
+	return value
+}
+
+func ergCLICache(t *testing.T, reader *user) map[string]string {
+	t.Helper()
+	path := filepath.Join(reader.env["XDG_CACHE_HOME"], "vecnet", "messages.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cached map[string]string
+	if err := json.Unmarshal(raw, &cached); err != nil {
+		t.Fatal(err)
+	}
+	return cached
 }
