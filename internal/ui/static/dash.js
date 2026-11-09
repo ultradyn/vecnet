@@ -257,10 +257,6 @@ export function mount(root, ctx) {
     const body = peerTable.querySelector('tbody');
     for (const old of [...body.children]) if (!nextRows.includes(old)) old.remove();
     nextRows.forEach((row, i) => { if (body.children[i] !== row) body.insertBefore(row, body.children[i] || null); });
-    // Retire hidden/removed owners before renderActivity updates the charts.
-    const shown = new Set(rows.map(p => p.id));
-    for (const id of peerRows.keys()) if (!shown.has(id)) peerRows.delete(id);
-    for (const id of peerCharts.keys()) if (!shown.has(id)) peerCharts.delete(id);
     return [archivedToggle, rows.length ? peerTableWrap : peerEmpty];
   }
 

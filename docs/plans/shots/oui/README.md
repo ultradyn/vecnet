@@ -41,6 +41,10 @@ Task 23 runs both clients against one disposable hub. Its assertions verify cros
 - [11-matrix-initial.png](11-matrix-initial.png) — Per-recipient delivery matrix — initial state.
 - [11-matrix-progress.png](11-matrix-progress.png) — Per-recipient delivery matrix — progress state.
 - [11-matrix-success.png](11-matrix-success.png) — Per-recipient delivery matrix — success state.
+- [12-dash-audit-head.png](12-dash-audit-head.png) — Dashboard audit — bounded live head.
+- [12-dash-audit-head-controls.png](12-dash-audit-head-controls.png) — Dashboard audit — live-head navigation controls.
+- [12-dash-audit-history.png](12-dash-audit-history.png) — Dashboard audit — selected historical page.
+- [12-dash-audit-history-controls.png](12-dash-audit-history-controls.png) — Dashboard audit — historical navigation controls.
 - [12-dash-error.png](12-dash-error.png) — Read-only dashboard — error state.
 - [12-dash-initial.png](12-dash-initial.png) — Read-only dashboard — initial state.
 - [12-dash-progress.png](12-dash-progress.png) — Read-only dashboard — progress state.
