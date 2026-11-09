@@ -38,6 +38,32 @@ function transportError(e, message) {
   return new APIError(0, 'network', message);
 }
 
+// Opt-in thumbnails keep the raster policy of thumbs-model.js, without
+// coupling this transport to the cache or activating any thumbnail callers.
+const THUMBNAIL_MAX = 10 << 20;
+const THUMBNAIL_ERROR_MAX = 8 << 10;
+const thumbnailType = type => String(type || '').split(';')[0].trim().toLowerCase();
+const thumbnailRaster = type => ['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(thumbnailType(type));
+
+// Only complete, bounded UTF-8 error bodies reach this parser. An envelope
+// with a malformed optional field is discarded as a whole, not coerced.
+function thumbnailEnvelope(parts) {
+  const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+  try {
+    const decoder = new TextDecoder('utf-8', { fatal: true });
+    let text = '';
+    for (const part of parts) text += decoder.decode(part, { stream: true });
+    text += decoder.decode();
+    const j = JSON.parse(text);
+    if (!object(j) || !object(j.error)) return null;
+    const { code, message, details } = j.error;
+    if (code !== undefined && typeof code !== 'string') return null;
+    if (message !== undefined && typeof message !== 'string') return null;
+    if (details !== undefined && !object(details)) return null;
+    return { error: { code, message, details } };
+  } catch { return null; }
+}
+
 // ---------- direct transfer rules ----------
 
 export const MAX_BLOB = 25 << 20;
@@ -154,10 +180,131 @@ export function createApi({ secret, fetch = globalThis.fetch, onUnauthorized = (
   function httpError(status, statusText, j, retryAfter) {
     const e = (j && j.error) || {};
     const details = e.details && typeof e.details === 'object' ? { ...e.details } : {};
-    if (!(Number(details.retry_after_seconds) > 0) && /^\d+$/.test(String(retryAfter || '').trim()) && Number(retryAfter) > 0) details.retry_after_seconds = Number(retryAfter);
+    let positiveRetry = false;
+    try { positiveRetry = Number(details.retry_after_seconds) > 0; } catch {
+      // Non-coercible JSON details remain data unless a valid header replaces them.
+    }
+    if (!positiveRetry && /^\d+$/.test(String(retryAfter || '').trim()) && Number(retryAfter) > 0) details.retry_after_seconds = Number(retryAfter);
     const err = new APIError(status, e.code || 'http_' + status, e.message || statusText, details);
     if (status === 401 && !unauthorized) { unauthorized = true; onUnauthorized(err); }
     return err;
+  }
+
+  // This owns fetch, every read and cancellation until they actually settle.
+  // Abort starts cleanup immediately, but never races a stuck operation to
+  // an early API result: callers may release their reservation only afterwards.
+  async function thumbnailBlob(sha, { signal, maxBytes } = {}) {
+    if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0 || maxBytes > THUMBNAIL_MAX) {
+      throw new RangeError('thumbnail maxBytes must be a positive safe integer of at most 10 MiB');
+    }
+    if (signal && signal.aborted) throw aborted();
+
+    const parts = [];
+    let response, reader, cancelTask, result, error, httpFailure;
+    let status, statusText, retryAfter, total = 0, abortSeen = false, cancelStarted = false;
+    const cancelBody = () => {
+      parts.length = 0;
+      result = undefined;
+      if (cancelStarted) return;
+      try {
+        const target = reader || (response && response.body);
+        if (!target || typeof target.cancel !== 'function') return;
+        cancelStarted = true;
+        // Observe rejection immediately, even when an outstanding read stalls.
+        cancelTask = Promise.resolve(target.cancel()).then(() => {}, () => {});
+      } catch {
+        // A synchronous cleanup failure cannot replace the selected cause.
+      }
+    };
+    const stop = () => { abortSeen = true; cancelBody(); };
+    const checkAbort = () => {
+      if (abortSeen || (signal && signal.aborted)) throw aborted();
+    };
+    const knownHTTP = () => status !== undefined && !(status >= 200 && status < 300);
+
+    try {
+      if (signal) signal.addEventListener('abort', stop, { once: true });
+      checkAbort();
+      response = await fetch('/v1/blobs/' + seg(sha), {
+        method: 'GET', headers: { Authorization: 'Bearer ' + secret, Accept: 'image/png,image/jpeg,image/gif,image/webp' },
+        signal, cache: 'no-store', credentials: 'omit',
+      });
+      status = response.status;
+      statusText = response.statusText;
+      retryAfter = response.headers && response.headers.get('Retry-After');
+      // In particular, 401 uses the shared once flag synchronously at headers,
+      // before any read or await. Sign-out may synchronously abort this call.
+      if (knownHTTP()) httpFailure = httpError(status, statusText, null, retryAfter);
+      checkAbort();
+
+      const body = response.body;
+      if (!body || typeof body.getReader !== 'function') {
+        if (httpFailure) throw httpFailure;
+        else throw new APIError(0, 'unsupported', 'bounded thumbnail streaming is unavailable');
+      } else {
+        let type;
+        if (!httpFailure) {
+          if (status === 204) throw untrusted('an empty thumbnail');
+          type = thumbnailType(response.headers && response.headers.get('Content-Type'));
+          if (!thumbnailRaster(type)) throw untrusted('a non-raster thumbnail');
+          const length = String(response.headers && response.headers.get('Content-Length') || '').trim();
+          if (/^\d+$/.test(length) && Number(length) > maxBytes) throw untrusted('an oversized thumbnail');
+          if (typeof Blob !== 'function') throw new APIError(0, 'unsupported', 'Blob support is unavailable for thumbnails');
+        }
+        try { reader = body.getReader(); } catch (e) {
+          if (e && e.name === 'AbortError') throw e;
+          throw new APIError(0, 'unsupported', 'bounded thumbnail stream reader is unavailable');
+        }
+        const cap = httpFailure ? Math.min(THUMBNAIL_ERROR_MAX, maxBytes) : maxBytes;
+        for (;;) {
+          // A stop handler cancels concurrently; we still await this exact read,
+          // including implementations that ignore abort or cancellation.
+          const { done, value } = await reader.read();
+          checkAbort();
+          if (done) break;
+          if (!(value instanceof Uint8Array)) throw new TypeError('unreadable thumbnail stream chunk');
+          if (value.byteLength > cap - total) throw untrusted('an oversized thumbnail body');
+          if (value.byteLength) {
+            // Copy only admitted bytes; subarrays/Buffer slices may otherwise
+            // retain an arbitrarily larger backing allocation. Ignore empty
+            // chunks so they cannot create an unbounded list of owned parts.
+            const owned = new Uint8Array(value.byteLength);
+            owned.set(value);
+            parts.push(owned);
+            total += owned.byteLength;
+          }
+        }
+        if (httpFailure) {
+          error = httpError(status, statusText, thumbnailEnvelope(parts), retryAfter);
+        } else {
+          if (total === 0) throw untrusted('an empty thumbnail');
+          result = new Blob(parts, { type });
+          if (!(result instanceof Blob) || !thumbnailRaster(result.type) || result.size !== total || result.size > maxBytes) {
+            throw untrusted('an invalid thumbnail Blob');
+          }
+        }
+      }
+    } catch (e) {
+      if (e && e.name === 'AbortError') abortSeen = true;
+      if (abortSeen || (signal && signal.aborted)) error = aborted();
+      else if (knownHTTP()) error = httpFailure || httpError(status, statusText, null, retryAfter);
+      else error = e instanceof APIError ? e : transportError(e, response ? UNREADABLE : 'hub unreachable');
+      cancelBody();
+    } finally {
+      parts.length = 0;
+      // The read/fetch above has drained. Cancellation can still be pending;
+      // keep the lock and abort handler until its rejection/fulfillment drains.
+      if (cancelTask) await cancelTask;
+      if (reader) {
+        try { reader.releaseLock(); } catch { /* Cleanup never replaces the result. */ }
+      }
+      if (signal) signal.removeEventListener('abort', stop);
+    }
+    // Abort during cancellation cleanup wins over an already selected HTTP,
+    // media or size error. No await follows this final observation.
+    checkAbort();
+    if (error) throw error;
+    return result;
   }
 
   // meta: resolve to { status, etag, body } so a caller can use the ETag; a
@@ -446,6 +593,7 @@ export function createApi({ secret, fetch = globalThis.fetch, onUnauthorized = (
     prefs, patchPrefs, previewPrefs,
     // blob(sha) reads a hub-hosted blob; blob(sha, id) a direct R2 one.
     blob: (sha, id) => (id ? download({ sha256: sha, blob_id: id }) : get('/v1/blobs/' + seg(sha), { read: 'blob' })),
+    thumbnailBlob,
     capabilities, download,
     // Metadata only (no link, no mint): an R2 file's state on the hub clock.
     blobStatus: (sha, id, { signal } = {}) => get('/v1/blobs/' + seg(sha) + '/status' + query({ blob_id: id }), { signal }),
