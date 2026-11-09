@@ -210,6 +210,11 @@ func (a *app) peerInvite(o opts) error {
 			hubURL = c.base
 		}
 	}
+	// Check the effective URL without normalizing it or contacting its hub.
+	_, _, selectedProfile, err := a.profileSelection()
+	if err != nil || checkHubURL(hubURL, selectedProfile.AllowInsecureHTTP || a.getenv(insecureEnv) == "1") != nil {
+		return usageErr("invalid invitation hub URL")
+	}
 	in := invite{Owner: out.HubOwner, HubURL: hubURL, Profile: profile, Token: out.EnrolToken, Expires: out.EnrolExpiresAt, Open: out.NameOpen}
 	if suggested {
 		in.Name = out.Name

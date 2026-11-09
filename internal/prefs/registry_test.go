@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/XertroV/vecnet/internal/prefs"
@@ -24,6 +25,7 @@ func TestRegistryDefaultsAndBounds(t *testing.T) {
 		{"blobs.expiry", "enum", `"1d"`, 0, 0, false, false},
 		{"events.refresh_interval", "duration", "1800", 60, 86400, false, true},
 		{"presence.default_ttl", "duration", "3600", 60, 86400, false, true},
+		{"presence.grokbot_ttl", "duration", "600", 60, 86400, false, true},
 		{"presence.session_ttl", "duration", "900", 60, 86400, false, true},
 		{"presence.launcher_ttl", "duration", "900", 60, 86400, false, true},
 		{"agents.default_max_depth", "int", "32", 1, 64, false, true},
@@ -266,5 +268,26 @@ func TestShippedMessageTextHardCap(t *testing.T) {
 	}
 	if err := prefs.Validate(d, prefs.Int(4097)); err == nil {
 		t.Fatal("accepted text cap above the Message schema's 4096-byte hard cap")
+	}
+}
+
+func TestGrokTTLRegistryMetadata(t *testing.T) {
+	if prefs.RegistryVersion != "2" {
+		t.Errorf("registry contract version = %s, want 2", prefs.RegistryVersion)
+	}
+	d, err := prefs.Lookup("presence.grokbot_ttl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Default != prefs.Duration(600) || d.Type != prefs.TypeDuration || d.Unit != "seconds" ||
+		d.Min == nil || *d.Min != 60 || d.Max == nil || *d.Max != 86400 ||
+		d.Group != "notifications_presence" || d.SettableBy != "operator" || !d.Editable ||
+		d.Runtime != "live" || d.UnavailableReason != "" || d.DisabledValue != nil ||
+		!reflect.DeepEqual(d.Danger, []string{"presence_shortened"}) {
+		t.Fatalf("Grok TTL metadata does not match the literal contract: %+v", d)
+	}
+	description := strings.ToLower(d.Description)
+	if !strings.Contains(description, "inherit") || !strings.Contains(description, "presence.default_ttl") || !strings.Contains(description, "explicit") {
+		t.Fatal("Grok TTL description must explain inheritance from explicit presence.default_ttl")
 	}
 }

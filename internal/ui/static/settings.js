@@ -10,7 +10,7 @@
 import { h } from './dom.js';
 import {
   BLOB_NEW_ONLY, GROUPS, LANES, TICKS, blobOffText, bytesText, createSettingsStore, durationText, enumLabel, formatValue, laneView, lanePosition, lockOf,
-  previewRefusal, rangeText, storageView, timingOf, unitOf, visibleRows,
+  formatDuration, grokPresencePolicy, previewRefusal, rangeText, storageView, timingOf, unitOf, visibleRows,
 } from './settings-model.js';
 
 let current = null;
@@ -38,9 +38,12 @@ const safeStorage = () => { try { return window.localStorage; } catch { return n
 const sid = key => 'st-' + key.replace(/[^A-Za-z0-9]/g, '-');
 const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
 
-function chip(source) {
+const presenceOverride = row => row && ['presence.default_ttl', 'presence.grokbot_ttl'].includes(row.key) && !lockOf(row);
+
+function chip(source, row) {
   if (!source) return null;
-  return h('span', { class: 'st-src s-' + source, title: SOURCE_TIP[source], text: source });
+  const tip = source === 'flag' && presenceOverride(row) ? 'Set when the hub started. A stored override takes precedence.' : SOURCE_TIP[source];
+  return h('span', { class: 'st-src s-' + source, title: tip, text: source });
 }
 function lockChip(lock) {
   return lock && LOCK_CHIP[lock.kind] ? h('span', { class: 'st-src s-' + lock.kind, text: LOCK_CHIP[lock.kind] }) : null;
@@ -119,9 +122,25 @@ function resetLink(store, row) {
   if (d && d.op === 'reset') return h('button', { type: 'button', class: 'linkbtn st-rst', 'data-fk': 'rst-' + row.key, text: 'Keep stored value', onclick: () => store.revert(row.key) });
   // Under a stored override the page cannot see the start-up layer (built-in
   // or a hub flag), so the label names the layer, not a value.
-  if (row.source === 'stored') return h('button', { type: 'button', class: 'linkbtn st-rst', 'data-fk': 'rst-' + row.key, text: 'Reset to start-up value', title: `Removes the stored override: built-in ${formatValue(row, row.default)} unless a hub flag sets it`, onclick: () => store.resetKey(row.key) });
+  if (row.source === 'stored') return h('button', { type: 'button', class: 'linkbtn st-rst', 'data-fk': 'rst-' + row.key, text: 'Reset to start-up value', title: presenceOverride(row) ? 'Removes only the stored override. The hub reply reveals the starting value and Grok inheritance.' : `Removes the stored override: built-in ${formatValue(row, row.default)} unless a hub flag sets it`, onclick: () => store.resetKey(row.key) });
   if (d) return h('button', { type: 'button', class: 'linkbtn st-rst', 'data-fk': 'rst-' + row.key, text: 'Revert to ' + formatValue(row, row.value), onclick: () => store.revert(row.key) });
   return null;
+}
+
+function storeOverride(store, row) {
+  if (!presenceOverride(row) || !['default', 'flag'].includes(row.source)) return null;
+  return h('button', {
+    type: 'button', class: 'linkbtn', 'data-fk': 'store-' + row.key, text: 'Store override', disabled: !!store.state.busy,
+    onclick: () => store.edit(row.key, store.input(row.key)),
+  });
+}
+
+function grokPolicy(store) {
+  const policy = grokPresencePolicy(store.state.rows);
+  if (!policy) return null;
+  const inheritance = policy.key === 'presence.default_ttl' ? 'inherited from' : 'controlled by';
+  return h('p', { class: 'st-meta', 'data-fk': 'grok-current', text:
+    `Current Grok presence: ${formatDuration(policy.seconds)}; ${inheritance} ${policy.key} (${policy.source}${policy.origin ? ', ' + policy.origin : ''}). Reports older than this TTL are unknown; never-reported presence is already unknown.` });
 }
 
 function metaText(row) {
@@ -139,8 +158,14 @@ function details(store, row, id) {
     h('p', { class: 'st-h', id: id + '-h', text: row.description || '' }),
     row.key === 'blobs.expiry' ? h('p', { class: 'st-blob-new', text: BLOB_NEW_ONLY }) : null,
     h('p', { class: 'st-meta', text: metaText(row) }),
+    presenceOverride(row) ? h('p', { class: 'st-meta', text:
+      (row.source === 'flag' ? `Starting value from ${row.origin || 'a hub flag or environment variable'}. ` : '') +
+      'A stored value takes precedence. Store override stages the displayed value; Save applies it after any required confirmation. Reset removes only a stored override and restores the hub starting value. An unset Grok TTL inherits an explicit default presence TTL.' }) : null,
+    row.key === 'presence.grokbot_ttl' && st.view === 'list' ? grokPolicy(store) : null,
     lock ? h('p', { class: 'st-lock ' + lock.kind, id: id + '-l', text: lock.text }) : null,
-    d && d.op === 'reset' ? h('p', { class: 'st-pend', text: `Removes the stored override on Save. The hub's start-up value returns: built-in ${formatValue(row, row.default)}, unless a hub flag or environment variable sets it.` }) : null,
+    d && d.op === 'reset' ? h('p', { class: 'st-pend', text: presenceOverride(row)
+      ? "Removes the stored override on Save. The hub's start-up value returns; its reply reveals that value and Grok inheritance. Current policy stays unchanged until the hub accepts Save."
+      : `Removes the stored override on Save. The hub's start-up value returns: built-in ${formatValue(row, row.default)}, unless a hub flag or environment variable sets it.` }) : null,
     danger && !lock ? h('p', { class: 'st-danger', text: danger }) : null,
     err ? h('p', { class: 'st-err', id: id + '-e', text: err }) : null,
   ];
@@ -151,9 +176,9 @@ function listRow(store, row, flash) {
   const cls = ['st-row', src === 'edited' && 'is-dirty', err && 'is-err', lock && 'is-locked', flash && flash.has(row.key) && 'is-flash'].filter(Boolean).join(' ');
   return h('div', { class: cls, 'data-row': row.key },
     h('div', { class: 'st-l' },
-      h('div', { class: 'st-t' }, h('label', { for: id, class: 'st-lbl', text: row.label }), chip(src), lockChip(lock)),
+      h('div', { class: 'st-t' }, h('label', { for: id, class: 'st-lbl', text: row.label }), chip(src, row), lockChip(lock)),
       ...details(store, row, id)),
-    h('div', { class: 'st-c' }, control(store, row, id), resetLink(store, row), h('span', { class: 'st-key', text: row.key })),
+    h('div', { class: 'st-c' }, control(store, row, id), storeOverride(store, row), resetLink(store, row), h('span', { class: 'st-key', text: row.key })),
     // The storage meter spans the row, under the label and its selector.
     row.key === 'blobs.expiry' ? storagePanel(store.state.storage) : null);
 }
@@ -239,7 +264,7 @@ function listAside(store) {
     return h('button', { type: 'button', class: 'st-toc-a', onclick: () => { const el = document.getElementById('sec-' + g.id); if (el) { el.scrollIntoView({ block: 'start' }); const f = el.querySelector('input,select,button'); if (f) f.focus({ preventScroll: true }); } } },
       h('span', { text: g.title }), e ? h('span', { class: 't-e', text: String(e), 'aria-label': plural(e, 'error') }) : n ? h('span', { class: 't-n', text: String(n), 'aria-label': plural(n, 'unsaved change') }) : null);
   });
-  const legend = ['default', 'flag', 'stored', 'edited'].flatMap(s => [h('dt', {}, chip(s)), h('dd', { text: SOURCE_TIP[s] })]);
+  const legend = ['default', 'flag', 'stored', 'edited'].flatMap(s => [h('dt', {}, chip(s)), h('dd', { text: SOURCE_TIP[s] + (s === 'flag' ? ' Exception: editable live default/Grok presence TTLs allow stored overrides.' : '') })]);
   return [
     h('nav', { class: 'st-toc', 'aria-label': 'On this page' }, h('div', { class: 'st-toc-h', text: 'On this page' }), ...toc),
     h('div', { class: 'st-toc-h', text: 'Where values come from' }),
@@ -346,9 +371,9 @@ function drawer(store, keys) {
   }
   const row = store.rowOf(key), id = sid(key);
   return h('div', { class: 'st-drawer', id: 'drawer-' + id, 'data-row': key },
-    h('div', { class: 'st-dr-h' }, h('label', { for: id, class: 'st-lbl', text: row.label }), chip(store.source(key)), lockChip(lockOf(row)), h('span', { class: 'st-key', text: key }),
+    h('div', { class: 'st-dr-h' }, h('label', { for: id, class: 'st-lbl', text: row.label }), chip(store.source(key), row), lockChip(lockOf(row)), h('span', { class: 'st-key', text: key }),
       h('button', { type: 'button', class: 'st-x', 'aria-label': 'Close', 'data-fk': 'close-' + key, text: '×', onclick: () => store.setOpen('') })),
-    h('div', { class: 'st-dr-c' }, control(store, row, id), resetLink(store, row)),
+    h('div', { class: 'st-dr-c' }, control(store, row, id), storeOverride(store, row), resetLink(store, row)),
     ...details(store, row, id));
 }
 
@@ -378,7 +403,8 @@ function policyBody(store, focusFor) {
       para(store, 1, 'Files', off
         ? ['New attachments ', t('blobs.expiry'), ' expire. Each peer may change its avatar ', t('rates.avatar_changes_per_hour'), ', and legacy file read links last ', t('files.read_token_ttl'), '.']
         : ['New attachments expire after ', t('blobs.expiry'), '. Each peer may change its avatar ', t('rates.avatar_changes_per_hour'), ', and legacy file read links last ', t('files.read_token_ttl'), '.']),
-      para(store, 2, 'Notifications & presence', ['MCP clients re-read their Events every ', t('events.refresh_interval'), '. An agent with no presence report turns unknown after ', t('presence.default_ttl'), '; a session after ', t('presence.session_ttl'), ' and a launcher after ', t('presence.launcher_ttl'), '.']),
+      para(store, 2, 'Notifications & presence', ['MCP clients re-read their Events every ', t('events.refresh_interval'), '. Never-reported presence is already unknown. Reports turn unknown when older than their TTL: other kinds ', t('presence.default_ttl'), ', sessions ', t('presence.session_ttl'), ', launchers ', t('presence.launcher_ttl'), '. Grok override value ', t('presence.grokbot_ttl'), '; see its current policy below.']),
+      grokPolicy(store),
       para(store, 3, 'Agents defaults', ['A new message may nest ', t('agents.default_max_depth'), ' deep and lives ', t('agents.default_ttl'), ', within a cap of ', t('agents.max_expiry'), '. A new thread gets a budget of ', t('agents.thread_budget'), '. A newly created agent may send ', t('rates.sends_per_minute'), ' and start threads at ', t('rates.threads_per_hour'), '. Provisioning policies without their own limits create up to ', t('provisioning.creates_per_hour'), ' and hold ', t('provisioning.max_peers'), '. Anonymous clients get bursts of ', t('rates.anonymous_burst'), ', refilled every ', t('rates.anonymous_refill'), '. Message text past ', t('agents.text_cap'), ' spills to an attachment.']),
       para(store, 4, 'Appearance', ['In this browser, show the ', { k: 'look.theme', look: 'theme', opts: THEME_OPTS }, ' theme at ', { k: 'look.density', look: 'density', opts: DENSITY_OPTS }, ' density.'], h('span', { class: 'st-you', text: 'only this browser' })),
       h('p', { class: 'st-leg' }, ...['default', 'stored', 'flag', 'edited'].map(s => h('span', { class: 'st-tok t-' + s + (s === 'flag' ? ' lk' : ''), text: s })),

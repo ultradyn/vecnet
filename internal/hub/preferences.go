@@ -388,7 +388,9 @@ func (p *Preferences) prospective(s prefs.Snapshot, stored map[string]prefs.Effe
 		old, exists := stored[key]
 		next, set := patch.Set[key]
 		next = normalizePreference(d, next)
-		if set && next == d.Default && p.bootstrap[key].Source == prefs.SourceDefault {
+		// D/G equality expresses explicit inheritance intent until RESET.
+		keepIntent := key == "presence.default_ttl" || key == "presence.grokbot_ttl"
+		if set && !keepIntent && next == d.Default && p.bootstrap[key].Source == prefs.SourceDefault {
 			set = false
 		}
 		if set {
@@ -445,19 +447,7 @@ func (p *Preferences) PreviewPreferences(ctx context.Context, caller auth.Caller
 }
 
 func preferenceRisks(before, after prefs.Snapshot) []prefs.Risk {
-	risks := []prefs.Risk{}
-	for _, d := range after.Descriptors() {
-		if !strings.HasPrefix(d.Key, "presence.") || len(d.Danger) == 0 {
-			continue
-		}
-		old, _ := before.Get(d.Key)
-		oldN, oldOK := old.Value.Int64()
-		newN, newOK := d.Value.Int64()
-		if oldOK && newOK && newN < oldN {
-			risks = append(risks, prefs.Risk{Code: d.Danger[0], Keys: []string{d.Key}, Message: "Shorter presence TTL may release held wakes."})
-		}
-	}
-	return risks
+	return presenceShorteningRisks(before, after)
 }
 func sanitizePreferenceError(err error) error {
 	if err == nil {

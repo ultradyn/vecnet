@@ -78,7 +78,8 @@ try {
         await view(v);
         for (const [key, row] of hub.rows) {
           const unavailable = row.runtime === 'unavailable';
-          const locked = unavailable || !row.editable || row.source === 'flag';
+          const ttlOverride = ['presence.default_ttl', 'presence.grokbot_ttl'].includes(key) && row.editable && row.runtime === 'live';
+          const locked = unavailable || !row.editable || (row.source === 'flag' && !ttlOverride);
           const lane = v === 'policy' && ['retention.history', 'retention.ack_events', 'blobs.expiry', 'agents.default_ttl'].includes(key);
           if (v === 'policy' && !lane && key !== 'retention.archive_mode') await open(key);
           const container = page.locator(v === 'policy' && key === 'retention.archive_mode' ? '.st-arch' : `[data-row="${key}"]`).first();
@@ -496,6 +497,158 @@ try {
     await noSideways('list 320');
     await page.setViewportSize(SIZES.desk);
     assert(await page.evaluate(() => localStorage.getItem('vecnet.ui.settingsView')) === 'list', 'view not stored as list');
+
+    // Equal raw G600 is deliberate intent under inherited stored D7200.
+    const G = 'presence.grokbot_ttl', D = 'presence.default_ttl';
+    const startTTL = await hubPrefs();
+    const seededTTL = await operator('PATCH', '/v1/admin/prefs', { body: { set: { [D]: 7200 } }, headers: { 'If-Match': startTTL.etag } });
+    assert(seededTTL.ok, 'real stored D7200 setup failed');
+    await page.reload({ waitUntil: 'load' });
+    await page.locator('.st-row, .st-lane').first().waitFor();
+    await quiet();
+    const currentG = async (duration, key, inherited) => {
+      const copy = page.locator('[data-fk=grok-current]');
+      assert(await copy.isVisible(), 'committed Grok policy copy is not visible');
+      const text = await copy.textContent();
+      assert(text.includes('Current Grok presence: ' + duration) && text.includes(key) && text.includes('stored'), 'wrong committed duration/controller/source: ' + text);
+      assert(!inherited || /inherit/i.test(text), 'inheritance omitted: ' + text);
+    };
+    for (const v of VIEWS) for (const [size, vp] of Object.entries(SIZES)) {
+      await page.setViewportSize(vp);
+      await view(v);
+      if (v === 'policy') await open(G);
+      const base = await hubPrefs(), start = patches.length;
+      assert(base.rows.get(D).value === 7200 && base.rows.get(D).source === 'stored' && base.rows.get(G).value === 600 && base.rows.get(G).source === 'default', 'real inherited setup/provenance missing');
+      assert(await page.locator(sid(G)).inputValue() === '10m', 'raw G editor replaced with inherited D');
+      await currentG('2 h', D, true);
+      const presenceWords = await page.locator('.st-page').textContent();
+      assert(!/no presence report turns unknown after/i.test(presenceWords), 'never-reported presence copy is false');
+      assert(/never.reported.*unknown|no presence report.*unknown/i.test(presenceWords), 'never-reported presence must be explained as unknown');
+      assert(/older than|more than|greater than/i.test(presenceWords), 'reported-presence staleness must describe a strict boundary');
+      const row = () => page.locator(`[data-row="${G}"]`).first();
+      const action = row().getByRole('button', { name: 'Store override', exact: true });
+      assert(await action.isEnabled() && await action.getAttribute('data-fk') === 'store-' + G, 'missing accessible override action/focus key');
+      assert(await row().getByRole('button', { name: /^Reset/ }).count() === 0, 'nonstored G offers RESET');
+      const previewsBefore = countRequests(req => new URL(req.url()).pathname === '/v1/admin/prefs/preview');
+      await action.click();
+      for (const otherView of VIEWS) {
+        await view(otherView);
+        if (otherView === 'policy') await open(G);
+        assert(await page.locator(sid(G)).inputValue() === '10m' && await row().locator('.st-src').first().textContent() === 'edited', 'equal override draft lost across views');
+        await currentG('2 h', D, true);
+      }
+      assert(await page.locator('#settings-count').textContent() === '1', 'equal intent not counted as unsaved');
+      assert(patches.length === start && countRequests(req => new URL(req.url()).pathname === '/v1/admin/prefs/preview') === previewsBefore && (await hubPrefs()).etag === base.etag, 'Store override auto-saved or previewed');
+      let leave = '';
+      page.once('dialog', d => { leave = d.message(); d.dismiss(); });
+      await page.locator('#nav-inbox').click();
+      await page.waitForFunction(() => location.hash === '#settings');
+      assert(leave.includes('1 unsaved change') && await page.evaluate(() => location.hash) === '#settings', 'equal intent bypassed navigation guard');
+      await view(v);
+      if (v === 'policy') await open(G);
+      await page.locator(sid(G)).fill('30s');
+      assert(await page.locator(sid(G)).getAttribute('aria-invalid') === 'true' && await page.locator('.st-bar [data-fk=save]').isDisabled(), 'G bounds/error not coupled to Save');
+      assert((await row().locator('.st-err').textContent()).includes('between'), 'G field error not rendered');
+      await page.locator(sid(G)).fill('10m');
+      await noSideways('grok-draft ' + v + ' ' + size);
+      await shot(`prefs-${v}-grok-draft-${size}`);
+      const previewG = async () => {
+        const response = page.waitForResponse(r => new URL(r.url()).pathname === '/v1/admin/prefs/preview');
+        await page.locator('.st-bar [data-fk=save]').click();
+        const r = await response, req = r.request(), result = await r.json();
+        assert(r.ok() && req.headers()['if-match'] === base.etag && result.base_revision === base.revision, 'G preview authority/revision mismatch');
+        assert(JSON.stringify(req.postDataJSON()) === JSON.stringify({ set: { [G]: 600 }, reset: [] }), 'raw-equal G SET missing from preview');
+        assert(result.risks.length === 1 && result.risks[0].code === 'presence_shortened' && result.risks[0].keys.join() === G && result.risks[0].message.includes('grokbot 2h0m0s -> 10m0s'), 'resolved Grok shortening risk missing');
+        assert(typeof result.confirm_token === 'string' && result.confirm_token.length > 20, 'no real G preview token');
+        await page.locator('dialog.st-cf[open]').waitFor();
+        assert((await page.locator('dialog.st-cf[open]').textContent()).includes('grokbot 2h0m0s -> 10m0s'), 'hub risk message missing from dialog');
+        assert(patches.length === start && (await hubPrefs()).etag === base.etag, 'G preview wrote state');
+        return result;
+      };
+      await previewG();
+      await shot(`prefs-${v}-grok-confirm-${size}`);
+      await page.keyboard.press('Escape');
+      await page.locator('dialog.st-cf[open]').waitFor({ state: 'detached' });
+      const cancelled = await hubPrefs();
+      assert(cancelled.etag === base.etag && cancelled.revision === base.revision && cancelled.rows.get(G).source === 'default' && patches.length === start, 'cancel changed current policy');
+      assert(await page.locator(sid(G)).inputValue() === '10m' && await row().locator('.st-src').first().textContent() === 'edited', 'cancel dropped equal draft');
+      await currentG('2 h', D, true);
+      const approved = await previewG();
+      await page.locator('dialog.st-cf [data-cf=ok]').click();
+      await page.locator('.st-bar').waitFor({ state: 'detached' });
+      assert(patches.length === start + 1 && patches.at(-1).ifMatch === base.etag && JSON.stringify(patches.at(-1).body) === JSON.stringify({ set: { [G]: 600 }, reset: [], confirm: [approved.confirm_token] }), 'G PATCH bypassed exact confirmed proposal/token');
+      const savedG = await hubPrefs();
+      assert(savedG.revision === base.revision + 1 && savedG.etag !== base.etag && savedG.rows.get(G).source === 'stored' && savedG.rows.get(G).value === 600, 'G600 not stored by hub');
+      assert(await row().locator('.st-src').first().textContent() === 'stored', 'source not adopted from reply');
+      await currentG('10 min', G, false);
+      await shot(`prefs-${v}-grok-stored-${size}`);
+      await row().getByRole('button', { name: 'Reset to start-up value', exact: true }).click();
+      assert(/hub.*start.up|start.up.*hub/i.test(await row().locator('.st-pend').textContent()), 'pending RESET must describe unknown starting layer');
+      await currentG('10 min', G, false);
+      assert((await hubPrefs()).etag === savedG.etag, 'RESET staged a write');
+      await page.locator('.st-bar [data-fk=save]').click();
+      await page.locator('.st-bar').waitFor({ state: 'detached' });
+      const resetG = await hubPrefs();
+      assert(JSON.stringify(patches.at(-1).body) === JSON.stringify({ set: {}, reset: [G] }) && patches.at(-1).ifMatch === savedG.etag, 'RESET became SET or lost ETag');
+      assert(resetG.revision === savedG.revision + 1 && resetG.rows.get(G).source === 'default' && resetG.rows.get(G).value === 600 && resetG.rows.get(D).source === 'stored' && resetG.rows.get(D).value === 7200, 'RESET did not reveal inherited D7200');
+      await currentG('2 h', D, true);
+      await noSideways('grok-reset ' + v + ' ' + size);
+      await shot(`prefs-${v}-grok-reset-${size}`);
+    }
+    await page.setViewportSize(SIZES.desk);
+  });
+  // Real bootstrap origins, narrow flag exception, and stored override/reset in both views/sizes.
+  await withDemo({ demoArgs: ['--pref-flag', 'events.refresh_interval=900@VECNET_EVENTS_REFRESH_INTERVAL', '--pref-flag', 'presence.default_ttl=3600@VECNET_PRESENCE_TTL', '--pref-flag', 'presence.grokbot_ttl=600@--grok-ttl'] }, async ({ page, demo, shot, quiet }) => {
+    const read = async () => {
+      const r = await fetch(demo.url + '/v1/admin/prefs', { headers: { Authorization: `Bearer ${demo.operator_secret}` } });
+      assert(r.ok, 'flag fixture GET failed');
+      return { etag: r.headers.get('etag'), ...(await r.json()) };
+    };
+    await page.locator('#nav-settings').click();
+    await page.locator('.st-row').first().waitFor();
+    for (const v of VIEWS) for (const [size, vp] of Object.entries(SIZES)) {
+      await page.setViewportSize(vp);
+      await page.locator(`[data-fk=view-${v}]`).click();
+      const base = await read();
+      for (const [key, origin, raw] of [['presence.default_ttl', 'VECNET_PRESENCE_TTL', '1h'], ['presence.grokbot_ttl', '--grok-ttl', '10m']]) {
+        if (v === 'policy') await page.locator(`[data-fk="tok-${key}"]`).click();
+        const row = page.locator(`[data-row="${key}"]`).first(), wire = base.preferences.find(r => r.key === key);
+        assert(wire.source === 'flag' && wire.origin === origin, 'real flag origin fixture missing');
+        assert(await page.locator(sid(key)).isEnabled() && await page.locator(sid(key)).inputValue() === raw, 'editable/live D/G flag not editable at raw value');
+        assert((await row.textContent()).includes(origin) && /stored.*precedence|override.*precedence/i.test(await row.textContent()), 'unlocked flag lacks visible origin/precedence copy');
+        assert(!/read.only/i.test(await row.locator('.st-src').first().getAttribute('title') || ''), 'D/G flag tooltip still claims read-only');
+        if (key === 'presence.grokbot_ttl') {
+          const text = await page.locator('[data-fk=grok-current]').textContent();
+          assert(text.includes('Current Grok presence: 10 min') && text.includes(key) && text.includes('flag') && text.includes(origin), 'committed G flag duration/controller/origin missing from policy copy');
+        }
+        assert(await row.getByRole('button', { name: /^Reset/ }).count() === 0, 'flag row offers RESET before stored');
+        const action = row.getByRole('button', { name: 'Store override', exact: true });
+        assert(await action.getAttribute('data-fk') === 'store-' + key, 'flag override focus key missing');
+        await action.click();
+        assert(await row.locator('.st-src').first().textContent() === 'edited', 'flag equal override not a draft');
+      }
+      if (v === 'policy') await page.locator('[data-fk="tok-events.refresh_interval"]').click();
+      assert(await page.locator(sid('events.refresh_interval')).isDisabled() && (await page.locator('[data-row="events.refresh_interval"]').textContent()).includes('VECNET_EVENTS_REFRESH_INTERVAL'), 'other flag lost lock/origin');
+      assert(/read.only here/i.test(await page.locator('[data-row="events.refresh_interval"] .st-src').first().getAttribute('title')), 'other flag lost read-only copy');
+      assert((await read()).etag === base.etag, 'flag actions auto-saved');
+      await page.locator('.st-bar [data-fk=save]').click();
+      await page.locator('.st-bar').waitFor({ state: 'detached' });
+      const stored = await read();
+      assert(stored.revision === base.revision + 1 && stored.preferences.filter(r => ['presence.default_ttl', 'presence.grokbot_ttl'].includes(r.key)).every(r => r.source === 'stored'), 'equal flag SETs not stored');
+      assert(stored.preferences.find(r => r.key === 'presence.default_ttl').value === 3600 && stored.preferences.find(r => r.key === 'presence.grokbot_ttl').value === 600, 'flag action changed displayed numeric values');
+      for (const key of ['presence.default_ttl', 'presence.grokbot_ttl']) {
+        if (v === 'policy') await page.locator(`[data-fk="tok-${key}"]`).click();
+        await page.locator(`[data-row="${key}"]`).getByRole('button', { name: 'Reset to start-up value', exact: true }).click();
+      }
+      await page.locator('.st-bar [data-fk=save]').click();
+      await page.locator('.st-bar').waitFor({ state: 'detached' });
+      const reset = await read();
+      assert(reset.revision === stored.revision + 1 && reset.preferences.find(r => r.key === 'presence.default_ttl').origin === 'VECNET_PRESENCE_TTL' && reset.preferences.find(r => r.key === 'presence.grokbot_ttl').origin === '--grok-ttl', 'RESET did not restore real flag origins');
+      assert(reset.preferences.find(r => r.key === 'presence.default_ttl').source === 'flag' && reset.preferences.find(r => r.key === 'presence.default_ttl').value === 3600 && reset.preferences.find(r => r.key === 'presence.grokbot_ttl').source === 'flag' && reset.preferences.find(r => r.key === 'presence.grokbot_ttl').value === 600, 'RESET did not restore flag values/provenance');
+      await quiet();
+      assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'flag view scrolls sideways');
+      await shot(`prefs-${v}-ttl-flags-${size}`);
+    }
   });
   console.log('settings passed: loading, initial, hub availability for every row, unavailable, flag, dirty, invalid, saving, saved, default, confirm, retention-available, retention-edited, retention-confirm, retention-existing-confirm, retention-saved, revision replay rejected, conflict, error, empty and appearance; List and Policy; desk and phone');
 } finally { await cleanBuild(); }
