@@ -57,6 +57,9 @@ export function createThumbBudget(options = {}) {
   function canStart() {
     return running < C && running + residentEntries < E && M <= B - residentBytes - M * running;
   }
+  function hasConcurrencySlot() {
+    return running < C;
+  }
   function unqueue(record) {
     queue.splice(queue.indexOf(record), 1);
     const index = explicit.indexOf(record);
@@ -218,6 +221,7 @@ export function createThumbBudget(options = {}) {
   return Object.freeze({
     enqueue,
     claimSource,
+    hasConcurrencySlot,
     get stats() {
       return Object.freeze({ running, residentEntries, residentBytes, reservedBytes: M * running, queued: queue.length, sources: sources.size });
     },

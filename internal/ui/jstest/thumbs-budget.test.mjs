@@ -310,3 +310,56 @@ test('WEB-MEM-3 T2a throwing_callbacks_do_not_corrupt_ownership', async t => {
   expect(r, { running: 1, residentEntries: 0 }); bad.drop(); await flush(); assert.equal(hints, 2);
   good.drop(); finish(next); await flush(); expect(r, { running: 0, queued: 0, sources: 0 });
 });
+
+test('WEB-MEM-3 T3 concurrency_slot_fact', async t => {
+  for (const C of [2, 3]) await t.test(`identical counters, hidden C=${C}`, async () => {
+    const limits = { B: 12, M: 4, C, E: 3, N: 4, Q: 4 };
+    const budget = createThumbBudget({ limits }), errors = [], actions = [];
+    let overflow = false, hints = 0;
+    const record = value => { if (actions.length === 256) throw new Error('action overflow'); actions.push(value); };
+    const guard = fn => (...args) => { try { fn(...args); } catch (error) { if (errors.length < 16) errors.push(error); else overflow = true; } };
+    const add = key => budget.enqueue({ key, priority: 'explicit',
+      onStart: guard(() => record(key)), onCancel: guard(() => record('cancel:' + key)) });
+    const permits = ['inline9', 'viewer7'].map(key => budget.claimSource(key, { onCapacity: guard(() => hints++) }));
+    const resident = add('9'); finish(resident, 1);
+    const a = add('oldA'), b = add('oldB'), waiting = add('7');
+    try {
+      assert.equal(typeof budget.hasConcurrencySlot, 'function', 'API prerequisite: pure concurrency fact');
+      assert.deepEqual(budget.stats, { running: 2, residentEntries: 1, residentBytes: 1, reservedBytes: 8, queued: 1, sources: 2 });
+      limits.C = 99; // The new fact must use the constructor's copied limit.
+      await flush(); const before = budget.stats, trace = [...actions], calls = hints;
+      for (let i = 0; i < 4; i++) assert.equal(budget.hasConcurrencySlot(), C === 3);
+      await flush(); assert.deepEqual(budget.stats, before); assert.deepEqual(actions, trace); assert.equal(hints, calls);
+      a.cancel(); await flush();
+      assert.equal(budget.hasConcurrencySlot(), C === 3, 'abort gives no concurrency credit');
+      assert.equal(budget.stats.reservedBytes, 8); assert.equal(actions.includes('7'), false, 'a free C slot is not B/E admission');
+      resident.dropPayload();
+      assert.equal(actions.includes('7'), C === 3, 'real payload retirement enables dispatch only with free C');
+      assert.equal(budget.hasConcurrencySlot(), false);
+      if (C === 2) { finish(a); assert.equal(actions.includes('7'), true); }
+      else finish(a);
+      finish(b); finish(waiting); assert.equal(budget.hasConcurrencySlot(), true);
+    } finally {
+      waiting.cancel(); a.cancel(); b.cancel(); finish(a); finish(b); finish(waiting); resident.dropPayload();
+      permits.forEach(p => p.drop()); await flush();
+      assert.equal(overflow, false); assert.deepEqual(errors, []);
+      for (const value of Object.values(budget.stats)) assert.equal(value, 0);
+    }
+  });
+  for (const [axis, limits] of [['B', { B: 4, E: 8 }], ['E', { B: 40, E: 1 }]]) {
+    await t.test(`free concurrency is not ${axis} capacity`, async () => {
+      const budget = createThumbBudget({ limits: { ...TINY, ...limits } });
+      let started = 0, cancelled = 0;
+      const add = key => budget.enqueue({ key, priority: 'automatic', onStart: () => started++, onCancel: () => cancelled++ });
+      const a = add('held'), b = add('waiting');
+      try {
+        assert.equal(typeof budget.hasConcurrencySlot, 'function', 'API prerequisite: pure concurrency fact');
+        assert.equal(budget.hasConcurrencySlot(), true); assert.equal(started, 1); assert.equal(budget.stats.queued, 1);
+        a.cancel(); assert.equal(cancelled, 1); assert.equal(budget.hasConcurrencySlot(), true); assert.equal(started, 1);
+        finish(a); assert.equal(started, 2); finish(b, 0);
+        assert.equal(budget.hasConcurrencySlot(), true); assert.equal(budget.stats.residentEntries, 1);
+      } finally { b.cancel(); finish(a); finish(b); b.dropPayload(); await flush(); }
+      assert.deepEqual(budget.stats, { running: 0, residentEntries: 0, residentBytes: 0, reservedBytes: 0, queued: 0, sources: 0 });
+    });
+  }
+});

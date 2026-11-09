@@ -48,7 +48,10 @@ import (
 // Raised to 704 KiB on 2026-11-09 for the bounded thumbnail cache core;
 // measured at 713,285 bytes (the smallest 16 KiB increment above the UI).
 // The all-files inventory and total-size assertion remain unchanged.
-const uiMaxBytes = 704 << 10
+// Raised to 736 KiB on 2026-11-10 for bounded thumbnail leases and app wiring;
+// measured at 750,580 bytes, requiring the smallest fitting 16 KiB step.
+// The all-files inventory and strict total-size assertion remain unchanged.
+const uiMaxBytes = 736 << 10
 
 var (
 	scriptTag   = regexp.MustCompile(`(?is)<script\b([^>]*)>(.*?)</script>`)
