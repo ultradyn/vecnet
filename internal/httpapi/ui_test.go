@@ -42,7 +42,10 @@ import (
 // Raised to 672 KiB on 2026-11-09 when preserving the live dashboard activity
 // charts alongside launcher recovery; measured at 682,503 bytes (the smallest
 // 16 KiB increment above the combined UI). The total-size assertion remains.
-const uiMaxBytes = 672 << 10
+// Raised to 688 KiB on 2026-11-09 for bounded opt-in thumbnail transport;
+// measured at 689,764 bytes (the smallest 16 KiB increment above the UI).
+// The total-size assertion remains.
+const uiMaxBytes = 688 << 10
 
 var (
 	scriptTag   = regexp.MustCompile(`(?is)<script\b([^>]*)>(.*?)</script>`)
