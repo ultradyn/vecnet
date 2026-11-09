@@ -71,6 +71,7 @@ func (a *app) cmdProfile(args []string) error {
 	}
 	if args[0] == "follow" {
 		c := newClient(p.Hub, p.Secret)
+		c.allowInsecureHTTP = allow
 		notices, err := a.activeNotices(c)
 		if err != nil {
 			return err

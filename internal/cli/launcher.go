@@ -232,6 +232,7 @@ func (a *app) launcherSetup(p launcherPaths, o opts) error {
 	// Resolve both authenticated identity and directory kind. No watch, ack,
 	// enrolment, hook registration or profile rewrite occurs during setup.
 	c := newClient(profile.Hub, profile.Secret)
+	c.allowInsecureHTTP = profile.AllowInsecureHTTP || a.getenv(insecureEnv) == "1"
 	ctx, cancel := context.WithTimeout(a.ctx, 10*time.Second)
 	defer cancel()
 	var me struct {

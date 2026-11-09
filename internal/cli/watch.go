@@ -535,6 +535,7 @@ func (w *watcher) verifyConnection() error {
 		return &relocationError{Code: "profile_changed", Reason: "watch profile changed; re-run the command"}
 	}
 	w.name, w.profile = name, p
+	w.c.allowInsecureHTTP = p.AllowInsecureHTTP || w.a.getenv(insecureEnv) == "1"
 	pin, _ := w.a.effectivePin(name, p)
 	// A pinned profile may name an alias of the hub (DEPLOY.md: enrol through
 	// vecnet.fly.dev pins the key from the enrol answer): prove the pinned key
@@ -542,7 +543,7 @@ func (w *watcher) verifyConnection() error {
 	// mismatch. Unpinned profiles and a just-followed hub keep the strict
 	// public_url check; follow targets and repoint always use it.
 	matchURL := pin == "" || w.announceMove
-	doc, rotated, err := verifyHubAt(w.a.ctx, p.Hub, pin, p.AllowInsecureHTTP || w.a.getenv(insecureEnv) == "1", matchURL)
+	doc, rotated, err := verifyHubAt(w.a.ctx, p.Hub, pin, w.c.allowInsecureHTTP, matchURL)
 	if err != nil {
 		var re *relocationError
 		if !errors.As(err, &re) {
@@ -653,6 +654,7 @@ func (w *watcher) adoptFollowed(n *envelope.HubNotice) bool {
 			return false
 		}
 	}
+	w.c.allowInsecureHTTP = p.AllowInsecureHTTP || w.a.getenv(insecureEnv) == "1"
 	w.switchHub(p.Hub)
 	return true
 }

@@ -187,6 +187,7 @@ func (a *app) cmdCodex(args []string, nowTime func() time.Time) error {
 		// looking up the authenticated caller, as ordinary hub commands do.
 		a.ensurePin(name, p)
 		c := newClient(p.Hub, p.Secret)
+		c.allowInsecureHTTP = p.AllowInsecureHTTP || a.getenv(insecureEnv) == "1"
 		if label := a.operatorLabel(p); label != nil {
 			c.clientHeader = label.Header()
 		}

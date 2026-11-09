@@ -15,6 +15,7 @@ import (
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/httpdiag"
 	"github.com/XertroV/vecnet/internal/hubid"
+	"github.com/XertroV/vecnet/internal/hubnotice"
 )
 
 // requestTimeout bounds one ordinary request; uploads and streams set their
@@ -72,6 +73,9 @@ type client struct {
 	// clientHeader is the X-Vecnet-Client value of a bare human run
 	// (operator.go), sent on every request; the hub reads it on sends.
 	clientHeader string
+
+	// allowInsecureHTTP snapshots the caller's permission for received URLs.
+	allowInsecureHTTP bool
 }
 
 func newClient(base, secret string) *client {
@@ -142,14 +146,14 @@ func (c *client) send(req *http.Request) (*http.Response, error) {
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		defer resp.Body.Close()
-		return nil, readHubError(resp)
+		return nil, readHubError(resp, c.allowInsecureHTTP)
 	}
 	return resp, nil
 }
 
 // readHubError decodes the PROTOCOL §2 error envelope; a body that is not
 // one becomes http_<status>.
-func readHubError(resp *http.Response) error {
+func readHubError(resp *http.Response, allowHTTP bool) error {
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	var env struct {
 		Error *struct {
@@ -159,6 +163,9 @@ func readHubError(resp *http.Response) error {
 		} `json:"error"`
 	}
 	if json.Unmarshal(raw, &env) == nil && env.Error != nil && env.Error.Code != "" {
+		if resp.StatusCode == http.StatusGone && env.Error.Code == "hub_moved" {
+			env.Error.Message, env.Error.Details = hubnotice.ProjectRelocation(env.Error.Details, allowHTTP)
+		}
 		return &hubError{Status: resp.StatusCode, Code: env.Error.Code, Message: env.Error.Message, Details: env.Error.Details}
 	}
 	return &hubError{Status: resp.StatusCode, Code: fmt.Sprintf("http_%d", resp.StatusCode), Message: http.StatusText(resp.StatusCode)}

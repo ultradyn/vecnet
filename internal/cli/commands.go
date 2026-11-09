@@ -418,6 +418,7 @@ func (a *app) connect() (*client, string, cache, error) {
 		dir = ""
 	}
 	c := newClient(p.Hub, p.Secret)
+	c.allowInsecureHTTP = p.AllowInsecureHTTP || a.getenv(insecureEnv) == "1"
 	if label != nil {
 		c.clientHeader = label.Header()
 	}
@@ -667,7 +668,9 @@ func (a *app) cmdEnrol(args []string) error {
 	if display != "" {
 		req["name"] = display
 	}
-	if err := newClient(hubURL, "").do(a.ctx, http.MethodPost, "/v1/enrol", nil, req, &out); err != nil {
+	c := newClient(hubURL, "")
+	c.allowInsecureHTTP = insecure || a.getenv(insecureEnv) == "1"
+	if err := c.do(a.ctx, http.MethodPost, "/v1/enrol", nil, req, &out); err != nil {
 		// "unauthenticated" alone reads as a revoked invite; say what else
 		// it covers and how to get a fresh one.
 		var he *hubError

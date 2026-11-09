@@ -167,6 +167,7 @@ func (a *app) registerCodexAuto(thread, home string) error {
 	// enter child arguments or environment.
 	a.ensurePin(name, p)
 	c := newClient(p.Hub, p.Secret)
+	c.allowInsecureHTTP = p.AllowInsecureHTTP || a.getenv(insecureEnv) == "1"
 	if label := a.operatorLabel(p); label != nil {
 		c.clientHeader = label.Header()
 	}
