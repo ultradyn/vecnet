@@ -435,7 +435,7 @@ func (w *watcher) run() error {
 				continue
 			}
 		}
-		if errors.Is(err, errWatchOutput) {
+		if errors.Is(err, errWatchOutput) || errors.Is(err, hubnotice.ErrInvalidNotice) {
 			return err
 		}
 		if ctx.Err() != nil {
@@ -1008,6 +1008,21 @@ func (w *watcher) stream() error {
 			}
 			idle.Reset(watchSilence)
 			if line == "" { // dispatch
+				joined := strings.Join(data, "\n")
+				var event envelope.Event
+				decodeErr := json.Unmarshal([]byte(joined), &event)
+				// Known notices must be admitted before transport controls or effects.
+				if evType == "hub_notice" || event.Type == "hub_notice" {
+					if decodeErr != nil || (evType != "" && event.Type != "" && evType != event.Type) {
+						return hubnotice.ErrInvalidNotice
+					}
+					if event.Type == "" {
+						event.Type = evType
+					}
+					if err := hubnotice.ValidateEvent(event, w.c.allowInsecureHTTP); err != nil {
+						return err
+					}
+				}
 				if evType == "hub_restarting" {
 					// Transport control (PROTOCOL §21.3): no event,
 					// acknowledgement or cursor, and never printed. A
@@ -1016,7 +1031,7 @@ func (w *watcher) stream() error {
 					var h struct {
 						RetryAfterMS *int64 `json:"retry_after_ms"`
 					}
-					if json.Unmarshal([]byte(strings.Join(data, "\n")), &h) == nil && h.RetryAfterMS != nil {
+					if json.Unmarshal([]byte(joined), &h) == nil && h.RetryAfterMS != nil {
 						w.restarting(restartHint{RetryAfterMS: *h.RetryAfterMS})
 						return errRestarting
 					}
@@ -1027,7 +1042,7 @@ func (w *watcher) stream() error {
 				}
 				// Empty data (the hub's priming event) only moves the
 				// cursor; it is not an event (PROTOCOL §13.1).
-				if joined := strings.Join(data, "\n"); hasData && joined != "" {
+				if hasData && joined != "" {
 					if err := w.handle(evType, joined, false); err != nil {
 						if errors.Is(err, errDisplayDeferred) && w.deferred != nil {
 							w.deferred.resume = idBuf
@@ -1428,6 +1443,9 @@ func (w *watcher) poll(wait int) (pollBody, error) {
 		worker.ctx = ctx
 	}
 	body, err := worker.poll(w.c, w.cursor, wait)
+	if errors.Is(err, hubnotice.ErrInvalidNotice) {
+		return body, err
+	}
 	if err != nil && !w.moveDue.IsZero() && !time.Now().Before(w.moveDue) {
 		return body, errMoveDue
 	}
