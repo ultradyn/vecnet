@@ -50,3 +50,36 @@ Try the signed-in dashboard at **https://vecnet.xk.io/ui/#dash**.
 Authenticated production dashboard/API interaction was not performed: this session had Fly deployment access but no working production operator credential. Authenticated behavior was exercised against the isolated real demo and unit/HTTP fixtures. Production-volume latency and manual assistive-technology sessions were not benchmarked. Existing mobile sidebar stacking remains unchanged; wide peer/value tables scroll within their containers.
 
 Raw gate logs, full screenshots, review reports, source fingerprints and deployment output are recorded in this job's scratch ledger `/home/xertrov/.claude/jobs/3c27868b/tmp/dashboard-progress.md`; the durable summary and representative captures are retained here.
+
+
+## PR #62 committed integration — 2026-11-09
+
+The sections above describe the original uncommitted Fly v49 deployment. PR #62 preserves that source in git and updates its presentation: exact minute values appear in pointer/keyboard readouts, with no expandable raw-value tables. Peer readouts remain inside their rows at narrow widths. Removed or filtered peers release chart/row ownership; restored views start without stale inspection, and surviving views preserve identity and focus. SVG accessible names use the existing control/bidi sanitizer.
+
+Product pin `ab862a52` includes the correction `7519a251` and preserves GitHub's merged OAuth PR #58 (`958111d3`). Later commits only repair/index screenshot fixtures: `cb679284` normalizes tmux tab-compressed whitespace for matching while retaining original ANSI raster bytes; `3b7c5801` reuses reviewed launcher header/row captures. The current gate pin is `f8b7b186`. No database migration, runtime dependency or storage-flag change is introduced.
+
+| Integration check | Result |
+| --- | --- |
+| x-boss full Go suite | 5,147 test passes, 2,014 top-level tests, 38 passing packages; actual exit 0 / build-box exit 0. Existing opt-in `TestWriteShots` skipped. |
+| x-boss canonical UI suite | 458 passed; zero failures, skips or cancellations. |
+| New retention/accessibility regressions | Three genuine assertion failures before production correction; focused suite 10/10 green afterwards. |
+| TUI whitespace regression | Tab-compressed live status reproduced as one focused failure with three controls passing; all four helper tests green after correction. Offline/reconnecting controls remain negative. |
+| Independent source reviews | Whole-PR findings I1/I2 addressed; scoped product, route integration, timeout/index and tmux repair reviews PASS with no new findings. Launcher fixture integration review PASS. |
+| Full x-boss screenshot gate | PASS: all 389 generated PNGs indexed exactly once; actual exit 0 / build-box exit 0. |
+| Representative visual check | Desktop overview and 320px peer inspection: complete readable readout within its row/viewport, visible keyboard focus; synthetic data. Final captures of desktop, 320px focus, launcher table header and launcher row inspected and passed. |
+| Embedded static assets | 654,213 bytes under the unchanged 640-KiB (655,360-byte) all-files guard; 1,147 bytes headroom. |
+
+Gates use disposable HOME/XDG/CODEX roots and physical temporary paths on x-boss, at most two threads in aggregate. All 2,028 gate source hashes are checked before and after locally/remotely; two empty owned-process drains are retained. Go and UI evidence applies to the final unchanged product bytes; subsequent differences are reviewed screenshot harness, index, receipt and generated-image changes, verified separately.
+
+Evidence SHA-256:
+
+- Full Go: `9c3e84c497b17dcb3354165f846d48cbe78ddccc5c37f220e7b6d52a5997a716`.
+- Canonical UI: `c641060ff6f88491b84c3136305c8169a3ce53355985d966357d39edb92926cf`.
+- Genuine feature RED: `09b13ae7c54e7a60ed40faf4c2dd04227cbf8f598449ff1ca40536a4fed2f582`.
+- Focused feature GREEN: `9282beac6947fc2e2257cae38638f2e260add86189153a6153eee87771b90f5c`.
+- TUI helper RED/GREEN: `7ec6f8c1f50c441d65334827b9fde8bf00624ee4c3f3dc86ef883b07887b9f46` / `9538b2e391611a47c65897c04f1fd112de31b01ed4b3b51d10c4ff5030bd464d`.
+- Full screenshots: `f827b5008c029fee1f588872236a894227dcc5add09048a4751a378156592987`.
+
+Superseded gates remain recorded as failures: the first feature RED included an invalid synthetic peer ID, corrected before the three genuine RED assertions; two full screenshot attempts reached a literal-space TUI wait, whose retained frame proved `live\tapr 2`; the next reached an obsolete requirement for the peer table header and taller final row to fit one screen. None is represented as a pass. The original pure-model TDD lapse above also remains disclosed.
+
+The screenshot suite uses isolated synthetic hubs and browser instances. Production acceptance after deployment verifies health/build identity and served asset hashes; it does not establish production-volume latency, multi-GB browser-memory resolution, or manual assistive-technology acceptance. Native Codex actor-policy acceptance and the broader memory work remain separate.
