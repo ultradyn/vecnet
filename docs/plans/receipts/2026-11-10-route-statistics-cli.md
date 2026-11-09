@@ -4,7 +4,7 @@ Ready for review, component only. The master-based route-statistics branch adds 
 
 The helper is the exact reviewed157-line selected C28058abb source. The three unchanged selected fixtures total1365lines. Parent commands.go integration is exactly8added/1removed lines for help, two early dispatch branches and route usage. Existing startup, parser, client and verified follow machinery remain unchanged. Only the exact410/hub_moved pair preserves the notice control payload; verification, one retry, profile/pin backup and refusal paths use the existing implementation.
 
-Parent-owned x-boss evidence on the same frozen2143-entry tree:
+Parent-owned x-boss evidence used a separate frozen tree at each stage:2142 entries for the API prerequisite,2143 after adding the helper, and2143 with the reviewed commands.go change for GREEN. Behavioral RED and GREEN have different commands.go bytes; each run independently verified its own before/after source equality.
 
 - API prerequisite: seven missing helper-method diagnostics, zero executed tests. Actual1/bb1, raw97048842b1f494b897bf8f25c5381025c76d5f87bd205ed26532a56aec57b0cc. This is not behavioral RED.
 - After the exact helper and before commands.go integration:41 genuine public-dispatch/relocation failing leaves,53 passing controls including all three helper roots and old route verbs. Actual1/bb1, raw7e8e2105690a9d76f20de030f26bfef1fdfe835d38c9e9aead6f313aa98ff223.
