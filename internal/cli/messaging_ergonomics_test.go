@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -469,4 +471,142 @@ func ergCLICache(t *testing.T, reader *user) map[string]string {
 		t.Fatal(err)
 	}
 	return cached
+}
+
+func TestMCPRelayInboxSenderChainParity(t *testing.T) {
+	env := testhub.Start(t)
+	_, aSecret := env.NewPeer("session", "Alpha")
+	b, bSecret := env.NewPeer("session", "Bravo")
+	sent := profileUser(t, env.URL, aSecret).send(b, "relay parity", "--hold")
+	direct := func(t *testing.T, method string, params any) json.RawMessage {
+		t.Helper()
+		body := relayLine(9, method, params)
+		req, err := http.NewRequest(http.MethodPost, env.URL+"/mcp", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer "+bSecret)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json, text/event-stream")
+		req.Header.Set("MCP-Protocol-Version", "2026-07-28")
+		response, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		var reply relayReply
+		if err := json.NewDecoder(response.Body).Decode(&reply); err != nil || response.StatusCode != http.StatusOK || reply.Error != nil {
+			t.Fatalf("direct MCP failed: status=%d reply=%+v err=%v", response.StatusCode, reply, err)
+		}
+		return reply.Result
+	}
+	defaultParams := map[string]any{"name": "vecnet_inbox", "arguments": map[string]any{}}
+	fullParams := map[string]any{"name": "vecnet_inbox", "arguments": map[string]any{"include_sender_chain": true}}
+	resourceParams := map[string]any{"uri": "vecnet://peer/" + b + "/inbox"}
+	for _, version := range []string{"2026-07-28", "2025-11-25"} {
+		t.Run(version, func(t *testing.T) {
+			var inboxCalls, resourceCalls, unintended atomic.Int32
+			target, err := url.Parse(env.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			proxy := httputil.NewSingleHostReverseProxy(target)
+			gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/v1/events" || r.URL.Path == "/v1/ack" || (r.URL.Path == "/mcp" && r.Method == http.MethodGet) {
+					unintended.Add(1)
+				}
+				if r.URL.Path == "/mcp" && r.Method == http.MethodPost {
+					raw, err := io.ReadAll(r.Body)
+					if err != nil {
+						t.Error(err)
+						http.Error(w, "read failed", http.StatusBadRequest)
+						return
+					}
+					r.Body = io.NopCloser(bytes.NewReader(raw))
+					var request struct {
+						Method string `json:"method"`
+						Params struct {
+							Name string `json:"name"`
+						} `json:"params"`
+					}
+					if err := json.Unmarshal(raw, &request); err != nil {
+						t.Error(err)
+					}
+					if request.Method == "resources/read" {
+						resourceCalls.Add(1)
+					}
+					switch request.Method {
+					case "events/subscribe", "subscriptions/listen", "resources/subscribe":
+						unintended.Add(1)
+					}
+					if request.Method == "tools/call" && request.Params.Name == "vecnet_inbox" {
+						inboxCalls.Add(1)
+					}
+					if request.Method == "tools/call" && (request.Params.Name == "vecnet_ack" || request.Params.Name == "vecnet_receipt") {
+						unintended.Add(1)
+					}
+				}
+				proxy.ServeHTTP(w, r)
+			}))
+			defer gateway.Close()
+			// initialize intentionally negotiates legacy even when offered current.
+			// Exercise the stateless era with discovery instead.
+			initLine := relayInit(version)
+			if version == "2026-07-28" {
+				initLine = relayLine(1, "server/discover", map[string]any{"_meta": map[string]any{"io.modelcontextprotocol/protocolVersion": version}})
+			}
+			replies := relayOK(t, profileUser(t, gateway.URL, bSecret), []string{
+				initLine,
+				relayLine(2, "tools/call", defaultParams),
+				relayLine(3, "tools/call", fullParams),
+				relayLine(4, "resources/read", resourceParams),
+			})
+			relayIDs(t, replies, 1, 2, 3, 4)
+			for i, expected := range []json.RawMessage{direct(t, "tools/call", defaultParams), direct(t, "tools/call", fullParams), direct(t, "resources/read", resourceParams)} {
+				if replies[i+1].Error != nil || !reflect.DeepEqual(ergCLIMCPPayload(t, replies[i+1].Result), ergCLIMCPPayload(t, expected)) {
+					t.Errorf("stdio/direct MCP result %d diverged: %+v", i, replies[i+1])
+				}
+			}
+			var compact struct {
+				Structured json.RawMessage `json:"structuredContent"`
+			}
+			if err := json.Unmarshal(replies[1].Result, &compact); err != nil {
+				t.Fatal(err)
+			}
+			if _, present := ergCLILoop(t, compact.Structured, sent.MessageID)["sender_chain"]; present {
+				t.Error("stdio default inbox still includes sender_chain")
+			}
+			if inboxCalls.Load() != 2 || resourceCalls.Load() != 1 || unintended.Load() != 0 {
+				t.Fatalf("relay introduced consumer/ack work: inbox=%d resources=%d unintended=%d", inboxCalls.Load(), resourceCalls.Load(), unintended.Load())
+			}
+		})
+	}
+}
+
+// Current stateless replies add two protocol envelope fields. Compare all
+// application fields across eras, validating the known transport fields first.
+func ergCLIMCPPayload(t *testing.T, raw []byte) any {
+	t.Helper()
+	value, ok := ergCLIJSONValue(t, raw).(map[string]any)
+	if !ok {
+		t.Fatal("MCP result is not an object")
+	}
+	if meta, ok := value["_meta"].(map[string]any); ok {
+		if info, present := meta["io.modelcontextprotocol/serverInfo"]; present {
+			if !reflect.DeepEqual(info, map[string]any{"name": "vecnet", "version": "dev"}) {
+				t.Fatalf("unexpected serverInfo: %v", info)
+			}
+			delete(meta, "io.modelcontextprotocol/serverInfo")
+		}
+		if len(meta) == 0 {
+			delete(value, "_meta")
+		}
+	}
+	if kind, present := value["resultType"]; present {
+		if kind != "complete" {
+			t.Fatalf("unexpected resultType: %v", kind)
+		}
+		delete(value, "resultType")
+	}
+	return value
 }

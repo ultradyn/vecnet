@@ -21,8 +21,9 @@ import (
 	"github.com/XertroV/vecnet/internal/testhub"
 )
 
-// These baseline fixtures are frozen at fcc71a10e9c2bf7c496983b7cb0dc363f6382d16.
-// No UPDATE_GOLDEN path: later storage changes must preserve these bytes.
+// Canonical baseline fixtures are frozen at fcc71a10e9c2bf7c496983b7cb0dc363f6382d16.
+// R-C61 updates only compact MCP inbox tool/resource views to omit ancestry.
+// No UPDATE_GOLDEN path: storage changes must preserve canonical bytes.
 const guardA = "peer_00000000000000000000000001"
 const guardB = "peer_00000000000000000000000002"
 const guardC = "peer_00000000000000000000000003"

@@ -24,7 +24,7 @@ func TestSenderInfoInMCPReadTools(t *testing.T) {
 	var inbox struct {
 		Events []venv.Event `json:"events"`
 	}
-	toolOK(t, env, bSecret, "vecnet_inbox", map[string]any{}, &inbox)
+	toolOK(t, env, bSecret, "vecnet_inbox", map[string]any{"include_sender_chain": true}, &inbox)
 	n := 0
 	for _, ev := range inbox.Events {
 		if ev.Type != "delivery" {
