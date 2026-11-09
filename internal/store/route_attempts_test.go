@@ -4,10 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // A1 is schema-only. The parent owns execution and the later writer/read slices.
@@ -388,4 +390,220 @@ func TestRouteAttemptsMasterPortUpgradeRollback(t *testing.T) {
 			t.Error("checksum refusal modified schema/ledger")
 		}
 	})
+}
+
+const a1bSince, a1bUntil = "2026-11-02T00:00:00.000Z", "2026-11-09T00:00:00.000Z"
+
+func a1bDB(t *testing.T) *DB {
+	t.Helper()
+	db := a1Raw(t)
+	if _, err := Migrate(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	return &DB{db}
+}
+
+func a1bSeed(t *testing.T, db *DB, route, at string, n, offset int) {
+	t.Helper()
+	if _, err := db.Exec(`WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<?)
+INSERT INTO route_attempts(id,route_id,delivery_id,at,outcome,body_bytes,latency_ms)
+SELECT i+?,?,'e1.1',?,'ok',i,i FROM n`, n, offset, route, at); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func a1bWriteError(t *testing.T, err error, stage, cause string) {
+	t.Helper()
+	var typed *RouteAttemptWriteError
+	if !errors.As(err, &typed) || typed == nil || typed.Stage != stage || typed.Err == nil {
+		t.Fatalf("expected typed %s failure with cause", stage)
+	}
+	if err.Error() != "route attempt write failed: "+stage || !errors.Is(err, typed.Err) || !strings.Contains(typed.Err.Error(), cause) {
+		t.Fatal("write error lost its cause or exposed private failure text")
+	}
+}
+
+func TestRouteAttemptsPruneNewest1000AndSevenDays(t *testing.T) {
+	db := a1bDB(t)
+	now := time.Date(2026, 11, 9, 11, 0, 0, 0, time.FixedZone("fixture", 11*60*60))
+	a1bSeed(t, db, "route_a", a1bUntil, 1005, 0)
+	a1bSeed(t, db, "route_idle", "2026-11-01T23:59:59.999Z", 1005, 6000)
+	a1Exec(t, db.DB, `INSERT INTO route_attempts(id,route_id,delivery_id,at,outcome,body_bytes,latency_ms) VALUES(0,'route_a','e1.1','2026-11-09T00:00:00.001Z','ok',0,0),(5000,'route_a','e1.1','2026-11-01T23:59:59.999Z','ok',0,0)`)
+	idle := a1Snapshot(t, db.DB, `SELECT * FROM route_attempts WHERE route_id='route_idle' ORDER BY id`)
+	a := RouteAttemptInsert{RouteID: "route_a", DeliveryID: "e1.1", At: a1bUntil, Outcome: "ok"}
+	if err := InsertRouteAttempt(context.Background(), db, a, now); err != nil {
+		t.Fatal(err)
+	}
+	a1Count(t, db.DB, `SELECT count(*) FROM route_attempts WHERE route_id='route_a'`, 1000)
+	// Independent exact membership: future ID 0, tied IDs 8..1005, new ID 7006.
+	a1Count(t, db.DB, `SELECT count(*) FROM route_attempts WHERE route_id='route_a' AND (id=0 OR id BETWEEN 8 AND 1005 OR id=7006)`, 1000)
+	a1bSeed(t, db, "route_cutoff", "2026-11-01T23:59:59.999Z", 1, 8000)
+	a1bSeed(t, db, "route_cutoff", a1bSince, 1, 8001)
+	a.RouteID = "route_cutoff"
+	a.At = a1bSince // Retention follows trusted write time, not this older observation.
+	if err := InsertRouteAttempt(context.Background(), db, a, now); err != nil {
+		t.Fatal(err)
+	}
+	if got := a1Snapshot(t, db.DB, `SELECT id,at FROM route_attempts WHERE route_id='route_cutoff' ORDER BY id`); got != `[[8002,"2026-11-02T00:00:00.000Z"],[8003,"2026-11-02T00:00:00.000Z"]]` {
+		t.Fatalf("seven-day boundary membership: %s", got)
+	}
+	if a1Snapshot(t, db.DB, `SELECT * FROM route_attempts WHERE route_id='route_idle' ORDER BY id`) != idle {
+		t.Fatal("write pruned another route's idle/over-cap history")
+	}
+}
+
+func TestRouteAttemptsReadAgeBoundsAndHardCap(t *testing.T) {
+	db := a1bDB(t)
+	a1bSeed(t, db, "route_read", a1bUntil, 1005, 0)
+	a1bSeed(t, db, "route_read", "2026-11-09T00:00:00.001Z", 1001, 2000)
+	a1bSeed(t, db, "route_read", "2026-11-01T23:59:59.999Z", 1, 4000)
+	a1bSeed(t, db, "route_read", a1bSince, 1, 5000)
+	a1bSeed(t, db, "route_other", a1bUntil, 1, 6000)
+	before := a1Snapshot(t, db.DB, `SELECT * FROM route_attempts ORDER BY id`)
+	if err := db.ReadSnapshot(context.Background(), func(q *sql.Conn) error {
+		for _, limit := range []int{0, -1, 1000, 1001, 1000000, 2} {
+			rows, err := RouteAttempts(context.Background(), q, "route_read", a1bSince, a1bUntil, limit)
+			want := 1000
+			if limit == 2 {
+				want = 2
+			}
+			if err != nil || len(rows) != want {
+				t.Fatalf("limit %d: count=%d err=%v", limit, len(rows), err)
+			}
+			for i, row := range rows {
+				expected := RouteAttempt{ID: int64(1005 - i), RouteAttemptInsert: RouteAttemptInsert{RouteID: "route_read", DeliveryID: "e1.1", At: a1bUntil, Outcome: "ok", BodyBytes: 1005 - i, LatencyMS: 1005 - i}}
+				if !reflect.DeepEqual(row, expected) {
+					t.Fatalf("ordered/nullable row %d: got %+v want %+v", i, row, expected)
+				}
+			}
+		}
+		cutoff, err := RouteAttempts(context.Background(), q, "route_read", a1bSince, a1bSince, 1000)
+		if err != nil || len(cutoff) != 1 || cutoff[0].ID != 5001 || cutoff[0].At != a1bSince {
+			t.Fatalf("inclusive lower/equal upper bound: %+v %v", cutoff, err)
+		}
+		for _, tc := range [][3]string{{"missing", a1bSince, a1bUntil}, {"route_read", "2026-11-10T00:00:00.000Z", "2026-11-17T00:00:00.000Z"}, {"route_read", a1bUntil, a1bSince}} {
+			rows, err := RouteAttempts(context.Background(), q, tc[0], tc[1], tc[2], 1000)
+			if err != nil || !reflect.DeepEqual(rows, []RouteAttempt{}) {
+				t.Fatalf("empty result must be []: %+v %v", rows, err)
+			}
+		}
+		if a1Snapshot(t, db.DB, `SELECT * FROM route_attempts ORDER BY id`) != before {
+			t.Fatal("reads physically pruned history")
+		}
+		// Commit through another connection after q's read snapshot is established.
+		if _, err := db.Exec(a1Insert, "route_read", "new", a1bUntil, "fail", 503, "http_5xx", 17, 42); err != nil {
+			return err
+		}
+		rows, err := RouteAttempts(context.Background(), q, "route_read", a1bSince, a1bUntil, 1)
+		if err != nil || len(rows) != 1 || rows[0].ID != 1005 {
+			t.Fatal("reader abandoned the caller's existing snapshot")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ReadSnapshot(context.Background(), func(q *sql.Conn) error {
+		rows, err := RouteAttempts(context.Background(), q, "route_read", a1bSince, a1bUntil, 1)
+		status, class := 503, "http_5xx"
+		expected := RouteAttempt{ID: 6002, RouteAttemptInsert: RouteAttemptInsert{RouteID: "route_read", DeliveryID: "new", At: a1bUntil, Outcome: "fail", HTTPStatus: &status, ErrorClass: &class, BodyBytes: 17, LatencyMS: 42}}
+		if err != nil || len(rows) != 1 || !reflect.DeepEqual(rows[0], expected) {
+			t.Fatal("new snapshot lost committed row/non-null fields")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	a1Count(t, db.DB, `SELECT count(*) FROM route_attempts`, 2010)
+}
+
+func TestRouteAttemptWriterNormalizationAndPrivacy(t *testing.T) {
+	db := a1bDB(t)
+	now := time.Date(2026, 11, 9, 0, 0, 0, 0, time.UTC)
+	base := RouteAttemptInsert{RouteID: "route_normalize", DeliveryID: "e1.1", At: a1bUntil, Outcome: "ok", BodyBytes: -1, LatencyMS: 600001}
+	if err := InsertRouteAttempt(context.Background(), db, base, now); err != nil {
+		t.Fatal(err)
+	}
+	if a1Snapshot(t, db.DB, `SELECT body_bytes,latency_ms,http_status,error_class FROM route_attempts`) != `[[0,600000,null,null]]` {
+		t.Fatal("zero/maximum clamps or nullable success fields changed")
+	}
+	a := base
+	a.BodyBytes, a.LatencyMS = 1048577, -1
+	if err := InsertRouteAttempt(context.Background(), db, a, now); err != nil {
+		t.Fatal(err)
+	}
+	if a1Snapshot(t, db.DB, `SELECT body_bytes,latency_ms FROM route_attempts ORDER BY id DESC LIMIT 1`) != `[[1048576,0]]` {
+		t.Fatal("opposite measurement clamps changed")
+	}
+	low, high := 100, 599
+	for i, class := range strings.Fields("http_3xx http_4xx http_408 http_409 http_410 http_413 http_429 http_5xx http_status routine_auth routine_rate_limited routine_not_started redirect_refused private_address scheme_refused userinfo_refused invalid_url canceled timeout dns_error tls_error connection_refused connection_reset connection_closed network_error request_failed") {
+		a = base
+		a.Outcome, a.ErrorClass, a.HTTPStatus = []string{"fail", "refused"}[i%2], &class, []*int{nil, &low, &high}[i%3]
+		if err := InsertRouteAttempt(context.Background(), db, a, now); err != nil {
+			t.Fatal("valid closed-class/outcome/status control rejected", err)
+		}
+		want, _ := json.Marshal([][]any{{a.Outcome, a.HTTPStatus, class, 0, 600000}})
+		if a1Snapshot(t, db.DB, `SELECT outcome,http_status,error_class,body_bytes,latency_ms FROM route_attempts ORDER BY id DESC LIMIT 1`) != string(want) {
+			t.Fatal("writer changed normalized class/outcome/status values")
+		}
+	}
+	status := 204
+	for _, id := range []string{"x", strings.Repeat("é", 40)} {
+		a = base
+		a.RouteID, a.DeliveryID, a.HTTPStatus, a.BodyBytes, a.LatencyMS = id, id, &status, 17, 42
+		if err := InsertRouteAttempt(context.Background(), db, a, now); err != nil {
+			t.Fatal("valid byte boundary/interior measurement rejected", err)
+		}
+		want, _ := json.Marshal([][]any{{id, id, a1bUntil, "ok", 204, nil, 17, 42}})
+		if a1Snapshot(t, db.DB, `SELECT route_id,delivery_id,at,outcome,http_status,error_class,body_bytes,latency_ms FROM route_attempts ORDER BY id DESC LIMIT 1`) != string(want) {
+			t.Fatal("writer changed valid bounded fields")
+		}
+	}
+	a1Count(t, db.DB, `SELECT count(*) FROM route_attempts`, 30)
+	private, empty, allowed, badLow, badHigh := "https://user:key@fixture.invalid/?token=canary", "", "http_5xx", 99, 600
+	before := a1Snapshot(t, db.DB, `SELECT * FROM route_attempts ORDER BY id`)
+	for _, mutate := range []func(*RouteAttemptInsert){
+		func(a *RouteAttemptInsert) { a.RouteID = "" },
+		func(a *RouteAttemptInsert) { a.RouteID = strings.Repeat("x", 81) },
+		func(a *RouteAttemptInsert) { a.RouteID = strings.Repeat("é", 41) },
+		func(a *RouteAttemptInsert) { a.DeliveryID = "" },
+		func(a *RouteAttemptInsert) { a.DeliveryID = strings.Repeat("é", 41) },
+		func(a *RouteAttemptInsert) { a.At = private },
+		func(a *RouteAttemptInsert) { a.At = "2026-02-30T00:00:00.000Z" },
+		func(a *RouteAttemptInsert) { a.At = "2026-11-09T00:00:00Z" },
+		func(a *RouteAttemptInsert) { a.At = "2026-11-09T00:00:00.000+00:00" },
+		func(a *RouteAttemptInsert) { a.Outcome = private },
+		func(a *RouteAttemptInsert) { a.Outcome = "fail" },
+		func(a *RouteAttemptInsert) { a.Outcome = "refused" },
+		func(a *RouteAttemptInsert) { a.ErrorClass = &allowed },
+		func(a *RouteAttemptInsert) { a.ErrorClass = &private },
+		func(a *RouteAttemptInsert) { a.Outcome, a.ErrorClass = "fail", &private },
+		func(a *RouteAttemptInsert) { a.Outcome, a.ErrorClass = "refused", &empty },
+		func(a *RouteAttemptInsert) { a.HTTPStatus = &badLow },
+		func(a *RouteAttemptInsert) { a.HTTPStatus = &badHigh },
+	} {
+		a = base
+		mutate(&a)
+		a1bWriteError(t, InsertRouteAttempt(context.Background(), db, a, now), "normalize", "invalid route attempt")
+		if a1Snapshot(t, db.DB, `SELECT * FROM route_attempts ORDER BY id`) != before {
+			t.Fatal("invalid writer input changed rows or persisted private text")
+		}
+	}
+	a1bSeed(t, db, "route_normalize", "2026-11-01T23:59:59.999Z", 1, 10000)
+	for _, fault := range [][2]string{{"INSERT", "insert"}, {"DELETE", "prune"}} {
+		before := a1Snapshot(t, db.DB, `SELECT * FROM route_attempts ORDER BY id`)
+		a1Exec(t, db.DB, `CREATE TRIGGER a1b_fault BEFORE `+fault[0]+` ON route_attempts BEGIN SELECT RAISE(ABORT,'private-driver-canary'); END`)
+		a1bWriteError(t, InsertRouteAttempt(context.Background(), db, base, now), fault[1], "private-driver-canary")
+		a1Exec(t, db.DB, `DROP TRIGGER a1b_fault`)
+		if a1Snapshot(t, db.DB, `SELECT * FROM route_attempts ORDER BY id`) != before {
+			t.Fatal("insert/prune failure violated atomic before-state")
+		}
+	}
+	a = base
+	a.DeliveryID = "retry"
+	if err := InsertRouteAttempt(context.Background(), db, a, now); err != nil {
+		t.Fatal("clean writer retry failed", err)
+	}
+	a1Count(t, db.DB, `SELECT count(*) FROM route_attempts WHERE id=10001`, 0)
+	a1Count(t, db.DB, `SELECT count(*) FROM route_attempts WHERE delivery_id='retry'`, 1)
+	a1Count(t, db.DB, `SELECT count(*) FROM route_attempts`, 31)
 }
