@@ -119,6 +119,9 @@ func New(d Deps) http.Handler {
 	uiHandler := ui.Handler(d.UIDir, s.r2Origins()...) // operator inbox; public (isPublic)
 	mux.Handle("GET /ui", uiHandler)
 	mux.Handle("GET /ui/", uiHandler)
+	mux.HandleFunc("GET /favicon.ico", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/ui/favicon.svg", http.StatusFound)
+	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, hub.E(http.StatusNotFound, "not_found", "no such endpoint"))
 	})
