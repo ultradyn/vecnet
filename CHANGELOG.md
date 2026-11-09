@@ -1,5 +1,7 @@
 # Changelog
 - 2026-11-09: ChatGPT Dot onboarding includes a short setup prompt and Copy prompt action after plugin connection (`internal/ui/static/invite.js`).
+- 2026-11-09: TUI dashboard hides archived peers by default; `a` reveals marked rows while displayed-row navigation and disabled peers remain available (`internal/tui/screen_dash.go`).
+- 2026-11-09: Deploy relevant reviewed master merges to Fly promptly, with serialized ownership and running commit/asset smoke checks (`docs/DEPLOY.md`).
 
 - 2026-11-09: Bound the Web UI parsed-message memo to 256 Ki UTF-16 key units while preserving full rendering; see docs/plans/2026-11-09-markdown-cache-memory.md.
 

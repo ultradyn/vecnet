@@ -2,6 +2,8 @@
 
 The hub runs as one always-on Fly.io machine (`shared-cpu-1x`, 512 MB) with a volume at `/data` ([ADR 0001](adr/0001-tech-stack.md)). The image is two static Go binaries on `scratch`. Nothing here runs in tests; Max triggers each step.
 
+After each tested and reviewed master merge that changes shipped hub or UI behavior, the authorized release owner should promptly deploy to Fly and smoke-check the running commit and affected assets. Serialize deployments through the existing coordination thread, honor explicit rollout holds, and skip a repeat deployment when Fly already serves the intended commit.
+
 ## Files
 
 | File | What it does |
