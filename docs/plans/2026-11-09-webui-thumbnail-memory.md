@@ -47,6 +47,7 @@ R-M38 (2026-11-09): split Task 2a pure shared budget and new dedicated thumbs-bu
 - [x] Task2a pure shared admission budget: focused26/fullUI522/Go10 pass; independent Sol source PASS C0/I0/M2. Coverage minors and remaining cache/DOM obligations are recorded in [the component receipt](receipts/2026-11-09-thumbnail-budget.md).
 - [x] Task2b1 opt-in cache core: 28 focused/542 full UI/7 Go embedding passes; independent Sol core and cap reviews C0/I0/M0. [Component receipt](receipts/2026-11-09-thumbnail-cache-core.md).
 - [x] Task2b2 owner transfer/retry: 34 focused/548 full UI/7 Go embedding passes and fresh independent Sol C0/I0/M0. [Extension receipt](receipts/2026-11-09-thumbnail-cache-transfer.md). No caller activation. Task3 cleanup recovery reachability is a separately recorded design dependency.
+- [x] Task2b3 cleanup recovery owner: 59 focused/555 full UI/7 Go embedding passes and fresh independent Sol C0/I0/M0. [Dependency receipt](receipts/2026-11-09-thumbnail-cleanup-owner.md). A bounded per-budget resource pool preserves original charges after retired unpublished-URL cleanup failures; Task3 caller activation and physical memory proof remain pending.
 
 **Files:** internal/ui/static/thumbs-budget.js; internal/ui/static/thumbs-model.js; internal/ui/jstest/thumbs.test.mjs.
 **Consumes:** Task 1 promise settlement/error semantics. **Produces:** the exact budget tickets, source permits and cache acquire/move/drop/retry/broken/release interfaces in the design; no incompatible partial DOM activation.

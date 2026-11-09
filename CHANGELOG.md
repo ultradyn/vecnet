@@ -1,4 +1,5 @@
 # Changelog
+- 2026-11-09: opt-in thumbnail cleanup can be retried through its budget after mount retirement while failed URL revocation keeps the original quota charged (`internal/ui/static/thumbs-model.js`).
 - 2026-11-09: opt-in thumbnail cache owner transfer preserves lease/permit identity and explicit retry preserves quota and priority contracts (`internal/ui/static/thumbs-model.js`).
 - 2026-11-09: opt-in thumbnail cache leases retain shared quota through transport settlement and retryable URL cleanup; existing DOM callers remain on legacy mode (`internal/ui/static/thumbs-model.js`).
 

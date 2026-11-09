@@ -91,6 +91,66 @@ function createLegacyThumbCache({ api, URL, onReady = () => {} }) {
   return { eligible, state, broken, release, stats };
 }
 
+// Only current unpublished resources live here, keyed by their original budget
+// tickets. No pool function is created in a cache's lexical environment.
+const thumbCleanupPools = new WeakMap();
+function thumbCleanupPool(budget) {
+  let pool = thumbCleanupPools.get(budget);
+  if (!pool) {
+    pool = { records: new Map(), passing: false };
+    thumbCleanupPools.set(budget, pool);
+  }
+  return pool;
+}
+function clearThumbCleanupCell(pool, cell) {
+  const ticket = cell.ticket, record = pool.records.get(ticket);
+  if (record?.cell === cell) {
+    pool.records.delete(ticket);
+    record.cell = record.counters = record.guard = null;
+  }
+  cell.phase = 'cleared';
+  cell.ticket = cell.url = cell.revoke = null;
+  return ticket;
+}
+function disposeThumbCleanupCell(pool, cell) {
+  const record = pool.records.get(cell.ticket);
+  if (record?.cell !== cell) return;
+  const wasDisposing = record.guard.active;
+  cell.phase = 'disposing'; record.guard.active = true;
+  try {
+    const revoke = cell.revoke;
+    revoke(cell.url);
+  } catch (error) {
+    cell.phase = 'failed';
+    throw error;
+  } finally { record.guard.active = wasDisposing; }
+  record.counters.revoked++;
+  // Clear resource ownership and restore guards before settlement pumps work.
+  clearThumbCleanupCell(pool, cell).settle({ residentBytes: null });
+}
+function disposeThumbCleanupCells(pool, cells) {
+  let didThrow = false, failure;
+  for (const cell of cells) {
+    if (cell.phase !== 'failed') continue;
+    try { disposeThumbCleanupCell(pool, cell); }
+    catch (error) { if (!didThrow) { didThrow = true; failure = error; } }
+  }
+  if (didThrow) throw failure;
+}
+function retryThumbCleanupCells(pool, cells) {
+  if (!pool || pool.passing) return;
+  pool.passing = true;
+  try { disposeThumbCleanupCells(pool, cells ?? [...pool.records.values()].map(record => record.cell)); }
+  finally { pool.passing = false; }
+}
+export function retryThumbCleanup(budget) {
+  const stats = budget?.stats;
+  if (typeof budget?.enqueue !== 'function' || typeof budget?.claimSource !== 'function' || !stats ||
+      !['running', 'residentEntries', 'residentBytes', 'reservedBytes', 'queued', 'sources'].every(key => Number.isSafeInteger(stats[key]) && stats[key] >= 0))
+    throw new TypeError('Invalid thumbnail budget');
+  retryThumbCleanupCells(thumbCleanupPools.get(budget));
+}
+
 let nextCacheIdentity = 0n;
 function leaseView(cell) {
   return Object.freeze({
@@ -172,14 +232,15 @@ function createLeaseThumbCache(options) {
       typeof onChange !== 'function') throw new TypeError('Invalid lease thumbnail dependencies');
   initialStats = null;
   const identity = `thumb-cache-${++nextCacheIdentity}`, entries = new Map(), owners = new Map();
-  // Each cell owns one still-running ticket, never a retired entry or cache.
-  const obligations = new Set();
+  // Local identity aliases only; the pool owns current original-ticket cells.
+  const obligations = new Set(), cleanupPool = thumbCleanupPool(budget);
   const counters = { fetches: 0, created: 0, revoked: 0 };
+  const disposalGuard = { active: false };
   const capacityLink = { run: capacityPass, pending: false }, onCapacity = capacityNotification(capacityLink);
-  let sequence = 0n, dead = false, detaching = false, releasing = false;
+  let sequence = 0n, dead = false, releasing = false;
 
   function guard() {
-    if (detaching) throw new Error('Thumbnail detach/revoke must not reenter cache mutation');
+    if (disposalGuard.active) throw new Error('Thumbnail detach/revoke must not reenter cache mutation');
   }
   function current(entry, task) {
     return !dead && entries.get(entry.sha) === entry && (!task || entry.task === task);
@@ -204,38 +265,25 @@ function createLeaseThumbCache(options) {
   // Mutate no ownership until both synchronous cleanup operations succeed.
   function discardURL(entry) {
     if (entry.url === null) return null;
-    detaching = true;
+    disposalGuard.active = true;
     try {
       beforeRevoke(entry.sha, entry.generation);
       const revoke = URL.revokeObjectURL;
       revoke(entry.url);
     }
-    finally { detaching = false; }
+    finally { disposalGuard.active = false; }
     counters.revoked++;
     const ticket = entry.ticket;
     entry.url = null; entry.bytes = 0; entry.ticket = null;
     return ticket;
   }
   function clearObligation(cell) {
-    const ticket = cell.ticket;
-    cell.phase = 'cleared';
-    cell.ticket = cell.url = cell.revoke = null;
+    const ticket = clearThumbCleanupCell(cleanupPool, cell);
     obligations.delete(cell);
     return ticket;
   }
-  function discardUnpublished(cell) {
-    cell.phase = 'disposing';
-    detaching = true;
-    try {
-      const revoke = cell.revoke;
-      revoke(cell.url);
-    } catch (error) {
-      cell.phase = 'failed';
-      throw error;
-    } finally { detaching = false; }
-    counters.revoked++;
-    // Remove all resource ownership before settlement can dispatch reentry.
-    return clearObligation(cell);
+  function pruneObligations() {
+    for (const cell of obligations) if (cell.phase === 'cleared') obligations.delete(cell);
   }
   function removeEntry(entry) {
     if (entries.get(entry.sha) !== entry) return;
@@ -274,7 +322,9 @@ function createLeaseThumbCache(options) {
           // on this synchronous stack only; the cell keeps a standalone revoke.
           if (current(entry, task)) {
             cell = { phase: 'allocating', ticket, url: null, revoke };
+            pruneObligations();
             obligations.add(cell);
+            cleanupPool.records.set(ticket, { cell, counters, guard: disposalGuard });
             cell.url = Reflect.apply(create, urlAPI, [blob]);
             counters.created++;
             bytes = size;
@@ -289,10 +339,9 @@ function createLeaseThumbCache(options) {
       unlinkThumbTask(task);
       task.ticket = task.controller = null;
       if (url !== null) {
-        let disposed;
-        try { disposed = discardUnpublished(cell); }
+        cell.phase = 'failed';
+        try { retryThumbCleanupCells(cleanupPool, [cell]); }
         catch { return; } // Keep the failed cell, not an ignored rejected promise.
-        disposed.settle({ residentBytes: null });
       } else {
         if (cell) clearObligation(cell);
         ticket.settle({ residentBytes: null });
@@ -440,7 +489,10 @@ function createLeaseThumbCache(options) {
     if (releasing) return;
     releasing = true;
     dead = true; onChange = api = null; capacityLink.run = null;
+    pruneObligations();
     const pendingEntries = [...entries.values()], pendingObligations = [...obligations];
+    const ownsCleanupPass = !cleanupPool.passing;
+    if (ownsCleanupPass) cleanupPool.passing = true;
     for (const owner of owners.values()) { owner.cell.state = 'dormant'; owner.cell.url = null; }
     let didThrow = false, failure;
     // A failed ready-payload cleanup cannot keep unrelated network callbacks
@@ -450,15 +502,13 @@ function createLeaseThumbCache(options) {
         try { removeEntry(entry); }
         catch (error) { if (!didThrow) { didThrow = true; failure = error; } }
       }
-      for (const cell of pendingObligations) {
-        // Allocating cells have no returned URL; their synchronous completion
-        // will dispose or transfer it. Never settle them from release().
-        if (cell.phase !== 'failed') continue;
-        try { discardUnpublished(cell).settle({ residentBytes: null }); }
+      if (ownsCleanupPass) {
+        try { disposeThumbCleanupCells(cleanupPool, pendingObligations); }
         catch (error) { if (!didThrow) { didThrow = true; failure = error; } }
       }
     } finally {
       if (!entries.size) URL = beforeRevoke = null;
+      if (ownsCleanupPass) cleanupPool.passing = false;
       releasing = false;
     }
     if (didThrow) throw failure;
