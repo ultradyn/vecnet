@@ -65,6 +65,47 @@ try {
     };
     const agentPosts = () => countRequests(r => r.method() === 'POST' && r.url().endsWith('/v1/admin/agents'));
     const linkPosts = () => countRequests(r => r.method() === 'POST' && r.url().endsWith('/v1/admin/dot-links'));
+    const assertDotCopyFailure = async dlg => {
+      const prompt = dlg.locator('#inv-dot-prompt'), button = dlg.getByRole('button', { name: 'Copy prompt', exact: true });
+      const copied = dlg.locator('.inv-acts').getByRole('button', { name: 'Copied', exact: true });
+      const text = await prompt.textContent();
+      const secrets = await dlg.locator('#inv-mcp, .inv-code-val').evaluateAll(els => els.map(el => el.value || el.textContent));
+      assert(text.length > 40 && !/https?:\/\/|peer_|vn_/.test(text) && ![...secrets, FAKE_KEY, ROUTINE].some(s => s && text.includes(s)), 'Dot prompt contains secret or instance data');
+      const overrides = await page.evaluateHandle(() => {
+        if (!isSecureContext || !navigator.clipboard?.writeText || !document.execCommand) throw new Error('NEEDS_CONTEXT: secure clipboard and fallback required');
+        const saved = [[navigator.clipboard, 'writeText'], [document, 'execCommand']].map(([o, k]) => [o, k, Object.getOwnPropertyDescriptor(o, k)]);
+        const state = { writes: 0, fallbacks: 0, restore: () => saved.forEach(([o, k, d]) => d ? Object.defineProperty(o, k, d) : delete o[k]) };
+        try {
+          Object.defineProperty(navigator.clipboard, 'writeText', { configurable: true, value: async () => { state.writes++; throw new DOMException('Synthetic clipboard denial', 'NotAllowedError'); } });
+          Object.defineProperty(document, 'execCommand', { configurable: true, value: () => { state.fallbacks++; return false; } });
+        } catch (error) { state.restore(); throw error; }
+        return state;
+      });
+      try {
+        await button.click();
+        const guidance = 'Could not copy. Select the text and copy it instead.';
+        const feedback = dlg.getByRole('status').or(dlg.getByRole('alert')).filter({ hasText: guidance });
+        await feedback.waitFor({ state: 'visible', timeout: 4000 });
+        assert(await feedback.textContent() === guidance, 'Dot copy failure guidance is not exact');
+        assert(await feedback.evaluate(el => {
+          const r = el.getBoundingClientRect(), d = el.closest('dialog').getBoundingClientRect();
+          return !el.closest('[inert], [aria-hidden="true"]') && el.getAttribute('aria-live') !== 'off' && r.top >= Math.max(0, d.top) && r.bottom <= Math.min(innerHeight, d.bottom) && r.left >= 0 && r.right <= innerWidth && el.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2));
+        }), 'Dot copy failure guidance is inaccessible or outside the visible dialog');
+        assert(await overrides.evaluate(s => s.writes === 1 && s.fallbacks === 1), 'both clipboard failure paths were not exercised');
+        assert(await button.isVisible() && await copied.count() === 0, 'failed Dot copy claimed Copied');
+        assert(await prompt.textContent() === text && await prompt.evaluate(el => {
+          const selection = getSelection(), range = document.createRange();
+          try { range.selectNodeContents(el); selection.removeAllRanges(); selection.addRange(range); return getComputedStyle(el).userSelect !== 'none' && el.tabIndex >= 0 && selection.toString() === el.textContent; }
+          finally { selection.removeAllRanges(); }
+        }), 'Dot prompt changed or cannot be selected after failure');
+      } finally {
+        try { await overrides.evaluate(s => s.restore()); } finally { await overrides.dispose(); }
+      }
+      await button.click();
+      await copied.waitFor({ timeout: 4000 });
+      assert(await page.evaluate(() => navigator.clipboard.readText()) === text && await prompt.textContent() === text, 'Dot copy retry did not copy the same visible prompt');
+      await button.waitFor({ timeout: 4000 });
+    };
     await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
     await page.locator('#conn.live').waitFor();
     await page.evaluate(() => { location.hash = '#dash'; });
@@ -251,6 +292,7 @@ try {
     await dlg.getByRole('button', { name: 'Copy code' }).click();
     assert(await page.evaluate(() => navigator.clipboard.readText()) === link.code, 'clipboard does not hold the link code');
     await page.evaluate(() => navigator.clipboard.writeText(''));
+    await assertDotCopyFailure(dlg);
 
     // A live bearer warns before another code. Nothing is posted until the
     // operator confirms, and there is no keep-bearer control.
@@ -377,6 +419,7 @@ try {
     const codeBox = await dlg.locator('.inv-code-val').boundingBox();
     assert(codeBox && codeBox.height < 60, `the link code wraps at 390 px: ${JSON.stringify(codeBox)}`);
     await shot('inv-13-dot-narrow');
+    await assertDotCopyFailure(dlg);
     await page.keyboard.press('Escape');
     await page.locator('dialog.inv').waitFor({ state: 'detached' });
 
