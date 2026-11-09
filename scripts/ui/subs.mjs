@@ -76,8 +76,15 @@ try {
     // Named assertion: dashboard section has no buttons.
     assert(await section.locator('button, [role=button], input, select, textarea').count() === 0, 'dashboard section has buttons');
     // Copy-id buttons (dom.js copyButton) only read, and Add agent (invite.js)
-    // only opens its dialog; nothing else may be a button.
-    assert(await page.locator('#view button:not(.cpy):not(.inv-open)').count() === 0, 'dashboard has buttons');
+    // only opens its dialog. The only remaining buttons are audit pagination.
+    await page.locator('#view section#d-audit').getByRole('button', { name: 'Latest', exact: true }).waitFor();
+    const dashboardButtons = await page.locator('#view button:not(.cpy):not(.inv-open)').evaluateAll(buttons => buttons.map(button => ({
+      audit: button.closest('section') === document.querySelector('#view section#d-audit'),
+      text: button.textContent,
+    })));
+    const auditLabels = ['Older', 'Newer', 'Latest'];
+    assert(dashboardButtons.length === 3 && dashboardButtons.every((button, i) => button.audit && button.text === auditLabels[i]),
+      `unexpected dashboard buttons: ${JSON.stringify(dashboardButtons)}`);
     // On the full dashboard the section sits below Peers and Threads; bring it into the shot.
     await scrollIntoViewStable(page, 'section.subs');
     await shot('13-subs-initial');
