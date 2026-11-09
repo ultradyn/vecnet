@@ -1,5 +1,7 @@
 # Changelog
 
+- 2026-11-09: Render CLI/operator transport diagnostics from the checked request URL and fixed failure text while preserving original typed causes, including redirects and upload discovery (internal/cli, internal/opclient, internal/httpdiag; issue #47).
+
 - 2026-11-09: Keep public and relocation URL environment values out of hub help and flag-error metadata while preserving explicit safe or empty flag overrides (`cmd/vecnet-hub`, issue #47).
 
 - 2026-11-09: Keep unresolved Codex acceptance actors as failed obligations, require exact pinned native shell events and per-TUI capability probes, select explicit workspace permissions for derived state directories plus each actor's own empty workspace, and check trusted Linux managed-policy absence and fresh null requirements before launches and native commands, with exact current owned-idle reads before native commands.
