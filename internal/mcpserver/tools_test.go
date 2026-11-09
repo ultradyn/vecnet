@@ -750,6 +750,9 @@ func TestSchemaValidationPath(t *testing.T) {
 
 	// The same arguments with a valid state go through.
 	toolOK(t, env, bSecret, "vecnet_receipt", map[string]any{"delivery_id": dly, "state": "processed", "note": "done"}, nil)
+	if p := invalidPath(t, env, env.OperatorSecret, "vecnet_route_stats", map[string]any{"id": 17}); p != "/id" {
+		t.Fatalf("route stats data.path = %q, want /id", p)
+	}
 }
 
 func TestReplyTargetIsChecked(t *testing.T) {

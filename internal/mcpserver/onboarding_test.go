@@ -69,7 +69,7 @@ func TestAgentOnboardMCPHumanBoundary(t *testing.T) {
 						t.Fatalf("ordinary peer tools/list includes %s", name)
 					}
 				}
-				if len(first) != 30 {
+				if len(first) != 31 {
 					t.Fatalf("operator tools = %d, want the catalogue plus the three agent tools", len(first))
 				}
 				for _, name := range []string{"vecnet_agent_kinds", "vecnet_agent_add", "vecnet_agent_status"} {

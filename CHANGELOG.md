@@ -1,4 +1,6 @@
 # Changelog
+- 2026-11-10: Document operator route statistics across HTTP, MCP and CLI JSON, with bounded route-wide request samples, separate retained-delivery evidence, null/last-status semantics and fixed private errors (docs/PROTOCOL.md §§2.12–2.13,3,4.3–4.4,5.3,13.7).
+
 - 2026-11-10: Hub URL environment defaults stay out of flag help and parse diagnostics; explicit URL flags, including empty overrides, retain precedence (`cmd/vecnet-hub/main.go`).
 - 2026-11-10: Validate received invitation Hub URLs before create/reissue human, JSON or clipboard output; preserve existing safe URL and HTTP opt-in behavior (internal/cli/invite.go).
 - 2026-11-09: Grok presence uses a 600-second factory TTL, inherits an explicit default TTL when unset, and preserves explicit factory-equal overrides with confirmed shortening risks (`docs/PROTOCOL.md`, registry version 2).

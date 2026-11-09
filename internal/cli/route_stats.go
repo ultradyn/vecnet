@@ -1,0 +1,157 @@
+package cli
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+
+	"github.com/XertroV/vecnet/internal/opapi"
+)
+
+func (a *app) cmdRouteStats(args []string) error {
+	o, err := parseFlags("route stats", args, nil)
+	if err != nil {
+		return routeStatsError(err)
+	}
+	return a.routeStats(o, func() (*client, error) {
+		c, _, _, err := a.connect()
+		return c, err
+	})
+}
+
+// Keep selection lazy so a bad arity never reads configuration or connects.
+func (a *app) routeStats(o opts, selectClient func() (*client, error)) error {
+	if len(o.pos) != 1 {
+		return usageErr("usage: vecnet route stats <peer_id|route_id|sub_id>")
+	}
+	c, err := selectClient()
+	if err != nil {
+		return routeStatsError(err)
+	}
+	var report opapi.RouteStats
+	if err := c.do(a.ctx, http.MethodGet, "/v1/admin/route-stats", url.Values{"id": {o.pos[0]}}, nil, &report); err != nil {
+		return routeStatsError(err)
+	}
+	if a.json {
+		return routeStatsError(a.emitValue(report))
+	}
+
+	// Only human output is flattened; JSON preserves the complete wire DTO.
+	safe := func(s string) string { return unbidi(flatten(s)) }
+	text := func(s *string) string {
+		if s == nil {
+			return "-"
+		}
+		return safe(*s)
+	}
+	number := func(n *float64) string {
+		if n == nil {
+			return "-"
+		}
+		return strconv.FormatFloat(*n, 'f', -1, 64)
+	}
+	var out strings.Builder
+	fmt.Fprintf(&out, "sample: newest %d per route / %dh subject=%s:%s since=%s until=%s\n",
+		report.Window.MaxRows, report.Window.MaxAgeHours, safe(report.Subject.Kind), safe(report.Subject.ID),
+		safe(report.Window.Since), safe(report.Window.Until))
+	out.WriteString("route-wide: attempts cover the whole route across peers, including shared principal routes; ownership and metadata are current.\n")
+	out.WriteString("OK means request acceptance or run start; it does not establish processing or replies.\n")
+	out.WriteString("Telemetry is best effort; retries add attempts and the sample can cover less than 168h.\n")
+	peers := make([]string, len(report.RetainedDeliveries.PeerIDs))
+	for i, peer := range report.RetainedDeliveries.PeerIDs {
+		peers[i] = safe(peer)
+	}
+	fmt.Fprintf(&out, "retained delivery evidence (separate population; retained rows by updated_at, evidence may include claims): peer_ids=[%s] total=%d with_push_evidence=%d accepted_without_push_evidence=%d\n",
+		strings.Join(peers, ","), report.RetainedDeliveries.Total, report.RetainedDeliveries.WithPushEvidence,
+		report.RetainedDeliveries.AcceptedWithoutPushEvidence)
+	for _, row := range report.Routes {
+		status := "-"
+		if row.LastStatus != nil {
+			status = strconv.Itoa(*row.LastStatus)
+		}
+		fmt.Fprintf(&out, "%s owner=%s:%s kind=%s host=%s attempt_scope=%s requests=%d ok=%d fail=%d refused=%d distinct_ids=%d"+
+			" last_used_at=%s last_success_at=%s last_error=%s last_error_at=%s last_status=%s"+
+			" body_bytes_avg=%s body_bytes_p95=%s body_bytes_p99=%s body_bytes_samples=%d"+
+			" latency_ms_avg=%s latency_ms_p95=%s latency_ms_p99=%s latency_ms_samples=%d\n",
+			safe(row.RouteID), safe(row.OwnerKind), safe(row.OwnerID), safe(row.Kind), safe(row.Host), safe(row.AttemptScope),
+			row.Requests, row.OK, row.Fail, row.Refused, row.DistinctIDs,
+			text(row.LastUsedAt), text(row.LastSuccessAt), text(row.LastError), text(row.LastErrorAt), status,
+			number(row.BodyBytes.Avg), number(row.BodyBytes.P95), number(row.BodyBytes.P99), row.BodyBytes.Samples,
+			number(row.LatencyMS.Avg), number(row.LatencyMS.P95), number(row.LatencyMS.P99), row.LatencyMS.Samples)
+	}
+	_, err = io.WriteString(a.stdout, out.String())
+	return routeStatsError(err)
+}
+
+// Rebuild errors before the shared exit printer sees them. Neither wrapping a
+// raw cause nor filtering its characters can keep selectors and remote text
+// private. Preserve exit classes, relocation control, and standard interruption
+// sentinels.
+func routeStatsError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var me *mcpStartupError
+	var he *hubError
+	var re *refusedError
+	var ne *netError
+	var ue *usageError
+	switch {
+	case errors.As(err, &me):
+		return &mcpStartupError{message: "route stats client selection refused"}
+	case errors.As(err, &he):
+		if he.Status == http.StatusGone && he.Code == "hub_moved" {
+			// The shared dispatcher verifies the notice and follows at most once.
+			// Keep only that control payload; terminal output stays fixed.
+			return &hubError{
+				Status: he.Status, Code: "hub_moved", Message: "route stats request failed",
+				Details: map[string]any{"notice": he.Details["notice"]},
+			}
+		}
+		code, message := "http_error", "route stats request failed"
+		switch he.Code {
+		case "unauthenticated":
+			code, message = "unauthenticated", "route stats requires authentication"
+		case "forbidden":
+			code, message = "forbidden", "route stats requires an operator credential"
+		case "not_found":
+			code, message = "not_found", "route stats subject was not found"
+		case "invalid_value":
+			code, message = "invalid_value", "route stats selector or query is invalid"
+		case "internal":
+			code, message = "internal", "the hub could not read route stats"
+		case "bad_response":
+			code, message = "bad_response", "the hub answered with unexpected route stats JSON"
+		default:
+			// Accept only the exact numeric fallback generated by readHubError.
+			fallback := fmt.Sprintf("http_%d", he.Status)
+			if he.Code == fallback {
+				code = fallback
+			}
+		}
+		return &hubError{Status: he.Status, Code: code, Message: message}
+	case errors.As(err, &re):
+		return &refusedError{msg: "route stats client selection refused"}
+	case errors.As(err, &ne):
+		var cause error = errors.New("route stats request failed")
+		if errors.Is(err, context.Canceled) {
+			cause = context.Canceled
+		} else if errors.Is(err, context.DeadlineExceeded) {
+			cause = context.DeadlineExceeded
+		}
+		return &netError{err: cause}
+	case errors.As(err, &ue):
+		return usageErr("route stats: invalid arguments or client configuration")
+	case errors.Is(err, context.Canceled):
+		return context.Canceled
+	case errors.Is(err, context.DeadlineExceeded):
+		return context.DeadlineExceeded
+	default:
+		return errors.New("route stats operation failed")
+	}
+}

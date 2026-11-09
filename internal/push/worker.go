@@ -156,7 +156,12 @@ func (w *Worker) Push(ctx context.Context, d hub.DueDelivery) {
 		w.pushGrokbot(ctx, d)
 		return
 	}
-	status, retryAfter, netErr := w.post(ctx, d.URL, d.DeliveryID, d.Keys, d.Body, d.Attempt, nil)
+	observation := hub.RouteAttemptObservation{RouteID: d.RouteID, DeliveryID: d.DeliveryID, Kind: hub.RouteKindHTTP, BodyBytes: len(d.Body)}
+	status, retryAfter, netErr := w.post(ctx, d.URL, d.DeliveryID, d.Keys, d.Body, d.Attempt, nil, &observation)
+	observation.HTTPStatus, observation.NetError = status, netErr
+	// The immutable invocation value is recorded only after PushResult (also
+	// on stale/error/shutdown returns), with no settlement transaction held.
+	defer func() { w.Hub.NoteRouteAttempt(ctx, observation) }()
 	if ctx.Err() != nil && netErr != nil {
 		// Shutting down: leave the lease to lapse rather than burn an attempt.
 		return
@@ -169,7 +174,7 @@ func (w *Worker) Push(ctx context.Context, d hub.DueDelivery) {
 
 // post signs and sends one webhook. When sink is non-nil the response body
 // (≤ 4 KiB) is copied into it; otherwise it is discarded.
-func (w *Worker) post(ctx context.Context, url, id string, keys []string, body []byte, attempt int, sink *bytes.Buffer) (status int, retryAfter time.Duration, err error) {
+func (w *Worker) post(ctx context.Context, url, id string, keys []string, body []byte, attempt int, sink *bytes.Buffer, observation *hub.RouteAttemptObservation) (status int, retryAfter time.Duration, err error) {
 	if len(body) > hub.MaxPushBody {
 		return 0, 0, &hub.OutboundError{Reason: "body_too_large", Err: fmt.Errorf("push: body is %d bytes, over the %d-byte cap", len(body), hub.MaxPushBody)}
 	}
@@ -192,14 +197,25 @@ func (w *Worker) post(ctx context.Context, url, id string, keys []string, body [
 	if attempt > 0 {
 		req.Header.Set(HeaderAttempt, strconv.Itoa(attempt))
 	}
-	return w.do(req, sink)
+	return w.do(req, sink, observation)
 }
 
 // do sends req on the egress client. When sink is non-nil the response body
 // (≤ 4 KiB) is copied into it; otherwise it is discarded.
-func (w *Worker) do(req *http.Request, sink *bytes.Buffer) (status int, retryAfter time.Duration, err error) {
+func (w *Worker) do(req *http.Request, sink *bytes.Buffer, observation *hub.RouteAttemptObservation) (status int, retryAfter time.Duration, err error) {
+	started := time.Now()
+	if observation != nil {
+		observation.Attempted = true
+	}
+	finish := func() {
+		if observation != nil {
+			observation.Elapsed = time.Since(started)
+			observation.CompletedAt = w.now()
+		}
+	}
 	resp, err := w.client.Do(req)
 	if err != nil {
+		finish()
 		if resp != nil && errors.Is(err, egress.ErrRedirect) {
 			// The redirect was refused, not followed; its status is the
 			// result (§3.3: 3xx is terminal). The body is already closed.
@@ -213,6 +229,7 @@ func (w *Worker) do(req *http.Request, sink *bytes.Buffer) (status int, retryAft
 		dst = sink
 	}
 	io.Copy(dst, io.LimitReader(resp.Body, hub.PushResponseCap))
+	finish()
 	return resp.StatusCode, ParseRetryAfter(resp.Header.Get("Retry-After"), w.now()), nil
 }
 
@@ -242,7 +259,7 @@ func (w *Worker) Verify(ctx context.Context, routeID string) error {
 		return fmt.Errorf("push: challenge: %w", err)
 	}
 	var answer bytes.Buffer
-	status, _, err := w.post(ctx, url, ids.New(verifyPrefix), keys, body, 0, &answer)
+	status, _, err := w.post(ctx, url, ids.New(verifyPrefix), keys, body, 0, &answer, nil)
 	if err != nil {
 		return fmt.Errorf("push: verify %s: %w", routeID, err)
 	}

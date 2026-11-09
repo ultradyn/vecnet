@@ -2,6 +2,7 @@ package mcpserver
 
 // Discovery wording is separate from the HTTP schema and call validators.
 var toolDescriptions = map[string]string{
+	"vecnet_route_stats":        "Read route-wide request samples as the operator: newest 1000 per route within 168h, plus separate retained delivery evidence. Shared routes include all recipients.",
 	"vecnet_send":               "Send to recipients (new thread) or thread_id. Prefer vecnet_reply for answers. Require priority. Use wake_idle for grokbot. See vecnet_guide topic replying.",
 	"vecnet_reply":              "Reply in-thread to inbox data.message.message_id. Require priority. Use wake_idle for grokbot. New thread: vecnet_send. See vecnet_guide topic replying.",
 	"vecnet_react":              "Add or remove a reaction. For text use vecnet_reply. Defaults and wake limits: vecnet_guide topic replying.",
@@ -100,6 +101,7 @@ var propertyDescriptions = map[string]string{
 }
 
 var toolPropertyDescriptions = map[string]map[string]string{
+	"vecnet_route_stats":    {"id": "Exact peer_, route_ or sub_ ID. Names and aliases are unsupported."},
 	"vecnet_ack":            {"cursor": "Event cursor: next_cursor from the inbox page you have fully handled."},
 	"vecnet_inbox":          {"after": "Event cursor e<epoch>.<seq>. head skips existing backlog. Omit for last ack."},
 	"vecnet_thread":         {"id": "Thread ID.", "after": "Message ID: next_after; locators also accept expired anchors."},
