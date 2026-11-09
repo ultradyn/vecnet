@@ -943,6 +943,14 @@ func (a *app) send(req envelope.SendRequest, text string, o opts) error {
 		return a.emitJSON(raw)
 	}
 	fmt.Fprintf(a.stdout, "sent %s thread %s deliveries %d", resp.MessageID, resp.ThreadID, len(resp.Deliveries))
+	for i, delivery := range resp.Deliveries {
+		if i == 0 {
+			fmt.Fprint(a.stdout, " to ")
+		} else {
+			fmt.Fprint(a.stdout, ", ")
+		}
+		fmt.Fprint(a.stdout, sendDestination(delivery))
+	}
 	if resp.Spilled {
 		fmt.Fprint(a.stdout, " (spilled)")
 	}
@@ -951,6 +959,26 @@ func (a *app) send(req envelope.SendRequest, text string, o opts) error {
 	}
 	fmt.Fprintln(a.stdout)
 	return nil
+}
+
+// sendDestination uses only receipt metadata; name discovery must never add
+// another operation or turn a successful send into a name-lookup failure.
+func sendDestination(raw json.RawMessage) string {
+	var destination struct {
+		Recipient string  `json:"recipient"`
+		Name      string  `json:"recipient_name"`
+		Via       *string `json:"via"`
+	}
+	_ = json.Unmarshal(raw, &destination)
+	name := peerName(destination.Name)
+	if name == "" {
+		name = "name unavailable"
+	}
+	label := strconv.QuoteToASCII(name) + "(" + unbidi(flatten(destination.Recipient)) + ")"
+	if destination.Via != nil {
+		label += " via " + unbidi(flatten(*destination.Via))
+	}
+	return label
 }
 
 // mediaTypeOf guesses a file's media type from its extension, without

@@ -36,10 +36,11 @@ type SendResponse struct {
 
 // DeliveryRef is one entry of SendResponse.deliveries.
 type DeliveryRef struct {
-	DeliveryID string  `json:"delivery_id"`
-	Recipient  string  `json:"recipient"`
-	Via        *string `json:"via"`
-	State      string  `json:"state"`
+	DeliveryID    string  `json:"delivery_id"`
+	Recipient     string  `json:"recipient"`
+	RecipientName string  `json:"recipient_name,omitempty"`
+	Via           *string `json:"via"`
+	State         string  `json:"state"`
 }
 
 // IdempotencyWindow is the default and minimum lifetime of a send key per sender
@@ -707,7 +708,7 @@ func (h *Hub) fanOut(ctx context.Context, tx *sql.Tx, thr *threadRow, msg *envel
 		if err != nil {
 			return nil, nil, fmt.Errorf("hub: encode delivery: %w", err)
 		}
-		route, err := routeFor(ctx, tx, t.peer)
+		route, recipientName, err := routeFor(ctx, tx, t.peer)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -751,7 +752,7 @@ func (h *Hub) fanOut(ctx context.Context, tx *sql.Tx, thr *threadRow, msg *envel
 			PushAttempts, route, held, dlyExpires, now, now, cur.Seq, hex.EncodeToString(sum[:])); err != nil {
 			return nil, nil, fmt.Errorf("hub: insert delivery: %w", err)
 		}
-		refs = append(refs, DeliveryRef{DeliveryID: dly, Recipient: t.peer, Via: t.via, State: "queued"})
+		refs = append(refs, DeliveryRef{DeliveryID: dly, Recipient: t.peer, RecipientName: recipientName, Via: t.via, State: "queued"})
 		notify = append(notify, t.peer)
 	}
 	// A message's final fan-out sequence is its immutable position in the
@@ -989,25 +990,25 @@ func (h *Hub) mustMaySend(ctx context.Context, tx *sql.Tx, from, to string) erro
 	return nil
 }
 
-// routeFor returns the push route of peer: its own route, else its
-// principal's, else nil (pull only).
-func routeFor(ctx context.Context, tx *sql.Tx, peer string) (any, error) {
-	var route sql.NullString
+// routeFor returns the peer's push route (its own, else its principal's,
+// else nil) and name. The same lookup supplies optional receipt metadata.
+func routeFor(ctx context.Context, tx *sql.Tx, peer string) (any, string, error) {
+	var route, name sql.NullString
 	err := tx.QueryRowContext(ctx,
-		`SELECT coalesce(p.route_id,
+		`SELECT p.name, coalesce(p.route_id,
 		   (SELECT route_id FROM routes WHERE owner_kind = 'peer' AND owner_id = p.peer_id ORDER BY created_at, route_id LIMIT 1),
 		   (SELECT route_id FROM routes WHERE owner_kind = 'principal' AND owner_id = p.prn_id ORDER BY created_at, route_id LIMIT 1))
-		 FROM peers p WHERE p.peer_id = ?`, peer).Scan(&route)
+		 FROM peers p WHERE p.peer_id = ?`, peer).Scan(&name, &route)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, unknownRecipient(peer)
+		return nil, "", unknownRecipient(peer)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("hub: route for %s: %w", peer, err)
+		return nil, "", fmt.Errorf("hub: route for %s: %w", peer, err)
 	}
 	if !route.Valid {
-		return nil, nil
+		return nil, name.String, nil
 	}
-	return route.String, nil
+	return route.String, name.String, nil
 }
 
 // checkRecipientNames rejects a recipient string that is not a vecnet id
