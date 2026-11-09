@@ -215,27 +215,50 @@ test('CONTROL pending Older reply after unmount cannot render or restart subscri
   }, { top: 100 });
 });
 
-test('CONTROL same peer keeps focused chart, open minute table and keyboard minute through errors', async () => {
+test('CONTROL same peer keeps focused SVG and exact keyboard minute through errors and recovery without minute disclosures', async () => {
   await dashboard(async h => {
     const cell = h.root.querySelector('.peer-activity'), svg = cell.querySelector('svg');
-    const details = cell.querySelector('details');
-    svg.focus(); svg.on.keydown({ key: 'Home', preventDefault() {} }); details.open = true;
-    const before = h.chartWrites(cell);
+    const readout = cell.querySelector('.spark-readout'), cursor = svg.querySelector('.spark-cursor');
+    const inspectHome = count => {
+      assert.equal(h.root.querySelector('.peer-activity'), cell);
+      assert.equal(cell.querySelector('svg'), svg);
+      assert.equal(cell.querySelector('.spark-readout'), readout);
+      assert.equal(svg.querySelector('.spark-cursor'), cursor);
+      assert.equal(document.activeElement, svg);
+      assert.equal(readout.hidden, false);
+      assert.equal(readout.textContent, `${count} messages · [2026-11-09T11:00:30.000Z, 2026-11-09T11:01:30.000Z) UTC — messages in this minute`);
+      assert.equal(cursor.hidden, false);
+      assert.equal(cursor.getAttribute('visibility'), 'visible');
+      assert.equal(cursor.getAttribute('x1'), '4');
+      assert.equal(cursor.getAttribute('x2'), '4');
+      for (const tag of ['details', 'summary', 'table']) assert.equal(cell.querySelectorAll(tag).length, 0, `no ${tag} in a peer chart`);
+    };
+    svg.focus(); svg.on.keydown({ key: 'Home', preventDefault() {} });
+    inspectHome(1);
+    const before = h.chartWrites(cell), points = svg.querySelector('.spark-line').getAttribute('points');
     h.state.peerError = new Error('directory offline');
     h.state.activityError = new Error('stats offline'); await h.tick();
-    assert.equal(h.root.querySelector('.peer-activity'), cell);
+    inspectHome(1);
     assert.match(h.root.querySelector('#d-peers').textContent, /Peers unavailable.*directory offline/);
-    assert.match(cell.textContent, /stale/);
-    assert.match(cell.querySelector('.spark-readout').textContent, /1 messages.*11:00:30/);
+    assert.match(h.root.querySelector('.activity-status').textContent, /Stale.*stats offline/);
+    assert.match(cell.querySelector('.peer-activity-summary').textContent, /4 messages.*stale/);
+    assert.equal(h.root.querySelector('.activity-count').textContent, '4');
+    assert.equal(svg.querySelector('.spark-line').getAttribute('points'), points, 'errors retain the last good chart data');
+    const beforeRecovery = h.chartWrites(cell);
     h.state.peerError = null; h.state.activityError = null;
     h.state.activity = snapshot({ peer_a: [9, 4] }); await h.tick();
-    assert.equal(h.root.querySelector('.peer-activity'), cell);
-    assert.equal(cell.querySelector('svg'), svg);
-    assert.equal(document.activeElement, svg); assert.equal(details.open, true);
-    assert.equal(cell.querySelector('tbody').children.length, 60);
-    assert.match(cell.querySelector('.spark-readout').textContent, /9 messages.*11:00:30/);
+    inspectHome(9);
+    assert.match(cell.querySelector('.peer-activity-summary').textContent, /13 messages/);
+    assert.equal(h.root.querySelector('.activity-count').textContent, '13');
+    assert.doesNotMatch(h.root.querySelector('#d-peers').textContent, /Peers unavailable|directory offline/);
+    assert.doesNotMatch(h.root.querySelector('.activity-status').textContent, /Stale|stats offline/);
     assert.doesNotMatch(cell.textContent, /stale/);
+    assert.notEqual(svg.querySelector('.spark-line').getAttribute('points'), points, 'recovery renders the new chart data');
     assert.ok(h.chartWrites(cell) > before, 'instrumentation observes real active chart updates');
+    assert.ok(h.chartWrites(cell) > beforeRecovery, 'recovery mutates the surviving SVG');
+    svg.on.keydown({ key: 'ArrowRight', preventDefault() {} });
+    assert.equal(readout.textContent, '4 messages · [2026-11-09T11:01:30.000Z, 2026-11-09T11:02:30.000Z) UTC — messages in this minute');
+    svg.on.keydown({ key: 'Home', preventDefault() {} }); inspectHome(9);
   });
 });
 

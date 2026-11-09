@@ -40,8 +40,10 @@ import (
 // (smallest 16 KiB step above it remains 640 KiB); refined on 2026-11-09
 // after removing raw-minute disclosures and compacting activity styles,
 // measured at 653,887 bytes including in-flow overview and peer inspection
-// (cap and all-files coverage unchanged).
-const uiMaxBytes = 640 << 10
+// (cap and all-files coverage unchanged); to 656 KiB on 2026-11-09 for the
+// integrated dashboard, event-pump and Markdown memory fixes, measured by
+// the parent at 657,219 bytes (smallest 16 KiB step above it: 656 KiB).
+const uiMaxBytes = 656 << 10
 
 var (
 	scriptTag   = regexp.MustCompile(`(?is)<script\b([^>]*)>(.*?)</script>`)
