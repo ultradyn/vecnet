@@ -1,4 +1,5 @@
 # Changelog
+- 2026-11-09: opt-in thumbnail cache leases retain shared quota through transport settlement and retryable URL cleanup; existing DOM callers remain on legacy mode (`internal/ui/static/thumbs-model.js`).
 
 - 2026-11-09: Keep unresolved Codex acceptance actors as failed obligations, require exact pinned native shell events and per-TUI capability probes, select explicit workspace permissions for derived state directories plus each actor's own empty workspace, and check trusted Linux managed-policy absence and fresh null requirements before launches and native commands, with exact current owned-idle reads before native commands.
 

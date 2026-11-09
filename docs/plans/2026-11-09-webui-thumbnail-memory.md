@@ -45,7 +45,8 @@ R-M37: independent review found that a schema-valid error envelope can contain a
 R-M38 (2026-11-09): split Task 2a pure shared budget and new dedicated thumbs-budget.test.mjs from Task 2b mount-local cache integration. The exact accepted interfaces and 18 budget regression contracts are in [the budget plan](2026-11-09-webui-thumbnail-budget.md). Existing constructors and DOM callers remain unchanged until their complete ownership transition.
 
 - [x] Task2a pure shared admission budget: focused26/fullUI522/Go10 pass; independent Sol source PASS C0/I0/M2. Coverage minors and remaining cache/DOM obligations are recorded in [the component receipt](receipts/2026-11-09-thumbnail-budget.md).
-- [ ] Task2b mount-local cache integration: source plan in progress; no caller activation.
+- [x] Task2b1 opt-in cache core: 28 focused/542 full UI/7 Go embedding passes; independent Sol core and cap reviews C0/I0/M0. [Component receipt](receipts/2026-11-09-thumbnail-cache-core.md).
+- [ ] Task2b2 owner transfer and explicit retry extension; no caller activation.
 
 **Files:** internal/ui/static/thumbs-budget.js; internal/ui/static/thumbs-model.js; internal/ui/jstest/thumbs.test.mjs.
 **Consumes:** Task 1 promise settlement/error semantics. **Produces:** the exact budget tickets, source permits and cache acquire/move/drop/retry/broken/release interfaces in the design; no incompatible partial DOM activation.
