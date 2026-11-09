@@ -393,7 +393,9 @@ func (w *Worker) drain(ctx context.Context, sub Subscription) (int, error) {
 			}
 		}
 		attemptStarted := time.Now()
-		status, retryAfter, netErr := w.post(ctx, s, r)
+		observation := hub.RouteAttemptObservation{RouteID: s.ID, DeliveryID: r.eventID, Kind: "events", BodyBytes: len(r.body)}
+		status, retryAfter, netErr := w.post(ctx, s, r, &observation)
+		observation.HTTPStatus, observation.NetError = status, netErr
 		result, reason := "delivered", ""
 		retry, dead := false, false
 		if netErr != nil || status < 200 || status >= 300 {
@@ -420,6 +422,9 @@ func (w *Worker) drain(ctx context.Context, sub Subscription) (int, error) {
 				err = endErr
 			}
 		}
+		// record and EndDispatch have returned, including their error paths.
+		// No settlement transaction or reachability lock is held here.
+		w.Hub.NoteRouteAttempt(ctx, observation)
 		if netErr != nil && ctx.Err() != nil {
 			return sent, err // shutting down: this attempt does not count
 		}
@@ -488,7 +493,7 @@ func (w *Worker) authorised(ctx context.Context, s Subscription) (bool, error) {
 
 // post signs and sends one row. webhook-timestamp and webhook-signature are
 // fresh on every attempt; the body and webhook-id never change.
-func (w *Worker) post(ctx context.Context, s Subscription, r outboxRow) (status int, retryAfter time.Duration, err error) {
+func (w *Worker) post(ctx context.Context, s Subscription, r outboxRow, observation *hub.RouteAttemptObservation) (status int, retryAfter time.Duration, err error) {
 	now := w.now()
 	secrets, err := w.Store.secrets(ctx, s.ID, now)
 	if err != nil {
@@ -507,8 +512,15 @@ func (w *Worker) post(ctx context.Context, s Subscription, r outboxRow) (status 
 	req.Header.Set(webhook.HeaderTimestamp, strconv.FormatInt(now.Unix(), 10))
 	req.Header.Set(webhook.HeaderSignature, sig)
 	req.Header.Set(HeaderSubscription, s.ID)
+	started := time.Now()
+	observation.Attempted = true
+	finish := func() {
+		observation.Elapsed = time.Since(started)
+		observation.CompletedAt = w.now()
+	}
 	resp, err := w.Client.Do(req)
 	if err != nil {
+		finish()
 		if resp != nil && errors.Is(err, egress.ErrRedirect) {
 			return resp.StatusCode, 0, nil // refused, not followed; the body is already closed
 		}
@@ -516,6 +528,7 @@ func (w *Worker) post(ctx context.Context, s Subscription, r outboxRow) (status 
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, hub.PushResponseCap))
+	finish()
 	return resp.StatusCode, push.ParseRetryAfter(resp.Header.Get("Retry-After"), now), nil
 }
 
