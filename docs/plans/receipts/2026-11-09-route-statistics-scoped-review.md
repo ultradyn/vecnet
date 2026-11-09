@@ -1,0 +1,64 @@
+PASS C=0 I=0 M=0
+Spec verdict: PASS for the scoped source fix: I1, M1, and M2 are ADDRESSED.
+Quality verdict: PASS for this range; no new actionable source regression established.
+
+This is a fresh independent SOURCE re-review of the three-path fix range, not an execution, release, integration, deployment, or live-acceptance verdict. The authors' reports were treated as claims and reconciled against the source. Counts mean critical / important / minor.
+
+**Scope and pinning**
+
+- Read `scoped-review-brief.md` first. Worktree: `/home/xertrov/src/vecnet4/.worktrees/pr3-route-stats-final-fix`.
+- Exact BASE: `803a8d74454266d1d5bc669ae47a3af4ce132325`; exact reviewed HEAD: `002a419e1d4a65e036b935917fb87bc4bcfbce69`. Final read-only HEAD/status checks matched; no tracked, staged, or untracked worktree changes were reported before writing this report.
+- Reviewed the full patch and all 473 lines of the added test. Delta: `docs/PROTOCOL.md` +3/-3, `internal/cli/route_stats.go` +10/-1, `internal/cli/route_stats_relocation_test.go` +473/-0; exactly three paths, +486/-4. All source citations below are relative to this worktree at reviewed HEAD.
+- Supplied `review-fixed.diff` SHA-256: `e91c30e17e378a98ee5c5725e0edda42fbd439a97b0d85a64f031d3e8bd22f8c`. Its patch payload matches independently generated `git diff --no-ext-diff --no-textconv -U10 BASE HEAD`, SHA-256 `c8ca675a3fd00d7f938f11f9c7b616af1a4bcabc8b943d556c436cd2a8760038`. The package also contains a ten-line title/commit/stat header and one trailing blank line; these account for the different whole-package hash. `git diff --check BASE HEAD` returned 0.
+- Current file SHA-256: route_stats.go `abd38d3da9caa8f2c7ea38b9bfd2fe9011eaf34af319ed9b28f4e94907d2a661`; relocation test `5f5328a954b77cd3aaa1416fae81780704b6e6f75453dd8ca5f0483b98cf0504`; protocol `2e993d2120aafeabda112f133cd89ac7082ef10bbc55624e26c5fda472c9ec7f`.
+- The requested GPT-6.1-Sol launch selection is parent-owned as stated in the brief. No private configuration/model probing, model changes, fallback, or subagents were used. Instruction discovery used exact ancestor paths; source inspection stayed within the assigned worktree and report context within the named preparation tree.
+
+**I1 — ADDRESSED**
+
+The previous destructive mapping is bypassed only for the conjunction `he.Status == http.StatusGone && he.Code == "hub_moved"` at `internal/cli/route_stats.go:108`. The rebuilt error retains status 410, the fixed code and message, and a newly constructed details map containing only `notice` (`route_stats.go:111–114`). The nested notice value is carried intact: no filtering or rewriting of its message, signature, URLs, identifiers, or lifecycle fields occurs. Outer remote Message, Hint, new_url, arbitrary Details, and the raw cause are not copied.
+
+The real relocated handler supplies this signal at `internal/httpapi/relocated.go:46`; the client decodes it at `internal/cli/client.go:151–163`. It now reaches the unchanged exact guard in `internal/cli/follow.go:165`, the existing notice parser at `follow.go:16–29`, and the existing verifier. Effective pin selection is at `internal/cli/pins.go:88–109`; notice verification uses that pin at `follow.go:59–69`. Source/destination checks precede candidate contact (`follow.go:36–57`), followed by active-time/replay checks (`follow.go:71–95`). The public successor identity is verified at `follow.go:97` before config/pin edits or command retry. `pins.go:195–205` constructs a fresh challenge request without bearer/client-label headers and disables redirects; public URL, challenge proof, and key/endorsement checks are at `pins.go:220–233`.
+
+The unchanged dispatcher calls `followFailure` once and retries through `dispatchOnce`, not through recursive follow (`internal/cli/commands.go:481–499`). A second 410 therefore retains its control payload inside the error but is never followed. Its terminal text is fixed: the shared printer emits only Code, Message and optional Hint (`commands.go:233–238`), while this branch supplies no Hint. A hostile but validly signed `HubNotice.Message` is required by the signature hash (`internal/hubid/hubid.go:213–236`) and is not printed by follow (`follow.go:154–159`) or the terminal hub-error printer. Only the verified first destination may appear in the inherited verified-follow diagnostic.
+
+Missing details, an absent notice, or a nil notice cannot panic on the map lookup at `route_stats.go:113`. The parser marshals the resulting nil to JSON null, obtains no moving kind/notice ID, and returns false (`follow.go:21–28`); `followFailure` returns the fixed invalid-notice refusal (`follow.go:175–177`). Disabled follow is handled before parsing (`follow.go:172–174`). Refusals retain the existing `relocation_unverified` error and exit 1 through `internal/cli/pins.go:171–173` and `commands.go:251–253`. No alternative verification or refusal implementation was added.
+
+Profile eligibility and pin persistence remain owned by `follow.go:112–148`: normalized old hub and effective pin select the edit set, config/pin snapshots guard concurrent changes, existing PinnedAt survives, and LastMove records the first verified notice. The new tests directly check config, backup, credential fields, unrelated profiles and pin records as detailed below.
+
+**New tests — production paths and independent oracles**
+
+| Requirement | Source evidence and assessment |
+| --- | --- |
+| Public command and real same-key successor | `internal/cli/route_stats_relocation_test.go:134–182` creates a real route, clones its database, explicitly checks equal identity keys, seeds synthetic profiles/pins, and installs the real relocated handler. `:185–188` invokes public `RunContext`. The observer proxies to real handlers except where a failure/envelope fixture is deliberately installed (`:49–96`). Fixture environment resolution is isolated by the existing `internal/cli/pins_test.go:21–29`. |
+| Positive relocation and signed hostile message | `route_stats_relocation_test.go:286–313` includes an unmodified real-410 case and a separately re-signed hostile-message case. Each requires one source stats GET/410 and exactly successor identity/200 then stats/200. Full CLI JSON is compared with bytes captured from that actual successor response, without a second sample read (`:302–305`). The hostile case therefore also detects destruction of signed Message, not just accidental printing. |
+| Config, backup and pins | Shared assertions at `:226–282` require p/q to move while retaining other fields, r/u to remain unchanged, an exact original `.bak`, preserved comments/unknown keys and unrelated section bytes, and exact pin/LastMove records with original timestamps and `How: follow`. The same assertions apply after a second-hop refusal. These read persisted synthetic files, not fixture-maintained success flags. |
+| Refusal, privacy and credentials | Twelve public-command cases at `:319–405` cover no-follow, missing/malformed/wrong-kind notice, bad signature, wrong source, unchanged destination, signed expiry, cleared state, secret-bearing URL, replay and a real wrong-key hub. They assert exact exit-1 refusal text, no stdout, no valid-successor requests, unchanged config/pins and no backup. Wrong-key contact is exactly one public identity GET and no stats GET (`:399–404`). The observer rejects credentials/client labels on identity requests (`:62–65`); privacy canaries are checked by `:191–199`. |
+| Exact status/code controls | `:412–435` sends 409/500 with hub_moved and 410 with not_found, hostile code or numeric fallback through the real command. Each requires the established exact exit-2 safe message, one source GET, zero successor requests and no config/pin/backup mutation. A valid notice is included, so neither status nor code alone can accidentally authorize a follow. |
+| Second hop | `:442–470` constructs a third same-key clone and a signed second moving notice with hostile text. It requires source stats/410, successor identity/200 then stats/410, no third-hub requests, exactly one verified-follow line and one stable terminal hub_moved line, and first-move-only persistence. Neither second notice ID nor third URL may appear. |
+
+The clear-state fixture is consistent with the real signature contract: clear metadata is explicitly unsigned (`internal/envelope/types.go:282–295`), so changing ClearedAt reaches lifecycle refusal rather than invalidating the signed message. The nil-notice behavior above is established by source; the table has a missing-notice case, not a separate explicit JSON-null fixture. No test execution is claimed here.
+
+**M1 — ADDRESSED**
+
+`docs/PROTOCOL.md:667` now describes the closed object after argument `_meta` removal. `docs/PROTOCOL.md:696` explicitly says `_meta` is stripped regardless of value type before validation, grants no selector/authority, and leaves other extra arguments subject to sanitized -32602. This matches unconditional member deletion at `internal/mcpserver/tools.go:99–107` followed by validation at `tools.go:118–129`. Existing null/string/array metadata cases remain at `internal/mcpserver/route_stats_test.go:204–207`; the required-id/extra-field cases remain at `:212–222`. No production authorization or schema change was folded into this wording correction.
+
+**M2 — ADDRESSED**
+
+`docs/PROTOCOL.md:525`, `:667`, and `:696` now distinguish MCP schema length 1–80 characters from the hub's independent 80 UTF-8 byte limit and strict ASCII/ULID selector semantics. The schema remains minLength 1/maxLength 80 (`internal/mcpserver/route_stats.go:13–15`); the hub checks Go byte length and strict ULID parsing (`internal/hub/route_stats.go:70–88`). Schema failures receive -32602 before the call (`tools.go:122–123`, `:182`), while an authorized selector failing the hub checks produces API invalid_value (`internal/hub/route_stats.go:25–33`) and tool-level isError (`tools.go:206–207`, `:215–220`). Thus a 27-character/81-byte string passes the schema-length stage but fails the hub stage, exactly as the corrected paragraph states. The operator guard remains before selector validation.
+
+**Regressions**
+
+None established in this fix range. All nonmatching status/code pairs still enter the unchanged mapping at `internal/cli/route_stats.go:116–137`; ordinary remote text/details and network/decode causes retain fixed sanitized output and their existing exit/interruption classes. The request/DTO/arity/selection paths at `route_stats.go:16–41` are unchanged. Existing normal one-GET/error/privacy/arity cases (`internal/cli/route_stats_test.go:159–389`) and public selected-profile/terminator cases (`internal/cli/route_stats_dispatch_test.go:140–268`) remain unchanged; they were read as source, not rerun.
+
+Read-only Git comparison returned 0 for the inherited commands/follow/pins/client files, existing follow/stats tests, all migrations, go.mod/go.sum and justfile. The complete three-path inventory also establishes no delivery/ack/loop/native/Dot/OAuth/dashboard change, no historical migration edits and no dependency/toolchain/public-surface addition. The only production executable delta is the bounded error-carrier branch. Unrelated inherited source observations were not expanded into findings or audited as part of this re-review.
+
+**Cannot verify**
+
+- No tests, compilation, formatting tools, builds, imports, Go/Node/just/SQL execution, network/SSH/rsync/browser, runtime/session/database/credential/private-config inspection, or gate reruns were performed. Test compilation, actual assertions, timing, race behavior and runtime effects are not independently verified by this report.
+- The parent reports behavior RED (19 failure nodes, 54 pass events), focused GREEN (73 passes), and complete CLI (1765 passes, one existing skip, actual/bb exit 0) with source-inventory receipts. These remain parent-supplied execution claims; I read their report, did not rerun the commands, and did not independently audit raw execution receipts. The older 803a full-Go result is baseline evidence only.
+- Exact fixed-head full Go and other applicable vet/build/dependency/integration gates, E2E/npm, screenshots and controller visual inspection, original PR3 disposition, final integration/release and live behavior remain outside this source verdict. Their completion is not inferred from the CLI report or from SOURCE PASS.
+- No unresolved I1/M1/M2 source defect remains in the assigned range. The outstanding matters above are execution/acceptance evidence and parent-owned integration decisions, not findings counted as C/I/M.
+
+Only read-only text/Git/hash/diff inspection preceded the sole requested write to this report. No source/index/ref writes, agents, ccc/c2c/attn/tmux, commit, push, merge or deployment were performed. Report written last; stopping without polling gates.
+
+=== DONE ===
