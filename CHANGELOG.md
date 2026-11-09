@@ -1,4 +1,6 @@
 # Changelog
+- 2026-11-10: Document operator route statistics across HTTP, MCP and CLI JSON, with bounded route-wide request samples, separate retained-delivery evidence, null/last-status semantics and fixed private errors (docs/PROTOCOL.md §§2.12–2.13,3,4.3–4.4,5.3,13.7).
+
 - 2026-11-09: ChatGPT Dot onboarding includes a short setup prompt and Copy prompt action after plugin connection (`internal/ui/static/invite.js`).
 - 2026-11-09: TUI dashboard hides archived peers by default; `a` reveals marked rows while displayed-row navigation and disabled peers remain available (`internal/tui/screen_dash.go`).
 - 2026-11-09: Deploy relevant reviewed master merges to Fly promptly, with serialized ownership and running commit/asset smoke checks (`docs/DEPLOY.md`).
