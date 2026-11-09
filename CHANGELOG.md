@@ -1,5 +1,7 @@
 # Changelog
 
+- 2026-11-09: Bound the Web UI parsed-message memo to 256 Ki UTF-16 key units while preserving full rendering; see docs/plans/2026-11-09-markdown-cache-memory.md.
+
 - 2026-11-09: Release event-pump abort bookkeeping after every resource wait and normal terminal stop, preserving accepted-once-shown acknowledgement and prompt abort semantics (issue #60; docs/plans/2026-11-09-webui-pump-lifetime.md).
 
 - 2026-11-09: Bound dashboard audit retention to one navigable fifty-entry page and release retired peer chart owners; preserve Older/Newer/Latest history, focus and last-good error recovery (issue #60; docs/plans/2026-11-09-webui-memory.md).
