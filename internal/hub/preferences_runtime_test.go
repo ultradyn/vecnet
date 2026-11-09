@@ -12,6 +12,7 @@ import (
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/events"
 	"github.com/XertroV/vecnet/internal/hub"
+	"github.com/XertroV/vecnet/internal/opapi"
 	"github.com/XertroV/vecnet/internal/opview"
 	"github.com/XertroV/vecnet/internal/prefs"
 	"github.com/XertroV/vecnet/internal/testhub"
@@ -722,6 +723,201 @@ func TestPreferencesRuntimeRefreshPreservesClientDeadline(t *testing.T) {
 			if err != nil || len(health) != 1 || health[0].RefreshBefore == nil || *health[0].RefreshBefore != envelope.FormatTime(*refreshed.RefreshBefore) {
 				t.Fatal("health did not adopt successful subscribe advice", err)
 			}
+		})
+	}
+}
+
+type grokTTLDeliveryState struct {
+	Held, Attempt, AttemptsLeft, LastStatus, Receipts, ReceiptAudits int
+	Priority, State, NextAttempt, ReadAt, LastError, Expires         string
+}
+
+func grokTTLDelivery(t *testing.T, h *hub.Hub, msg string) grokTTLDeliveryState {
+	t.Helper()
+	var d grokTTLDeliveryState
+	err := h.DB.QueryRow(`SELECT held, attempt, attempts_left, coalesce(last_status,0),
+		(SELECT count(*) FROM events WHERE type='receipt'),
+		(SELECT count(*) FROM audit WHERE action='receipt'),
+		priority, state, coalesce(next_attempt_at,''), coalesce(read_at,''), coalesce(last_error,''), expires_at
+		FROM deliveries WHERE msg_id=?`, msg).Scan(&d.Held, &d.Attempt, &d.AttemptsLeft, &d.LastStatus,
+		&d.Receipts, &d.ReceiptAudits, &d.Priority, &d.State, &d.NextAttempt, &d.ReadAt, &d.LastError, &d.Expires)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if expiry, err := envelope.ParseTime(d.Expires); err != nil || !expiry.After(h.Now()) {
+		t.Fatal("held fixture must outlive the sampled fake time", err)
+	}
+	return d
+}
+
+func grokTTLAssertDelivery(t *testing.T, h *hub.Hub, msg string, before grokTTLDeliveryState, held int) {
+	t.Helper()
+	before.Held = held
+	if got := grokTTLDelivery(t, h, msg); got != before {
+		t.Errorf("delivery %s = %+v, want %+v (only held may change)", msg, got, before)
+	}
+}
+
+func grokTTLSend(t *testing.T, env *testhub.Env, peer, key, priority string) string {
+	t.Helper()
+	body := req(key, peer)
+	body["priority"] = priority
+	msg := mustSend(t, env, env.OperatorSecret, body).MessageID
+	d := grokTTLDelivery(t, env.Hub, msg)
+	wantHeld := 0
+	if priority == "wake_idle" {
+		wantHeld = 1
+	}
+	if d.Priority != priority || d.Held != wantHeld || d.State != "queued" || d.Attempt != 0 || d.ReadAt != "" {
+		t.Fatalf("fresh busy delivery control = %+v, want priority=%s held=%d queued/unattempted/unread", d, priority, wantHeld)
+	}
+	return msg
+}
+
+func TestGrokTTLHeldReleaseAtTick(t *testing.T) {
+	env := testhub.Start(t)
+	peer, secret := env.NewPeer("grokbot", "busy")
+	reportPresence(t, env, secret, "", "working")
+	msg := grokTTLSend(t, env, peer, "held-at-T", "wake_idle")
+	hold := grokTTLSend(t, env, peer, "priority-hold", "hold")
+	before, holdBefore := grokTTLDelivery(t, env.Hub, msg), grokTTLDelivery(t, env.Hub, hold)
+	env.Now.Advance(600 * time.Second)
+	env.Hub.Tick(context.Background(), false)
+	grokTTLAssertDelivery(t, env.Hub, msg, before, 1)
+	env.Now.Advance(time.Millisecond)
+	env.Hub.Tick(context.Background(), false)
+	grokTTLAssertDelivery(t, env.Hub, msg, before, 0)
+	grokTTLAssertDelivery(t, env.Hub, hold, holdBefore, 0)
+	body := req("fresh-after-boundary", peer)
+	body["priority"] = "wake_idle"
+	fresh := mustSend(t, env, env.OperatorSecret, body).MessageID
+	d := grokTTLDelivery(t, env.Hub, fresh)
+	if d.Held != 0 || d.State != "queued" || d.Attempt != 0 || d.ReadAt != "" || d.Receipts != before.Receipts || d.ReceiptAudits != before.ReceiptAudits {
+		t.Errorf("fresh send after 600s+1ms = %+v, want unheld without dispatch or receipt", d)
+	}
+}
+
+func TestGrokTTLProjectionConsumers(t *testing.T) {
+	env := testhub.Start(t)
+	peer, secret := env.NewPeer("grokbot", "projection")
+	caller := provisionCaller(t, env, secret)
+	reportPresence(t, env, secret, "", "working")
+	state, at := "working", envelope.FormatTime(env.Now.Now())
+	env.Now.Advance(601 * time.Second)
+	row := hub.PresenceRow{Kind: "grokbot", State: &state, At: &at}
+	snapshot, err := env.Hub.Preferences.LoadSnapshot(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{
+		"EffectivePresence":  env.Hub.EffectivePresence(row, env.Now.Now()),
+		"Current":            hub.EffectivePresenceSnapshot(env.Hub.Preferences.Current(), row, env.Now.Now()),
+		"operation snapshot": hub.EffectivePresenceSnapshot(snapshot, row, env.Now.Now()),
+		"Directory":          directoryPresence(t, env, peer),
+	}
+	reader := opview.New(env.Hub)
+	peers, err := reader.Peers(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, p := range peers {
+		if p.Peer.PeerID == peer {
+			found = true
+			got["Peers"] = p.Peer.Presence
+		}
+	}
+	if !found {
+		t.Fatal("Grok missing from operator peer projection")
+	}
+	// Resolve the real peer credential and project only its own inbox.
+	inbox, err := reader.Inbox(context.Background(), caller, opapi.InboxQuery{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inbox.Me.PeerID != peer {
+		t.Fatal("inbox projection used a foreign peer")
+	}
+	got["own-peer Inbox"] = inbox.Me.Presence
+	for consumer, presence := range got {
+		if presence != "unknown" {
+			t.Errorf("%s at age601s = %q, want unknown", consumer, presence)
+		}
+	}
+}
+
+func TestGrokTTLPublicationAndStartupRelease(t *testing.T) {
+	for _, mode := range []string{"startup", "notification", "missed-publication-restart"} {
+		t.Run(mode, func(t *testing.T) {
+			env := testhub.StartWith(t, func(cfg *hub.Config) {
+				if mode != "startup" {
+					*cfg = grokTTLExplicitDefault(*cfg, 7200)
+				}
+			})
+			if mode != "startup" {
+				runtimePatch(t, env.Hub, map[string]prefs.Value{"presence.default_ttl": prefs.Duration(3600)})
+			}
+			peer, secret := env.NewPeer("grokbot", "busy")
+			reportPresence(t, env, secret, "", "working")
+			msg := grokTTLSend(t, env, peer, "grok-held", "wake_idle")
+			hold := grokTTLSend(t, env, peer, "hold-control", "hold")
+			stale, staleSecret := env.NewPeer("session", "independent-startup-barrier")
+			reportPresence(t, env, staleSecret, "", "working")
+			barrier := grokTTLSend(t, env, stale, "session-held", "wake_idle")
+			before, holdBefore := grokTTLDelivery(t, env.Hub, msg), grokTTLDelivery(t, env.Hub, hold)
+			if mode == "startup" {
+				env.Now.Advance(601 * time.Second)
+			} else {
+				env.Now.Advance(20 * time.Minute)
+				env.Hub = grokTTLReopen(t, env.Hub, hub.DefaultConfig())
+				prefValue(t, readPrefs(t, env.Hub), "presence.default_ttl", 3600, prefs.SourceStored, "")
+			}
+			reset := func() {
+				t.Helper()
+				s := readPrefs(t, env.Hub)
+				p := prefs.Patch{Reset: []string{"presence.default_ttl"}}
+				preview, err := env.Hub.Preferences.PreviewPreferences(context.Background(), prefsOperator, s.ETag, p)
+				if err != nil {
+					t.Fatal(err)
+				}
+				// Missing baseline risk must not hide the independent release oracle.
+				if len(preview.Risks) > 0 {
+					p.Confirm = []string{preview.ConfirmToken}
+				}
+				patchPrefs(t, env.Hub, s, p)
+			}
+			if mode == "missed-publication-restart" {
+				if env.Hub.Preferences.SubscriberCount() != 0 {
+					t.Fatal("missed-publication fixture already has a subscriber")
+				}
+				reset()
+				grokTTLAssertDelivery(t, env.Hub, msg, before, 1)
+				env.Hub = grokTTLReopen(t, env.Hub, hub.DefaultConfig())
+				prefValue(t, readPrefs(t, env.Hub), "presence.default_ttl", 3600, prefs.SourceDefault, "")
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan struct{})
+			stop := runtimeWorkerCleanup(t, cancel, done)
+			t.Cleanup(func() {
+				stop()
+				runtimeEventually(t, func() bool { return env.Hub.Preferences.SubscriberCount() == 0 })
+			})
+			go func() { env.Hub.RunTickers(ctx, time.Hour); close(done) }()
+			if mode == "notification" {
+				// A committed stale-session release proves the initial pass ran.
+				runtimeEventually(t, func() bool {
+					return grokTTLDelivery(t, env.Hub, barrier).Held == 0
+				})
+				grokTTLAssertDelivery(t, env.Hub, msg, before, 1)
+				reset()
+			}
+			runtimeEventually(t, func() bool {
+				return grokTTLDelivery(t, env.Hub, msg).Held == 0
+			})
+			stop()
+			runtimeEventually(t, func() bool { return env.Hub.Preferences.SubscriberCount() == 0 })
+			grokTTLAssertDelivery(t, env.Hub, msg, before, 0)
+			grokTTLAssertDelivery(t, env.Hub, hold, holdBefore, 0)
 		})
 	}
 }

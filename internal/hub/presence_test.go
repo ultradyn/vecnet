@@ -182,13 +182,13 @@ func TestPresenceGoesStale(t *testing.T) {
 	if p := directoryPresence(t, env, s); p != "unknown" {
 		t.Fatalf("session presence after 16m = %q, want unknown", p)
 	}
-	if p := directoryPresence(t, env, g); p != "idle" {
-		t.Fatalf("grokbot presence after 16m = %q, want idle", p)
+	if p := directoryPresence(t, env, g); p != "unknown" {
+		t.Fatalf("grokbot presence after 16m = %q, want unknown (10 min TTL)", p)
 	}
 
 	env.Now.Advance(43 * time.Minute) // 59m since the report
-	if p := directoryPresence(t, env, g); p != "idle" {
-		t.Fatalf("grokbot presence after 59m = %q, want idle", p)
+	if p := directoryPresence(t, env, g); p != "unknown" {
+		t.Fatalf("grokbot presence after 59m = %q, want unknown (10 min TTL)", p)
 	}
 	env.Now.Advance(2 * time.Minute) // 61m
 	if p := directoryPresence(t, env, g); p != "unknown" {
@@ -226,7 +226,44 @@ func TestLauncherPresenceGoesStaleAfter15m(t *testing.T) {
 	if got := directoryPresence(t, env, launcher); got != "unknown" {
 		t.Fatalf("launcher presence at 15m01s = %q, want unknown", got)
 	}
-	if got := directoryPresence(t, env, grokbot); got != "idle" {
-		t.Fatalf("grokbot presence at 15m01s = %q, want idle (1 h TTL)", got)
+	if got := directoryPresence(t, env, grokbot); got != "unknown" {
+		t.Fatalf("grokbot presence at 15m01s = %q, want unknown (10 min TTL)", got)
+	}
+}
+
+func TestGrokTTLFactoryBoundary(t *testing.T) {
+	env := testhub.Start(t)
+	peers := map[string]string{}
+	for _, kind := range []string{"grokbot", "session", "launcher", "openclaw"} {
+		peer, secret := env.NewPeer(kind, kind)
+		peers[kind] = peer
+		reportPresence(t, env, secret, "", "working")
+	}
+	never, _ := env.NewPeer("grokbot", "never-reported")
+	state, at := "working", envelope.FormatTime(env.Now.Now())
+	start := env.Now.Now()
+	for _, sample := range []struct {
+		age                  time.Duration
+		grok, session, other string
+	}{
+		{600 * time.Second, "working", "working", "working"},
+		{600*time.Second + time.Millisecond, "unknown", "working", "working"},
+		{900 * time.Second, "unknown", "working", "working"},
+		{900*time.Second + time.Millisecond, "unknown", "unknown", "working"},
+		{3600 * time.Second, "unknown", "unknown", "working"},
+		{3600*time.Second + time.Millisecond, "unknown", "unknown", "unknown"},
+	} {
+		env.Now.Advance(start.Add(sample.age).Sub(env.Now.Now()))
+		for kind, want := range map[string]string{"grokbot": sample.grok, "session": sample.session, "launcher": sample.session, "openclaw": sample.other} {
+			if got := env.Hub.EffectivePresence(hub.PresenceRow{Kind: kind, State: &state, At: &at}, env.Now.Now()); got != want {
+				t.Errorf("EffectivePresence(%s, %s) = %q, want %q", kind, sample.age, got, want)
+			}
+			if got := directoryPresence(t, env, peers[kind]); got != want {
+				t.Errorf("Directory(%s, %s) = %q, want %q", kind, sample.age, got, want)
+			}
+		}
+		if got := directoryPresence(t, env, never); got != "unknown" {
+			t.Errorf("never-reported Grok = %q, want unknown", got)
+		}
 	}
 }

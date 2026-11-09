@@ -535,3 +535,197 @@ func TestPreferencesConfirmedOrdinaryNoopDoesNotActivate(t *testing.T) {
 		})
 	}
 }
+
+func TestGrokTTLProvenanceResetRequiresConfirmation(t *testing.T) {
+	h, _, clock := preferencesHubClock(t, grokTTLExplicitDefault(hub.DefaultConfig(), 7200))
+	runtimePatch(t, h, map[string]prefs.Value{"presence.default_ttl": prefs.Duration(3600)})
+	h = grokTTLReopen(t, h, hub.DefaultConfig())
+	before := readPrefs(t, h)
+	prefValue(t, before, "presence.default_ttl", 3600, prefs.SourceStored, "")
+	state, at := "working", envelope.FormatTime(clock.Now())
+	clock.Advance(20 * time.Minute)
+	row := hub.PresenceRow{Kind: "grokbot", State: &state, At: &at}
+	if got := h.EffectivePresence(row, clock.Now()); got != "working" {
+		t.Fatalf("stored D3600 control = %q, want working", got)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	updates := h.Preferences.Subscribe(ctx)
+	t.Cleanup(func() {
+		cancel()
+		runtimeEventually(t, func() bool { return h.Preferences.SubscriberCount() == 0 })
+	})
+	unchanged := func() {
+		t.Helper()
+		for _, s := range []prefs.Snapshot{readPrefs(t, h), h.Preferences.Current()} {
+			if s.ETag != before.ETag || s.Revision != before.Revision || !reflect.DeepEqual(s.Descriptors(), before.Descriptors()) {
+				t.Error("preview or rejected reset changed persistent/published preferences")
+			}
+		}
+		prefsAuditCount(t, h, 1)
+		select {
+		case <-updates:
+			t.Error("preview or rejected reset published a notification")
+		default:
+		}
+	}
+	p := prefs.Patch{Reset: []string{"presence.default_ttl"}}
+	preview := previewPrefs(t, h.Preferences, prefsOperator, before, p)
+	if len(preview.Risks) != 1 || preview.Risks[0].Code != "presence_shortened" ||
+		!reflect.DeepEqual(preview.Risks[0].Keys, []string{"presence.default_ttl"}) ||
+		!strings.Contains(strings.ToLower(preview.Risks[0].Message), "grok") {
+		t.Errorf("raw3600 -> raw3600 reset must identify Grok 3600 -> 600 shortening: %+v", preview.Risks)
+	}
+	unchanged()
+	_, err := h.Preferences.PatchPreferences(context.Background(), prefsOperator, before.ETag, p)
+	if err == nil {
+		t.Error("provenance-only shortening RESET committed without confirmation")
+		unchanged()
+		return
+	}
+	prefsCode(t, err, prefs.CodeConfirmationRequired)
+	unchanged()
+	p.Confirm = []string{preview.ConfirmToken}
+	after := patchPrefs(t, h, before, p)
+	prefValue(t, after, "presence.default_ttl", 3600, prefs.SourceDefault, "")
+	if after.Revision != before.Revision+1 || after.ETag == before.ETag {
+		t.Error("confirmed provenance-only reset must revise its ETag")
+	}
+	if got := h.EffectivePresence(row, clock.Now()); got != "unknown" {
+		t.Errorf("confirmed reset must change Grok from inherited3600 to factory600: %q", got)
+	}
+	prefsAuditCount(t, h, 2)
+	select {
+	case revision := <-updates:
+		if revision != after.Revision {
+			t.Errorf("notification revision = %d, want %d", revision, after.Revision)
+		}
+	default:
+		t.Error("confirmed reset did not notify")
+	}
+	_, err = h.Preferences.PatchPreferences(context.Background(), prefsOperator, before.ETag, p)
+	prefsCode(t, err, prefs.CodeRevisionConflict)
+}
+
+func TestGrokTTLExplicitGFactorySetRequiresConfirmation(t *testing.T) {
+	for _, scenario := range []string{"confirmed", "tampered", "expired", "patch", "revision", "commit-failure"} {
+		t.Run(scenario, func(t *testing.T) {
+			h, _, clock := preferencesHubClock(t, grokTTLExplicitDefault(hub.DefaultConfig(), 7200))
+			s := readPrefs(t, h)
+			prefValue(t, s, "presence.grokbot_ttl", 600, prefs.SourceDefault, "")
+			prefValue(t, s, "presence.default_ttl", 7200, prefs.SourceFlag, "--presence-ttl")
+			old, oldRows := h.Preferences.Current(), s.Descriptors()
+			state, at := "working", envelope.FormatTime(clock.Now())
+			row := hub.PresenceRow{Kind: "grokbot", State: &state, At: &at}
+			clock.Advance(601 * time.Second)
+			if got := h.EffectivePresence(row, clock.Now()); got != "working" {
+				t.Fatalf("unset G must inherit explicit D7200: %q", got)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			wake := h.Preferences.Subscribe(ctx)
+			t.Cleanup(func() {
+				cancel()
+				runtimeEventually(t, func() bool { return h.Preferences.SubscriberCount() == 0 })
+			})
+			audits := 0
+			unchanged := func() {
+				t.Helper()
+				for _, got := range []prefs.Snapshot{readPrefs(t, h), h.Preferences.Current()} {
+					if got.Revision != s.Revision || got.ETag != s.ETag || !reflect.DeepEqual(got.Descriptors(), s.Descriptors()) {
+						t.Fatal("preview/rejection/rollback changed durable or published preferences")
+					}
+				}
+				if !reflect.DeepEqual(old.Descriptors(), oldRows) {
+					t.Fatal("old publication was mutated")
+				}
+				prefsAuditCount(t, h, audits)
+				select {
+				case <-wake:
+					t.Fatal("preview/rejection/rollback published a wake")
+				default:
+				}
+			}
+			p := prefs.Patch{Set: map[string]prefs.Value{"presence.grokbot_ttl": prefs.Duration(600)}}
+			preview := previewPrefs(t, h.Preferences, prefsOperator, s, p)
+			if len(preview.Risks) != 1 || preview.Risks[0].Code != "presence_shortened" ||
+				!reflect.DeepEqual(preview.Risks[0].Keys, []string{"presence.grokbot_ttl"}) ||
+				!strings.Contains(strings.ToLower(preview.Risks[0].Message), "grok") {
+				t.Fatalf("explicit G600 replacing inherited7200 must identify Grok shortening: %+v", preview.Risks)
+			}
+			unchanged()
+			_, err := h.Preferences.PatchPreferences(ctx, prefsOperator, s.ETag, p)
+			prefsCode(t, err, prefs.CodeConfirmationRequired)
+			unchanged()
+			p.Confirm = []string{preview.ConfirmToken}
+			switch scenario {
+			case "tampered":
+				p.Confirm[0] = "x" + preview.ConfirmToken[1:]
+			case "expired":
+				clock.Advance(5 * time.Minute)
+			case "patch":
+				p.Set["presence.grokbot_ttl"] = prefs.Duration(601)
+			case "revision":
+				s = patchPrefs(t, h, s, prefs.Patch{Set: map[string]prefs.Value{"agents.thread_budget": prefs.Int(600)}})
+				audits++
+				select {
+				case revision := <-wake:
+					if revision != s.Revision {
+						t.Fatal("unrelated commit notified the wrong revision")
+					}
+				default:
+					t.Fatal("unrelated commit failed to notify")
+				}
+			case "commit-failure":
+				// Fault injection only: no preference rows or auth/policy are patched.
+				// The trigger INSERT succeeds; its deferred FK fails at COMMIT.
+				for _, statement := range []string{
+					"CREATE TABLE grok_ttl_parent (id INTEGER PRIMARY KEY)",
+					"CREATE TABLE grok_ttl_child (parent_id INTEGER REFERENCES grok_ttl_parent(id) DEFERRABLE INITIALLY DEFERRED)",
+					"CREATE TRIGGER grok_ttl_commit AFTER INSERT ON hub_preferences WHEN NEW.key='presence.grokbot_ttl' BEGIN INSERT INTO grok_ttl_child VALUES(1); END",
+				} {
+					if _, err := h.DB.Exec(statement); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if scenario != "confirmed" {
+				_, err = h.Preferences.PatchPreferences(ctx, prefsOperator, s.ETag, p)
+				want := prefs.CodeConfirmationStale
+				if scenario == "commit-failure" {
+					want = prefs.CodeStorageUnavailable
+				}
+				prefsCode(t, err, want)
+				unchanged()
+				if scenario == "commit-failure" {
+					var children int
+					if err := h.DB.QueryRow("SELECT count(*) FROM grok_ttl_child").Scan(&children); err != nil || children != 0 {
+						t.Fatal("failed commit left fault-injection rows", err)
+					}
+					if _, err := h.DB.Exec("DROP TRIGGER grok_ttl_commit"); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			p = prefs.Patch{Set: map[string]prefs.Value{"presence.grokbot_ttl": prefs.Duration(600)}}
+			fresh := previewPrefs(t, h.Preferences, prefsOperator, s, p)
+			unchanged()
+			p.Confirm = []string{fresh.ConfirmToken}
+			after := patchPrefs(t, h, s, p)
+			prefValue(t, after, "presence.grokbot_ttl", 600, prefs.SourceStored, "")
+			if after.Revision != s.Revision+1 || after.ETag == s.ETag || h.Preferences.Current().ETag != after.ETag || readPrefs(t, h).ETag != after.ETag {
+				t.Fatal("fresh confirmed factory-equal intent did not commit/publish")
+			}
+			if h.EffectivePresence(row, clock.Now()) != "unknown" || !reflect.DeepEqual(old.Descriptors(), oldRows) {
+				t.Fatal("explicit G600 did not shorten Grok or mutated the old publication")
+			}
+			prefsAuditCount(t, h, audits+1)
+			select {
+			case revision := <-wake:
+				if revision != after.Revision {
+					t.Fatal("confirmed intent notified the wrong revision")
+				}
+			default:
+				t.Fatal("confirmed intent did not publish a wake")
+			}
+		})
+	}
+}

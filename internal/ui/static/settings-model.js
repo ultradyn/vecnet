@@ -150,19 +150,31 @@ export function parseField(row, input) {
   return { error: 'This setting type is not supported here.' };
 }
 
-// lockOf says why a row cannot be edited here, or null. Unavailable rows
-// (an adapter not installed) and start-up-only rows come from the hub; a
-// flag or environment value is read-only in both views, as it would come back
-// on the next restart (plan Decision 1).
+// Only live default/Grok TTLs preserve explicit overrides of starting values.
+const presenceIntent = row => ['presence.default_ttl', 'presence.grokbot_ttl'].includes(row.key) && row.editable && row.runtime === 'live';
+
+// lockOf says why a row cannot be edited here, or null. Other flag values,
+// unavailable consumers and start-up-only settings remain read-only.
 export function lockOf(row) {
   if (!row) return { kind: 'unavailable', text: 'Unknown setting.' };
   if (row.runtime === 'unavailable') return { kind: 'unavailable', text: row.unavailable_reason || 'Its consumer is not installed on this hub.' };
-  if (!row.editable) return { kind: 'readonly', text: row.unavailable_reason || 'Not editable while the hub runs.' };
-  if (row.source === 'flag') {
+  if (!row.editable || row.runtime !== 'live') return { kind: 'readonly', text: row.unavailable_reason || 'Not editable while the hub runs.' };
+  if (row.source === 'flag' && !presenceIntent(row)) {
     const where = row.origin ? (row.origin.startsWith('--') ? `the ${row.origin} flag` : `the ${row.origin} environment variable`) : 'a hub flag or environment variable';
     return { kind: 'flag', text: `Set by ${where} when the hub started. Change it there; it is read-only here.` };
   }
   return null;
+}
+
+// Resolve committed policy only; draft badges and provisional RESET values
+// cannot reveal the hub's hidden starting layer. Incomplete older snapshots
+// have no policy to display, rather than an invented factory value.
+export function grokPresencePolicy(rows) {
+  const grok = rows.find(r => r.key === 'presence.grokbot_ttl');
+  const fallback = rows.find(r => r.key === 'presence.default_ttl');
+  if (!grok || !fallback) return null;
+  const row = grok.source === 'default' && ['flag', 'stored'].includes(fallback.source) ? fallback : grok;
+  return { seconds: row.value, key: row.key, source: row.source, origin: row.origin };
 }
 
 // timingOf: when a saved value takes effect, per the hub's runtime field.
@@ -179,15 +191,14 @@ function entryDirty(row, d) {
   if (!row || !d) return false;
   if (d.op === 'reset') return row.source === 'stored';
   const p = parseField(row, d.input);
-  return !!p.error || !same(p.value, row.value);
+  const intent = presenceIntent(row) && ['default', 'flag'].includes(row.source);
+  return !!p.error || intent || !same(p.value, row.value);
 }
 
-// buildPatch turns the dirty draft into one atomic PATCH body. A value typed
-// equal to the built-in default is sent as a set: the hub turns it into
-// removing the override when the inherited layer is the built-in, so its
-// reply shows `default`, and keeps it `stored` above a differing flag layer
-// (plan Decision 2). The UI never sets either badge itself. Reset sends a
-// reset and reveals whatever start-up layer is underneath.
+// buildPatch turns the dirty draft into one atomic PATCH body. Explicit
+// default/Grok TTL SETs preserve intent even at equality; ordinary settings
+// retain numeric no-op handling. The hub alone determines saved provenance.
+// RESET removes a stored override and reveals the hub's starting layer.
 export function buildPatch(rows, draft) {
   const byKey = new Map(rows.map(r => [r.key, r]));
   const set = {}, reset = [];
