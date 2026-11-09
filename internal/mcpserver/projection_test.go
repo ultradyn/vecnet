@@ -23,6 +23,7 @@ var grokToolNames = []string{
 var operatorToolNames = []string{
 	"vecnet_agent_add", "vecnet_agent_kinds", "vecnet_agent_status",
 	"vecnet_peer_invite_get", "vecnet_peer_invite_revoke", "vecnet_peer_lifecycle",
+	"vecnet_route_stats",
 }
 
 func sortedToolNames(t *testing.T, entries []map[string]any) []string {
@@ -127,6 +128,8 @@ func TestKindScopedDiscoveryCallAuthority(t *testing.T) {
 			for _, name := range operatorToolNames {
 				args := map[string]any{"peer_id": peer}
 				switch name {
+				case "vecnet_route_stats":
+					args = map[string]any{"id": peer}
 				case "vecnet_agent_kinds":
 					args = map[string]any{}
 				case "vecnet_agent_status":

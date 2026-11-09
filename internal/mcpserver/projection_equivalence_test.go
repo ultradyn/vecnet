@@ -79,6 +79,12 @@ func TestProjectionCallValidationEquivalent(t *testing.T) {
 		}
 		before[name] = doc
 	}
+	// This new tool has no historical pre-projection fixture. Pin its reviewed
+	// call contract independently here; keep every historical fixture intact.
+	before["vecnet_route_stats"] = schema{
+		"type": "object", "additionalProperties": false, "required": []any{"id"},
+		"properties": schema{"id": schema{"type": "string", "minLength": 1, "maxLength": 80}},
+	}
 	const peer = "peer_00000000000000000000000001"
 	const message = "msg_00000000000000000000000001"
 	const thread = "thr_00000000000000000000000001"
@@ -89,6 +95,13 @@ func TestProjectionCallValidationEquivalent(t *testing.T) {
 	const agentAdd = `{"kind":"session","spec_version":"v1","request_id":"setup-1","inputs":{}}`
 	type cases struct{ valid, invalid []string }
 	table := map[string]cases{
+		"vecnet_route_stats": {
+			[]string{`{"id":"` + peer + `"}`, `{"id":"route_00000000000000000000000001"}`,
+				`{"id":"sub_00000000000000000000000001"}`, `{"id":"x"}`,
+				`{"id":"` + strings.Repeat("x", 80) + `"}`},
+			[]string{`{}`, `{"id":""}`, `{"id":null}`, `{"id":1}`, `{"id":false}`, `{"id":[]}`,
+				`{"id":"` + strings.Repeat("x", 81) + `"}`, `{"id":"` + peer + `","as":"` + peer + `"}`},
+		},
 		"vecnet_send": {
 			[]string{send, strings.Replace(send, `"recipients":["`+peer+`"]`, `"thread_id":"`+thread+`"`, 1),
 				withField(send, "origin", `{"system":"github","thread_id":"42"}`),
