@@ -462,3 +462,5 @@ Fixture services only: the demo hub, routed R2 grant endpoints and a local fake 
 - [activity pointer 1440](activity-pointer-1440.png)
 - [activity refreshing 1440](activity-refreshing-1440.png)
 - [activity stale 1440](activity-stale-1440.png)
+
+- [Launcher peer table header](ln04-dash-header.png)
