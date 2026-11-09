@@ -43,7 +43,10 @@ import (
 // (cap and all-files coverage unchanged); to 656 KiB on 2026-11-09 for the
 // integrated dashboard, event-pump and Markdown memory fixes, measured by
 // the parent at 657,219 bytes (smallest 16 KiB step above it: 656 KiB).
-const uiMaxBytes = 656 << 10
+// Raised to 720 KiB on 2026-11-10 for bounded thumbnail transport, admission
+// and cleanup ownership, measured across all 76 static files at 729,336 bytes
+// (smallest 16 KiB step above it: 720 KiB).
+const uiMaxBytes = 720 << 10
 
 var (
 	scriptTag   = regexp.MustCompile(`(?is)<script\b([^>]*)>(.*?)</script>`)
