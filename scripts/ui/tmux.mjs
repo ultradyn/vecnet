@@ -58,12 +58,13 @@ export async function withTui({ scale = false, command, env: shared, beatEvery, 
       : text instanceof RegExp ? text.test(plain) : plain.includes(text);
     const waitFor = async text => {
       const until = Date.now() + 60000;
+      let output = '';
       while (Date.now() < until) {
-        const output = await capture();
+        output = await capture();
         if (matches(plainText(output), text)) return output;
         await new Promise(resolve => setTimeout(resolve, 100));
       }
-      throw new Error(`tmux text did not appear: ${String(text)}`);
+      throw new Error(`tmux text did not appear: ${String(text)}\nFinal owned fixture pane:\n${plainText(output).slice(-12000)}`);
     };
     await fn({
       demo: env.demo, advance: env.advance, restart: env.restart, stall: env.stall, clear: env.clear, controlStatus: env.controlStatus, fail: env.fail, asPeer: env.asPeer,
