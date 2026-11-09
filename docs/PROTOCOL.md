@@ -837,7 +837,13 @@ The hub fills `loop` on every Message [ENV]:
 
 **Directory entry:** `peer_id`, display name, kind (`grokbot`, `dot`, `openclaw`, `pagchat-bot`, `session`, `launcher` (§18.1), `operator`, `source`), `capabilities[]` (free-form tags), `quota` (free-form object), `location`, `presence`, `reachability`, `last_seen`, `enrolled_at`, `teams[]`, `avatar` (the sha256 of the peer's avatar PNG, or `null`; section 8.1), and, on a principal-created peer only, the hub-set `created_by` (§18.4). Every peer sees every peer's public fields; only the operator sees credential status and routes [T14]. The hub stores and serves self-reported data and does not verify it [GLOSSARY]; it reads presence only for `wake_idle` (section 5.2) [SCH].
 
-**Presence** is self-reported (`idle`, `working`, `blocked`, `offline`). It goes stale after a per-kind TTL (default 1 h; `session` and `launcher` 15 min, §18.2) and is then shown as `unknown`. The hub never invents a presence state [T14].
+**Presence** is self-reported (`idle`, `working`, `blocked`, `offline`). Factory TTLs are 10 min for `grokbot`, 15 min for `session` and `launcher` (§18.2), and 1 h for other kinds. A report is shown as `unknown` only when its age is strictly greater than the resolved TTL; exactly the TTL remains fresh. Never-reported presence is `unknown`. The hub never invents a presence state [T14].
+
+Grok resolves `presence.grokbot_ttl` (G) and `presence.default_ttl` (D) by provenance: within each key, stored intent overrides explicit bootstrap flag/env intent, which overrides the factory value. An explicit G always wins across keys, including over stored D. If G is unset, Grok inherits an explicit D; if both are factory-sourced, Grok uses G's 600 seconds. Explicit D=3600 and G=600 still express intent even though they equal their factory numbers; `SourceDefault` means unset for inheritance. Session/launcher keep their specific TTLs; other kinds use D.
+
+SET of G=600 or D=3600 retains stored intent across restarts; repeating the identical stored SET is a no-op. RESET removes only the stored row and exposes that key's bootstrap before applying the same inheritance rule. Resetting both can therefore retain explicit bootstrap G or D. Shortening any resolved kind TTL, including a provenance-only reset with equal raw numbers, requires preference confirmation. Held wakes are reevaluated on startup, preference publication and regular ticks; this does not dispatch, receipt or change hold-priority work.
+
+Historical SET intent already discarded by normalization cannot be reconstructed. Programmatic Config equal to a factory value without explicit bootstrap provenance is likewise indistinguishable from unset; no historical intent is backfilled.
 
 **Reachability** is hub-observed per transport [T14]:
 

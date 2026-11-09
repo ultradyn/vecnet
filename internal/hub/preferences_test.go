@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -984,5 +985,330 @@ func TestPreferencesApplyExistingAuthorizesWithoutValueDelta(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatal("refused apply_existing reached authorization")
+	}
+}
+
+func grokTTLExplicitDefault(cfg hub.Config, seconds int64) hub.Config {
+	cfg.PreferenceBootstrap = map[string]prefs.Effective{
+		"presence.default_ttl": {Value: prefs.Duration(seconds), Source: prefs.SourceFlag, Origin: "--presence-ttl"},
+	}
+	return cfg
+}
+
+// Reopen the same real temporary database; neither rows nor clock are replaced.
+func grokTTLReopen(t *testing.T, h *hub.Hub, cfg hub.Config) *hub.Hub {
+	t.Helper()
+	cfg.DataDir = h.Cfg.DataDir
+	if err := h.DB.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(filepath.Join(cfg.DataDir, "hub.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	again, err := hub.New(db, cfg, h.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return again
+}
+
+func TestGrokTTLDefaultEqualIntentSurvivesRestart(t *testing.T) {
+	h, _, clock := preferencesHubClock(t, hub.DefaultConfig())
+	before := readPrefs(t, h)
+	set := patchPrefs(t, h, before, prefs.Patch{Set: map[string]prefs.Value{"presence.default_ttl": prefs.Duration(3600)}})
+	same := patchPrefs(t, h, set, prefs.Patch{Set: map[string]prefs.Value{"presence.default_ttl": prefs.Duration(3600)}})
+	if same.ETag != set.ETag || same.Revision != set.Revision {
+		t.Error("repeated identical stored SET must be a no-op")
+	}
+	state, at := "working", envelope.FormatTime(clock.Now())
+	clock.Advance(3601 * time.Second)
+	again := grokTTLReopen(t, h, grokTTLExplicitDefault(hub.DefaultConfig(), 7200))
+	row := hub.PresenceRow{Kind: "grokbot", State: &state, At: &at}
+	if got := again.EffectivePresence(row, clock.Now()); got != "unknown" {
+		t.Errorf("restarted Grok at 3601s = %q, want unknown under explicit stored D3600", got)
+	}
+	restarted := readPrefs(t, again)
+	if set.Revision != before.Revision+1 || set.ETag == before.ETag || restarted.Revision != set.Revision || restarted.ETag == set.ETag {
+		t.Error("explicit equality must revise once, survive restart, and bind the new bootstrap ETag")
+	}
+	prefValue(t, restarted, "presence.default_ttl", 3600, prefs.SourceStored, "")
+	prefsAuditCount(t, again, 1)
+	prefValue(t, before, "presence.default_ttl", 3600, prefs.SourceDefault, "")
+	reset := patchPrefs(t, again, restarted, prefs.Patch{Reset: []string{"presence.default_ttl"}})
+	prefValue(t, reset, "presence.default_ttl", 7200, prefs.SourceFlag, "--presence-ttl")
+	if got := again.EffectivePresence(row, clock.Now()); got != "working" {
+		t.Errorf("RESET must expose explicit bootstrap D7200: %q", got)
+	}
+	prefsAuditCount(t, again, 2)
+}
+
+func grokTTLMatrixBoundary(t *testing.T, h *hub.Hub, s prefs.Snapshot, seconds int64) {
+	t.Helper()
+	state, at := "working", envelope.FormatTime(h.Now())
+	row := hub.PresenceRow{Kind: "grokbot", State: &state, At: &at}
+	for _, sample := range []struct {
+		age  time.Duration
+		want string
+	}{
+		{time.Duration(seconds) * time.Second, "working"},
+		{time.Duration(seconds)*time.Second + time.Millisecond, "unknown"},
+	} {
+		now := h.Now().Add(sample.age)
+		for _, got := range []string{h.EffectivePresence(row, now), hub.EffectivePresenceSnapshot(s, row, now)} {
+			if got != sample.want {
+				t.Errorf("literal TTL%d at %s = %q, want %q", seconds, sample.age, got, sample.want)
+			}
+		}
+	}
+}
+
+func TestGrokTTLProvenanceMatrix(t *testing.T) {
+	t.Run("unaffected-key-normalization", func(t *testing.T) {
+		h, _ := preferencesHub(t, hub.DefaultConfig())
+		before := readPrefs(t, h)
+		after := patchPrefs(t, h, before, prefs.Patch{Set: map[string]prefs.Value{
+			"agents.thread_budget": prefs.Int(500), "events.refresh_interval": prefs.Duration(1800),
+		}})
+		if after.ETag != before.ETag || after.Revision != before.Revision {
+			t.Fatal("ordinary factory-equal keys must still normalize to a no-op")
+		}
+		prefValue(t, after, "agents.thread_budget", 500, prefs.SourceDefault, "")
+		prefValue(t, after, "events.refresh_interval", 1800, prefs.SourceDefault, "")
+		prefsAuditCount(t, h, 0)
+	})
+	// TTL columns are literal policy expectations, independent of the resolver.
+	for _, tc := range []struct {
+		name                           string
+		flagG, flagD, setG, setD       int64
+		ttl, afterG, afterD, afterBoth int64
+	}{
+		{"factory", 0, 0, 0, 0, 600, 600, 600, 600},
+		{"D-flag7200", 0, 7200, 0, 0, 7200, 7200, 7200, 7200},
+		{"D-flag-factory-equal", 0, 3600, 0, 0, 3600, 3600, 3600, 3600},
+		{"D-stored-factory-equal", 0, 0, 0, 3600, 3600, 3600, 600, 600},
+		{"D-stored7200", 0, 0, 0, 7200, 7200, 7200, 600, 600},
+		{"D-stored-over-flag", 0, 7200, 0, 3600, 3600, 3600, 7200, 7200},
+		{"G-flag600-over-storedD", 600, 0, 0, 7200, 600, 600, 600, 600},
+		{"G-flag1200-over-storedD", 1200, 0, 0, 7200, 1200, 1200, 1200, 1200},
+		{"G-stored600-over-flagD", 0, 7200, 600, 0, 600, 7200, 600, 7200},
+		{"G-stored600-over-storedD", 0, 0, 600, 7200, 600, 7200, 600, 600},
+		{"both-stored-over-flags", 600, 7200, 1800, 3600, 1800, 600, 1800, 600},
+		{"G-stored600-over-flag1200", 1200, 0, 600, 0, 600, 1200, 600, 1200},
+		{"G-stored-factory-equal", 0, 0, 600, 0, 600, 600, 600, 600},
+		{"both-flags-factory-equal", 600, 3600, 0, 0, 600, 600, 600, 600},
+		{"both-stored-factory-equal", 0, 0, 600, 3600, 600, 3600, 600, 600},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := hub.DefaultConfig()
+			cfg.PreferenceBootstrap = map[string]prefs.Effective{}
+			values := map[string]prefs.Value{}
+			for _, key := range []struct {
+				name         string
+				flag, stored int64
+			}{
+				{"presence.grokbot_ttl", tc.flagG, tc.setG},
+				{"presence.default_ttl", tc.flagD, tc.setD},
+			} {
+				if key.flag != 0 {
+					cfg.PreferenceBootstrap[key.name] = prefs.Effective{Value: prefs.Duration(key.flag), Source: prefs.SourceFlag, Origin: "--ttl-fixture"}
+				}
+				if key.stored != 0 {
+					values[key.name] = prefs.Duration(key.stored)
+				}
+			}
+			h, _ := preferencesHub(t, cfg)
+			initial := readPrefs(t, h)
+			if tc.flagG == 0 {
+				prefValue(t, initial, "presence.grokbot_ttl", 600, prefs.SourceDefault, "")
+			}
+			if tc.flagD == 0 {
+				prefValue(t, initial, "presence.default_ttl", 3600, prefs.SourceDefault, "")
+			}
+			// Explicit bootstraps have their own provenance even at factory equality.
+			for key, e := range cfg.PreferenceBootstrap {
+				prefValue(t, initial, key, mustGrokTTLNumber(t, e.Value), prefs.SourceFlag, "--ttl-fixture")
+			}
+			audits := 0
+			apply := func(p prefs.Patch, changed bool) prefs.Snapshot {
+				t.Helper()
+				if len(p.Set)+len(p.Reset) == 0 {
+					// Empty proposals are invalid; exercise an absent-row RESET instead.
+					p.Reset = []string{"presence.grokbot_ttl"}
+				}
+				before, old := readPrefs(t, h), h.Preferences.Current()
+				oldRows := old.Descriptors()
+				preview := previewPrefs(t, h.Preferences, prefsOperator, before, p)
+				if len(preview.Risks) > 0 {
+					p.Confirm = []string{preview.ConfirmToken}
+				}
+				after := patchPrefs(t, h, before, p)
+				if changed {
+					audits++
+					if after.Revision != before.Revision+1 || after.ETag == before.ETag {
+						t.Error("intent change must advance revision and ETag")
+					}
+				} else if after.Revision != before.Revision || after.ETag != before.ETag {
+					t.Error("identical stored SET or absent-row RESET must be a no-op")
+				}
+				if !reflect.DeepEqual(old.Descriptors(), oldRows) || h.Preferences.Current().ETag != after.ETag || readPrefs(t, h).ETag != after.ETag {
+					t.Error("publication mutated an old snapshot or disagrees with durable state")
+				}
+				prefsAuditCount(t, h, audits)
+				return after
+			}
+			resetSource := func(s prefs.Snapshot, key string, factory int64) {
+				t.Helper()
+				if e, ok := cfg.PreferenceBootstrap[key]; ok {
+					prefValue(t, s, key, mustGrokTTLNumber(t, e.Value), prefs.SourceFlag, e.Origin)
+				} else {
+					prefValue(t, s, key, factory, prefs.SourceDefault, "")
+				}
+			}
+			s := apply(prefs.Patch{Set: values}, len(values) > 0)
+			for key, v := range values {
+				prefValue(t, s, key, mustGrokTTLNumber(t, v), prefs.SourceStored, "")
+			}
+			grokTTLMatrixBoundary(t, h, s, tc.ttl)
+			apply(prefs.Patch{Set: values}, false)
+			h = grokTTLReopen(t, h, cfg)
+			restarted := readPrefs(t, h)
+			if restarted.Revision != s.Revision || restarted.ETag != s.ETag {
+				t.Error("same-bootstrap reopen lost intent revision or ETag")
+			}
+			for key, v := range values {
+				prefValue(t, restarted, key, mustGrokTTLNumber(t, v), prefs.SourceStored, "")
+			}
+			grokTTLMatrixBoundary(t, h, restarted, tc.ttl)
+			s = apply(prefs.Patch{Reset: []string{"presence.grokbot_ttl"}}, tc.setG != 0)
+			resetSource(s, "presence.grokbot_ttl", 600)
+			grokTTLMatrixBoundary(t, h, s, tc.afterG)
+			apply(prefs.Patch{Set: values}, tc.setG != 0)
+			s = apply(prefs.Patch{Reset: []string{"presence.default_ttl"}}, tc.setD != 0)
+			resetSource(s, "presence.default_ttl", 3600)
+			grokTTLMatrixBoundary(t, h, s, tc.afterD)
+			apply(prefs.Patch{Set: values}, tc.setD != 0)
+			s = apply(prefs.Patch{Reset: []string{"presence.grokbot_ttl", "presence.default_ttl"}}, len(values) > 0)
+			resetSource(s, "presence.grokbot_ttl", 600)
+			resetSource(s, "presence.default_ttl", 3600)
+			grokTTLMatrixBoundary(t, h, s, tc.afterBoth)
+		})
+	}
+}
+
+func mustGrokTTLNumber(t *testing.T, v prefs.Value) int64 {
+	t.Helper()
+	n, ok := v.Int64()
+	if !ok {
+		t.Fatal("fixture duration is not numeric")
+	}
+	return n
+}
+
+func TestGrokTTLDualKeyRiskAttribution(t *testing.T) {
+	const g, d = "presence.grokbot_ttl", "presence.default_ttl"
+	const grokShortened = "Shorter presence TTL may release held wakes: grokbot 2h0m0s -> 10m0s."
+	for _, tc := range []struct {
+		name                string
+		initialG, initialD  int64
+		proposal            prefs.Patch
+		want                []prefs.Risk
+		ttl, finalG, finalD int64
+		gSource, dSource    prefs.Source
+	}{
+		{
+			"reset-both-stored-G7200-D3600", 7200, 3600,
+			prefs.Patch{Reset: []string{g, d}},
+			[]prefs.Risk{{Code: "presence_shortened", Keys: []string{d}, Message: grokShortened}, {Code: "presence_shortened", Keys: []string{g}, Message: grokShortened}},
+			600, 600, 3600, prefs.SourceDefault, prefs.SourceDefault,
+		},
+		{
+			"explicit-G-shortening-D-lengthening", 7200, 3600,
+			prefs.Patch{Set: map[string]prefs.Value{g: prefs.Duration(600), d: prefs.Duration(7200)}},
+			[]prefs.Risk{{Code: "presence_shortened", Keys: []string{g}, Message: grokShortened}},
+			600, 600, 7200, prefs.SourceStored, prefs.SourceStored,
+		},
+		{
+			"redundant-G-set-D-reset", 0, 7200,
+			prefs.Patch{Set: map[string]prefs.Value{g: prefs.Duration(600)}, Reset: []string{d}},
+			[]prefs.Risk{
+				{Code: "presence_shortened", Keys: []string{d}, Message: "Shorter presence TTL may release held wakes: grokbot 2h0m0s -> 10m0s; other 2h0m0s -> 1h0m0s."},
+				{Code: "presence_shortened", Keys: []string{g}, Message: grokShortened},
+			},
+			600, 600, 3600, prefs.SourceStored, prefs.SourceDefault,
+		},
+		{
+			"reset-G-unchanged-D", 7200, 3600,
+			prefs.Patch{Reset: []string{g}},
+			[]prefs.Risk{{Code: "presence_shortened", Keys: []string{g}, Message: "Shorter presence TTL may release held wakes: grokbot 2h0m0s -> 1h0m0s."}},
+			3600, 600, 3600, prefs.SourceDefault, prefs.SourceStored,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, _, clock := preferencesHubClock(t, hub.DefaultConfig())
+			values := map[string]prefs.Value{d: prefs.Duration(tc.initialD)}
+			if tc.initialG != 0 {
+				values[g] = prefs.Duration(tc.initialG)
+			}
+			runtimePatch(t, h, values)
+			before, old := readPrefs(t, h), h.Preferences.Current()
+			oldRows := old.Descriptors()
+			prefValue(t, before, d, tc.initialD, prefs.SourceStored, "")
+			if tc.initialG == 0 {
+				prefValue(t, before, g, 600, prefs.SourceDefault, "")
+			} else {
+				prefValue(t, before, g, tc.initialG, prefs.SourceStored, "")
+			}
+			grokTTLMatrixBoundary(t, h, before, 7200)
+			state, at := "working", envelope.FormatTime(clock.Now())
+			row := hub.PresenceRow{Kind: "grokbot", State: &state, At: &at}
+			// Advance before preview: the tested token never ages before PATCH.
+			clock.Advance(time.Duration(tc.ttl)*time.Second + time.Millisecond)
+			unchanged := func() {
+				t.Helper()
+				for _, s := range []prefs.Snapshot{readPrefs(t, h), h.Preferences.Current(), old} {
+					if s.ETag != before.ETag || s.Revision != before.Revision || !reflect.DeepEqual(s.Descriptors(), oldRows) {
+						t.Error("preview or rejected PATCH changed durable, published, or old state")
+					}
+				}
+				if got := h.EffectivePresence(row, clock.Now()); got != "working" {
+					t.Errorf("uncommitted shortening changed presence: %q", got)
+				}
+				prefsAuditCount(t, h, 1)
+			}
+			preview := previewPrefs(t, h.Preferences, prefsOperator, before, tc.proposal)
+			// Literal ordered rows also exclude extra keys, kinds, and transitions.
+			if !reflect.DeepEqual(preview.Risks, tc.want) {
+				t.Errorf("risks = %+v, want %+v", preview.Risks, tc.want)
+			}
+			unchanged()
+			_, err := h.Preferences.PatchPreferences(context.Background(), prefsOperator, before.ETag, tc.proposal)
+			prefsCode(t, err, prefs.CodeConfirmationRequired)
+			unchanged()
+			tc.proposal.Confirm = []string{preview.ConfirmToken}
+			after := patchPrefs(t, h, before, tc.proposal)
+			if after.Revision != before.Revision+1 || after.ETag == before.ETag {
+				t.Error("confirmed proposal must advance revision and ETag")
+			}
+			for _, s := range []prefs.Snapshot{readPrefs(t, h), h.Preferences.Current()} {
+				if s.ETag != after.ETag || s.Revision != after.Revision || !reflect.DeepEqual(s.Descriptors(), after.Descriptors()) {
+					t.Error("confirmed durable and published snapshots disagree")
+				}
+			}
+			prefValue(t, after, g, tc.finalG, tc.gSource, "")
+			prefValue(t, after, d, tc.finalD, tc.dSource, "")
+			prefsAuditCount(t, h, 2)
+			if !reflect.DeepEqual(old.Descriptors(), oldRows) || !reflect.DeepEqual(before.Descriptors(), oldRows) {
+				t.Error("confirmed proposal mutated a previous snapshot")
+			}
+			if got := hub.EffectivePresenceSnapshot(old, row, clock.Now()); got != "working" {
+				t.Errorf("old snapshot lost the original 7200s policy: %q", got)
+			}
+			if got := h.EffectivePresence(row, clock.Now()); got != "unknown" {
+				t.Errorf("confirmed shortening must reclassify existing report: %q", got)
+			}
+			grokTTLMatrixBoundary(t, h, after, tc.ttl)
+		})
 	}
 }

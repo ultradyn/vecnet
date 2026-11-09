@@ -95,12 +95,13 @@ func TestPreferencesHTTPMetadataAndConditionalRead(t *testing.T) {
 	if err := json.Unmarshal(raw, &wire); err != nil {
 		t.Fatal(err)
 	}
-	if wire.Revision != 0 || len(wire.Preferences) != 21 {
+	if wire.Revision != 0 || len(wire.Preferences) != 22 {
 		t.Fatal("incomplete initial metadata")
 	}
 	const fixture = `{"key":"events.refresh_interval","type":"duration","default":1800,"min":60,"max":86400,"unit":"seconds","label":"Events refresh interval","description":"Refresh cadence for MCP Events subscriptions.","group":"notifications_presence","settable_by":"operator","editable":true,"runtime":"live","danger":[],"value":1800,"source":"flag","origin":"VECNET_EVENTS_REFRESH_INTERVAL"}`
 	previous := ""
 	found := false
+	foundGrok := false
 	for _, row := range wire.Preferences {
 		var d prefs.Descriptor
 		if json.Unmarshal(row, &d) != nil {
@@ -110,6 +111,19 @@ func TestPreferencesHTTPMetadataAndConditionalRead(t *testing.T) {
 			t.Fatal("unstable order")
 		}
 		previous = d.Key
+		if d.Key == "presence.grokbot_ttl" {
+			foundGrok = true
+			if d.Default != prefs.Int(600) || d.Value != prefs.Int(600) || d.Source != "default" || d.Origin != "" ||
+				d.Type != "duration" || d.Unit != "seconds" || d.Min == nil || *d.Min != 60 || d.Max == nil || *d.Max != 86400 ||
+				d.Group != "notifications_presence" || d.SettableBy != "operator" || !d.Editable || d.Runtime != "live" ||
+				d.UnavailableReason != "" || !reflect.DeepEqual(d.Danger, []string{"presence_shortened"}) {
+				t.Fatal("Grok TTL wire metadata differs from the literal API contract")
+			}
+			description := strings.ToLower(d.Description)
+			if !strings.Contains(description, "inherit") || !strings.Contains(description, "presence.default_ttl") || !strings.Contains(description, "explicit") {
+				t.Fatal("Grok TTL wire description must explain explicit default TTL inheritance")
+			}
+		}
 		if d.Key == "events.refresh_interval" {
 			var got, want any
 			_ = json.Unmarshal(row, &got)
@@ -128,6 +142,9 @@ func TestPreferencesHTTPMetadataAndConditionalRead(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("missing refresh descriptor")
+	}
+	if !foundGrok {
+		t.Fatal("missing Grok TTL descriptor")
 	}
 	for _, condition := range []string{resp.Header.Get("ETag"), "W/" + resp.Header.Get("ETag"), `"other", ` + resp.Header.Get("ETag"), "*"} {
 		req, _ := http.NewRequest("GET", e.URL+"/v1/admin/prefs", nil)

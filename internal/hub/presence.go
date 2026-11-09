@@ -19,6 +19,7 @@ import (
 // per-kind TTL is shown as "unknown".
 const (
 	DefaultPresenceTTL         = time.Hour
+	DefaultGrokbotPresenceTTL  = 10 * time.Minute
 	DefaultSessionPresenceTTL  = 15 * time.Minute
 	DefaultLauncherPresenceTTL = 15 * time.Minute
 )
@@ -48,8 +49,8 @@ type PresenceRow struct {
 
 // EffectivePresence is the presence the hub shows for p at now: the stored
 // state, or "unknown" when there is none or presence_at is older than the
-// kind's TTL (1 h; 15 min for session and launcher). The hub never invents a state
-// (PROTOCOL §8).
+// resolved kind TTL (factory: Grok 10 min, session/launcher 15 min, others 1 h).
+// Exactly the TTL remains fresh. The hub never invents a state (PROTOCOL §8).
 func (h *Hub) EffectivePresence(p PresenceRow, now time.Time) string {
 	// This legacy projection has no context/transaction parameter and is also
 	// called inside transactions. Use the immutable committed publication rather

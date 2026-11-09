@@ -79,7 +79,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, getenv func(strin
 	fs := flag.NewFlagSet("vecnet-hub", flag.ContinueOnError)
 	listen := fs.String("listen", envOr(getenv, "VECNET_LISTEN", "127.0.0.1:45752"), "address to listen on ($VECNET_LISTEN)")
 	dataDir := fs.String("data-dir", envOr(getenv, "VECNET_DATA_DIR", "/data"), "directory holding hub.db and blobs/ ($VECNET_DATA_DIR)")
-	publicURL := fs.String("public-url", getenv("VECNET_PUBLIC_URL"), "externally visible origin ($VECNET_PUBLIC_URL; default http://<listen address>)")
+	publicURL := fs.String("public-url", "", "externally visible origin ($VECNET_PUBLIC_URL; default http://<listen address>)")
 	mcpOrigins := fs.String("mcp-allowed-origins", getenv("VECNET_MCP_ALLOWED_ORIGINS"), "extra /mcp origins, comma-separated; empty defaults to https://chatgpt.com, none allows public origin only ($VECNET_MCP_ALLOWED_ORIGINS)")
 	mcpLegacy := fs.String("mcp-legacy-sessions", envOr(getenv, "VECNET_MCP_LEGACY_SESSIONS", "on"), "legacy MCP sessions: on, off-for-oauth, off ($VECNET_MCP_LEGACY_SESSIONS)")
 	oauthRedirects := fs.String("oauth-redirects", getenv("VECNET_OAUTH_REDIRECTS"), "extra OAuth redirect patterns, comma-separated, appended to defaults ($VECNET_OAUTH_REDIRECTS)")
@@ -97,12 +97,23 @@ func run(ctx context.Context, args []string, stdout io.Writer, getenv func(strin
 		"development only: let outbound URLs be http and reach private/loopback addresses ($VECNET_ALLOW_PRIVATE_EGRESS=1)")
 	trustFly := fs.Bool("trust-fly-client-ip", getenv("VECNET_TRUST_FLY_CLIENT_IP") == "1",
 		"key the per-client rate limit on the Fly-Client-IP header; only behind Fly's proxy ($VECNET_TRUST_FLY_CLIENT_IP=1)")
-	relocatedTo := fs.String("relocated-to", getenv("VECNET_RELOCATED_TO"), "answer hub_moved without workers at the old hub ($VECNET_RELOCATED_TO)")
+	relocatedTo := fs.String("relocated-to", "", "answer hub_moved without workers at the old hub ($VECNET_RELOCATED_TO)")
 	restartRetry := fs.String("restart-retry-ms", envOr(getenv, "VECNET_RESTART_RETRY_MS", "5000"), "restart reconnect delay in milliseconds, 0..60000 ($VECNET_RESTART_RETRY_MS)")
 	resolvePreferences := registerPreferenceFlags(fs, getenv)
 	resolveBlobs := registerBlobFlags(fs, getenv)
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	// URL environment values must stay out of flag metadata: parser
+	// diagnostics run before URL validation. Explicit empty flags still
+	// override the environment.
+	explicit := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { explicit[f.Name] = true })
+	if !explicit["public-url"] {
+		*publicURL = getenv("VECNET_PUBLIC_URL")
+	}
+	if !explicit["relocated-to"] {
+		*relocatedTo = getenv("VECNET_RELOCATED_TO")
 	}
 	if fs.Arg(0) == "init" {
 		ifs := flag.NewFlagSet("vecnet-hub init", flag.ContinueOnError)
