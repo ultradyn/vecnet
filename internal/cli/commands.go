@@ -32,6 +32,7 @@ import (
 
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/hubid"
+	"github.com/XertroV/vecnet/internal/hubnotice"
 	"github.com/XertroV/vecnet/internal/inboxview"
 	"github.com/XertroV/vecnet/internal/opapi"
 )
@@ -226,6 +227,9 @@ func (a *app) exit(err error) int {
 	var re *refusedError
 	var me *mcpStartupError
 	switch {
+	case errors.Is(err, hubnotice.ErrInvalidNotice):
+		fmt.Fprintln(a.stderr, "bad_response: invalid hub notice")
+		return exitHub
 	case errors.As(err, &me):
 		fmt.Fprintln(a.stderr, me)
 		return exitUsage

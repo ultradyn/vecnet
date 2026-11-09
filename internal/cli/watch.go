@@ -19,6 +19,7 @@ import (
 
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/hubid"
+	"github.com/XertroV/vecnet/internal/hubnotice"
 )
 
 // Watch timing (PROTOCOL §13.1).
@@ -736,6 +737,9 @@ func (w *watcher) stopMoveTimer() {
 func (w *watcher) refreshMoving() {
 	notices, err := w.a.activeNotices(w.c)
 	if err != nil {
+		if errors.Is(err, hubnotice.ErrInvalidNotice) {
+			w.systemLine("relocation_unverified", "invalid hub notice")
+		}
 		return
 	}
 	var moving *envelope.HubNotice

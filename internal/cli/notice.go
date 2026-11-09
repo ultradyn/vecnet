@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/hubnotice"
 )
 
 func noticeText(n envelope.HubNotice, cleared bool) string {
@@ -27,12 +29,43 @@ func noticeText(n envelope.HubNotice, cleared bool) string {
 	return "[" + label + "] " + n.Message
 }
 
+// Decode raw URL fields before typed decoding can erase a present null value.
+func decodeReceivedNotice(raw json.RawMessage, allowHTTP bool) (envelope.HubNotice, error) {
+	var n envelope.HubNotice
+	var fields struct {
+		Hub    json.RawMessage `json:"hub"`
+		NewURL json.RawMessage `json:"new_url"`
+	}
+	if json.Unmarshal(raw, &n) != nil || json.Unmarshal(raw, &fields) != nil ||
+		bytes.Equal(bytes.TrimSpace(fields.Hub), []byte("null")) ||
+		bytes.Equal(bytes.TrimSpace(fields.NewURL), []byte("null")) {
+		return envelope.HubNotice{}, hubnotice.ErrInvalidNotice
+	}
+	if err := hubnotice.ValidateNotice(n, allowHTTP); err != nil {
+		return envelope.HubNotice{}, err
+	}
+	return n, nil
+}
+
 func (a *app) activeNotices(c *client) ([]envelope.HubNotice, error) {
 	var body struct {
-		Notices []envelope.HubNotice `json:"notices"`
+		Notices []json.RawMessage `json:"notices"`
 	}
-	err := c.do(a.ctx, http.MethodGet, "/v1/hub/notices", nil, nil, &body)
-	return body.Notices, err
+	if err := c.do(a.ctx, http.MethodGet, "/v1/hub/notices", nil, nil, &body); err != nil {
+		return nil, err
+	}
+	if body.Notices == nil {
+		return nil, nil
+	}
+	notices := make([]envelope.HubNotice, len(body.Notices))
+	for i, raw := range body.Notices {
+		n, err := decodeReceivedNotice(raw, c.allowInsecureHTTP)
+		if err != nil {
+			return nil, err
+		}
+		notices[i] = n
+	}
+	return notices, nil
 }
 
 func (a *app) cmdNotice(args []string) error {
@@ -97,15 +130,19 @@ func (a *app) cmdNotice(args []string) error {
 			body["expires_at"] = value
 		}
 		var result struct {
-			Notice envelope.HubNotice `json:"notice"`
+			Notice json.RawMessage `json:"notice"`
 		}
 		if err = c.do(a.ctx, http.MethodPost, "/v1/admin/notices", nil, body, &result); err != nil {
 			return err
 		}
-		if a.json {
-			return a.emitValue(result.Notice)
+		notice, err := decodeReceivedNotice(result.Notice, c.allowInsecureHTTP)
+		if err != nil {
+			return err
 		}
-		fmt.Fprintf(a.stdout, "%s %s\n", result.Notice.NoticeID, firstRunes(unbidi(flatten(noticeText(result.Notice, false))), monitorTextRunes))
+		if a.json {
+			return a.emitValue(notice)
+		}
+		fmt.Fprintf(a.stdout, "%s %s\n", notice.NoticeID, firstRunes(unbidi(flatten(noticeText(notice, false))), monitorTextRunes))
 		return nil
 	case "list":
 		notices, e := a.activeNotices(c)
