@@ -2,58 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createStore } from '../static/store.js';
 import { mount } from '../static/dash.js';
-
-// Enough of a document for the dashboard to draw the peer table. node has no
-// DOM; md-dom.test.mjs keeps its own shim on globalThis.document afterwards.
-class El {
-  constructor(tag) {
-    this.tag = tag;
-    this.attrs = {};
-    this.kids = [];
-    this.className = '';
-    this.on = {};
-    this.hidden = false;
-    this.isConnected = false;
-    this.classList = { add() {}, remove() {}, contains: () => false };
-  }
-  get childNodes() { return this.kids; }
-  set textContent(v) { this.kids = [String(v)]; }
-  get textContent() { return this.kids.map(k => (typeof k === 'string' ? k : k.textContent)).join(''); }
-  setAttribute(k, v) { this.attrs[k] = String(v); }
-  addEventListener(type, fn) { this.on[type] = fn; }
-  append(...xs) {
-    for (const x of xs) {
-      if (x == null || x === false) continue;
-      if (typeof x !== 'string' && !(x instanceof El)) throw new Error('append got ' + Object.prototype.toString.call(x));
-      this.kids.push(x);
-    }
-  }
-  replaceChildren(...xs) { this.kids = []; this.append(...xs); }
-  querySelector(sel) { return walk(this, sel, false); }
-  querySelectorAll(sel) {
-    const out = [];
-    walk(this, sel, false, out);
-    return out;
-  }
-}
-
-function matches(el, sel) {
-  if (sel.startsWith('#')) return el.attrs.id === sel.slice(1);
-  if (sel.startsWith('.')) return el.className.split(/\s+/).includes(sel.slice(1));
-  return el.tag === sel;
-}
-function walk(el, sel, self, out) {
-  if (!(el instanceof El)) return out ? undefined : null;
-  if (self && matches(el, sel)) {
-    if (out) out.push(el);
-    else return el;
-  }
-  for (const kid of el.kids) {
-    const hit = walk(kid, sel, true, out);
-    if (!out && hit) return hit;
-  }
-  return out ? undefined : null;
-}
+import { El, snapshot } from './activity-dom-fixture.mjs';
 
 function peer(id, name, kind, extra = {}) {
   return {
@@ -72,10 +21,11 @@ async function withPeers(peers, fn) {
   const prev = globalThis.document;
   const setInterval = globalThis.setInterval;
   const clearInterval = globalThis.clearInterval;
-  globalThis.document = { createElement: tag => new El(tag) };
+  globalThis.document = { createElement: tag => new El(tag), createElementNS: (ns, tag) => new El(tag, ns) };
   globalThis.setInterval = () => 0;
   globalThis.clearInterval = () => {};
   const api = {
+    activityStats: async () => snapshot({}),
     counters: async () => page({}),
     adminPeers: async () => page({ peers }),
     principals: async () => page({ principals: [] }),

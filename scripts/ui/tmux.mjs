@@ -6,6 +6,8 @@ import { ansiHTML, LINE } from './ansi.mjs';
 import { assert, bootDemo, buildCLI, chromium, registerExitCleanup, run, shotPath } from './lib.mjs';
 
 const quote = s => `'${s.replaceAll("'", "'\\''")}'`;
+// capture-pane may compress rendered blank cells to tabs; match their text as spaces.
+export const paneText = output => output.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '').replaceAll('\t', ' ');
 // COLOURS are the TUI's colour rungs (docs/design/tui-color.md §4.1, §10.3):
 // the environment each one is started with. 256 and 16 also drop TMUX, so only
 // TERM decides; tmux's own report would lift a TERM=xterm run to 256.
@@ -53,17 +55,17 @@ export async function withTui({ scale = false, command, env: shared, beatEvery, 
     const page = await browser.newPage({ viewport: { width: 1240, height: Math.ceil(42 * LINE) + 32 }, colorScheme: light ? 'light' : 'dark' });
     page.setDefaultTimeout(60000);
     const capture = () => tmux('capture-pane', '-t', 'ui:0.0', '-e', '-p', '-N');
-    const plainText = output => output.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '');
     const matches = (plain, text) => Array.isArray(text) ? text.every(t => matches(plain, t))
       : text instanceof RegExp ? text.test(plain) : plain.includes(text);
     const waitFor = async text => {
       const until = Date.now() + 60000;
+      let output = '';
       while (Date.now() < until) {
-        const output = await capture();
-        if (matches(plainText(output), text)) return output;
+        output = await capture();
+        if (matches(paneText(output), text)) return output;
         await new Promise(resolve => setTimeout(resolve, 100));
       }
-      throw new Error(`tmux text did not appear: ${String(text)}`);
+      throw new Error(`tmux text did not appear: ${String(text)}\nFinal owned fixture pane:\n${paneText(output).slice(-12000)}`);
     };
     await fn({
       demo: env.demo, advance: env.advance, restart: env.restart, stall: env.stall, clear: env.clear, controlStatus: env.controlStatus, fail: env.fail, asPeer: env.asPeer,
