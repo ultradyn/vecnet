@@ -468,3 +468,28 @@ Fixture services only: the demo hub, routed R2 grant endpoints and a local fake 
 - [activity stale 1440](activity-stale-1440.png)
 
 - [Launcher peer table header](ln04-dash-header.png)
+
+## Grok presence TTL settings
+
+Committed Grok policy and deliberate stored overrides in List and Policy, including preview confirmation, RESET and boot flags at desktop and phone widths.
+
+- [prefs-list-grok-confirm-desk](prefs-list-grok-confirm-desk.png)
+- [prefs-list-grok-confirm-phone](prefs-list-grok-confirm-phone.png)
+- [prefs-list-grok-draft-desk](prefs-list-grok-draft-desk.png)
+- [prefs-list-grok-draft-phone](prefs-list-grok-draft-phone.png)
+- [prefs-list-grok-reset-desk](prefs-list-grok-reset-desk.png)
+- [prefs-list-grok-reset-phone](prefs-list-grok-reset-phone.png)
+- [prefs-list-grok-stored-desk](prefs-list-grok-stored-desk.png)
+- [prefs-list-grok-stored-phone](prefs-list-grok-stored-phone.png)
+- [prefs-list-ttl-flags-desk](prefs-list-ttl-flags-desk.png)
+- [prefs-list-ttl-flags-phone](prefs-list-ttl-flags-phone.png)
+- [prefs-policy-grok-confirm-desk](prefs-policy-grok-confirm-desk.png)
+- [prefs-policy-grok-confirm-phone](prefs-policy-grok-confirm-phone.png)
+- [prefs-policy-grok-draft-desk](prefs-policy-grok-draft-desk.png)
+- [prefs-policy-grok-draft-phone](prefs-policy-grok-draft-phone.png)
+- [prefs-policy-grok-reset-desk](prefs-policy-grok-reset-desk.png)
+- [prefs-policy-grok-reset-phone](prefs-policy-grok-reset-phone.png)
+- [prefs-policy-grok-stored-desk](prefs-policy-grok-stored-desk.png)
+- [prefs-policy-grok-stored-phone](prefs-policy-grok-stored-phone.png)
+- [prefs-policy-ttl-flags-desk](prefs-policy-ttl-flags-desk.png)
+- [prefs-policy-ttl-flags-phone](prefs-policy-ttl-flags-phone.png)
