@@ -21,6 +21,7 @@ import (
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/httpdiag"
 	"github.com/XertroV/vecnet/internal/hubid"
+	"github.com/XertroV/vecnet/internal/hubnotice"
 	"github.com/XertroV/vecnet/internal/opapi"
 )
 
@@ -122,6 +123,11 @@ func checkedResponse(resp *http.Response) (*http.Response, error) {
 		// Error pages are untrusted and may be HTML. Preserve the HTTP status even
 		// when a proxy did not send the protocol's JSON envelope.
 		_ = json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&wire)
+		if resp.StatusCode == http.StatusGone && wire.Error.Code == "hub_moved" {
+			// Like gate(), operator receive validation leaves public HTTP opt-in
+			// to the caller; it never infers permission from the source scheme.
+			wire.Error.Message, wire.Error.Details = hubnotice.ProjectRelocation(wire.Error.Details, true)
+		}
 		e := &Error{Status: resp.StatusCode, Code: wire.Error.Code, Message: wire.Error.Message, Details: wire.Error.Details}
 		if e.Message == "" {
 			e.Message = http.StatusText(e.Status)
@@ -282,11 +288,42 @@ func decodeJSON(resp *http.Response, out any) (string, error) {
 }
 
 func (c *Client) Notices(ctx context.Context) ([]envelope.HubNotice, error) {
-	var out struct {
-		Notices []envelope.HubNotice `json:"notices"`
+	resp, err := c.request(ctx, "GET", "/v1/hub/notices", nil)
+	if err != nil {
+		return nil, err
 	}
-	err := c.do(ctx, "GET", "/v1/hub/notices", nil, &out)
-	return out.Notices, err
+	defer resp.Body.Close()
+	var out struct {
+		Notices []json.RawMessage `json:"notices"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		var syntax *json.SyntaxError
+		var shape *json.UnmarshalTypeError
+		if errors.As(err, &syntax) || errors.As(err, &shape) || err == io.EOF || err == io.ErrUnexpectedEOF {
+			return nil, hubnotice.ErrInvalidNotice
+		}
+		return nil, err
+	}
+	if out.Notices == nil {
+		return nil, nil
+	}
+	notices := make([]envelope.HubNotice, len(out.Notices))
+	for i, raw := range out.Notices {
+		// Present null URL fields must not disappear into string zero values.
+		var fields struct {
+			Hub    json.RawMessage `json:"hub"`
+			NewURL json.RawMessage `json:"new_url"`
+		}
+		if json.Unmarshal(raw, &notices[i]) != nil || json.Unmarshal(raw, &fields) != nil ||
+			bytes.Equal(bytes.TrimSpace(fields.Hub), []byte("null")) ||
+			bytes.Equal(bytes.TrimSpace(fields.NewURL), []byte("null")) {
+			return nil, hubnotice.ErrInvalidNotice
+		}
+		if err := hubnotice.ValidateNotice(notices[i], true); err != nil {
+			return nil, err
+		}
+	}
+	return notices, nil
 }
 func (c *Client) LoopCuts(ctx context.Context, hours int) (out opapi.LoopCuts, err error) {
 	q := url.Values{}

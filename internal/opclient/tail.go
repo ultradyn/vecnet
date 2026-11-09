@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/hubnotice"
 )
 
 var (
@@ -127,6 +128,9 @@ func (c *Client) TailWithAck(ctx context.Context, handle func(Batch) error, stat
 			resp.Body.Close()
 			if err == nil && page.Cursor == "" {
 				err = fmt.Errorf("event page is missing next_cursor")
+			}
+			if err == nil {
+				err = hubnotice.ValidateBatch(page.Events, true)
 			}
 			if err == nil && page.Restarting != nil && len(page.Events) == 0 {
 				// The hub answered with no events and an unchanged cursor:

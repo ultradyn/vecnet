@@ -74,6 +74,13 @@ func fixture[T any]() T { var v T; wireFixture(reflect.ValueOf(&v).Elem()); retu
 
 func TestReadsDecode(t *testing.T) {
 	ctx := context.Background()
+	notices := fixture[[]envelope.HubNotice]()
+	for i := range notices {
+		notices[i].Hub = "https://Source.Example:8443/Vecnet/%2Fexact/"
+		if notices[i].NewURL != "" {
+			notices[i].NewURL = "https://[2001:db8::7]:8443/Next/%2Fexact/"
+		}
+	}
 	// Values and wrappers reflect the protocol, including the bare subscription array.
 	cases := []struct {
 		name, method, path, query string
@@ -98,7 +105,7 @@ func TestReadsDecode(t *testing.T) {
 		{"subscriptions", "GET", "/v1/admin/subscriptions", "", fixture[[]opapi.Subscription](), func(c *Client) (any, error) { return c.Subscriptions(ctx) }, nil},
 		{"audit", "GET", "/v1/admin/audit", "before=42&limit=7", fixture[opapi.AuditPage](), func(c *Client) (any, error) { return c.Audit(ctx, 7, "42") }, nil},
 		{"counters", "GET", "/v1/admin/counters", "", map[string]int{"loop_cut": 3, "dead_letters": 2}, func(c *Client) (any, error) { return c.Counters(ctx) }, nil},
-		{"notices", "GET", "/v1/hub/notices", "", fixture[[]envelope.HubNotice](), func(c *Client) (any, error) { return c.Notices(ctx) }, func(v any) any { return map[string]any{"notices": v} }},
+		{"notices", "GET", "/v1/hub/notices", "", notices, func(c *Client) (any, error) { return c.Notices(ctx) }, func(v any) any { return map[string]any{"notices": v} }},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
