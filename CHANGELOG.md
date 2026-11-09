@@ -1,6 +1,7 @@
 # Changelog
 - 2026-11-09: Grok presence uses a 600-second factory TTL, inherits an explicit default TTL when unset, and preserves explicit factory-equal overrides with confirmed shortening risks (`docs/PROTOCOL.md`, registry version 2).
 - 2026-11-09: ChatGPT Dot onboarding includes a short setup prompt and Copy prompt action after plugin connection (`internal/ui/static/invite.js`).
+- 2026-11-10: Hub URL environment defaults stay out of flag help and parse diagnostics; explicit URL flags, including empty overrides, retain precedence (`cmd/vecnet-hub/main.go`).
 - 2026-11-09: TUI dashboard hides archived peers by default; `a` reveals marked rows while displayed-row navigation and disabled peers remain available (`internal/tui/screen_dash.go`).
 - 2026-11-09: Deploy relevant reviewed master merges to Fly promptly, with serialized ownership and running commit/asset smoke checks (`docs/DEPLOY.md`).
 
