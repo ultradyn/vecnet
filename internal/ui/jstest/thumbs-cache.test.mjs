@@ -373,3 +373,200 @@ test('WEB-MEM-3 T2b1 callback_throw_reentry_retirement', async t => {
   assert.equal(first.events.length, afterRelease); assert.equal(dispatch.allocated.length, 1); assert.equal(dispatch.revoked.length, 1);
   quota(dispatch, { running: 1, residentEntries: 0, sources: 1 }); await dispatch.complete(dispatch.calls[1]); assert.equal(queued.state, 'ready');
 });
+
+test('WEB-MEM-3 T2b2 move_owner_N1_identity', async t => {
+  const r = fixture(t, { N: 1 }), { cache } = r.create(), denied = r.create();
+  const lease = acquire(cache, 'from', 1), loading = view(lease);
+  assert.equal(acquire(denied.cache, 'denied', 2), null);
+  r.log.push({ op: 'caller-detach', owner: 'from' });
+  assert.equal(cache.moveOwner('from', 'loading-target', { priority: 'explicit' }), lease);
+  assert.deepEqual(view(lease), loading); assert.equal(r.calls.length, 1); assert.equal(r.calls[0].signal.aborted, false);
+  quota(r, { sources: 1, running: 1, reservedBytes: 4 }); stats(cache, { owners: 1, entries: 1, fetches: 1 });
+  assert.equal(cache.retry('from'), null); r.drop(cache, 'from'); assert.deepEqual(view(lease), loading);
+  await r.complete(r.calls[0], raster(2)); const ready = view(lease), snapshot = cache.stats;
+  r.log.push({ op: 'caller-detach', owner: 'loading-target' });
+  assert.equal(cache.moveOwner('loading-target', 'ready-target', { priority: 'automatic' }), lease);
+  assert.equal(cache.moveOwner('ready-target', 'ready-target', { priority: 'explicit' }), lease);
+  assert.equal(cache.moveOwner('missing', 'unused', { priority: 'automatic' }), null);
+  assert.deepEqual(view(lease), ready); assert.deepEqual(cache.stats, snapshot);
+  assert.equal(cache.retry('loading-target'), null); r.drop(cache, 'loading-target');
+  assert.equal(r.calls.length, 1); assert.equal(r.allocated.length, 1); assert.equal(r.revoked.length, 0);
+  quota(r, { sources: 1, running: 0, residentEntries: 1, residentBytes: 2 });
+  r.drop(cache, 'ready-target'); assert.equal(lease.state, 'dormant'); assert.equal(lease.url, null);
+  assert.deepEqual(r.revoked, [ready.url]); quota(r, { sources: 0, residentEntries: 0, residentBytes: 0 });
+});
+
+test('WEB-MEM-3 T2b2 retry_revalidates_owner_metadata', async t => {
+  const r = fixture(t, { N: 1 }), { cache } = r.create();
+  const original = att(1, { origin_url: 'https://invalid.test/source' });
+  const lease = cache.acquire('owner', original, true, { priority: 'automatic' }), firstGeneration = lease.generation;
+  await r.complete(r.calls[0], new Error('transport failure'), true); await flush();
+  assert.equal(lease.state, 'error'); assert.equal(r.calls.length, 1); quota(r, { sources: 1, running: 0 });
+  // Caller mutation cannot change the scalar metadata snapshot admitted earlier.
+  original.sha256 = '../changed'; original.media_type = 'image/svg+xml'; original.size = THUMB_MAX + 1;
+  assert.equal(cache.retry('owner'), lease); const secondGeneration = lease.generation;
+  assert.notEqual(secondGeneration, firstGeneration); assert.equal(typeof secondGeneration, 'string');
+  assert.equal(lease.state, 'loading');
+  const loadingRetry = view(lease);
+  assert.equal(cache.retry('owner'), lease); assert.equal(r.calls.length, 2); assert.equal(r.calls[1].hash, sha(1));
+  assert.deepEqual(view(lease), loadingRetry);
+  await r.complete(r.calls[1], raster(1, 'text/html')); assert.equal(lease.state, 'error');
+  assert.equal(acquire(cache, 'owner', 1, 'explicit', { origin_url: 'origin', blob_url: 'hosted-metadata' }, false), lease);
+  await flush(); assert.equal(r.calls.length, 2); assert.equal(lease.state, 'error');
+  assert.equal(cache.retry('owner'), lease); const thirdGeneration = lease.generation;
+  assert.notEqual(thirdGeneration, secondGeneration); assert.equal(typeof thirdGeneration, 'string');
+  quota(r, { sources: 1, running: 1, reservedBytes: 4 });
+  await r.complete(r.calls[2], raster(2)); const ready = view(lease);
+  assert.equal(cache.retry('owner'), lease); assert.deepEqual(view(lease), ready); assert.equal(r.calls.length, 3);
+  cache.broken(sha(1), firstGeneration); cache.broken(sha(1), secondGeneration);
+  assert.deepEqual(view(lease), ready); assert.equal(r.revoked.length, 0);
+  quota(r, { sources: 1, running: 0, residentEntries: 1, residentBytes: 2 });
+  r.log.push({ op: 'caller-detach', owner: 'owner' });
+  assert.equal(acquire(cache, 'owner', 1, 'explicit', { origin_url: 'not-hosted' }, false), null);
+  assert.equal(cache.retry('owner'), null); assert.equal(lease.state, 'dormant'); assert.equal(lease.url, null);
+  stats(cache, { owners: 0, entries: 0, fetches: 3, created: 1, revoked: 1 });
+  quota(r, { sources: 0, residentEntries: 0, residentBytes: 0 });
+});
+
+test('WEB-MEM-3 T2b2 aggregate_explicit_priority_FIFO', async t => {
+  const r = fixture(t, { B: 40, C: 1, E: 16, N: 16, Q: 8 }), { cache } = r.create();
+  acquire(cache, 'hold', 10); const automatic = acquire(cache, 'auto', 11);
+  acquire(cache, 'earlier', 12, 'explicit'); const shared = acquire(cache, 'shared', 11, 'explicit');
+  acquire(cache, 'later', 13, 'explicit'); const second = acquire(cache, 'second', 11, 'explicit');
+  const generation = shared.generation;
+  assert.equal(cache.moveOwner('shared', 'moved', { priority: 'automatic' }), shared);
+  assert.equal(cache.moveOwner('second', 'second', { priority: 'explicit' }), second);
+  assert.equal(acquire(cache, 'auto', 11), automatic); // Another explicit owner still promotes this hash.
+  assert.equal(shared.generation, generation); quota(r, { running: 1, queued: 3, sources: 6 });
+  for (const hash of [10, 12, 11, 13]) {
+    assert.equal(r.calls.at(-1).hash, sha(hash)); await r.complete(r.calls.at(-1), raster(0));
+  }
+  assert.deepEqual(r.calls.map(call => call.hash), [10, 12, 11, 13].map(sha));
+  const demoted = fixture(t, { B: 40, C: 1, E: 16, N: 16, Q: 8 }), c = demoted.create().cache;
+  acquire(c, 'hold', 20); const base = acquire(c, 'base', 21);
+  acquire(c, 'earlier', 22, 'explicit'); acquire(c, 'last-explicit', 21, 'explicit');
+  acquire(c, 'later', 23, 'explicit'); acquire(c, 'automatic', 24);
+  const queuedGeneration = base.generation; demoted.drop(c, 'last-explicit');
+  acquire(c, 'before-upgrade', 25, 'explicit');
+  assert.equal(c.moveOwner('base', 'renamed', { priority: 'explicit' }), base);
+  acquire(c, 'after-upgrade', 26, 'explicit');
+  assert.equal(c.moveOwner('renamed', 'renamed', { priority: 'explicit' }), base);
+  assert.equal(acquire(c, 'renamed', 21, 'explicit'), base); assert.equal(base.generation, queuedGeneration);
+  quota(demoted, { running: 1, queued: 6, sources: 7 });
+  for (const hash of [20, 22, 23, 25, 21, 26, 24]) {
+    assert.equal(demoted.calls.at(-1).hash, sha(hash)); await demoted.complete(demoted.calls.at(-1), raster(0));
+  }
+  quota(demoted, { running: 0, queued: 0, residentEntries: 7 });
+  const moved = fixture(t, { B: 40, C: 1, E: 10, Q: 4 }), m = moved.create().cache;
+  acquire(m, 'hold', 30); const only = acquire(m, 'only-explicit', 31, 'explicit');
+  acquire(m, 'automatic', 34); acquire(m, 'other-explicit', 32, 'explicit');
+  const movedGeneration = only.generation;
+  assert.equal(m.moveOwner('only-explicit', 'now-automatic', { priority: 'automatic' }), only);
+  assert.equal(only.generation, movedGeneration); quota(moved, { running: 1, queued: 3, sources: 4 });
+  for (const hash of [30, 32, 31, 34]) {
+    assert.equal(moved.calls.at(-1).hash, sha(hash)); await moved.complete(moved.calls.at(-1), raster(0));
+  }
+  quota(moved, { running: 0, queued: 0, residentEntries: 4 });
+});
+
+test('WEB-MEM-3 T2b2 waiting_retry_on_actual_capacity', async t => {
+  const r = fixture(t, { B: 40, C: 1, E: 10, N: 3, Q: 1 }), hold = r.create(), active = r.create(), denied = r.create();
+  acquire(hold.cache, 'hold', 1); const accepted = acquire(active.cache, 'accepted', 2, 'explicit');
+  const waiting = acquire(active.cache, 'waiting', 3, 'explicit'); assert.equal(waiting.state, 'waiting');
+  assert.equal(acquire(denied.cache, 'denied', 5), null);
+  assert.equal(active.cache.retry('waiting'), waiting); assert.equal(waiting.generation, null);
+  quota(r, { sources: 3, running: 1, queued: 1 }); assert.equal(r.calls.length, 1);
+  r.drop(active.cache, 'accepted'); assert.equal(accepted.state, 'dormant');
+  assert.equal(active.cache.retry('waiting'), waiting); const generation = waiting.generation;
+  assert.equal(waiting.state, 'queued'); assert.equal(typeof generation, 'string');
+  const follower = acquire(active.cache, 'follower', 4, 'explicit'); assert.equal(follower.state, 'waiting');
+  assert.equal(active.cache.retry('follower'), follower); assert.equal(active.cache.retry('waiting'), waiting);
+  assert.equal(waiting.generation, generation); hold.cache.release();
+  r.calls[0].body.resolve(raster(0)); await flush();
+  quota(r, { sources: 2, running: 1, reservedBytes: 4, queued: 1 });
+  assert.equal(waiting.state, 'queued'); assert.equal(follower.state, 'waiting'); assert.equal(r.calls.length, 1);
+  r.calls[0].cleanup.resolve(); await Promise.allSettled([r.calls[0].terminal]); await flush();
+  assert.equal(waiting.state, 'loading'); assert.equal(waiting.generation, generation);
+  assert.equal(follower.state, 'queued'); assert.equal(typeof follower.generation, 'string');
+  const followerGeneration = follower.generation, loadingView = view(waiting), queuedView = view(follower);
+  assert.equal(active.cache.retry('waiting'), waiting); assert.equal(active.cache.retry('follower'), follower);
+  assert.deepEqual(view(waiting), loadingView); assert.deepEqual(view(follower), queuedView);
+  assert.equal(r.calls.length, 2); quota(r, { sources: 2, running: 1, queued: 1 });
+  await r.complete(r.calls[1], raster(0)); assert.equal(follower.state, 'loading');
+  assert.equal(follower.generation, followerGeneration); assert.equal(active.cache.retry('follower'), follower);
+  await r.complete(r.calls[2]); assert.equal(follower.state, 'ready');
+  assert.deepEqual(r.calls.map(call => call.hash), [1, 3, 4].map(sha)); assert.equal(denied.events.length, 0);
+  quota(r, { sources: 2, running: 0, queued: 0, residentEntries: 2 });
+});
+
+test('WEB-MEM-3 T2b2 move_drop_retry_terminal_reentry', async t => {
+  const r = fixture(t), h = {}, { cache, events } = r.create(h), lease = acquire(cache, 'old', 1);
+  assert.equal(typeof cache.moveOwner, 'function'); assert.equal(typeof cache.retry, 'function');
+  const before = cache.stats, budgetBefore = r.budget.stats, loading = view(lease);
+  for (const args of [['', 'new', { priority: 'explicit' }], ['old', '', { priority: 'automatic' }],
+    ['old', 'new', { priority: 'viewer' }], ['old', 'new', null], ['old', 'new', undefined],
+    [null, 'new', { priority: 'automatic' }], ['old', 1, { priority: 'explicit' }]])
+    assert.throws(() => cache.moveOwner(...args), TypeError);
+  for (const key of ['', null, 1, {}]) assert.throws(() => cache.retry(key), TypeError);
+  assert.deepEqual(cache.stats, before); assert.deepEqual(r.budget.stats, budgetBefore); assert.deepEqual(view(lease), loading);
+  let phase = 0, replacement, retiredCount;
+  h.change = () => {
+    if (phase === 0 && lease.state === 'error') {
+      phase = 1; const failedGeneration = lease.generation;
+      assert.equal(cache.moveOwner('old', 'moved', { priority: 'explicit' }), lease);
+      assert.equal(cache.retry('moved'), lease); assert.notEqual(lease.generation, failedGeneration);
+      assert.equal(cache.retry('moved'), lease); r.drop(cache, 'old');
+    } else if (phase === 1 && lease.state === 'ready') {
+      phase = 2; assert.equal(cache.retry('moved'), lease);
+      r.log.push({ op: 'caller-detach', owner: 'moved' });
+      assert.equal(cache.moveOwner('moved', 'ready', { priority: 'automatic' }), lease);
+      r.drop(cache, 'moved'); assert.equal(lease.state, 'ready'); r.drop(cache, 'ready');
+      replacement = acquire(cache, 'ready', 1); assert.notEqual(replacement, lease);
+      assert.equal(cache.retry('ready'), replacement); cache.release(); retiredCount = events.length;
+    }
+  };
+  await r.complete(r.calls[0], null); assert.equal(phase, 1); assert.equal(lease.state, 'loading');
+  assert.equal(r.calls.length, 2); quota(r, { sources: 1, running: 1 });
+  await r.complete(r.calls[1]); assert.equal(phase, 2); assert.equal(r.calls.length, 3);
+  assert.equal(lease.state, 'dormant'); assert.equal(replacement.state, 'dormant'); assert.ok(r.calls[2].signal.aborted);
+  assert.equal(cache.retry('ready'), null); assert.equal(cache.moveOwner('ready', 'late', { priority: 'explicit' }), null);
+  assert.equal(cache.retry('missing'), null); assert.equal(r.drop(cache, 'ready'), undefined);
+  quota(r, { sources: 0, running: 1, reservedBytes: 4, residentEntries: 0 });
+  await r.complete(r.calls[2]); assert.equal(events.length, retiredCount); assert.equal(r.allocated.length, 1);
+  assert.equal(r.revoked.length, 1); quota(r, { sources: 0, running: 0, reservedBytes: 0 });
+  const collision = fixture(t), c = collision.create().cache, a = acquire(c, 'a', 2), b = acquire(c, 'b', 3);
+  const aView = view(a), bView = view(b), snapshot = c.stats, quotaBefore = collision.budget.stats;
+  assert.equal(c.moveOwner('a', 'b', { priority: 'explicit' }), null);
+  assert.equal(c.moveOwner('missing', 'free', { priority: 'automatic' }), null); assert.equal(c.retry('missing'), null);
+  assert.deepEqual(view(a), aView); assert.deepEqual(view(b), bView); assert.deepEqual(c.stats, snapshot);
+  assert.deepEqual(collision.budget.stats, quotaBefore); assert.equal(collision.calls.length, 2);
+});
+
+test('WEB-MEM-3 T2b2 cross_cache_explicit_close_switch_progress', async t => {
+  const r = fixture(t, { B: 40, C: 1, E: 10, Q: 2 });
+  const hold = r.create(), earlier = r.create(), closed = r.create(), switched = r.create();
+  acquire(hold.cache, 'hold', 1); const first = acquire(earlier.cache, 'first', 2, 'explicit');
+  const cancelled = acquire(closed.cache, 'pending', 3, 'explicit'), next = acquire(switched.cache, 'switch', 4, 'explicit');
+  assert.equal(first.state, 'queued'); assert.equal(cancelled.state, 'queued'); assert.equal(next.state, 'waiting');
+  assert.equal(switched.cache.retry('switch'), next); quota(r, { running: 1, queued: 2, sources: 4 });
+  closed.cache.release(); const closedCount = closed.events.length;
+  assert.equal(cancelled.state, 'dormant'); assert.equal(switched.cache.retry('switch'), next);
+  assert.equal(next.state, 'queued'); assert.equal(first.state, 'queued');
+  assert.equal(closed.cache.retry('pending'), null); hold.cache.release();
+  r.calls[0].body.reject(new Error('closed transport still cleaning')); await flush();
+  quota(r, { running: 1, reservedBytes: 4, queued: 2, sources: 2 }); assert.equal(r.calls.length, 1);
+  r.calls[0].cleanup.resolve(); await Promise.allSettled([r.calls[0].terminal]); await flush();
+  assert.equal(first.state, 'loading'); assert.equal(next.state, 'queued'); assert.equal(r.calls[1].hash, sha(2));
+  earlier.cache.release(); const earlierCount = earlier.events.length;
+  assert.ok(r.calls[1].signal.aborted); assert.equal(first.state, 'dormant');
+  r.calls[1].body.resolve(raster()); await flush(); assert.equal(next.state, 'queued');
+  quota(r, { running: 1, reservedBytes: 4, queued: 1, sources: 1 }); assert.equal(r.calls.length, 2);
+  r.calls[1].cleanup.resolve(); await Promise.allSettled([r.calls[1].terminal]); await flush();
+  assert.equal(next.state, 'loading'); assert.equal(r.calls[2].hash, sha(4));
+  assert.equal(switched.cache.retry('switch'), next); await r.complete(r.calls[2], raster(2));
+  const ready = view(next); closed.cache.release(); earlier.cache.release(); hold.cache.release();
+  assert.deepEqual(view(next), ready); assert.deepEqual(r.calls.map(call => call.hash), [1, 2, 4].map(sha));
+  assert.equal(closed.events.length, closedCount); assert.equal(earlier.events.length, earlierCount);
+  assert.equal(r.allocated.length, 1); assert.equal(r.revoked.length, 0);
+  quota(r, { running: 0, queued: 0, residentEntries: 1, residentBytes: 2, sources: 1 });
+});

@@ -46,14 +46,14 @@ R-M38 (2026-11-09): split Task 2a pure shared budget and new dedicated thumbs-bu
 
 - [x] Task2a pure shared admission budget: focused26/fullUI522/Go10 pass; independent Sol source PASS C0/I0/M2. Coverage minors and remaining cache/DOM obligations are recorded in [the component receipt](receipts/2026-11-09-thumbnail-budget.md).
 - [x] Task2b1 opt-in cache core: 28 focused/542 full UI/7 Go embedding passes; independent Sol core and cap reviews C0/I0/M0. [Component receipt](receipts/2026-11-09-thumbnail-cache-core.md).
-- [ ] Task2b2 owner transfer and explicit retry extension; no caller activation.
+- [x] Task2b2 owner transfer/retry: 34 focused/548 full UI/7 Go embedding passes and fresh independent Sol C0/I0/M0. [Extension receipt](receipts/2026-11-09-thumbnail-cache-transfer.md). No caller activation. Task3 cleanup recovery reachability is a separately recorded design dependency.
 
 **Files:** internal/ui/static/thumbs-budget.js; internal/ui/static/thumbs-model.js; internal/ui/jstest/thumbs.test.mjs.
 **Consumes:** Task 1 promise settlement/error semantics. **Produces:** the exact budget tickets, source permits and cache acquire/move/drop/retry/broken/release interfaces in the design; no incompatible partial DOM activation.
 
-- [ ] Write named RED tests for two/many caches sharing one budget before old calls drain, byte/entry/request/queue/source bounds, duplicate eligibility, stale generations and fair explicit admission.
-- [ ] Observe RED, implement minimum ownership model, then parent GREEN/full relevant suites and independent review.
-- [ ] Preserve original cache eligibility and current callers until Task 3 can switch their complete ownership protocol together.
+- [x] Write named RED tests for two/many caches sharing one budget before old calls drain, byte/entry/request/queue/source bounds, duplicate eligibility, stale generations and fair explicit admission.
+- [x] Observe RED, implement minimum ownership model, then parent GREEN/full relevant suites and independent review.
+- [x] Preserve original cache eligibility and current callers until Task 3 can switch their complete ownership protocol together.
 
 ## Task 3: Atomic thumbnail, viewer and focus integration
 

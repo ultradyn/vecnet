@@ -377,6 +377,42 @@ function createLeaseThumbCache(options) {
     aggregatePriority(entry); admit(entry);
     return owner.lease;
   }
+  function moveOwner(fromKey, toKey, options) {
+    guard(); ownerKey(fromKey); ownerKey(toKey);
+    const priority = priorityOption(options);
+    if (dead) return null;
+    const owner = owners.get(fromKey);
+    if (!owner || (fromKey !== toKey && owners.has(toKey))) return null;
+    if (fromKey !== toKey) {
+      // Permit transfer has no callback boundary or zero-owner interval. Keep
+      // its existing capacity link rather than dropping/reclaiming a source.
+      owner.permit.move(`${identity}/owner/${toKey}`, { onCapacity });
+      owners.delete(fromKey);
+      owner.key = toKey;
+      owners.set(toKey, owner);
+    }
+    owner.priority = priority;
+    aggregatePriority(owner.entry);
+    // Priority dispatch may retire/move this owner; never look up a replacement.
+    return owner.lease;
+  }
+  function retry(key) {
+    guard(); ownerKey(key);
+    if (dead) return null;
+    const owner = owners.get(key);
+    if (!owner) return null;
+    if (!eligible(owner.att, owner.hosted)) { drop(key); return null; }
+    const entry = owner.entry;
+    if (entry.state !== 'error' && entry.state !== 'waiting') return owner.lease;
+    const wasError = entry.state === 'error', previous = entry.generation;
+    if (wasError) entry.state = 'waiting';
+    admit(entry);
+    // A denied retry still commits error -> waiting. Admission/observer reentry
+    // may instead have retired this owner or started a different generation.
+    if (wasError && current(entry) && owner.entry === entry && owners.get(owner.key) === owner &&
+        entry.state === 'waiting' && entry.generation === previous) notify(entry);
+    return owner.lease;
+  }
   function drop(key) {
     guard(); ownerKey(key);
     const owner = owners.get(key);
@@ -428,7 +464,7 @@ function createLeaseThumbCache(options) {
     if (didThrow) throw failure;
   }
   return Object.freeze({
-    acquire, drop, broken, release,
+    acquire, moveOwner, retry, drop, broken, release,
     get stats() {
       let queued = 0, loading = 0, residentEntries = 0, residentBytes = 0;
       for (const entry of entries.values()) {
