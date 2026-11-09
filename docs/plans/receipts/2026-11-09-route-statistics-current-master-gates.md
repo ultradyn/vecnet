@@ -6,7 +6,7 @@ The 35 selected source/test/documentation paths and three earlier public receipt
 
 | Gate on x-boss | Observed result |
 | --- | --- |
-| Full Go suite | PASS, 5,888 passing test events; no failed or skipped test events |
+| Full Go suite | PASS, 5,888 passing named test events and no failures; one intentional `TestWriteShots` skip and two package-level skip events |
 | Full UI tests | PASS, 521 tests |
 | Canonical launcher strict TypeScript and units | PASS, 1,828 tests; includes hub-client inputs |
 | Launcher E2E | PASS, 16 tests against the real candidate hub and fake backends |
@@ -17,7 +17,7 @@ The 35 selected source/test/documentation paths and three earlier public receipt
 | Canonical screenshots | PASS, 413 PNGs indexed exactly once; all hashes retained |
 | Operator backup-helper rehearsal | PASS, actual static helper, live WAL sentinel, separate exact restore, 14 calls including ten refusals and one retained incomplete resource-failure artifact |
 
-Every gate retained its actual child status, `bb: exit=0`, before/after source hashes and two empty owned-process drains. All execution ran on x-boss with at most two aggregate workers and private physical homes/temp roots. The normal Fly remote-only deployment build remains the separately recorded rollout exception.
+The successful final wrappers retained actual child status, `bb: exit=0`, before/after source hashes and two empty owned-process drains. The full UI child passed 521 tests with child exit 0 inside the initial combined Node wrapper, whose later launcher fixture failure produced `bb: exit=1`; that retained UI result is the explicit wrapper-status exception. All execution ran on x-boss with at most two aggregate workers and private physical homes/temp roots. The normal Fly remote-only deployment build remains the separately recorded rollout exception.
 
 The first combined Node runner failed one credential-mode fixture because its inherited umask 077 changed the fixture's requested 0644 to 0600. Its raw failure is preserved (`c0545d6478ed3282bcc6fe58131fbb2ae9bf64f78982b1f09e7471ad6f26a8cb`). The corrected runner retained private 0700 roots and used umask 022 inside synthetic launcher/npm tests. No product or test source changed; the corrected strict/unit/E2E/npm sequence passed. The original UI 521 PASS remains attributed to its original run.
 
