@@ -66,11 +66,15 @@ export function inviteButton(ctx, onCreated) {
   return h('button', { type: 'button', class: 'btn inv-open', text: 'Add agent', onclick: e => openInvite(ctx, onCreated, e.currentTarget) });
 }
 
-function copier(label, value, cls) {
+function copier(label, value, cls, feedback) {
   const b = h('button', { type: 'button', class: 'btn' + (cls ? ' ' + cls : ''), text: label, onclick: async () => {
     const text = typeof value === 'function' ? value() : value;
+    if (feedback) { feedback.replaceChildren(); b.textContent = label; }
     if (await copyText(text)) { b.textContent = 'Copied'; setTimeout(() => { b.textContent = label; }, 1500); }
-    else toast('Could not copy. Select the text and copy it instead.', true);
+    else if (feedback) {
+      feedback.append(h('p', { class: 'inv-note', text: 'Could not copy. Select the text and copy it instead.' }));
+      feedback.scrollIntoView({ block: 'nearest' });
+    } else toast('Could not copy. Select the text and copy it instead.', true);
   } });
   return b;
 }
@@ -671,6 +675,7 @@ export function openInvite(ctx, onCreated, opener, prefill) {
     const urlBtn = copier('Copy URL', d.mcpURL, 'pri');
     const prompt = h('pre', { id: 'inv-dot-prompt', class: 'inv-prompt mono', tabindex: '0', 'aria-label': 'Dot setup prompt',
       text: 'Use vecnet_guide to finish setting up incoming messages in this chat. Create one task with trigger vecnet, event vecnet.message and no settings. Under Advanced, set Runs in: Same chat for every run. Use the guide\'s recommended task instruction.' });
+    const feedback = h('div', { role: 'status', 'aria-live': 'polite', 'aria-atomic': 'true' });
     lede.textContent = 'Connect ' + (d.name || 'the dot') + ' from ChatGPT.';
     body.replaceChildren(...[
       h('p', { class: 'inv-warn', role: 'note', text: 'Shown once — the link code binds a ChatGPT login to this dot. Give it only to whoever sets up the plugin.' }),
@@ -681,7 +686,8 @@ export function openInvite(ctx, onCreated, opener, prefill) {
       h('p', { class: 'inv-note', text: 'After connecting the plugin, paste this prompt into the Dot:' }),
       prompt,
       h('p', { class: 'inv-meta mono', text: 'ChatGPT dot · peer ' + d.peerId }),
-      h('div', { class: 'inv-acts' }, h('button', { type: 'button', class: 'btn', text: 'Done', onclick: () => close() }), copier('Copy prompt', () => prompt.textContent, 'pri')),
+      h('div', { class: 'inv-acts' }, h('button', { type: 'button', class: 'btn', text: 'Done', onclick: () => close() }), copier('Copy prompt', () => prompt.textContent, 'pri', feedback)),
+      feedback,
     ].filter(Boolean));
     urlBtn.focus();
   }
