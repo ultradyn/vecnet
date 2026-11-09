@@ -206,6 +206,14 @@ export function mount(root, ctx) {
     peerEmpty.textContent = list.archived ? 'Archived peers are hidden.' : 'No peers enrolled.';
     if (lastPeers === value && lastArchived === showArchived) return [archivedToggle, rows.length ? peerTableWrap : peerEmpty];
     lastPeers = value; lastArchived = showArchived;
+    // Hidden/removed peers release both owners; surviving views keep their identity.
+    const shownIDs = new Set(rows.map(p => p.id));
+    for (const id of peerRows.keys()) {
+      if (!shownIDs.has(id)) {
+        peerRows.delete(id);
+        peerCharts.delete(id);
+      }
+    }
     const nextRows = rows.map(p => {
       const presenceAge = p.presence === 'n/a' ? '' : p.presenceAt ? age(p.presenceAt) : 'never reported';
       const reachSub = [p.via, p.seen ? age(p.seen) : ''].filter(Boolean).join(', ');

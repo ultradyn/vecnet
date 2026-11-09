@@ -42,3 +42,21 @@ test('keyboard and pointer select exact minute, clamp, dismiss and retain select
     assert.doesNotMatch(c.el.textContent, /9 messages/);
   } finally { restore(); }
 });
+
+test('SVG accessible labels strip hostile bidi and controls while preserving Unicode and chart context', () => {
+  const restore = installDom();
+  try {
+    const c = module.createSparkline(), s = snapshot(), svg = c.el.querySelector('svg');
+    for (const name of [
+      'Zoë\u202e 東京\u2066 / café\u2069\u0000\u0007\u001b\u007f\u0085\u009f 42',
+      'Zoë 東京 / café 42',
+    ]) {
+      c.update(s, s, { label: name, max: 5 });
+      const label = svg.getAttribute('aria-label');
+      assert.equal(label, 'Zoë 東京 / café 42: 4 messages in the last hour; minute counts, zero to 5. Use arrows, Home or End to inspect.');
+      for (const control of ['\u202e', '\u2066', '\u2069', '\u0000', '\u0007', '\u001b', '\u007f', '\u0085', '\u009f']) {
+        assert.equal(label.includes(control), false, `accessible name retained U+${control.charCodeAt(0).toString(16)}`);
+      }
+    }
+  } finally { restore(); }
+});

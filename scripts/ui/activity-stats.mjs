@@ -101,6 +101,67 @@ async function inspectPeerReadouts({ page, shot, refresh, ready, value, director
   assert(!failures.length, `Peer inspection clipping/collision regressions:\n${failures.join('\n')}`);
 }
 
+async function inspectPeerRemoval({ page, refresh, ready, value, directory, setDirectory }) {
+  const visible = directory.peers.filter(row => !row.archived_at);
+  assert(visible.length >= 2, 'removal fixture needs a target and survivor');
+  const targetID = visible[0].peer.peer_id, survivorID = visible[1].peer.peer_id;
+  const rowFor = id => page.locator('.peer-table-scroll tbody tr').filter({ has: page.locator(`a.pn[href="#peer/${id}"]`) });
+  const survivor = rowFor(survivorID), target = rowFor(targetID);
+  const toggle = page.getByRole('checkbox', { name: 'Show archived', exact: true });
+  const refreshBoth = async () => {
+    const responses = ['/v1/admin/activity-stats', '/v1/admin/peers'].map(path => page.waitForResponse(r => new URL(r.url()).pathname === path));
+    await refresh(); await Promise.all((await Promise.all(responses)).map(r => r.finished()));
+    await ready();
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  };
+  await page.mouse.move(0, 0);
+  await survivor.evaluate(el => { window.__removalSurvivorRow = el; window.__removalSurvivorSVG = el.querySelector('svg'); });
+  for (const scenario of ['removed', 'archived']) {
+    await target.locator('svg').focus(); await page.keyboard.press('Home');
+    assert(await target.locator('.spark-readout').isVisible(), `${scenario}: target inspection inaccessible`);
+    await target.evaluate(el => { window.__removedRow = el; window.__removedSVG = document.activeElement; });
+    setDirectory({ ...directory, peers: scenario === 'removed'
+      ? directory.peers.filter(row => row.peer.peer_id !== targetID)
+      : directory.peers.map(row => row.peer.peer_id === targetID ? { ...row, archived_at: '2026-11-09T10:00:00Z' } : row) });
+    await refreshBoth();
+    assert(await target.count() === 0, `${scenario}: target still visible`);
+    assert(await page.evaluate(() => document.activeElement !== window.__removedSVG && document.activeElement.isConnected), `${scenario}: focus stranded on removed chart`);
+    assert(await survivor.evaluate(el => el === window.__removalSurvivorRow && el.querySelector('svg') === window.__removalSurvivorSVG), `${scenario}: survivor replaced`);
+    assert(await page.locator('.activity-count').textContent() === value.messages.toLocaleString('en-US'), `${scenario}: filtering dropped history`);
+    await survivor.locator('svg').focus(); await page.keyboard.press('Home');
+    assert(await survivor.locator('.spark-readout').textContent() === `${value.peers[survivorID]?.buckets[0] || 0} messages · [2026-11-09T11:00:30.000Z, 2026-11-09T11:01:30.000Z) UTC — messages in this minute`, `${scenario}: surviving keyboard chart unusable`);
+    await refreshBoth();
+    assert(await page.evaluate(() => document.activeElement === window.__removalSurvivorSVG), `${scenario}: survivor focus lost on refresh`);
+    if (scenario === 'removed') { setDirectory(directory); await refreshBoth(); }
+    else await toggle.check();
+    assert(await target.evaluate(el => el !== window.__removedRow && el.querySelector('svg') !== window.__removedSVG), `${scenario}: restored view reused retained row or chart`);
+    assert(!await target.locator('.spark-readout').isVisible() && await target.locator('.spark-readout').textContent() === '', `${scenario}: obsolete inspection reopened`);
+    assert(await target.locator('.spark-cursor').getAttribute('visibility') === 'hidden', `${scenario}: restored cursor not cleared`);
+    assert(scenario === 'removed'
+      ? await page.evaluate(() => document.activeElement === window.__removalSurvivorSVG)
+      : await toggle.evaluate(el => el === document.activeElement), `${scenario}: restoration left unusable focus`);
+    await target.locator('svg').focus(); await page.keyboard.press('Home');
+    assert((await target.locator('.spark-readout').textContent()).startsWith(`${value.peers[targetID]?.buckets[0] || 0} messages`), `${scenario}: restored chart keyboard unusable`);
+    await page.keyboard.press('Escape');
+    assert(!await target.locator('.spark-readout').isVisible(), `${scenario}: restored chart cannot dismiss selection`);
+    if (scenario === 'archived') {
+      await page.keyboard.press('Home');
+      await target.evaluate(el => { window.__removedRow = el; window.__removedSVG = document.activeElement; });
+      await toggle.uncheck(); assert(await target.count() === 0, 'archive toggle did not hide target');
+      assert(await toggle.evaluate(el => el === document.activeElement && el.isConnected), 'hide stranded focus instead of leaving it on the checkbox');
+      await survivor.locator('svg').focus(); await page.keyboard.press('Home');
+      await toggle.check();
+      assert(await target.evaluate(el => el !== window.__removedRow && el.querySelector('svg') !== window.__removedSVG), 'repeated show reused hidden view');
+      assert(!await target.locator('.spark-readout').isVisible() && await target.locator('.spark-readout').textContent() === '', 'repeated show reopened inspection');
+      await survivor.locator('svg').focus(); await page.keyboard.press('End');
+      assert((await survivor.locator('.spark-readout').textContent()).includes('11:59:30.000Z'), 'survivor keyboard unusable after repeated show');
+      setDirectory(directory); await refreshBoth(); await toggle.uncheck();
+    }
+    assert(await survivor.evaluate(el => el === window.__removalSurvivorRow && el.querySelector('svg') === window.__removalSurvivorSVG), `${scenario}: survivor identity lost`);
+  }
+  await page.evaluate(() => { document.activeElement?.blur(); delete window.__removalSurvivorRow; delete window.__removalSurvivorSVG; delete window.__removedRow; delete window.__removedSVG; });
+}
+
 try {
   await withDemo({}, async ({ page, asPeer, shot, allowConsole, countRequests, demo }) => {
     allowConsole(/status of 500/);
@@ -112,8 +173,8 @@ try {
     const directory = await (await asPeer('operator', 'GET', '/v1/admin/peers')).json();
     const ids = directory.peers.map(p => p.peer.peer_id).filter(id => id.startsWith('peer_'));
     const value = snapshot(ids);
-    let singlePeer = null;
-    await page.route('**/v1/admin/peers', route => route.fulfill({ contentType: 'application/json', body: JSON.stringify(singlePeer ? { ...directory, peers: directory.peers.filter(row => row.peer.peer_id === singlePeer) } : directory) }));
+    let singlePeer = null, shownDirectory = directory;
+    await page.route('**/v1/admin/peers', route => route.fulfill({ contentType: 'application/json', body: JSON.stringify(singlePeer ? { ...shownDirectory, peers: shownDirectory.peers.filter(row => row.peer.peer_id === singlePeer) } : shownDirectory) }));
     let mode = 'hold', release;
     let gate = new Promise(r => { release = r; });
     await page.route('**/v1/admin/activity-stats', async route => {
@@ -146,6 +207,7 @@ try {
     assert(await plot.getAttribute('xmlns') === null || await plot.evaluate(el => el.namespaceURI === 'http://www.w3.org/2000/svg'), 'namespaced SVG');
     await shot('activity-dark-1440');
     await inspectPeerReadouts({ page, shot, refresh, ready, value, directory, setSinglePeer: id => { singlePeer = id; } });
+    await inspectPeerRemoval({ page, refresh, ready, value, directory, setDirectory: next => { shownDirectory = next; } });
 
     // The overview inspection must participate in layout, not cover the next
     // metric row on mobile or the explanatory status on desktop.
