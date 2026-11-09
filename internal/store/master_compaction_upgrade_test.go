@@ -18,6 +18,7 @@ func TestCompactionMigrationsFreshAndUpgradeFromMaster0026(t *testing.T) {
 		"0032_idempotency_created_at_index.sql",
 		"0033_thread_seq_history_tombstones.sql",
 		"0034_thread_history_loop_parent.sql",
+		"0035_route_attempts.sql",
 	}
 	for _, fromMaster := range []bool{false, true} {
 		name := "fresh"
@@ -36,8 +37,8 @@ func TestCompactionMigrationsFreshAndUpgradeFromMaster0026(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(migs) != 34 {
-				t.Fatalf("migration count=%d, want 34", len(migs))
+			if len(migs) != 35 {
+				t.Fatalf("migration count=%d, want 35", len(migs))
 			}
 			want := make([]string, len(migs))
 			for i, m := range migs {
