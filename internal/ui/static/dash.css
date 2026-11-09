@@ -83,7 +83,7 @@ body[data-route=dash] .va .col{max-width:1120px}
 .dash .peer-activity-summary{font-size:11px;line-height:1.5;margin:0 0 4px;color:var(--chart-ink);font-variant-numeric:tabular-nums}
 .dash .peer-activity .spark-axis{display:none}
 .dash .peer-activity svg{height:36px}
-.dash .peer-activity .spark-readout{top:36px}
+.dash .peer-activity .spark-readout{position:static;min-width:0;padding:0;border:0;box-shadow:none}
 .dash tr.off td.peer-activity{opacity:1}
 @media(max-width:1200px){.activity-overview{grid-template-columns:minmax(120px,1fr) minmax(180px,1.5fr)}.activity-metric{padding-top:4px}}
 @media(max-width:600px){.activity-overview{grid-template-columns:1fr 1fr;gap:14px}.activity-volume{grid-column:1/-1}.activity-chart{grid-column:1/-1}.dash .dash-sec>.body{max-width:100%;overflow-x:auto}.dash .dash-counters{overflow-wrap:anywhere}}
