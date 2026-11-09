@@ -268,6 +268,8 @@ Commands: `:attach PATH`, `:attach`, `:detach N`, `:detach` (see [Attachments](#
 
 ## Dashboard and administration
 
+The web dashboard adds an hourly activity snapshot: committed non-reaction messages in the hub-clock rolling interval `[now − 60 minutes, now)`, split into 60 one-minute counts, including source/hub traffic and archived senders. Messages/min is the whole-hour average (count ÷ 60), not an instantaneous rate; active peers means distinct peer senders, including the operator and dots, not presence. Peer traces share a common vertical scale. Focus a trace and use arrows or Home/End to inspect a minute, Escape to dismiss, or expand **Minute values** for exact UTC intervals and counts. Activity refreshes independently every 30 seconds, retaining focused charts and prior values while loading; initial unknown/error values are not zero, and a failed refresh labels retained values stale until recovery.
+
 The dashboard observes peers, filtered threads, subscription health, loop cuts, blocked/failed deliveries, counters and audit entries. It performs no writes. In the web client every peer name links to that peer's own read-only page (`#peer/<id>`): its full id, kind, principal, credential and disabled state, presence with the last heartbeat and capabilities, scopes and send limits, routes (its own and its principal's), subscriptions, delivery health and recent threads. Ids show short (`peer_…X6Z8B`) but copy whole: select one (a click selects it all) or use the copy button that appears on hover or focus. Use the inbox for retry/discard/resume or the CLI for administration:
 
 | Change | CLI command |
