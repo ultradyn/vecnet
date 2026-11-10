@@ -92,4 +92,18 @@ await withDemo({}, async ({ page, shot, demo, asPeer }) => {
   await shot('composer-fit-page-1180');
   await page.setViewportSize({ width: 390, height: 844 });
   await shot('composer-fit-page-390');
+
+  // One column, the document scrolls: mid-way through a long thread the reply
+  // composer is pinned to the viewport's bottom, not left at the column's end.
+  await page.evaluate(id => { location.hash = `#thread/${id}`; }, demo.threads.hark);
+  await page.locator('#view .msg').nth(5).waitFor();
+  const pinned = await page.evaluate(async () => {
+    const ms = document.querySelectorAll('#view .msg');
+    ms[ms.length >> 1].scrollIntoView({ block: 'center' });
+    await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+    const doc = document.scrollingElement, c = document.querySelector('.composer').getBoundingClientRect();
+    return { y: doc.scrollTop, max: doc.scrollHeight - doc.clientHeight, bottom: c.bottom, top: c.top, vh: innerHeight };
+  });
+  assert(pinned.y > 0 && pinned.y < pinned.max - 1, `not mid-thread at 390: ${JSON.stringify(pinned)}`);
+  assert(Math.abs(pinned.bottom - pinned.vh) <= 1 && pinned.top > 0, `composer not pinned to the viewport bottom at 390: ${JSON.stringify(pinned)}`);
 });

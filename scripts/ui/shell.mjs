@@ -168,6 +168,45 @@ try {
     await page.evaluate(() => { location.hash = '#inbox'; });
     await page.getByRole('heading', { name: 'Inbox', exact: true }).waitFor();
 
+    // Phone (one column, the document scrolls): the thread lists fold behind
+    // Threads, so the page starts on the first screen; a sidebar route link
+    // brings the new page's top into view. Above 720 px neither applies.
+    const tog = page.locator('#side-tog'), lists = page.locator('#lists'), inboxH = page.getByRole('heading', { name: 'Inbox', exact: true });
+    const expanded = () => tog.getAttribute('aria-expanded');
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.evaluate(() => scrollTo(0, 0));
+    assert(await tog.getAttribute('aria-controls') === 'lists' && await expanded() === 'false' && await lists.isHidden(), 'phone thread lists are not folded behind Threads');
+    // Its dot (an unread thread in Your Threads) is in its accessible name too.
+    const mineUnread = await page.locator('#threads a.unread').count();
+    assert(mineUnread > 0 && await page.getByRole('button', { name: 'Threads, unread', exact: true }).isVisible(), `Threads does not name its unread dot (${mineUnread} unread rows)`);
+    const folded = await inboxH.boundingBox();
+    assert(folded && folded.y >= 0 && folded.y + folded.height <= 844, `phone Inbox heading is not on the first screen: ${JSON.stringify(folded)}`);
+    await tog.click();
+    assert(await expanded() === 'true' && await page.locator('#threads a').first().isVisible(), 'Threads did not open the lists');
+    await tog.click();
+    assert(await expanded() === 'false' && await lists.isHidden(), 'Threads did not close the lists');
+    await tog.click();
+    await page.locator('#nav-dash').click();
+    await page.getByRole('heading', { name: 'Dashboard', exact: true }).waitFor();
+    assert(await expanded() === 'false' && await lists.isHidden(), 'a route change left Threads open');
+    await quiet();
+    await page.evaluate(() => scrollTo(0, 0));
+    await page.locator('#nav-inbox').click();
+    await inboxH.waitFor();
+    const shown = await page.evaluate(() => ({ y: scrollY, main: document.getElementById('main').getBoundingClientRect().top }));
+    const revealed = await inboxH.boundingBox();
+    assert(shown.y > 0 && Math.abs(shown.main) <= 1, `the Inbox link did not bring the page's top into view: ${JSON.stringify(shown)}`);
+    assert(revealed && revealed.y >= 0 && revealed.y + revealed.height <= 844, `phone Inbox heading off screen after the link: ${JSON.stringify(revealed)}`);
+    await page.setViewportSize({ width: 1000, height: 900 });
+    const wide = await page.evaluate(() => ({ tog: getComputedStyle(document.getElementById('side-tog')).display, lists: getComputedStyle(document.getElementById('lists')).display }));
+    assert(wide.tog === 'none' && wide.lists !== 'none', `at 1000 px Threads shows or the lists hide: ${JSON.stringify(wide)}`);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.locator('#nav-dash').click();
+    await page.getByRole('heading', { name: 'Dashboard', exact: true }).waitFor();
+    await page.locator('#nav-inbox').click();
+    await inboxH.waitFor();
+    assert(await page.evaluate(() => scrollY) === 0, 'a desktop route link scrolled the document');
+
     // A thread reached through #matrix is the same mounted thread. The real
     // matrix (Task 11) is a modal <dialog>, so the thread under it is inert:
     // the draft is typed on #thread and must survive #thread → #matrix → #thread.

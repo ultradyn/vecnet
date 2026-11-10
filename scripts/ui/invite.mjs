@@ -394,7 +394,8 @@ try {
       return ((await r.json()).peers || []).some(p => p.peer_id === id);
     }, { secret: demo.operator_secret, id: nres.peer_id }, { polling: 200 });
 
-    // Narrow: the sidebar stacks above the view; the button and dialog fit.
+    // Narrow: the sidebar stacks above the view, its thread lists folded
+    // behind Threads; the button and dialog fit.
     await page.setViewportSize({ width: 390, height: 844 });
     await draft.fill('');
     await page.evaluate(() => { document.getElementById('main').scrollTop = 0; window.scrollTo(0, 0); });

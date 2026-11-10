@@ -129,7 +129,10 @@ try {
     await fits(1000);
     await shot('sb-unread-narrow');
     await page.setViewportSize({ width: 390, height: 844 });
-    // One column: the sidebar is on top and the page scrolls; frame Your Threads.
+    // One column: the sidebar is on top and the page scrolls. Open the folded
+    // thread lists (Threads), then frame Your Threads.
+    await page.locator('#side-tog').click();
+    assert(await page.locator('#side-tog').getAttribute('aria-expanded') === 'true' && await mineList.isVisible(), 'Threads did not open the lists at 390 px');
     await page.locator('nav.side .grp', { hasText: 'Your Threads' }).evaluate(el => el.scrollIntoView({ block: 'start' }));
     await fits(390);
     await shot('sb-unread-phone');

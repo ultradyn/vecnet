@@ -257,6 +257,8 @@ try {
     await snap('sr-narrow');
     await page.setViewportSize({ width: 390, height: 844 });
     await page.locator('#search').evaluate(el => el.scrollIntoView({ block: 'start' }));
+    // The results show while the phone's Threads disclosure (and its lists) hide.
+    assert(await results.isVisible() && await page.locator('#side-tog').isHidden() && await lists.isHidden(), 'phone search does not show its results in place of Threads');
     await fitsSidebar(390);
     await snap('sr-phone');
     await page.setViewportSize({ width: 1440, height: 900 });

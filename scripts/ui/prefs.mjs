@@ -65,7 +65,8 @@ try {
       }
       await page.setViewportSize(SIZES.desk);
     };
-    // The page's own top: on a phone the sidebar stacks above it.
+    // The page's own top: on a phone the sidebar (thread lists folded behind
+    // Threads) stacks above it.
     const top = () => page.evaluate(() => { document.getElementById('main').scrollTop = 0; if (innerWidth <= 720) document.querySelector('.st-page').scrollIntoView({ block: 'start' }); else scrollTo(0, 0); });
     const section = id => () => page.locator('#' + id).evaluate(el => el.scrollIntoView({ block: 'start' }));
     const bar = () => into('.st-bar');
@@ -169,6 +170,13 @@ try {
     assert(await page.locator(sid('agents.default_ttl')).inputValue() === '12h', 'a Policy edit is not shown in List');
     assert(await page.locator('[data-row="agents.default_ttl"] .st-src').first().textContent() === 'edited', 'edited badge missing');
     await both('dirty', { list: section('sec-agents_defaults'), policy: () => into('.st-p:nth-of-type(3)') });
+    // At phone width the document scrolls: the save bar pins to the viewport
+    // from the page's top, not only at the end of the form.
+    await page.setViewportSize(SIZES.phone);
+    await top();
+    const stBar = await page.locator('.st-bar').evaluate(el => { const r = el.getBoundingClientRect(); return { top: r.top, bottom: r.bottom, vh: innerHeight, y: scrollY }; });
+    assert(stBar.top >= 0 && stBar.bottom <= stBar.vh, `dirty save bar outside the phone viewport: ${JSON.stringify(stBar)}`);
+    await page.setViewportSize(SIZES.desk);
 
     // ---------- invalid input: beside the field, Save blocked ----------
     await view('list');

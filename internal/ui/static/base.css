@@ -166,7 +166,29 @@ a.plink:hover,span.plink:hover{color:var(--violet);border-bottom-color:var(--vio
 
 @media (min-width:1101px){body[data-route=dash] .va,body[data-route=new] .va,body[data-route=peer] .va{grid-template-columns:240px minmax(0,1fr)}}
 @media (max-width:1100px){.va{grid-template-columns:220px minmax(0,1fr)}.va aside{display:none}}
-@media (max-width:720px){.va{grid-template-columns:1fr;height:auto;min-height:100vh}.va .side{border-right:0;border-bottom:1px solid var(--line)}.va main{padding:24px 16px}}
+/* One column at phone width. The document scrolls, not main, so main must not
+   clip: the sticky composer and save bar then pin to the viewport, and
+   minmax(0,1fr) keeps wide content from widening the page. Threads (#side-tog,
+   app.js showThreads) folds the thread lists and the sidebar packs into rows,
+   so every page starts on the first screen; its dot says a thread is unread. */
+.side-tog{display:none}
+@media (max-width:720px){
+  .va{grid-template-columns:minmax(0,1fr);height:auto;min-height:100vh}
+  .va main{padding:24px 16px;overflow:visible;min-height:100vh}
+  .va .side{padding-top:16px;border-right:0;border-bottom:1px solid var(--line)}
+  .va .side .brand{padding-bottom:12px}
+  .va .side>.nav{display:grid;grid-template-columns:1fr 1fr;gap:2px 6px}
+  .va .side>.nav .nav-add{grid-column:1/-1;margin-top:4px}
+  .side-tog{display:flex;align-items:center;gap:8px;width:100%;margin:10px 0 0;padding:7px 9px;border:1px solid var(--line2);border-radius:7px;background:#0d1325;color:var(--muted);font-size:13.5px}
+  .side-tog:hover{border-color:#3d4a73;color:var(--text)}
+  .side-tog.unread::before{content:'';width:7px;height:7px;border-radius:50%;background:var(--wake)}
+  .side-tog::after{content:'';margin:0 3px 3px auto;width:6px;height:6px;border:solid currentColor;border-width:0 1.5px 1.5px 0;transform:rotate(45deg)}
+  .side-tog[aria-expanded=true]::after{margin-bottom:-3px;transform:rotate(-135deg)}
+  .va .side-tog[aria-expanded=false]+#lists{display:none}
+  .va .side .foot{position:static;flex-direction:row;flex-wrap:wrap;align-items:center;margin-top:10px;padding:6px 0 12px;border-top:1px solid var(--line)}
+  .va .side .foot .linkbtn{margin-left:auto}
+  .va .build-info{flex-basis:100%;padding-top:2px}
+}
 
 /* This browser's appearance (appearance.js; set before first paint by
    appearance-boot.js). Light inverts the dark palette, hue kept, until a

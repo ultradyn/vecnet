@@ -105,6 +105,7 @@ function renderNav(s, route) {
   // Search replaces the thread lists; closing it redraws their current state.
   const open = !!(s.search && s.search.state().open);
   $('lists').hidden = open;
+  $('side-tog').hidden = open;
   $('results').hidden = !open;
   if (open) {
     renderResults($('results'), {
@@ -123,6 +124,10 @@ function renderNav(s, route) {
     unread: head.unread_by_thread,
   });
   $('threads').replaceChildren(...(yours.rows.length ? yours.rows.map(r => threadLink(r, route, s.nameOf)) : [h('div', { class: 'none', text: yours.note })]));
+  // The dot is drawn in CSS: its name says it too.
+  const unreadMine = yours.rows.some(r => r.unread);
+  $('side-tog').classList.toggle('unread', unreadMine);
+  $('side-tog').setAttribute('aria-label', unreadMine ? 'Threads, unread' : 'Threads');
   renderOthers(s, route, threads, now);
   if (list) {
     const back = [...list.children].find(el => href ? el.getAttribute('href') === href : el.tagName === 'BUTTON');
@@ -208,7 +213,12 @@ function renderRoute(s) {
     $('aside').replaceChildren();
     const offView = entry.screen.mount($('view'), ctx);
     const offAside = entry.aside ? entry.aside($('aside'), ctx) : () => {};
+    showThreads(false);
     $('main').scrollTop = 0;
+    // One column (phone): the document scrolls, so bring the new page's top
+    // into view. A no-op when main is its own scroller. A thread with unread
+    // places itself at New once its data lands, after this.
+    if (changed && route.name !== 'matrix' && route.name !== 'add-agent') $('main').scrollIntoView({ block: 'start' });
     s.unmount = () => { offView(); offAside(); s.unmount = () => {}; };
     s.mounted = key;
   }
@@ -383,6 +393,10 @@ function leaving(s) {
   return !msg || window.confirm(msg);
 }
 $('signout').addEventListener('click', () => { if (leaving(session)) signOut(''); });
+// Threads: at 720 px and below the sidebar's thread lists fold behind this
+// disclosure (base.css), so every page starts on the first screen.
+const showThreads = open => $('side-tog').setAttribute('aria-expanded', String(open));
+$('side-tog').addEventListener('click', e => showThreads(e.currentTarget.getAttribute('aria-expanded') !== 'true'));
 // Add agent from any view: the invite dialog opens over the current screen,
 // which stays mounted. A created peer reloads the shared directory; the
 // dashboard follows the hub's directory_updated event.
