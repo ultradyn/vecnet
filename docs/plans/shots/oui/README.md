@@ -34,6 +34,7 @@ Task 23 runs both clients against one disposable hub. Its assertions verify cros
 - [t10-thread-explicit-wake.png](t10-thread-explicit-wake.png) — Grok setup reply with wake chosen explicitly: the quota note stays without a preselection claim.
 - [t10-thread-keyboard.png](t10-thread-keyboard.png) — Grok setup reply with wake selected and keyboard focus on wake_idle, showing its tooltip.
 - [t10-thread-narrow.png](t10-thread-narrow.png) — Grok setup reply at 390 px with explicit wake kept and the quota note below the controls, without horizontal overflow.
+- [t10-thread-phone-follow.png](t10-thread-phone-follow.png) — A thread at 390 px, where the page scrolls: a message arriving while the reader is at the bottom is followed into view above the pinned reply box.
 - [10-aside-error.png](10-aside-error.png) — Thread participants and files — error state.
 - [10-aside-initial.png](10-aside-initial.png) — Thread participants and files — initial state.
 - [10-aside-progress.png](10-aside-progress.png) — Thread participants and files — progress state.
