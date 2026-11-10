@@ -2,11 +2,12 @@
 // rebuilds every .msg, so the picker is one node outside the list and the
 // open message lives here.
 import { h } from './dom.js';
-import { prioritySeg } from './prio.js';
+import { markPriority, prioritySeg } from './prio.js';
 import { chips, errorText, nextOp, reactBody, REACTIONS } from './react-model.js';
 
 const SAYS = { wake: 'wakes now', wake_idle: 'wakes if idle', hold: 'no wake' };
-const FOCUSABLE = 'a,button,input,textarea,select,[tabindex]';
+// main takes focus only from script (the shell's route handoff): not a control.
+const FOCUSABLE = 'a,button,input,textarea,select,[tabindex]:not(main)';
 
 export function createReactions({ api, me, nameOf, onDone, toast }) {
   let open = '', cur = null, override = null, busy = false;
@@ -24,7 +25,8 @@ export function createReactions({ api, me, nameOf, onDone, toast }) {
       b.setAttribute('aria-label', r.name + ', ' + (mine ? 'remove yours' : SAYS[p]));
       b.title = b.getAttribute('aria-label');
     });
-    for (const b of seg.seg.children) { b.className = b.value === override ? 'on' : ''; b.disabled = busy; }
+    markPriority(seg.seg, override);
+    for (const b of seg.seg.children) b.disabled = busy;
   }
 
   // place pins the picker under the button (above it near the bottom), left
@@ -108,7 +110,7 @@ export function createReactions({ api, me, nameOf, onDone, toast }) {
   // Tabbing out closes it in place.
   picker.addEventListener('focusout', e => {
     const t = e.relatedTarget;
-    if (open && !busy && t && !picker.contains(t) && !t.closest('.rx-btn')) close(false);
+    if (open && !busy && t && t.matches(FOCUSABLE) && !picker.contains(t) && !t.closest('.rx-btn')) close(false);
   });
 
   function button(m) {

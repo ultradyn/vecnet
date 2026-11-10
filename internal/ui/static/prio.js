@@ -12,7 +12,7 @@ export const PRIORITIES = ['wake', 'wake_idle', 'hold'];
 let seq = 0;
 
 // prioritySeg returns the wrapper to place and the .seg whose buttons the
-// caller marks .on.
+// caller marks with markPriority.
 export function prioritySeg(onPick) {
   const id = 'ptip' + (++seq) + '-';
   const seg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Priority' },
@@ -25,4 +25,14 @@ export function prioritySeg(onPick) {
   el.addEventListener('focusin', calm);
   el.addEventListener('pointerleave', calm);
   return { el, seg };
+}
+
+// markPriority shows value as the chosen priority (null for none): .on for
+// the eye, aria-pressed for assistive technology.
+export function markPriority(seg, value) {
+  for (const b of seg.children) {
+    const on = b.value === value;
+    b.className = on ? 'on' : '';
+    b.setAttribute('aria-pressed', String(on));
+  }
 }

@@ -8,7 +8,7 @@ import { blobView, nextExpiry, sendRefusal } from './attach-model.js';
 import { avatar, h, idText, peerLink } from './dom.js';
 import { ago, bytes, clean, deltaLabel, deltaTitle, fullWhen, kindShort, kindTitle, plural, short, title, when } from './format.js';
 import { markdown } from './md.js';
-import { prioritySeg } from './prio.js';
+import { markPriority, prioritySeg } from './prio.js';
 import { createReactions } from './react.js';
 import { budgetBanner, budgetOut, canShowFull, clientLabel, clientSuspect, excerpt, FULL_TEXT_CAP, GROK_QUOTA_DETAIL, INITIAL_PRIORITY, items, nextDivider, opening, replyKey, replyPriority, replyPriorityLocked, replyQuotaNote, replySig, sendError, SPILL_BYTES, TEXT_CAP, unreadOf } from './thread-model.js';
 import { createReader, enough } from './thread-read.js';
@@ -231,7 +231,7 @@ export function mount(root, ctx) {
     }
     // Choose again before minting. An unchanged draft keeps the captured
     // priority and key; an edit after a 503 does not.
-    const draft = syncPriority();
+    const submitted = ta.value, draft = syncPriority();
     S.pending = replyKey(S.pending, draft, randKey);
     const body = { idempotency_key: S.pending.key, thread_id: threadId, priority: draft.prio, content: { text: draft.text } };
     if (draft.replyTo) body.in_reply_to = draft.replyTo;
@@ -243,10 +243,11 @@ export function mount(root, ctx) {
     try {
       const r = await api.send(body);
       S.pending = null;
-      ta.value = '';
+      // The editable composer may already hold the next message.
+      if (ta.value === submitted) ta.value = '';
       atts.clear(carried);
       counter(ta);
-      S.replyTo = null;
+      if (S.replyTo === draft.replyTo) S.replyTo = null;
       S.pinned = true;
       toast(r.spilled ? 'Sent (spilled into message.md)' : 'Sent');
       store.invalidate(tag, 'threads', 'inbox');
@@ -390,7 +391,7 @@ export function mount(root, ctx) {
     const buttons = [];
     if (live && a.actionable) {
       a.options.forEach((o, i) => {
-        const b = h('button', { type: 'button', class: 'btn opt' + (i === 0 ? ' pri' : ''), text: o, onclick: () => answer(a, i) });
+        const b = h('button', { type: 'button', class: 'btn opt' + (i === 0 ? ' pri' : ''), 'data-focus': 'option-' + i, text: o, onclick: () => answer(a, i) });
         b.disabled = S.answering.has(a.approval_id);
         buttons.push(b);
         opts.append(b);
@@ -460,14 +461,14 @@ export function mount(root, ctx) {
         h('b', { text: label }), p.excerpt ? h('span', { text: p.excerpt }) : null);
     }
     const go = () => jump(p.message_id);
-    return h('div', { class: 'reply', role: 'link', tabindex: '0', title: 'Show ' + p.message_id, onclick: go,
+    return h('div', { class: 'reply', role: 'link', tabindex: '0', 'data-focus': 'quote', title: 'Show ' + p.message_id, onclick: go,
       onkeydown: e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); } } },
     h('b', { text: label }), h('span', { text: p.excerpt }));
   }
 
   function spillBlock(m, att) {
     const f = S.full.get(m.message_id);
-    const toggle = h('button', { type: 'button', class: 'linkbtn showfull' });
+    const toggle = h('button', { type: 'button', class: 'linkbtn showfull', 'data-focus': 'full' });
     if (!f) toggle.textContent = 'Show full text';
     else if (f.state === 'loading') { toggle.textContent = 'Loading full text…'; toggle.disabled = true; }
     else toggle.textContent = 'Hide full text';
@@ -496,7 +497,7 @@ export function mount(root, ctx) {
     const files = (m.attachments || []).filter(a => a !== it.spill).map(a => (a.blob_id ? r2Chip(a, blobView(a, stateOf(a.blob_id), store.hubNow())) : thumbs.render(a, hostedOf(m.message_id, a.sha256))));
     const full = S.full.get(m.message_id), showTxt = m.content && m.content.text && !(full && full.state === 'ok');
     const cls = 'msg' + (m.message_id === S.replyTo ? ' target' : '') + (m.message_id === S.flash ? ' flash' : '');
-    return h('div', { class: cls, id: 'm-' + m.message_id, onanimationend: e => { if (e.animationName === 'flash') { S.flash = ''; e.currentTarget.classList.remove('flash'); } } },
+    const el = h('div', { class: cls, id: 'm-' + m.message_id, onanimationend: e => { if (e.animationName === 'flash') { S.flash = ''; e.currentTarget.classList.remove('flash'); } } },
       avatar(m.sender, ctx),
       h('div', {},
         h('header', {},
@@ -507,7 +508,7 @@ export function mount(root, ctx) {
           delta ? h('span', { class: 'dt', text: delta, title: deltaTitle(prev.created_at, m.created_at) }) : null,
           h('span', { class: 'prio ' + m.priority, text: m.priority }),
           others ? h('span', { class: 'via' }, 'to ', (m.recipients || []).flatMap((r, i) => [i ? ', ' : '', peerLink(r, nameOf(r))])) : null,
-          h('span', { class: 'acts' }, agoLabel(m.created_at), h('button', { type: 'button', text: 'reply', onclick: () => { S.replyTo = m.message_id; render(); comp.querySelector('textarea').focus(); } }))),
+          h('span', { class: 'acts' }, agoLabel(m.created_at), h('button', { type: 'button', text: 'reply', 'data-focus': 'reply', onclick: () => { S.replyTo = m.message_id; render(); comp.querySelector('textarea').focus(); } }))),
         it.parent ? replyQuote(it.parent) : null,
         // A spilled preview is clamped to a few lines; Show full text opens it.
         showTxt ? h('div', { class: 'txt' + (it.spill ? ' clamp' : '') }, markdown(m.content.text)) : null,
@@ -516,6 +517,9 @@ export function mount(root, ctx) {
         files.length ? h('div', { class: 'atts' }, files) : null,
         R.chipsRow(m),
         it.receipts.length ? h('div', { class: 'rc' }, it.receipts.map(r => h('span', { class: 'st-' + r.display, title: r.delivery_id + ' · ' + r.state }, h('i'), nameOf(r.recipient) + ' ' + r.display))) : null));
+    el.querySelectorAll('a.plink').forEach((a, i) => { a.dataset.focus = 'peer-' + i; });
+    el.querySelectorAll('button.thumb').forEach(b => { b.dataset.focus = 'thumb-' + b.dataset.sha; });
+    return el;
   }
 
   const head = h('div', { class: 'thead' }), list = h('div', { class: 'msgs' }), comp = composer();
@@ -584,7 +588,7 @@ export function mount(root, ctx) {
     const seg = comp.querySelector('.seg');
     if (note) seg.setAttribute('aria-describedby', 'r-quota r-quota-more');
     else seg.removeAttribute('aria-describedby');
-    for (const b of seg.querySelectorAll('button')) b.className = b.value === S.prio ? 'on' : '';
+    markPriority(seg, S.prio);
     return { ...draft, prio: S.prio };
   }
 
@@ -606,8 +610,10 @@ export function mount(root, ctx) {
       // The first draw waits for unread, to open there, not jump from the bottom.
       list.replaceChildren(h('div', { class: 'loading', text: 'Loading thread…' }));
     } else {
-      // A rebuild replaces every node: a focused thumbnail keeps its focus.
-      const f = document.activeElement, keep = f && list.contains(f) && f.matches('button.thumb') && f.closest('.msg');
+      // A rebuild replaces every node. Reactions own their data-rx focus;
+      // other message controls keep their key without moving the viewport.
+      const f = document.activeElement, keep = f && list.contains(f) && !f.closest('[data-rx]') && f.dataset.focus && f.closest('.msg');
+      const key = keep && f.dataset.focus;
       const its = items(all, matrix.get() || null, (d && d.open_approvals) || []);
       const isUnread = new Set(unread.map(u => u.message_id));
       list.replaceChildren(...its.flatMap((it, i) => {
@@ -616,8 +622,8 @@ export function mount(root, ctx) {
         return id === S.divider ? [newDivider(), el] : [el];
       }));
       const again = keep && document.getElementById(keep.id);
-      const thumb = again && again.querySelector('button.thumb[data-sha="' + f.dataset.sha + '"]');
-      if (thumb) thumb.focus({ preventScroll: true });
+      const control = again && [...again.querySelectorAll('[data-focus]')].find(el => el.dataset.focus === key);
+      if (control && !control.matches(':disabled')) control.focus({ preventScroll: true });
       if (io) watch(); else observe();
     }
     tick();
