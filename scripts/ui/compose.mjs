@@ -6,6 +6,15 @@ const isSend = req => req.method() === 'POST' && new URL(req.url()).pathname ===
 try {
   await withDemo({}, async ctx => {
     const { page, shot, demo, asPeer, hold, allowConsole } = ctx;
+    // Exercise the directory's normal timer callback without a minute-long wait.
+    await page.addInitScript(() => {
+      const interval = window.setInterval;
+      window.setInterval = (fn, ms, ...args) => {
+        if (ms === 60000) window.refreshDirectory = fn;
+        return interval(fn, ms, ...args);
+      };
+    });
+    await page.reload();
     // Chromium logs every non-2xx fetch as a console error: the two rejections
     // this script stages, and the views other tasks have yet to fill in.
     allowConsole(/status of 403/);
@@ -35,6 +44,24 @@ try {
     assert(await page.locator('img').count() === 0, 'a peer name became an element');
     assert(await send.isDisabled(), 'Send enabled on an empty form');
     await shot('15-compose-initial');
+
+    // Selecting an option and a background refresh keep its keyboard position.
+    for (const key of ['codex', 'sleuth']) {
+      await opt(id(key)).focus();
+      await page.keyboard.press('Enter');
+      assert(await opt(id(key)).evaluate(el => el === document.activeElement && el.getAttribute('aria-pressed') === 'true'), 'recipient option lost focus on Enter');
+    }
+    assert(await view.locator('.picked .pick').count() === 2, 'keyboard did not pick both peers');
+    for (const control of [opt(id('codex')), view.locator(`.pick[title="${id('codex')}"] button`)]) {
+      await control.focus();
+      const refreshed = page.waitForResponse(r => new URL(r.url()).pathname === '/v1/peers');
+      await page.evaluate(() => window.refreshDirectory());
+      await refreshed;
+      await ctx.quiet();
+      assert(await control.evaluate(el => el === document.activeElement), 'directory refresh lost recipient control focus');
+    }
+    for (const key of ['codex', 'sleuth']) await view.locator(`.pick[title="${id(key)}"] button`).click();
+    assert(await search.evaluate(el => el === document.activeElement), 'removing a chip did not focus search');
 
     // Named assertion: empty text or no recipient keeps Send disabled.
     await text.fill('Text but nobody to send it to.');
@@ -149,7 +176,14 @@ try {
     // Grok recipient defaults (Decisions §6). A fresh composer: non-grokbot
     // keeps wake; any grokbot preselects wake_idle; a manual choice sticks;
     // a failed send retries the same body and priority.
-    const on = () => view.locator('.seg button.on').getAttribute('value');
+    // The chosen priority is .on for the eye and aria-pressed for assistive
+    // technology; every read checks that the two agree.
+    const on = async () => {
+      await view.locator('.seg button.on').waitFor();
+      const v = await view.locator('.seg button').evaluateAll(bs => ({ on: bs.filter(b => b.classList.contains('on')).map(b => b.value), pressed: bs.filter(b => b.getAttribute('aria-pressed') === 'true').map(b => b.value) }));
+      assert(v.on.length === 1 && v.on.join() === v.pressed.join(), `priority marks disagree: ${JSON.stringify(v)}`);
+      return v.on[0];
+    };
     const quota = view.locator('#c-quota');
     const center = sel => view.locator(sel).evaluate(el => el.scrollIntoView({ block: 'center' }));
     const quotaLine = 'Preselected for Grok Bot · each run spends Grok quota';

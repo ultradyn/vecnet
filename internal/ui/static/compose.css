@@ -67,3 +67,5 @@
 
 /* priority tips (prio.js): the picker ends the row, so its tip opens leftward */
 .compose .ptip{left:auto;right:0}
+/* Forced colors drop the wrapper's border tint and shadow: the field shows focus itself. */
+@media (forced-colors:active){.compose textarea:focus-visible,.compose .to input[type=search]:focus-visible{outline:2px solid Highlight;outline-offset:2px}}

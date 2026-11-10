@@ -40,3 +40,13 @@
 .va aside .onpage h3:first-child{margin-top:24px}
 .va aside .onpage a{display:block;color:var(--violet);text-decoration:none;padding:2px 0}
 .va aside .onpage a:hover{color:var(--text)}
+
+/* Phone width: a card's right column (countdown and thread, or Retry and Discard) moves
+   under its text, so the question and its answers get the card's full width. */
+@media (max-width:560px){
+  .va .item.apr,.va .item.dl{grid-template-columns:28px minmax(0,1fr)}
+  .va .item.apr .rs,.va .item.dl .rs{grid-column:2;flex-direction:row;flex-wrap:wrap;align-items:baseline;justify-content:space-between;gap:4px 12px}
+  .va .item.apr .rs .tl{max-width:100%;text-align:left}
+  /* the failure line wraps, so the delivery id and its copy button stay reachable */
+  .va .item.dl .meta{white-space:normal;overflow-wrap:anywhere}
+}

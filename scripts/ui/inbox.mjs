@@ -65,6 +65,39 @@ try {
     await quiet();
     await shot('08-inbox-initial');
 
+    // Phone width: a card's side column (countdown and thread, or Retry and
+    // Discard) sits under its text, so the question and answers get the card's
+    // width, and nothing runs off a card. At desktop it stays beside the text.
+    const cardShapes = () => page.evaluate(() => [...document.querySelectorAll('#view .item.apr, #view .item.dl')].map(el => {
+      const box = e => e.getBoundingClientRect();
+      const c = box(el), main = box(el.querySelector('.main')), rs = box(el.querySelector('.rs'));
+      const out = [...el.querySelectorAll('*')].filter(e => { const r = box(e); return r.width && (r.right > c.right + 0.5 || r.left < c.left - 0.5); }).length;
+      return { id: el.dataset.id, mainW: Math.round(main.width), cardW: Math.round(c.width), under: rs.top >= main.bottom - 0.5, out };
+    }));
+    assert((await cardShapes()).every(c => !c.under && !c.out), 'desktop cards stacked their side column');
+    await page.setViewportSize({ width: 390, height: 844 });
+    const phoneCards = await cardShapes();
+    assert(phoneCards.length === 5 && phoneCards.every(c => c.under && !c.out && c.mainW >= c.cardW - 80), `phone cards: ${JSON.stringify(phoneCards)}`);
+    assert(await page.evaluate(() => document.documentElement.scrollWidth) <= 390, 'the inbox scrolls sideways at 390 px');
+    await page.locator('#view h1').evaluate(el => el.scrollIntoView({ block: 'start' }));
+    await quiet();
+    await shot('08-inbox-phone');
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.evaluate(() => { document.getElementById('main').scrollTop = 0; scrollTo(0, 0); });
+
+    // Unrelated deliveries must not interrupt a keyboard decision or retry.
+    for (const [i, control] of [card(aprA).getByRole('button', { name: 'Yes', exact: true }), card(dl503).getByRole('button', { name: 'Retry', exact: true })].entries()) {
+      await control.focus();
+      const refreshed = page.waitForResponse(r => new URL(r.url()).pathname === '/v1/admin/inbox');
+      const r = await asPeer('codex', 'POST', '/v1/messages', {
+        idempotency_key: 'inbox-focus-' + i, thread_id: demo.threads.hosting, priority: 'hold', content: { text: 'Unrelated focus check ' + i },
+      });
+      assert(r.ok, `focus delivery: ${r.status}`);
+      await refreshed;
+      await quiet();
+      assert(await control.evaluate(el => el === document.activeElement), 'unrelated delivery dropped inbox control focus');
+    }
+
     // ---- double-click sends one POST (progress, then success) ----
     {
       const releasePost = await hold('**/v1/messages');

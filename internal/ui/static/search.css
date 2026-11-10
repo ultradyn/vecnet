@@ -39,3 +39,5 @@
 .sr-pick{flex:none;margin-right:5px;padding:2px 7px;border:1px solid var(--line2);border-radius:5px;background:#151c33;color:var(--muted);font:500 11px/16px var(--sans)}
 .sr-pick:hover{border-color:#6366f1;color:var(--text)}
 @media (hover:none){.sr-key{display:none}}
+/* Forced colors drop the wrapper's border tint and shadow: the field shows focus itself. */
+@media (forced-colors:active){#search-q:focus-visible{outline:2px solid Highlight;outline-offset:2px}}

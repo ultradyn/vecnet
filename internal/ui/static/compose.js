@@ -8,7 +8,7 @@
 import { createAttachments } from './attach.js';
 import { avatar, h, idText } from './dom.js';
 import { kindShort } from './format.js';
-import { prioritySeg } from './prio.js';
+import { markPriority, prioritySeg } from './prio.js';
 import { anyGrokbot, buildSend, canSend, composePriority, counter, draftOf, eligible, errorText, GROK_QUOTA_DETAIL, grokQuotaNote, INITIAL_PRIORITY, keepKey, keyFor, matches, priorityLocked, sendRefusal } from './compose-model.js';
 
 // The draft for the next mount only. The caller sets it and routes to #new in
@@ -98,7 +98,7 @@ export function mount(root, ctx) {
   function renderPicked() {
     picked.replaceChildren(...S.recipients.map(id => h('span', { class: 'pick' + (id === S.denied ? ' denied' : ''), title: id },
       h('span', { text: nameOf(id) }),
-      h('button', { type: 'button', 'aria-label': 'Remove ' + nameOf(id), text: '×', onclick: () => { toggle(id); search.focus(); } }))));
+      h('button', { type: 'button', 'data-peer': id, 'aria-label': 'Remove ' + nameOf(id), text: '×', onclick: () => { toggle(id); search.focus(); } }))));
   }
 
   function renderOpts() {
@@ -112,7 +112,7 @@ export function mount(root, ctx) {
     } else {
       opts.replaceChildren(...shown.map(p => {
         const on = S.recipients.includes(p.peer_id);
-        return h('button', { type: 'button', class: 'opt' + (on ? ' on' : ''), 'aria-pressed': on ? 'true' : 'false', title: p.peer_id, onclick: () => toggle(p.peer_id) },
+        return h('button', { type: 'button', class: 'opt' + (on ? ' on' : ''), 'data-peer': p.peer_id, 'aria-pressed': on ? 'true' : 'false', title: p.peer_id, onclick: () => toggle(p.peer_id) },
           avatar(p.peer_id, ctx),
           h('span', { class: 'nm', text: p.name }),
           h('span', { class: 'kd', text: kindShort(p.kind) }),
@@ -138,6 +138,9 @@ export function mount(root, ctx) {
 
   function render() {
     if (gone) return;
+    const active = document.activeElement;
+    const target = opts.contains(active) ? opts : picked.contains(active) ? picked : null;
+    const peer = target && active.dataset.peer;
     syncPriority();
     // "Preselected" only while wake_idle is the automatic choice; after a
     // manual pick the note says only what holds for every priority.
@@ -149,7 +152,7 @@ export function mount(root, ctx) {
     else seg.removeAttribute('aria-describedby');
     renderPicked();
     renderOpts();
-    for (const b of seg.querySelectorAll('button')) b.className = b.value === S.priority ? 'on' : '';
+    markPriority(seg, S.priority);
     const c = counter(text.value);
     count.textContent = c.label;
     count.className = 'bytes' + (c.tone ? ' ' + c.tone : '');
@@ -158,6 +161,8 @@ export function mount(root, ctx) {
     fields.disabled = S.sending;
     send.disabled = S.sending || !canSend(f);
     send.textContent = S.sending ? 'Sending…' : 'Send';
+    // Directory refreshes and keyboard toggles replace both recipient lists.
+    if (peer && !S.sending) (target.querySelector('[data-peer="' + CSS.escape(peer) + '"]') || search).focus({ preventScroll: true });
   }
 
   async function submit() {

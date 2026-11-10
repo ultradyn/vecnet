@@ -100,7 +100,7 @@ export function mount(root, ctx) {
 
   function approvalCard(a) {
     const buttons = (a.options || []).map((option, i) => h('button', {
-      type: 'button', class: 'btn' + (i === 0 ? ' pri' : ''), text: label(option), title: option,
+      type: 'button', class: 'btn' + (i === 0 ? ' pri' : ''), text: label(option), title: option, 'data-focus': 'option-' + i,
       onclick: () => answer(a, i),
     }));
     const exp = h('span', { class: 'exp', title: 'expires ' + a.expires_at });
@@ -113,7 +113,7 @@ export function mount(root, ctx) {
         a.text && a.text !== question ? h('div', { class: 'ex', text: a.text }) : null,
         h('div', { class: 'opts' }, buttons)),
       h('div', { class: 'rs' }, exp,
-        a.thread_title ? h('a', { class: 'meta tl', href: '#thread/' + a.thread_id, title: a.thread_id, text: a.thread_title }) : h('a', { class: 'meta tl', href: '#thread/' + a.thread_id }, idText(a.thread_id))));
+        a.thread_title ? h('a', { class: 'meta tl', 'data-focus': 'thread', href: '#thread/' + a.thread_id, title: a.thread_id, text: a.thread_title }) : h('a', { class: 'meta tl', 'data-focus': 'thread', href: '#thread/' + a.thread_id }, idText(a.thread_id))));
     cards.set(a.approval_id, { a, el, buttons, exp });
     paintCard(a.approval_id);
     return el;
@@ -147,9 +147,10 @@ export function mount(root, ctx) {
     let ctl = dlControls.get(id);
     if (!ctl) {
       ctl = {
-        retry: h('button', { type: 'button', class: 'btn', text: 'Retry', onclick: () => act(id, api.retryDeadLetter, 'Retry queued') }),
+        retry: h('button', { type: 'button', class: 'btn', 'data-focus': 'retry', text: 'Retry', onclick: () => act(id, api.retryDeadLetter, 'Retry queued') }),
         discard: confirmButton('Discard', 'Confirm discard', () => act(id, api.discardDeadLetter, 'Discarded')),
       };
+      ctl.discard.dataset.focus = 'discard';
       dlControls.set(id, ctl);
     }
     paintDead(id);
@@ -164,7 +165,7 @@ export function mount(root, ctx) {
       h('div', { class: 'main' },
         h('div', { class: 'who' }, 'To ', peerLink(dl.recipient, ctx.nameOf(dl.recipient)), ' ', h('span', { class: 'muted' }, 'from ', peerLink(dl.sender, ctx.nameOf(dl.sender)))),
         h('div', { class: 'meta', title: dl.delivery_id }, parts),
-        dl.excerpt ? h('a', { class: 'ex', href: '#thread/' + dl.thread_id, title: dl.thread_id, text: dl.excerpt }) : h('a', { class: 'ex', href: '#thread/' + dl.thread_id, title: dl.thread_id }, idText(dl.message_id)),
+        dl.excerpt ? h('a', { class: 'ex', 'data-focus': 'thread', href: '#thread/' + dl.thread_id, title: dl.thread_id, text: dl.excerpt }) : h('a', { class: 'ex', 'data-focus': 'thread', href: '#thread/' + dl.thread_id, title: dl.thread_id }, idText(dl.message_id)),
         dl.last_error && dl.last_error !== dl.excerpt ? h('div', { class: 'why', text: dl.last_error }) : null),
       h('div', { class: 'rs' }, h('div', { class: 'opts' }, ctl.retry, ctl.discard)));
   }
@@ -177,7 +178,7 @@ export function mount(root, ctx) {
     if (d.attachments) meta.push(d.attachments === 1 ? '1 file' : d.attachments + ' files');
     const why = heldWhy(d);
     if (why) meta.push(why);
-    return h('a', { class: 'item' + (d.read_at ? ' read' : ''), href: '#thread/' + d.thread_id, 'data-id': d.delivery_id, title: d.delivery_id },
+    return h('a', { class: 'item' + (d.read_at ? ' read' : ''), href: '#thread/' + d.thread_id, 'data-id': d.delivery_id, 'data-focus': 'row', title: d.delivery_id },
       avatar(d.sender, ctx),
       h('div', { class: 'main' },
         h('div', { class: 'who' }, peerLink(d.sender, ctx.nameOf(d.sender), { nested: true }), ' ', h('span', { class: 'muted', text: 'in' }), ' ', d.thread_title ? h('span', { class: 'tl', text: d.thread_title }) : h('span', { class: 'tl' }, idText(d.thread_id))),
@@ -237,6 +238,12 @@ export function mount(root, ctx) {
     }
 
     if (older.pending(value)) { syncOlder(value); return; }
+    // Capture before dead-letter controls move to new cards: even moving a
+    // retained node drops focus. Its confirmation state stays on that node.
+    const active = body.contains(document.activeElement) ? document.activeElement : null;
+    const key = active && active.dataset.focus;
+    const item = active && active.closest('[data-id]');
+    const id = item && item.dataset.id;
     const data = withOlder(value, older.pages()), nowMs = store.hubNow();
     const byKey = new Map(sections(data).map(s => [s.key, s]));
     const live = new Set((data.approvals || []).map(a => a.approval_id));
@@ -258,12 +265,18 @@ export function mount(root, ctx) {
       if (s) out.push(heading(s), ...s.items.map(d => deliveryRow(d, nowMs)));
     }
     if (data.next_before) {
-      const btn = h('button', { type: 'button', class: 'btn more', text: 'Load older' });
+      const btn = h('button', { type: 'button', class: 'btn more', 'data-focus': 'older', text: 'Load older' });
       btn.addEventListener('click', () => loadOlder(btn));
       out.push(btn);
     }
     if (!byKey.size) out.push(h('div', { class: 'empty' }, h('b', { text: 'Nothing needs you' }), 'No decisions, failed deliveries or messages are waiting.'));
     body.replaceChildren(...out);
+    if (key) {
+      const row = id ? body.querySelector('[data-id="' + CSS.escape(id) + '"]') : body;
+      const selector = '[data-focus="' + CSS.escape(key) + '"]';
+      const again = row && (row.matches(selector) ? row : row.querySelector(selector));
+      if (again && !again.disabled) again.focus({ preventScroll: true });
+    }
   }
 
   // Countdowns tick from the hub's clock, never the browser's alone.

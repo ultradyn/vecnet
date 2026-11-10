@@ -16,6 +16,15 @@ const titled = q => u => u.pathname === '/v1/threads' && u.searchParams.get('q')
 try {
   await withDemo({}, async ctx => {
     const { page, shot, demo, asPeer, hold, fail, allowConsole, countRequests, quiet, ignore } = ctx;
+    // Exercise the directory's normal timer callback without a minute-long wait.
+    await page.addInitScript(() => {
+      const interval = window.setInterval;
+      window.setInterval = (fn, ms, ...args) => {
+        if (ms === 60000) window.refreshDirectory = fn;
+        return interval(fn, ms, ...args);
+      };
+    });
+    await page.reload();
     allowConsole(/status of 503/);
     // Keeps interception on when hold() unroutes (see shell.mjs).
     await page.route('**/__keep-interception__', route => route.continue());
@@ -403,6 +412,30 @@ try {
       assert(JSON.stringify(await shown()) === JSON.stringify(current), `obsolete More changed ${change} results`);
     }
     await page.unroute(pageQuery, pages);
+    await box.press('Escape');
+
+    // Renaming the picked peer updates its chip without replacing the remove button.
+    await box.fill('grok');
+    await page.locator('#results .sr-peer', { hasText: 'grok-reviewer' }).locator('.sr-pick').click();
+    await settled();
+    const renamed = 'Renamed reviewer';
+    const renameDirectory = async route => {
+      const response = await route.fetch(), body = await response.json();
+      body.peers = body.peers.map(peer => peer.peer_id === p('grok') ? { ...peer, name: renamed } : peer);
+      await route.fulfill({ response, json: body });
+    };
+    await page.route('**/v1/peers', renameDirectory);
+    const unpick = page.locator('.sr-unpick');
+    await unpick.focus();
+    const refreshed = page.waitForResponse(r => new URL(r.url()).pathname === '/v1/peers');
+    await page.evaluate(() => window.refreshDirectory());
+    await refreshed;
+    await page.locator('.sr-scope .nm', { hasText: renamed }).waitFor();
+    await settled();
+    assert(await unpick.evaluate(el => el === document.activeElement), 'directory rename dropped scope remove focus');
+    assert(await page.getByRole('button', { name: 'Stop narrowing to ' + renamed, exact: true }).count() === 1, 'scope remove accessible name is stale');
+    assert(await page.locator('.sr-scope .nm').getAttribute('title') === renamed + ' · ' + p('grok'), 'scope title is stale');
+    await page.unroute('**/v1/peers', renameDirectory);
     await box.press('Escape');
 
     // A real directory reply supplies long hostile names. Reloading goes
