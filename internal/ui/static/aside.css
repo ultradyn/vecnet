@@ -66,6 +66,8 @@
   body[data-route=thread] .va aside.open,body[data-route=matrix] .va aside.open{top:0;right:0;bottom:0;width:min(380px,100vw);padding:64px 22px 24px;overflow:auto;background:var(--panel);border-left:1px solid var(--line);box-shadow:-20px 0 40px #0009}
   body[data-route=thread] .va aside.open .aside-toggle,body[data-route=matrix] .va aside.open .aside-toggle{position:absolute;top:14px;right:16px}
 }
+/* One column: the fixed toggle sits over the brand row, so the hub address moves clear of it. */
+@media (max-width:720px){body[data-route=thread] .va .brand .hub,body[data-route=matrix] .va .brand .hub{margin-right:86px}}
 /* R2 files: life by recorded class; expired and purged are different ends */
 .va aside .file.r2 .meta{flex-wrap:wrap;row-gap:4px}
 .va aside .file .tag.r2{max-width:100%;white-space:normal;text-align:right;line-height:1.25;font-family:var(--sans);color:var(--dim)}

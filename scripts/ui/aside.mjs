@@ -170,6 +170,17 @@ try {
     await page.evaluate(id => { location.hash = `#thread/${id}`; }, demo.threads.hark);
     await fileBtn(LOG).waitFor({ state: 'attached' });
     await escapeDetails();
+    // One column: the fixed toggle shares the top row with the brand, and
+    // must not cover the hub address.
+    for (const w of [720, 390, 320]) {
+      await page.setViewportSize({ width: w, height: 844 });
+      await page.evaluate(() => scrollTo(0, 0));
+      const over = await page.evaluate(() => {
+        const hub = document.getElementById('hubname').getBoundingClientRect(), tog = document.querySelector('.aside-toggle').getBoundingClientRect();
+        return { hit: hub.width > 0 && hub.right > tog.left && hub.left < tog.right && hub.bottom > tog.top && hub.top < tog.bottom, doc: document.documentElement.scrollWidth };
+      });
+      assert(!over.hit && over.doc <= w, `Details covers the hub address or the page overflows at ${w}: ${JSON.stringify(over)}`);
+    }
     await page.setViewportSize({ width: 1440, height: 900 });
     await aside.getByRole('heading', { name: 'Participants' }).waitFor({ state: 'visible' });
     assert(await toggle.isHidden(), 'toggle shows at 1440 wide');
