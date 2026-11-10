@@ -100,6 +100,15 @@ try {
       await waitFor('[eyes: you]');
       await chip(target, '👀').waitFor();
       assert(await chip(target, '👀').getAttribute('aria-pressed') === 'true', 'TUI eyes must be marked as the operator reaction in the web');
+      // The live-built chip in the light theme: its text is unchanged and only
+      // the glyph is re-inverted, so its face and count follow the page.
+      const lit = await chip(target, '👀').evaluate(c => {
+        document.documentElement.dataset.theme = 'light';
+        const f = el => getComputedStyle(el).filter, out = { text: c.textContent, chip: f(c), glyph: f(c.querySelector('.rx-g')), g: c.querySelector('.rx-g').textContent };
+        document.documentElement.dataset.theme = 'dark';
+        return out;
+      });
+      assert(lit.text === '👀1' && lit.g === '👀' && lit.chip === 'none' && /invert/.test(lit.glyph), 'light theme must re-invert only the chip glyph: ' + JSON.stringify(lit));
       assert(deliveries(await since('codex', agentCursor)).length === 1, 'TUI eyes must not create a Delivery (default hold)');
       console.log('ok - TUI eyes reaches the live web chip without waking the agent');
 

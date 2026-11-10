@@ -390,8 +390,8 @@ test('notes quote a long query cut to 40 characters', () => {
 // Just enough DOM for the search field, scoped to this regression check.
 test('a directory refresh renames the selected peer without searching or notifying again', () => {
   class El {
-    constructor() { this.children = []; }
-    setAttribute() {}
+    constructor() { this.children = []; this.attrs = {}; }
+    setAttribute(k, v) { this.attrs[k] = v; }
     addEventListener() {}
     removeEventListener() {}
     append(child) { this.children.push(child); }
@@ -408,14 +408,24 @@ test('a directory refresh renames the selected peer without searching or notifyi
     box = createSearchBox(field, { api, nameOf: () => name, onChange: () => { changes++; } });
     box.pick('peer_b');
     assert.ok(field.textContent.includes('Grok-Reviewer'));
+    const chip = field.children[1].children[1], [text, button] = chip.children;
     const before = changes;
     name = 'Renamed reviewer';
     box.refresh();
     assert.ok(field.textContent.includes(name));
+    assert.equal(field.children[1].children[1], chip, 'chip stays mounted');
+    assert.equal(chip.children[1], button, 'remove button stays mounted');
+    assert.equal(text.attrs.title, name + ' · peer_b');
+    assert.equal(button.attrs['aria-label'], 'Stop narrowing to ' + name);
     assert.ok(!field.textContent.includes('Grok-Reviewer'));
     assert.equal(changes, before, 'repainting must not recurse through renderNav');
     assert.equal(calls.length, 1, 'renaming must not issue another title search');
     assert.equal(box.state().participant, 'peer_b', 'scope stays bound to the peer id');
+    name = 'Renamed\u202ereviewer';
+    box.refresh();
+    assert.equal(text.textContent, 'Renamedreviewer');
+    assert.equal(text.attrs.title, 'Renamedreviewer · peer_b');
+    assert.equal(button.attrs['aria-label'], 'Stop narrowing to Renamedreviewer');
   } finally {
     if (box) box.close();
     globalThis.document = previous;

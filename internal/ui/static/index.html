@@ -43,6 +43,7 @@
 </section>
 
 <div id="app" class="va" hidden>
+  <a id="skip" class="skip" href="#main">Skip to content</a>
   <div id="notices" class="notices" role="status" aria-live="polite" hidden></div>
   <nav class="side" aria-label="Inbox and threads">
     <div class="brand"><span class="logo"></span>vecnet<span id="hubname" class="hub"></span></div>
@@ -56,6 +57,7 @@
     <div class="grp">You</div>
     <div id="me" class="me"></div>
     <div id="search" class="srch" role="search"></div>
+    <button id="side-tog" type="button" class="side-tog" aria-expanded="false" aria-controls="lists">Threads</button>
     <div id="lists">
       <div class="grp">Your Threads</div>
       <div id="threads" class="nav rows"></div>
@@ -69,7 +71,7 @@
       <div id="build-info" class="build-info">vecnet dev · unknown · unknown · unknown</div>
     </div>
   </nav>
-  <main id="main"><div id="view" class="col"></div></main>
+  <main id="main" tabindex="-1"><div id="view" class="col"></div></main>
   <aside id="aside" aria-label="Details"></aside>
 </div>
 

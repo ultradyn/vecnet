@@ -16,9 +16,8 @@ function newId(prefix) {
 try {
   await withDemo({}, async ctx => {
     const { page, shot, demo, asPeer, advance, hold, allowConsole, countRequests, quiet } = ctx;
-    // Chromium logs every non-2xx fetch as a console error. The late answer is
-    // the only one this script provokes on purpose.
-    allowConsole(/status of 422/);
+    // Chromium logs the forced failures and the late answer as console errors.
+    allowConsole(/status of (422|503)/);
 
     let dialogs = 0;
     page.on('dialog', dialog => { dialogs++; dialog.dismiss().catch(() => {}); });
@@ -64,6 +63,110 @@ try {
     assert(onPage.join('|') === 'Needs a decision|Failed deliveries|Subscriptions|Woke you|Held', `on this page: ${onPage.join('|')}`);
     await quiet();
     await shot('08-inbox-initial');
+
+    // Phone width: a card's side column (countdown and thread, or Retry and
+    // Discard) sits under its text, so the question and answers get the card's
+    // width, and nothing runs off a card. At desktop it stays beside the text.
+    const cardShapes = () => page.evaluate(() => [...document.querySelectorAll('#view .item.apr, #view .item.dl')].map(el => {
+      const box = e => e.getBoundingClientRect();
+      const c = box(el), main = box(el.querySelector('.main')), rs = box(el.querySelector('.rs'));
+      const out = [...el.querySelectorAll('*')].filter(e => { const r = box(e); return r.width && (r.right > c.right + 0.5 || r.left < c.left - 0.5); }).length;
+      return { id: el.dataset.id, mainW: Math.round(main.width), cardW: Math.round(c.width), under: rs.top >= main.bottom - 0.5, out };
+    }));
+    assert((await cardShapes()).every(c => !c.under && !c.out), 'desktop cards stacked their side column');
+    await page.setViewportSize({ width: 390, height: 844 });
+    const phoneCards = await cardShapes();
+    assert(phoneCards.length === 5 && phoneCards.every(c => c.under && !c.out && c.mainW >= c.cardW - 80), `phone cards: ${JSON.stringify(phoneCards)}`);
+    assert(await page.evaluate(() => document.documentElement.scrollWidth) <= 390, 'the inbox scrolls sideways at 390 px');
+    await page.locator('#view h1').evaluate(el => el.scrollIntoView({ block: 'start' }));
+    await quiet();
+    await shot('08-inbox-phone');
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.evaluate(() => { document.getElementById('main').scrollTop = 0; scrollTo(0, 0); });
+
+    // Unrelated deliveries must not interrupt a keyboard decision or retry.
+    for (const [i, control] of [card(aprA).getByRole('button', { name: 'Yes', exact: true }), card(dl503).getByRole('button', { name: 'Retry', exact: true })].entries()) {
+      await control.focus();
+      const refreshed = page.waitForResponse(r => new URL(r.url()).pathname === '/v1/admin/inbox');
+      const r = await asPeer('codex', 'POST', '/v1/messages', {
+        idempotency_key: 'inbox-focus-' + i, thread_id: demo.threads.hosting, priority: 'hold', content: { text: 'Unrelated focus check ' + i },
+      });
+      assert(r.ok, `focus delivery: ${r.status}`);
+      await refreshed;
+      await quiet();
+      assert(await control.evaluate(el => el === document.activeElement), 'unrelated delivery dropped inbox control focus');
+    }
+
+    // A failed keyboard action returns to its control, with a durable error
+    // on the card as well as the toast. A delivery must not erase that error.
+    {
+      const retry = card(dl410).getByRole('button', { name: 'Retry', exact: true });
+      const retryURL = `**/v1/admin/dead-letters/${dl410}/retry`;
+      const fail = route => route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: { code: 'unavailable', message: 'Retry temporarily unavailable', details: {} } }) });
+      await page.route(retryURL, fail);
+      await retry.focus();
+      await page.keyboard.press('Enter');
+      await page.locator('#toast.on', { hasText: 'Retry temporarily unavailable' }).waitFor();
+      assert(await retry.evaluate(el => el === document.activeElement), 'failed Retry lost keyboard focus');
+      const error = card(dl410).locator('.err[role="alert"]');
+      assert(await error.textContent() === 'unavailable: Retry temporarily unavailable', 'failed Retry has no inline error');
+      await card(dlNet).getByRole('button', { name: 'Discard', exact: true }).click();
+      await retry.focus();
+      const refreshed = page.waitForResponse(r => new URL(r.url()).pathname === '/v1/admin/inbox');
+      const r = await asPeer('codex', 'POST', '/v1/messages', {
+        idempotency_key: 'inbox-error-redraw', thread_id: demo.threads.hosting, priority: 'hold', content: { text: 'Unrelated error check' },
+      });
+      assert(r.ok, `error delivery: ${r.status}`);
+      await refreshed;
+      await quiet();
+      assert(await card(dlNet).locator('button.armed').textContent() === 'Confirm discard', 'unrelated delivery disarmed Discard');
+      assert(await error.textContent() === 'unavailable: Retry temporarily unavailable', 'unrelated delivery erased the action error');
+      assert(await retry.evaluate(el => el === document.activeElement), 'error redraw dropped Retry focus');
+      await page.unroute(retryURL, fail);
+      let release;
+      const gate = new Promise(resolve => { release = resolve; });
+      const delayed = async route => { await gate; await fail(route); };
+      await page.route(retryURL, delayed);
+      const sent = page.waitForRequest(req => req.url().endsWith(`/dead-letters/${dl410}/retry`));
+      await page.keyboard.press('Enter');
+      await sent;
+      const elsewhere = page.locator('#nav-settings');
+      await elsewhere.focus();
+      release();
+      await quiet();
+      assert(await elsewhere.evaluate(el => el === document.activeElement), 'settling Retry stole focus after the operator moved away');
+      await page.unroute(retryURL, delayed);
+      console.log('ok - failed keyboard Retry keeps focus and an inline error across deliveries, without stealing moved focus');
+    }
+
+    // A normal keyboard answer (not just approval_closed) also stays in
+    // the list. Use a fresh approval so the double-click fixture is untouched.
+    {
+      const id = newId('apr');
+      const now = Date.parse((await snapshot()).now);
+      const r = await asPeer('codex', 'POST', '/v1/messages', {
+        idempotency_key: 'inbox-keyboard-answer', thread_id: demo.threads.hosting, recipients: [demo.operator_peer], kind: 'approval_request', priority: 'wake',
+        content: { text: 'Proceed with the keyboard check?' },
+        approval_request: { approval_id: id, question: 'Proceed with the keyboard check?', options: ['yes', 'no'], expires_at: new Date(now + 60 * 60_000).toISOString() },
+      });
+      assert(r.ok, `keyboard approval: ${r.status}`);
+      const yes = card(id).getByRole('button', { name: 'Yes', exact: true });
+      const fail = route => route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: { code: 'unavailable', message: 'Answer temporarily unavailable', details: {} } }) });
+      await page.route('**/v1/messages', fail);
+      await yes.focus();
+      await page.keyboard.press('Enter');
+      await page.locator('#toast.on', { hasText: 'Answer temporarily unavailable' }).waitFor();
+      assert(await card(id).locator('.err[role="alert"]').textContent() === 'unavailable: Answer temporarily unavailable', 'failed answer has no inline error');
+      assert(await yes.evaluate(el => el === document.activeElement && !el.disabled), 'failed answer did not return focus to its option');
+      await page.unroute('**/v1/messages', fail);
+      await page.keyboard.press('Enter');
+      await page.locator('#toast.on', { hasText: 'Answered “yes”' }).waitFor();
+      assert(await card(id).count() === 0, 'keyboard answer left its approval in the list');
+      assert(await page.evaluate(() => !!document.activeElement.closest('#view .inbox .item')), 'keyboard answer left focus outside the inbox list');
+      assert(posts(id) === 2, 'keyboard answer did not send one failed and one successful POST');
+      await page.waitForFunction(() => !document.getElementById('toast').classList.contains('on'));
+      console.log('ok - successful keyboard approval answer keeps focus in the list');
+    }
 
     // ---- double-click sends one POST (progress, then success) ----
     {
@@ -164,9 +267,32 @@ try {
 
     // ---- retry moves a dead letter out; discard needs a second click ----
     {
-      await card(dl410).getByRole('button', { name: 'Retry', exact: true }).click();
+      // The expiry check reloaded the page, so recreate the error before
+      // checking cleanup; an already-empty card would pass vacuously.
+      const retryURL = `**/v1/admin/dead-letters/${dl410}/retry`;
+      const fail = route => route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: { code: 'unavailable', message: 'Retry temporarily unavailable', details: {} } }) });
+      await page.route(retryURL, fail);
+      await card(dl410).getByRole('button', { name: 'Retry', exact: true }).focus();
+      await page.keyboard.press('Enter');
+      await page.locator('#toast.on', { hasText: 'Retry temporarily unavailable' }).waitFor();
+      assert(await card(dl410).locator('.err[role="alert"]').textContent() === 'unavailable: Retry temporarily unavailable', 'Retry cleanup check lost its prior inline error');
+      await page.unroute(retryURL, fail);
+      const position = await card(dl410).evaluate(el => [...el.parentElement.querySelectorAll('.item[data-id]')].indexOf(el));
+      const releaseRetry = await hold(`**/v1/admin/dead-letters/${dl410}/retry`);
+      await card(dl410).getByRole('button', { name: 'Retry', exact: true }).focus();
+      await page.keyboard.press('Enter');
+      await card(dl410).locator('button:disabled').first().waitFor();
+      assert(await card(dl410).locator('.err').count() === 0, 'trying Retry again kept its old error');
+      await releaseRetry();
       await page.locator('#toast.on', { hasText: 'Retry queued' }).waitFor();
       await card(dl410).waitFor({ state: 'detached' });
+      assert(await page.locator('#view .inbox').evaluate((el, position) => {
+        const rows = [...el.querySelectorAll('.item[data-id]')];
+        const row = rows[position] || rows[position - 1];
+        const primary = row && (row.querySelector('[data-focus]:not(:disabled)') || (row.matches('a[data-focus]') ? row : null));
+        return !!primary && document.activeElement === primary;
+      }, position), 'successful keyboard Retry did not focus the item that took its place');
+      assert(await page.locator('#view .inbox .err').count() === 0, 'successful Retry left a stale inline error');
 
       const discards = () => countRequests(req => req.method() === 'POST' && req.url().endsWith(`/v1/admin/dead-letters/${dlNet}/discard`));
       // Confirm straight after arming: confirmButton disarms after 3 s, and the

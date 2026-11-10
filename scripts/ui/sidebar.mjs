@@ -103,6 +103,19 @@ try {
     // advanced hub clock for the relative times.
     await others.locator('a', { hasText: 'Classifier rollout plan' }).locator('.ago', { hasText: '2m ago' }).waitFor();
     await page.waitForFunction(() => document.querySelectorAll('#others a[href^="#thread/"]').length === 5);
+    // Resource redraws must not drop a keyboard user's current sidebar row.
+    for (const list of ['threads', 'others']) {
+      const link = page.locator('#' + list + ' a').first();
+      const href = await link.getAttribute('href');
+      await link.focus();
+      const before = countRequests(req => isOthers(req.url()));
+      const reloaded = page.waitForResponse(r => isOthers(r.url()));
+      await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+      await reloaded;
+      await quiet();
+      assert(countRequests(req => isOthers(req.url())) > before, 'visibility did not reload threads');
+      assert(await page.evaluate(({ list, href }) => document.activeElement.parentElement.id === list && document.activeElement.getAttribute('href') === href, { list, href }), `${list} redraw dropped focus`);
+    }
     let rows = await rowsOf();
     assert(rows.map(r => r.id).join() === [rollout, group, hostile, untitled, release].map(t => t.thread_id).join(), `order ${JSON.stringify(rows)}`);
     const mine = await page.locator('#threads a').evaluateAll(as => as.map(a => a.getAttribute('href')));
@@ -167,6 +180,8 @@ try {
     const grown = page.waitForResponse(r => isOthers(r.url()) && new URL(r.url()).searchParams.get('limit') === '100');
     await more.click();
     await grown;
+    await quiet();
+    assert(await more.evaluate(el => el === document.activeElement), 'Show more redraw dropped focus');
     await page.unroute(isOthers, paged);
     // The real hub has nothing behind this page, so the tail goes.
     fresh = drawn();
@@ -180,6 +195,8 @@ try {
     await page.locator('#view .msg', { hasText: 'Staged rollout, 10% first.' }).waitFor();
     await page.locator('.composer .join:not([hidden])').waitFor();
     await others.locator('a.on', { hasText: 'Classifier rollout plan' }).waitFor();
+    const currentRows = await page.locator('nav.side [aria-current="page"]').evaluateAll(els => els.map(e => e.getAttribute('href')));
+    assert(currentRows.length === 1 && currentRows[0] === '#thread/' + rollout.thread_id, `the open thread is not the one current row: ${currentRows}`);
     assert(await page.locator('#threads a.on').count() === 0, 'Your Threads lit a thread the operator is not in');
     await page.locator('#aside .pp', { hasText: 'pag-hark-sleuth' }).first().waitFor();
     await quiet();

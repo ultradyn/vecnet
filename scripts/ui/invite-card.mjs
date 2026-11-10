@@ -167,6 +167,13 @@ try {
       assert(await newBtn.isVisible() && !(await revokeBtn.isVisible()), 'an expired invite offers Revoke');
       await snap('pvi-5-none');
     }
+    // A very long hostile name (and its Open thread quote) wraps or ellipsizes
+    // inside the one column at 390 px: the page never scrolls sideways.
+    await route('#peer/' + id('hostile'));
+    await pv.locator('.pv-head h1 .nm').waitFor();
+    await quiet();
+    const wide = await page.evaluate(() => ({ doc: document.documentElement.scrollWidth, out: [...document.querySelectorAll('.pv-head, .pv-head *')].filter(e => e.getBoundingClientRect().right > innerWidth + 0.5).map(e => e.className || e.tagName) }));
+    assert(wide.doc <= SIZES.phone.width && !wide.out.length, `hostile peer page scrolls sideways at 390 px: ${JSON.stringify(wide)}`);
     await page.setViewportSize(SIZES.desk);
 
     // ---- The peer enrols while its invite is open: the card closes and the

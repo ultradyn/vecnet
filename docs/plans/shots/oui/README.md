@@ -13,6 +13,7 @@ Task 23 runs both clients against one disposable hub. Its assertions verify cros
 - [07-shell-success.png](07-shell-success.png) — Web shell and connection handling — success state.
 - [08-inbox-error.png](08-inbox-error.png) — Web inbox triage — error state.
 - [08-inbox-initial.png](08-inbox-initial.png) — Web inbox triage — initial state.
+- [08-inbox-phone.png](08-inbox-phone.png) — Web inbox at 390 px: each decision's countdown and thread, and each failed delivery's Retry and Discard, sit under the card's text.
 - [08-inbox-progress.png](08-inbox-progress.png) — Web inbox triage — progress state.
 - [08-inbox-success.png](08-inbox-success.png) — Web inbox triage — success state.
 - [09-thread-error.png](09-thread-error.png) — Web thread chat and receipts — error state.
@@ -33,6 +34,7 @@ Task 23 runs both clients against one disposable hub. Its assertions verify cros
 - [t10-thread-explicit-wake.png](t10-thread-explicit-wake.png) — Grok setup reply with wake chosen explicitly: the quota note stays without a preselection claim.
 - [t10-thread-keyboard.png](t10-thread-keyboard.png) — Grok setup reply with wake selected and keyboard focus on wake_idle, showing its tooltip.
 - [t10-thread-narrow.png](t10-thread-narrow.png) — Grok setup reply at 390 px with explicit wake kept and the quota note below the controls, without horizontal overflow.
+- [t10-thread-phone-follow.png](t10-thread-phone-follow.png) — A thread at 390 px, where the page scrolls: a message arriving while the reader is at the bottom is followed into view above the pinned reply box.
 - [10-aside-error.png](10-aside-error.png) — Thread participants and files — error state.
 - [10-aside-initial.png](10-aside-initial.png) — Thread participants and files — initial state.
 - [10-aside-progress.png](10-aside-progress.png) — Thread participants and files — progress state.
@@ -186,7 +188,7 @@ Sidebar unread screens come from `scripts/ui/sidebar-unread.mjs`. Each Your Thre
 
 - [sb-unread-desktop.png](sb-unread-desktop.png) — 1440 px: badge 26 and the rows that sum to it (12, 3 under a long ellipsized title, then 1s and a 6), with the five delivery-health rows at zero showing only their message counts.
 - [sb-unread-narrow.png](sb-unread-narrow.png) — 1000 px, where the sidebar narrows to 220 px: titles ellipsize and the pills keep their place.
-- [sb-unread-phone.png](sb-unread-phone.png) — 390 px, one column: Your Threads at full width with the long title, the pills, the zero rows, and an Other Threads row with no pill.
+- [sb-unread-phone.png](sb-unread-phone.png) — 390 px, one column, with the folded thread lists opened by the Threads button: Your Threads at full width with the long title, the pills, the zero rows, and an Other Threads row with no pill.
 
 Thread unread screens come from `scripts/ui/thread-unread.mjs` (CoS unread ruling). A thread opens at the operator's first unread message under a New divider in the unread tint, not at the bottom; each unread message has a thin amber bar until it is seen. A message is read on its own, by one read receipt for its delivery (batched over 500 ms), once 60% of it has been on screen for a second or it is scrolled past going down, and only while the page is visible and focused. Opening never marks the whole thread read. The fixture is a fourteen-message thread whose first eight the operator read earlier.
 
@@ -251,7 +253,7 @@ Add agent screens come from `scripts/ui/invite.mjs`. The sidebar's nav block (un
 - [inv-5-open.png](inv-5-open.png) — An open-name invite ("Let the agent choose its name at enrol", suggestion `helper bot`): the block has the agent enrol with `--name`, and its profile follows from the name it picks.
 - [inv-6-nav.png](inv-6-nav.png) — A thread open, with the sidebar's Add agent button under Inbox, New message and Dashboard.
 - [inv-7-nav-thread.png](inv-7-nav-thread.png) — Add agent opened from the sidebar by keyboard over that thread, which stays mounted underneath.
-- [inv-8-nav-narrow.png](inv-8-nav-narrow.png) — At 390 px the sidebar stacks above the view; Add agent spans its width.
+- [inv-8-nav-narrow.png](inv-8-nav-narrow.png) — At 390 px the sidebar stacks above the view with its thread lists folded behind Threads; Add agent spans its width.
 - [inv-9-nav-narrow-dialog.png](inv-9-nav-narrow-dialog.png) — The Add agent dialog at 390 px.
 - [inv-10-dot-form.png](inv-10-dot-form.png) — Kind ChatGPT dot: no open-name checkbox or token lifetime, the lede says it makes a link code, and the button reads Create and link.
 - [inv-11-dot-link-error.png](inv-11-dot-link-error.png) — The dot is made but its link code is refused: the MCP URL and steps stay, with the error and Try again in place of the code.
@@ -284,7 +286,7 @@ Composer fit screens come from `scripts/ui/composer-fit.mjs`, which sweeps the v
 - [composer-fit-spill-700.png](composer-fit-spill-700.png) — Spilling: hint dropped, byte count whole.
 - [composer-fit-spill-390.png](composer-fit-spill-390.png) — Spilling on a phone: the byte count ellipsizes between the priority row and Attach and Send.
 - [composer-fit-page-1180.png](composer-fit-page-1180.png) — The whole thread page at 1180 px: the composer in context (hint dropped, one row).
-- [composer-fit-page-390.png](composer-fit-page-390.png) — The whole thread page at phone width.
+- [composer-fit-page-390.png](composer-fit-page-390.png) — The whole thread page at phone width: the thread lists fold behind Threads and the reply box pins to the bottom of the screen.
 
 Hub notice TUI screens come from `scripts/ui/tui-notice.mjs`. An active hub notice takes one ASCII row under the top bar, and the body gives up that row: the most important notice (moving, then restart, then maintenance) with its time, a move's target host, the cleaned message and a count of the others. A hub restart reads as `restarting` in amber, not as offline.
 

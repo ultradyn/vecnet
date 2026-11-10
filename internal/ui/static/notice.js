@@ -55,10 +55,10 @@ function noticeRow(it, sig, onDismiss) {
 
 // createNotices loads `notices` at sign-in and on each hub_notice Event, and
 // keeps the restart state; onPhase redraws #conn.
-export function createNotices({ api, store, root, onPhase = () => {}, now = Date.now, storage = globalThis.sessionStorage }) {
+export function createNotices({ api, store, root, onPhase = () => {}, now = Date.now, storage }) {
   const res = store.resource('notices', () => api.notices());
   let restart = restartState(), timer = null, hidden;
-  try { hidden = new Set(JSON.parse(storage.getItem(KEY)) || []); } catch { hidden = new Set(); }
+  try { if (storage === undefined) storage = globalThis.sessionStorage; hidden = new Set(JSON.parse(storage.getItem(KEY)) || []); } catch { hidden = new Set(); }
   const dismiss = id => {
     hidden.add(id);
     try { storage.setItem(KEY, JSON.stringify([...hidden])); } catch { /* this page only */ }

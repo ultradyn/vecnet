@@ -108,6 +108,9 @@ try {
     const open = async () => {
       await page.evaluate(() => { location.hash = '#inbox'; });
       await page.getByRole('heading', { name: 'Inbox', exact: true }).waitFor();
+      // At phone width the thread lists are folded behind Threads.
+      const tog = page.locator('#side-tog');
+      if (await tog.isVisible() && await tog.getAttribute('aria-expanded') !== 'true') await tog.click();
       await row.click();
       await page.locator(`[id="m-${ids.at(-1)}"]`).waitFor();
       await quiet();

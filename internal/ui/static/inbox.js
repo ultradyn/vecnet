@@ -31,6 +31,7 @@ export function mount(root, ctx) {
   const cards = new Map();      // approval_id → { a, buttons, exp } as rendered
   const dlControls = new Map(); // delivery_id → { retry, discard }
   const dlBusy = new Set();
+  const errors = new Map(), returning = new Set();
   // "Load older" pages, each with the cursor it was read with. They follow
   // the head: every new head re-reads them before the page redraws, because a
   // reload that shifts it moves their cursors and a read elsewhere changes
@@ -44,6 +45,48 @@ export function mount(root, ctx) {
   root.replaceChildren(h('h1', { text: 'Inbox' }), h('p', { class: 'lede', text: LEDE }), banner, body);
 
   const reload = async () => { store.invalidate('inbox'); await store.settled(); };
+
+  // Remember before disabling: browsers blur a disabled control immediately.
+  // Only settled actions consume their record, after any older-page redraw.
+  function remember(id, key) {
+    const active = document.activeElement, row = active.closest('[data-id]');
+    if (!body.contains(active) || !row || row.dataset.id !== id || active.dataset.focus !== key) return null;
+    const back = { id, key, position: [...body.querySelectorAll('.item[data-id]')].indexOf(row), ready: false };
+    returning.add(back);
+    return back;
+  }
+
+  function restoreActions() {
+    for (const back of returning) {
+      if (!back.ready) continue;
+      returning.delete(back);
+      const active = document.activeElement;
+      if (active && active !== document.body && active.isConnected) continue;
+      const rows = [...body.querySelectorAll('.item[data-id]')];
+      const row = rows.find(el => el.dataset.id === back.id);
+      const selector = '[data-focus="' + CSS.escape(back.key) + '"]';
+      const primary = el => el && (el.querySelector('[data-focus]:not(:disabled)') || (el.matches('a[data-focus]') ? el : null));
+      const target = row ? row.querySelector(selector) : primary(rows[back.position]) || primary(rows[back.position - 1]);
+      if (target && !target.disabled) target.focus({ preventScroll: true });
+    }
+  }
+
+  function settled(back) {
+    if (!alive || !back) return;
+    back.ready = true;
+    // reload() can finish before the older pages; their redraw restores it.
+    if (!older.pending(inbox.get())) restoreActions();
+  }
+
+  const errorLine = id => errors.has(id) ? h('p', { class: 'err', role: 'alert', text: errors.get(id) }) : null;
+  function actionError(id, text) {
+    const row = body.querySelector('[data-id="' + CSS.escape(id) + '"]');
+    if (text && row) errors.set(id, text); else errors.delete(id);
+    if (!row) return;
+    const old = row.querySelector('.err');
+    if (old) old.remove();
+    if (text) row.querySelector('.main').append(errorLine(id));
+  }
 
   // ---- approvals ----
 
@@ -75,10 +118,13 @@ export function mount(root, ctx) {
     if (answering.has(id)) return;
     let req;
     try { req = answerBody(a, index); } catch { return; }
+    const back = remember(id, 'option-' + index);
+    actionError(id);
     answering.set(id, 'sending');
     paintCard(id);
     try {
       await api.send(req);
+      actionError(id);
       answering.set(id, 'answered');
       paintCard(id);
       await reload();
@@ -93,14 +139,17 @@ export function mount(root, ctx) {
       } else {
         answering.delete(id);
         paintCard(id);
+        actionError(id, describe(e));
         ctx.toast(describe(e), true);
       }
+    } finally {
+      settled(back);
     }
   }
 
   function approvalCard(a) {
     const buttons = (a.options || []).map((option, i) => h('button', {
-      type: 'button', class: 'btn' + (i === 0 ? ' pri' : ''), text: label(option), title: option,
+      type: 'button', class: 'btn' + (i === 0 ? ' pri' : ''), text: label(option), title: option, 'data-focus': 'option-' + i,
       onclick: () => answer(a, i),
     }));
     const exp = h('span', { class: 'exp', title: 'expires ' + a.expires_at });
@@ -111,9 +160,9 @@ export function mount(root, ctx) {
         h('div', { class: 'who' }, peerLink(a.requester, ctx.nameOf(a.requester)), ' ', h('span', { class: 'muted', text: 'asks' })),
         h('div', { class: 'q', text: question }),
         a.text && a.text !== question ? h('div', { class: 'ex', text: a.text }) : null,
-        h('div', { class: 'opts' }, buttons)),
+        h('div', { class: 'opts' }, buttons), errorLine(a.approval_id)),
       h('div', { class: 'rs' }, exp,
-        a.thread_title ? h('a', { class: 'meta tl', href: '#thread/' + a.thread_id, title: a.thread_id, text: a.thread_title }) : h('a', { class: 'meta tl', href: '#thread/' + a.thread_id }, idText(a.thread_id))));
+        a.thread_title ? h('a', { class: 'meta tl', 'data-focus': 'thread', href: '#thread/' + a.thread_id, title: a.thread_id, text: a.thread_title }) : h('a', { class: 'meta tl', 'data-focus': 'thread', href: '#thread/' + a.thread_id }, idText(a.thread_id))));
     cards.set(a.approval_id, { a, el, buttons, exp });
     paintCard(a.approval_id);
     return el;
@@ -127,19 +176,24 @@ export function mount(root, ctx) {
     ctl.retry.disabled = ctl.discard.disabled = dlBusy.has(id);
   }
 
-  async function act(id, run, done) {
+  async function act(id, key, run, done) {
     if (dlBusy.has(id)) return;
+    const back = remember(id, key);
+    actionError(id);
     dlBusy.add(id);
     paintDead(id);
     try {
       await run(id);
+      actionError(id);
       await reload();
       ctx.toast(done);
     } catch (e) {
+      actionError(id, describe(e));
       ctx.toast(describe(e), true);
     } finally {
       dlBusy.delete(id);
       paintDead(id);
+      settled(back);
     }
   }
 
@@ -147,9 +201,10 @@ export function mount(root, ctx) {
     let ctl = dlControls.get(id);
     if (!ctl) {
       ctl = {
-        retry: h('button', { type: 'button', class: 'btn', text: 'Retry', onclick: () => act(id, api.retryDeadLetter, 'Retry queued') }),
-        discard: confirmButton('Discard', 'Confirm discard', () => act(id, api.discardDeadLetter, 'Discarded')),
+        retry: h('button', { type: 'button', class: 'btn', 'data-focus': 'retry', text: 'Retry', onclick: () => act(id, 'retry', api.retryDeadLetter, 'Retry queued') }),
+        discard: confirmButton('Discard', 'Confirm discard', () => act(id, 'discard', api.discardDeadLetter, 'Discarded')),
       };
+      ctl.discard.dataset.focus = 'discard';
       dlControls.set(id, ctl);
     }
     paintDead(id);
@@ -164,8 +219,8 @@ export function mount(root, ctx) {
       h('div', { class: 'main' },
         h('div', { class: 'who' }, 'To ', peerLink(dl.recipient, ctx.nameOf(dl.recipient)), ' ', h('span', { class: 'muted' }, 'from ', peerLink(dl.sender, ctx.nameOf(dl.sender)))),
         h('div', { class: 'meta', title: dl.delivery_id }, parts),
-        dl.excerpt ? h('a', { class: 'ex', href: '#thread/' + dl.thread_id, title: dl.thread_id, text: dl.excerpt }) : h('a', { class: 'ex', href: '#thread/' + dl.thread_id, title: dl.thread_id }, idText(dl.message_id)),
-        dl.last_error && dl.last_error !== dl.excerpt ? h('div', { class: 'why', text: dl.last_error }) : null),
+        dl.excerpt ? h('a', { class: 'ex', 'data-focus': 'thread', href: '#thread/' + dl.thread_id, title: dl.thread_id, text: dl.excerpt }) : h('a', { class: 'ex', 'data-focus': 'thread', href: '#thread/' + dl.thread_id, title: dl.thread_id }, idText(dl.message_id)),
+        dl.last_error && dl.last_error !== dl.excerpt ? h('div', { class: 'why', text: dl.last_error }) : null, errorLine(dl.delivery_id)),
       h('div', { class: 'rs' }, h('div', { class: 'opts' }, ctl.retry, ctl.discard)));
   }
 
@@ -177,7 +232,7 @@ export function mount(root, ctx) {
     if (d.attachments) meta.push(d.attachments === 1 ? '1 file' : d.attachments + ' files');
     const why = heldWhy(d);
     if (why) meta.push(why);
-    return h('a', { class: 'item' + (d.read_at ? ' read' : ''), href: '#thread/' + d.thread_id, 'data-id': d.delivery_id, title: d.delivery_id },
+    return h('a', { class: 'item' + (d.read_at ? ' read' : ''), href: '#thread/' + d.thread_id, 'data-id': d.delivery_id, 'data-focus': 'row', title: d.delivery_id },
       avatar(d.sender, ctx),
       h('div', { class: 'main' },
         h('div', { class: 'who' }, peerLink(d.sender, ctx.nameOf(d.sender), { nested: true }), ' ', h('span', { class: 'muted', text: 'in' }), ' ', d.thread_title ? h('span', { class: 'tl', text: d.thread_title }) : h('span', { class: 'tl' }, idText(d.thread_id))),
@@ -237,12 +292,19 @@ export function mount(root, ctx) {
     }
 
     if (older.pending(value)) { syncOlder(value); return; }
+    // Capture before dead-letter controls move to new cards: even moving a
+    // retained node drops focus. Its confirmation state stays on that node.
+    const active = body.contains(document.activeElement) ? document.activeElement : null;
+    const key = active && active.dataset.focus;
+    const item = active && active.closest('[data-id]');
+    const id = item && item.dataset.id;
     const data = withOlder(value, older.pages()), nowMs = store.hubNow();
     const byKey = new Map(sections(data).map(s => [s.key, s]));
     const live = new Set((data.approvals || []).map(a => a.approval_id));
     for (const [id, state] of answering) if (!live.has(id) && state !== 'sending') answering.delete(id);
     const deadIds = new Set((data.dead_letters || []).map(d => d.delivery_id));
     for (const id of dlControls.keys()) if (!deadIds.has(id) && !dlBusy.has(id)) dlControls.delete(id);
+    for (const id of errors.keys()) if (!live.has(id) && !deadIds.has(id)) errors.delete(id);
     cards.clear();
 
     const out = [];
@@ -258,12 +320,19 @@ export function mount(root, ctx) {
       if (s) out.push(heading(s), ...s.items.map(d => deliveryRow(d, nowMs)));
     }
     if (data.next_before) {
-      const btn = h('button', { type: 'button', class: 'btn more', text: 'Load older' });
+      const btn = h('button', { type: 'button', class: 'btn more', 'data-focus': 'older', text: 'Load older' });
       btn.addEventListener('click', () => loadOlder(btn));
       out.push(btn);
     }
     if (!byKey.size) out.push(h('div', { class: 'empty' }, h('b', { text: 'Nothing needs you' }), 'No decisions, failed deliveries or messages are waiting.'));
     body.replaceChildren(...out);
+    if (key) {
+      const row = id ? body.querySelector('[data-id="' + CSS.escape(id) + '"]') : body;
+      const selector = '[data-focus="' + CSS.escape(key) + '"]';
+      const again = row && (row.matches(selector) ? row : row.querySelector(selector));
+      if (again && !again.disabled) again.focus({ preventScroll: true });
+    }
+    restoreActions();
   }
 
   // Countdowns tick from the hub's clock, never the browser's alone.

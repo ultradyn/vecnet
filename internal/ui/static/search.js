@@ -6,7 +6,7 @@
 // (participant=). "/" focuses the box from anywhere but a text field. Peer
 // strings become text through h() only.
 import { avatar, h } from './dom.js';
-import { kindShort, kindTitle } from './format.js';
+import { clean, kindShort, kindTitle } from './format.js';
 import { peerHref } from './peer-model.js';
 import { createSearch, peerResults, threadResults } from './search-model.js';
 
@@ -35,7 +35,7 @@ export function createSearchBox(field, { api, nameOf, onChange, results = null, 
 
   const reset = () => { input.value = ''; search.clear(); input.focus(); };
   const unpick = () => { search.pick(''); input.focus(); };
-  let scopeId = '', scopeName = '';
+  let scopeId = '', scopeName = '', scopeText, scopeButton;
   const draw = () => {
     const st = search.state();
     if (input.value !== st.text) input.value = st.text;
@@ -44,9 +44,17 @@ export function createSearchBox(field, { api, nameOf, onChange, results = null, 
     scope.hidden = !st.participant;
     if (st.participant) {
       const name = nameOf(st.participant);
-      if (scopeId !== st.participant || scopeName !== name) scope.replaceChildren(h('span', { class: 'lb', text: 'Threads with' }),
-        h('span', { class: 'sr-with' }, h('span', { class: 'nm', text: name, title: name + ' · ' + st.participant }),
-          h('button', { type: 'button', class: 'sr-unpick', 'aria-label': 'Stop narrowing to ' + name, title: 'Back to your threads (Backspace in the empty box)', onclick: unpick })));
+      if (scopeId !== st.participant) {
+        scopeText = h('span', { class: 'nm' });
+        scopeButton = h('button', { type: 'button', class: 'sr-unpick', title: 'Back to your threads (Backspace in the empty box)', onclick: unpick });
+        scope.replaceChildren(h('span', { class: 'lb', text: 'Threads with' }), h('span', { class: 'sr-with' }, scopeText, scopeButton));
+      }
+      // A rename must not unmount the focused remove button; match h()'s cleaning.
+      if (scopeId !== st.participant || scopeName !== name) {
+        scopeText.textContent = clean(name);
+        scopeText.setAttribute('title', clean(name + ' · ' + st.participant));
+        scopeButton.setAttribute('aria-label', clean('Stop narrowing to ' + name));
+      }
       scopeName = name;
       input.placeholder = 'Search their thread titles';
     } else {

@@ -2,16 +2,20 @@
 // rebuilds every .msg, so the picker is one node outside the list and the
 // open message lives here.
 import { h } from './dom.js';
-import { prioritySeg } from './prio.js';
+import { markPriority, prioritySeg } from './prio.js';
 import { chips, errorText, nextOp, reactBody, REACTIONS } from './react-model.js';
 
 const SAYS = { wake: 'wakes now', wake_idle: 'wakes if idle', hold: 'no wake' };
-const FOCUSABLE = 'a,button,input,textarea,select,[tabindex]';
+// The light theme re-inverts only the glyph (base.css .rx-g): the chip's face
+// and count invert with the page.
+const glyph = emoji => h('span', { class: 'rx-g', text: emoji });
+// main takes focus only from script (the shell's route handoff): not a control.
+const FOCUSABLE = 'a,button,input,textarea,select,[tabindex]:not(main)';
 
 export function createReactions({ api, me, nameOf, onDone, toast }) {
   let open = '', cur = null, override = null, busy = false;
   const seg = prioritySeg(p => { override = override === p ? null : p; paint(); });
-  const emo = REACTIONS.map(r => h('button', { type: 'button', class: 'rx-e', onclick: () => send(cur, r.emoji, true) }, r.emoji, h('i')));
+  const emo = REACTIONS.map(r => h('button', { type: 'button', class: 'rx-e', onclick: () => send(cur, r.emoji, true) }, glyph(r.emoji), h('i')));
   const picker = h('div', { class: 'rx-pick', role: 'dialog', 'aria-label': 'React', hidden: true },
     h('div', { class: 'rx-es' }, emo), seg.el);
 
@@ -24,7 +28,8 @@ export function createReactions({ api, me, nameOf, onDone, toast }) {
       b.setAttribute('aria-label', r.name + ', ' + (mine ? 'remove yours' : SAYS[p]));
       b.title = b.getAttribute('aria-label');
     });
-    for (const b of seg.seg.children) { b.className = b.value === override ? 'on' : ''; b.disabled = busy; }
+    markPriority(seg.seg, override);
+    for (const b of seg.seg.children) b.disabled = busy;
   }
 
   // place pins the picker under the button (above it near the bottom), left
@@ -108,7 +113,7 @@ export function createReactions({ api, me, nameOf, onDone, toast }) {
   // Tabbing out closes it in place.
   picker.addEventListener('focusout', e => {
     const t = e.relatedTarget;
-    if (open && !busy && t && !picker.contains(t) && !t.closest('.rx-btn')) close(false);
+    if (open && !busy && t && t.matches(FOCUSABLE) && !picker.contains(t) && !t.closest('.rx-btn')) close(false);
   });
 
   function button(m) {
@@ -136,7 +141,7 @@ export function createReactions({ api, me, nameOf, onDone, toast }) {
       return h('div', { class: 'rx-row' }, button(m), chips(m.reactions, me, nameOf).map(c => keep(h('button', {
         type: 'button', class: 'rx-chip' + (c.mine ? ' mine' : ''), 'aria-pressed': c.mine ? 'true' : 'false', title: c.title,
         'data-rx': m.message_id + c.emoji, onclick: () => send(m, c.emoji, false),
-      }, c.emoji, h('b', { text: String(c.count) })))));
+      }, glyph(c.emoji), h('b', { text: String(c.count) })))));
     },
     destroy() {
       document.removeEventListener('keydown', onKey);

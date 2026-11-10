@@ -15,7 +15,7 @@ import * as compose from './compose.js';
 import { connectionState } from './connection-model.js';
 import * as dash from './dash.js';
 import { h, peerLink, toast } from './dom.js';
-import { short } from './format.js';
+import { clean, short, title } from './format.js';
 import * as inbox from './inbox.js';
 import { addAgentPrefill } from './invite-model.js';
 import { closeInvite, openInvite } from './invite.js';
@@ -31,6 +31,7 @@ import { createStore } from './store.js';
 import * as threadAside from './thread-aside.js';
 import * as thread from './thread.js';
 
+const LOGIN_TITLE = 'vecnet · operator inbox';
 const SECRET_KEY = 'vecnet.ui.secret';
 const PEERS_REFRESH = 60000;
 const CONN_CLASS = { live: 'live', reconnecting: 'retry', stopped: 'off', restarting: 'warn' };
@@ -50,6 +51,10 @@ const SCREENS = {
 let localStore = null;
 try { localStore = window.localStorage; } catch { /* blocked: defaults */ }
 const appearance = createAppearance({ storage: localStore, root: document.documentElement, win: window });
+function readLocal(key) { try { return localStore?.getItem(key); } catch { return null; } }
+function writeLocal(key, value) { try { if (localStore) { localStore.setItem(key, value); return true; } } catch {} return false; }
+function removeLocal(key) { try { localStore?.removeItem(key); } catch { /* session teardown must finish */ } }
+let storageWarned = false;
 
 function parseRoute(hash) {
   // #add-agent?kind=&name=&request_id= opens the dialog. The query is a
@@ -69,19 +74,24 @@ function parseRoute(hash) {
 
 let session = null;
 
-function showLogin(msg) {
+function showLogin(msg, secret = '') {
+  if (document.title !== LOGIN_TITLE) document.title = LOGIN_TITLE;
   document.body.dataset.route = 'login';
   $('app').hidden = true;
   $('login').hidden = false;
   $('login-err').textContent = msg || '';
-  $('secret').value = '';
+  $('secret').value = secret;
   $('secret').focus();
+  if (secret) $('secret').select();
 }
 
 function signOut(msg) {
   if (session) session.close();
+  // close() unmounts the screen, saving its draft: erase only afterwards.
+  thread.forgetDrafts();
+  compose.forgetDrafts();
   session = null;
-  localStorage.removeItem(SECRET_KEY);
+  removeLocal(SECRET_KEY);
   showLogin(msg);
 }
 
@@ -90,16 +100,34 @@ function renderNav(s, route) {
   const head = s.inboxHead.get() || {}, count = $('inbox-count'), unread = head.unread;
   count.textContent = unread ? String(unread) : '';
   count.className = 'cnt' + (unread ? ' hot' : '');
-  $('nav-inbox').className = route.name === 'inbox' ? 'on' : '';
-  $('nav-new').className = route.name === 'new' ? 'on' : '';
-  $('nav-dash').className = route.name === 'dash' ? 'on' : '';
-  $('nav-settings').className = route.name === 'settings' ? 'on' : '';
+  // A deep link can name a thread outside both sidebar pages. Keep its
+  // title live with the thread tag, and stop listening when the route leaves.
+  const id = route.view === 'thread' ? route.id : '';
+  if (s.ctx && id !== s.titleId) {
+    s.titleOff();
+    s.titleId = id;
+    s.titleThread = id ? s.store.resource('thread:' + id, () => s.ctx.api.thread(id)) : null;
+    s.titleOff = s.titleThread ? s.titleThread.subscribe(() => { if (session === s) renderNav(s, parseRoute(location.hash)); }) : () => {};
+  }
+  const detail = s.titleThread && s.titleThread.get();
+  const named = ((s.peers.get() || {}).peers || []).find(p => p.peer_id === route.id);
+  const label = route.view === 'thread' ? title((detail && detail.row && detail.row.thread) || threads.find(t => t.thread_id === id), s.me, s.nameOf) || 'Thread'
+    : route.view === 'peer' ? (named && named.name) || 'Peer'
+    : ({ inbox: 'Inbox', new: 'New message', dash: 'Dashboard', settings: 'Settings' })[route.view];
+  const tabTitle = (unread > 0 ? '(' + unread + ') ' : '') + clean(label) + ' · vecnet';
+  if (document.title !== tabTitle) document.title = tabTitle;
+  for (const n of ['inbox', 'new', 'dash', 'settings']) {
+    const a = $('nav-' + n), on = route.name === n;
+    a.className = on ? 'on' : '';
+    if (on) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
+  }
   $('nav-add').disabled = !s.ctx; // the invite needs the session's api
   const now = s.store.hubNow(), mineRes = s.mine;
   if (s.search) s.search.refresh(); // a directory rename also updates the scope chip
   // Search replaces the thread lists; closing it redraws their current state.
   const open = !!(s.search && s.search.state().open);
   $('lists').hidden = open;
+  $('side-tog').hidden = open;
   $('results').hidden = !open;
   if (open) {
     renderResults($('results'), {
@@ -109,13 +137,24 @@ function renderNav(s, route) {
     return;
   }
   $('results').replaceChildren();
+  // Only the normal lists own this focus; search restores its own results.
+  const active = document.activeElement, list = active.closest('#threads, #others');
+  const href = list && active.getAttribute('href');
   const yours = yourThreads({
     page: mineRes && mineRes.get(), summaries: s.threads.get() ? threads : null,
     error: s.threads.error() || (mineRes && mineRes.error()), me: s.me, nameOf: s.nameOf, now,
     unread: head.unread_by_thread,
   });
   $('threads').replaceChildren(...(yours.rows.length ? yours.rows.map(r => threadLink(r, route, s.nameOf)) : [h('div', { class: 'none', text: yours.note })]));
+  // The dot is drawn in CSS: its name says it too.
+  const unreadMine = yours.rows.some(r => r.unread);
+  $('side-tog').classList.toggle('unread', unreadMine);
+  $('side-tog').setAttribute('aria-label', unreadMine ? 'Threads, unread' : 'Threads');
   renderOthers(s, route, threads, now);
+  if (list) {
+    const back = [...list.children].find(el => href ? el.getAttribute('href') === href : el.tagName === 'BUTTON');
+    if (back) back.focus({ preventScroll: true });
+  }
 }
 
 // Search summaries (§2.8) have no activity time. Reuse ThreadRows from
@@ -134,7 +173,7 @@ function lastActive(s) {
 // takes the message count's place (base.css); zero shows nothing.
 function threadLink(r, route, nameOf) {
   const cls = [r.id === route.id ? 'on' : '', r.unread ? 'unread' : ''].filter(Boolean).join(' ');
-  return h('a', { href: r.href, class: cls, title: r.tip },
+  return h('a', { href: r.href, class: cls, title: r.tip, 'aria-current': r.id === route.id ? 'page' : null },
     h('span', { class: 'tt' + (r.untitled ? ' un' : ''), text: r.title }),
     h('span', { class: 'nums' }, h('span', { class: 'cnt', text: r.count }), ...(r.unread ? [h('span', { class: 'ur', text: r.unreadText, 'aria-label': r.unread + ' unread' })] : [])),
     r.ids && r.ids.length ? h('span', { class: 'pp' }, peopleLinks(r, nameOf)) : h('span', { class: 'pp', text: r.people }),
@@ -187,8 +226,20 @@ function renderRoute(s) {
   document.body.dataset.route = route.name;
   s.shownHash = location.hash;
   renderNav(s, route);
-  if (!s.ctx) return; // the directory has not named the operator yet
-  const key = routeKey(route);
+  if (!s.ctx) {
+    const err = s.peers.error(), message = err && err.status !== 401 ? err.message || String(err) : '';
+    // Snapshot notifications (including a retry starting) must not steal focus.
+    if (message !== s.hubError) {
+      s.hubError = message;
+      $('view').replaceChildren(message ? h('div', { class: 'empty error hub-down', role: 'alert' },
+        h('b', { text: 'Hub unreachable' }),
+        h('div', { text: message.replace(/\.?$/, '.') + ' Trying again automatically.' }),
+        h('button', { type: 'button', class: 'btn', text: 'Retry now', onclick: () => s.peers.reload() }))
+        : h('div', { class: 'loading', text: 'Connecting to the hub…' }));
+    }
+    return; // the directory has not named the operator yet
+  }
+  const key = routeKey(route), changed = !!s.mounted && key !== s.mounted;
   if (key !== s.mounted) {
     s.unmount();
     const entry = SCREENS[route.view], ctx = { ...s.ctx, threadId: route.view === 'thread' ? route.id : undefined, peerId: route.view === 'peer' ? route.id : undefined };
@@ -196,7 +247,12 @@ function renderRoute(s) {
     $('aside').replaceChildren();
     const offView = entry.screen.mount($('view'), ctx);
     const offAside = entry.aside ? entry.aside($('aside'), ctx) : () => {};
+    showThreads(false);
     $('main').scrollTop = 0;
+    // One column (phone): the document scrolls, so bring the new page's top
+    // into view. A no-op when main is its own scroller. A thread with unread
+    // places itself at New once its data lands, after this.
+    if (changed && route.name !== 'matrix' && route.name !== 'add-agent') $('main').scrollIntoView({ block: 'start' });
     s.unmount = () => { offView(); offAside(); s.unmount = () => {}; };
     s.mounted = key;
   }
@@ -206,6 +262,9 @@ function renderRoute(s) {
     s.addAgentHash = location.hash;
     openInvite(s.ctx, () => s.ctx.peers.reload(), $('nav-add'), route.prefill);
   } else if (route.name !== 'add-agent') s.addAgentHash = '';
+  // A screen's mount focus (compose) and modal focus take precedence.
+  const active = document.activeElement;
+  if (changed && route.name !== 'matrix' && route.name !== 'add-agent' && !document.querySelector('dialog[open]') && !(active.isConnected && $('view').contains(active))) $('main').focus({ preventScroll: true });
 }
 
 function start(secret) {
@@ -250,11 +309,12 @@ function start(secret) {
     threads, inboxHead, peers, nameOf, store, mine: null, others: null, otherLimit: OTHER_PAGE, search: null,
     me: '', ctx: null, mounted: '', matrixHash: '', addAgentHash: '', unmount: () => {}, offs: [],
     // leaveGuard: a screen with unsaved work (Settings) names what leaving loses.
-    leaveGuard: null, shownHash: '',
+    leaveGuard: null, shownHash: '', hubError: '', titleId: '', titleThread: null, titleOff: () => {},
     close() {
       stop.abort();
       closeInvite(); // a shown token goes with the session
       this.unmount();
+      this.titleOff();
       for (const off of this.offs) if (typeof off === 'function') off();
       avatars.release();
       $('view').replaceChildren();
@@ -343,13 +403,22 @@ async function signIn(secret) {
   $('login-err').textContent = '';
   try {
     await createApi({ secret }).peers();
-    localStorage.setItem(SECRET_KEY, secret);
+    const saved = writeLocal(SECRET_KEY, secret);
     start(secret);
+    if (!saved && !storageWarned) { storageWarned = true; toast('Secret not saved in this browser. Sign in again after closing this page.'); }
   } catch (e) {
-    showLogin(e.status === 401 ? 'The hub rejected that secret.' : 'Could not reach the hub: ' + e.message);
+    const msg = e.status === 401 ? 'The hub rejected that secret.'
+      : e.status === 0 ? 'Could not reach the hub (' + e.message + '). Check your connection, then try again.'
+      : 'The hub answered ' + e.status + ': ' + e.message + '. Try again shortly.';
+    showLogin(msg, e.status === 401 ? '' : secret);
   } finally { submit.disabled = false; }
 }
 
+$('skip').addEventListener('click', e => {
+  e.preventDefault();
+  $('main').focus({ preventScroll: true });
+  $('main').scrollIntoView({ block: 'start' });
+});
 $('login-form').addEventListener('submit', e => {
   e.preventDefault();
   const secret = $('secret').value.trim();
@@ -362,6 +431,10 @@ function leaving(s) {
   return !msg || window.confirm(msg);
 }
 $('signout').addEventListener('click', () => { if (leaving(session)) signOut(''); });
+// Threads: at 720 px and below the sidebar's thread lists fold behind this
+// disclosure (base.css), so every page starts on the first screen.
+const showThreads = open => $('side-tog').setAttribute('aria-expanded', String(open));
+$('side-tog').addEventListener('click', e => showThreads(e.currentTarget.getAttribute('aria-expanded') !== 'true'));
 // Add agent from any view: the invite dialog opens over the current screen,
 // which stays mounted. A created peer reloads the shared directory; the
 // dashboard follows the hub's directory_updated event.
@@ -386,10 +459,10 @@ document.addEventListener('click', e => {
 }, true);
 
 // The local read list was replaced by the hub's read state.
-localStorage.removeItem('vecnet.ui.read');
+removeLocal('vecnet.ui.read');
 
 showBuildInfo($('build-info'));
 
-const stored = localStorage.getItem(SECRET_KEY);
+const stored = readLocal(SECRET_KEY);
 if (stored) start(stored);
 else showLogin('');

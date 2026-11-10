@@ -52,6 +52,11 @@ export function draftOf(v) {
   return { recipients, priority: PRIORITIES.includes(v.priority) ? v.priority : 'wake' };
 }
 
+// Recipient picks alone are not a draft; in-flight or sent work must not return.
+export function shouldKeepDraft({ title, text, sending, sent }) {
+  return !sending && !sent && !!(title || text);
+}
+
 // matches is the picker's search: by display name only, since a name is for
 // finding a peer and its id is what gets sent (PROTOCOL §14.4).
 export function matches(peer, query) {

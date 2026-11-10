@@ -9,6 +9,27 @@ try {
   await withDemo({}, async ctx => {
     const { page, shot, demo, asPeer, allowConsole, countRequests, quiet, ignore } = ctx;
     const hark = demo.threads.hark, quota = demo.threads.quota;
+    await page.addInitScript(() => {
+      const set = window.setInterval;
+      window.__directoryRefresh = [];
+      window.setInterval = (fn, ms, ...args) => {
+        if (ms === 60000) window.__directoryRefresh.push(() => fn(...args));
+        return set(fn, ms, ...args);
+      };
+    });
+    await page.reload();
+    const keepsFocus = async control => {
+      await quiet();
+      await control.focus();
+      await page.evaluate(() => {
+        if (!window.__directoryRefresh.length) throw new Error('directory timer not captured');
+        window.__beforeRefresh = document.activeElement;
+        window.__directoryRefresh.forEach(fn => fn());
+      });
+      await quiet();
+      assert(await page.evaluate(() => !window.__beforeRefresh.isConnected), 'directory refresh did not rebuild messages');
+      assert(await control.evaluate(el => document.activeElement === el), 'directory refresh lost focus on ' + await control.textContent());
+    };
     // Chromium logs every non-2xx fetch and every aborted request as a console
     // error. These are the ones this script provokes on purpose.
     allowConsole(/status of 422/);
@@ -29,7 +50,14 @@ try {
     const isReceipt = req => req.method() === 'POST' && new URL(req.url()).pathname === '/v1/receipts';
     const msgEl = id => page.locator(`[id="m-${id}"]`);
     const comp = page.locator('.composer');
-    const selected = () => comp.locator('.seg button.on').getAttribute('value');
+    // The chosen priority is .on for the eye and aria-pressed for assistive
+    // technology; every read checks that the two agree.
+    const selected = async () => {
+      await comp.locator('.seg button.on').waitFor();
+      const v = await comp.locator('.seg button').evaluateAll(bs => ({ on: bs.filter(b => b.classList.contains('on')).map(b => b.value), pressed: bs.filter(b => b.getAttribute('aria-pressed') === 'true').map(b => b.value) }));
+      assert(v.on.length === 1 && v.on.join() === v.pressed.join(), `priority marks disagree: ${JSON.stringify(v)}`);
+      return v.on[0];
+    };
     const note = comp.locator('#r-quota');
     const quotaLine = 'Preselected for Grok Bot · each run spends Grok quota';
     const plainLine = 'Grok Bot: each run spends Grok quota';
@@ -129,6 +157,9 @@ try {
     await noteFits('hark', { hint: true });
     await quiet();
     await shot('09-thread-initial');
+    // Directory polling must not discard a keyboard user's message action.
+    await keepsFocus(page.locator('.msg .acts button').first());
+    await keepsFocus(approval.getByRole('button', { name: 'no', exact: true }));
 
     // live delivery from asPeer appears without reload
     await page.evaluate(() => { window.__noReload = true; });
@@ -146,6 +177,30 @@ try {
     for (const deadline = Date.now() + 15000; await unreadIn(hark) !== 0; await page.waitForTimeout(100)) {
       assert(Date.now() < deadline, 'the live delivery stayed unread while the thread was open');
     }
+
+    // Live messages follow the actual scroll owner: main on desktop, the
+    // document on phones, whether or not the composer is sticky.
+    await quiet();
+    assert(await page.locator('#main').evaluate(el => el.scrollHeight - el.scrollTop - el.clientHeight <= 1), 'desktop main did not follow the live delivery to the bottom');
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.evaluate(async () => {
+      document.scrollingElement.scrollTop = document.scrollingElement.scrollHeight;
+      await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+    });
+    await quiet();
+    const phoneLive = await api('POST', '/v1/messages', { idempotency_key: 'thread-phone-live', thread_id: hark, priority: 'hold', content: { text: 'Phone follow: finalize now runs after over.' } }, 'sleuth');
+    await msgEl(phoneLive.message_id).waitFor();
+    await quiet();
+    const phoneFollow = await msgEl(phoneLive.message_id).evaluate(el => {
+      const doc = document.scrollingElement;
+      return { gap: doc.scrollHeight - doc.scrollTop - doc.clientHeight, max: doc.scrollHeight - doc.clientHeight, top: el.getBoundingClientRect().top, vh: innerHeight };
+    });
+    assert(phoneFollow.max > 0 && phoneFollow.gap <= 1, `phone did not follow the live delivery to the page bottom: ${JSON.stringify(phoneFollow)}`);
+    assert(phoneFollow.top >= 0 && phoneFollow.top < phoneFollow.vh, `phone live message is below the viewport: ${JSON.stringify(phoneFollow)}`);
+    await shot('t10-thread-phone-follow');
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.locator('#main').evaluate(el => { el.scrollTop = el.scrollHeight; });
+    await quiet();
 
     // reply link jumps to parent
     assert(!(await inView(first.message_id)), 'the first message was already on screen');
@@ -223,6 +278,35 @@ try {
     const after = (await api('GET', `/v1/threads/${hark}/messages?limit=200`)).messages.filter(m => m.content.text === reply);
     assert(after.length === 1, `the retried send landed ${after.length} times`);
     assert(await ta.inputValue() === '', 'the composer kept the sent text');
+
+    // A new draft typed while a successful send is pending is not its payload.
+    const nextDraft = 'Second draft typed while the first is sending.';
+    const firstDraft = 'First held successful send.';
+    let releaseNext;
+    const nextGate = new Promise(resolve => { releaseNext = resolve; });
+    await page.route('**/v1/messages', async route => { await nextGate; await route.continue(); });
+    await ta.fill(firstDraft);
+    await ta.press('Enter');
+    await comp.locator('.send:disabled').waitFor();
+    await ta.fill(nextDraft);
+    // Also select a new reply target while the previous draft is in flight.
+    await msgEl(first.message_id).locator('.acts button', { hasText: 'reply' }).click();
+    releaseNext();
+    await comp.locator('.send:enabled').waitFor();
+    await page.locator('.msg .txt', { hasText: firstDraft }).waitFor();
+    await quiet();
+    assert(await ta.inputValue() === nextDraft, 'successful send erased the next draft');
+    assert(await comp.locator('.to').isVisible(), 'successful send erased the next reply target');
+    assert(await comp.locator('.bytes').textContent() === nextDraft.length + ' / 4096 B', 'byte count lost the next draft');
+    const heldMessages = () => api('GET', `/v1/threads/${hark}/messages?limit=200`);
+    assert((await heldMessages()).messages.filter(m => m.content.text === firstDraft).length === 1, 'first held message did not land exactly once');
+    await page.unroute('**/v1/messages');
+    await ta.press('Enter');
+    await comp.locator('.send:enabled').waitFor();
+    await page.locator('.msg .txt', { hasText: nextDraft }).waitFor();
+    const nextMessages = (await heldMessages()).messages.filter(m => m.content.text === nextDraft);
+    assert(nextMessages.length === 1 && nextMessages[0].in_reply_to === first.message_id, 'second draft did not send once to its selected target');
+    assert(await ta.inputValue() === '', 'unchanged second draft did not clear');
 
     // Receipt markers move when the recipients report.
     const row = (await api('GET', `/v1/admin/threads/${hark}/deliveries?limit=200`)).rows.find(r => r.message_id === after[0].message_id);
@@ -471,6 +555,72 @@ try {
     await noteFits('explicit wake at 390');
     await shot('t10-thread-narrow');
     await page.setViewportSize({ width: 1440, height: 900 });
+    // Reply drafts survive a real unmount, but belong to just one thread.
+    const openThread = async id => {
+      await page.evaluate(id => { location.hash = `#thread/${id}`; }, id);
+      await page.locator('#view .thead .ids', { hasText: id }).waitFor();
+      await quiet();
+    };
+    const inbox = async () => {
+      await page.evaluate(() => { location.hash = '#inbox'; });
+      await page.locator('#view h1', { hasText: /^Inbox$/ }).waitFor();
+    };
+    await openThread(hosting);
+    assert(await comp.isVisible(), 'a real thread hid its composer');
+    const savedDraft = 'Navigation draft: café 漢字.';
+    await ta.fill(savedDraft);
+    await inbox();
+    await openThread(hark);
+    assert(await ta.inputValue() === '', 'a draft leaked into another thread');
+    await openThread(hosting);
+    assert(await ta.inputValue() === savedDraft, 'navigation lost the reply draft');
+    assert(await comp.locator('.bytes').textContent() === new TextEncoder().encode(savedDraft).length + ' / 4096 B', 'restored draft byte count is wrong');
+    await ta.press('Enter');
+    await page.locator('.msg .txt', { hasText: savedDraft }).waitFor();
+    await comp.locator('.send:enabled').waitFor();
+    assert(await ta.inputValue() === '', 'the restored successful draft did not clear');
+    await inbox();
+    await openThread(hosting);
+    assert(await ta.inputValue() === '', 'navigation restored an already sent draft');
+
+    // A send from an old mount must not erase a newer mount's saved draft.
+    const oldDraft = 'Sending while away from this thread.';
+    const newerDraft = 'New draft saved before the old send finishes.';
+    let releaseOld;
+    const oldGate = new Promise(resolve => { releaseOld = resolve; });
+    const holdOld = async route => { await oldGate; await route.continue(); };
+    await page.route('**/v1/messages', holdOld);
+    const stopIgnoring = ignore(req => req.method() === 'POST' && req.url().endsWith('/v1/messages'));
+    await ta.fill(oldDraft);
+    await ta.press('Enter');
+    await comp.locator('.send:disabled').waitFor();
+    await inbox();
+    await openThread(hosting);
+    assert(await ta.inputValue() === '', 'an in-flight send was restored as a draft');
+    await ta.fill(newerDraft);
+    await inbox();
+    const oldResponse = page.waitForResponse(r => r.request().method() === 'POST' && r.url().endsWith('/v1/messages'));
+    releaseOld();
+    await oldResponse;
+    stopIgnoring();
+    await quiet();
+    await page.unroute('**/v1/messages', holdOld);
+    await openThread(hosting);
+    assert(await ta.inputValue() === newerDraft, 'an old send erased a newer saved draft');
+    const oldMessages = (await api('GET', `/v1/threads/${hosting}/messages?limit=200`)).messages.filter(m => m.content.text === oldDraft);
+    assert(oldMessages.length === 1, 'the send completing after unmount did not land exactly once');
+    await ta.fill('');
+
+    // Run last: an unknown id must offer an exit, not a working Send button.
+    allowConsole(/status of 404/);
+    await page.evaluate(() => { location.hash = '#thread/thr_01ZZZZZZZZZZZZZZZZZZZZZZZZ'; });
+    await page.locator('#view .empty.error', { hasText: 'Thread unavailable' }).waitFor();
+    assert(await comp.isHidden(), 'unknown thread shows a live composer');
+    await page.getByRole('link', { name: 'Back to the inbox', exact: true }).click();
+    await page.locator('#view h1', { hasText: /^Inbox$/ }).waitFor();
+    assert(await page.evaluate(() => location.hash) === '#inbox', 'unknown thread exit did not open the inbox');
+    await openThread(hosting);
+    assert(await comp.isVisible(), 'returning to a real thread hid its composer');
     assert(countRequests(isRead) === 0, 'the thread view posted mark-all');
   });
   console.log('Thread passed: opens at New and reads by receipt, receipts, live delivery, reply jump, literal full text, held retry key, budget banner, inline approvals, join notice, grokbot wake_idle preselect stays sticky');

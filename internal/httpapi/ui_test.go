@@ -42,8 +42,11 @@ import (
 // measured at 653,887 bytes including in-flow overview and peer inspection
 // (cap and all-files coverage unchanged); to 656 KiB on 2026-11-09 for the
 // integrated dashboard, event-pump and Markdown memory fixes, measured by
-// the parent at 657,219 bytes (smallest 16 KiB step above it: 656 KiB).
-const uiMaxBytes = 656 << 10
+// the parent at 657,219 bytes (smallest 16 KiB step above it: 656 KiB);
+// to 672 KiB on 2026-11-10 for the UI review's phone layout, draft keeping,
+// light theme and feedback fixes, measured at 667,480 bytes before them with
+// 4,264 bytes of headroom left (one 16 KiB step).
+const uiMaxBytes = 672 << 10
 
 var (
 	scriptTag   = regexp.MustCompile(`(?is)<script\b([^>]*)>(.*?)</script>`)

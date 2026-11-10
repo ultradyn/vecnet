@@ -65,4 +65,6 @@ body[data-route=peer] .va .col{max-width:1120px}
 .pv-invite>.err{margin:10px 0 0}
 .pv-inv-fresh{margin-top:14px;padding-top:14px;border-top:1px solid var(--line)}
 .pv-inv-fresh>.pv-inv-msg{margin:0 0 10px;color:var(--wake)}
-@media (max-width:1100px){.pv-grid{grid-template-columns:1fr}.pv-head{grid-template-columns:1fr}.pv-acts{justify-content:flex-start;padding:4px 0 0}}
+/* minmax(0,1fr) and a capped button: a long name or quote ellipsizes in the
+   one column instead of widening the page. */
+@media (max-width:1100px){.pv-grid{grid-template-columns:1fr}.pv-head{grid-template-columns:minmax(0,1fr)}.pv-acts{justify-content:flex-start;padding:4px 0 0}.pv-acts .btn{max-width:100%}}
