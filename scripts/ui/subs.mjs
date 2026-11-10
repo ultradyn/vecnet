@@ -107,6 +107,16 @@ try {
       assert((want.action === 'resume') === (health === 'paused_failed' || health === 'paused_operator'), `hub action for ${health}: ${want.action}`);
     }
 
+    // Phone width: each summary gets the card's width under its chip and Resume,
+    // and a chip keeps its own size instead of stretching into an empty bar.
+    await page.setViewportSize({ width: 390, height: 844 });
+    const cards = await attn.locator('.attn-item').evaluateAll(els => els.map(el => [
+      el.querySelector('.sum').getBoundingClientRect().width, el.querySelector('.chip').getBoundingClientRect().width]));
+    assert(cards.length === 5 && cards.every(([sum, chip]) => sum >= 300 && chip > 0 && chip < 200), `phone attention cards: ${JSON.stringify(cards)}`);
+    assert(await page.evaluate(() => document.documentElement.scrollWidth) === 390, 'the inbox scrolls sideways at 390 px');
+    assert(await item('paused_failed').getByRole('button', { name: 'Resume', exact: true }).isVisible(), 'phone Resume lost its name');
+    await page.setViewportSize({ width: 1440, height: 900 });
+
     // Named assertion (Review Focus 5): paused_token and paused_auth rows have no Resume button anywhere.
     const tokenId = byHealth.paused_token.sub_id, authId = byHealth.paused_auth.sub_id;
     for (const id of [tokenId, authId]) {

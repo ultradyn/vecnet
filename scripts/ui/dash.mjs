@@ -96,6 +96,58 @@ try {
     await peerRow('codex-hark').locator('td', { hasText: /^44%$/ }).waitFor();
     assert(countRequests('/v1/admin/peers') > peerReads, 'peers tag did not reload the dashboard');
 
+    // Phone width: dead letter cells break between words, never one letter per
+    // line, and each audit entry keeps time, actor and action inside the box
+    // with its targets under the actor. The oldest entry is aged so its time
+    // prints a day and month, the widest when() output ("28 Sept 14:40"), and
+    // one entry carries the hub's longest action, which must not starve the
+    // actor of any other entry. Another carries eight real target ids, so its
+    // targets wrap, and they must wrap between ids, never inside one.
+    await page.route('**/v1/admin/audit*', async route => {
+      const response = await route.fetch(), json = await response.json();
+      json.entries.at(-1).at = new Date(new Date().getFullYear() - 1, 8, 28, 14, 40).toISOString();
+      json.entries[1].action = 'principal_default_scopes';
+      json.entries[2].target_ids = json.entries.flatMap(e => e.target_ids || []).slice(0, 8);
+      await route.fulfill({ response, json });
+    });
+    const aged = page.waitForResponse(r => new URL(r.url()).pathname === '/v1/admin/audit');
+    assert((await asPeer('codex', 'POST', '/v1/presence', { state: 'working', at: new Date().toISOString(), quota: { weekly_remaining_pct: 45 } })).ok, 'presence for codex');
+    await aged;
+    await peerRow('codex-hark').locator('td', { hasText: /^45%$/ }).waitFor();
+    await ctx.quiet();
+    // The route stays until the phone checks are done: the dashboard reloads
+    // every 30 s (dash.js RELOAD_MS), and a real page has no dated entry.
+    const phone = () => page.evaluate(() => {
+      const box = e => e.getBoundingClientRect(), a = box(document.querySelector('.dash .audit'));
+      const inside = r => r.width > 0 && r.left >= a.left - 0.5 && r.right <= a.right + 0.5;
+      const bad = [...document.querySelectorAll('.dash .audit .ln')].flatMap((ln, i) => {
+        const [t, actor, act, tg] = ln.children, [rt, ra, rx, rg] = [t, actor, act, tg].map(box), out = [];
+        if (!inside(rt) || !inside(ra) || !inside(rx)) out.push(i + ' outside the box');
+        if (t.scrollWidth > t.clientWidth || act.scrollWidth > act.clientWidth) out.push(i + ' time or action clipped');
+        if (i !== 1 && ra.width < 55) out.push(i + ' actor squeezed to ' + Math.round(ra.width) + ' px');
+        if (tg.childElementCount && !(inside(rg) && rg.height > 0 && Math.abs(rg.left - ra.left) < 1 && rg.top >= ra.bottom - 0.5)) out.push(i + ' targets not under the actor');
+        // An id's head, elided middle and tail ("route_…U8I2Z") share one line.
+        for (const id of tg.querySelectorAll('.tg')) {
+          if (new Set([...id.querySelectorAll('.ih,.it')].flatMap(s => [...s.getClientRects()]).map(r => Math.round(r.top))).size > 1) out.push(i + ' an id splits across lines');
+        }
+        return out;
+      });
+      // The entry with eight ids must actually wrap, or the split check proves nothing.
+      const wrapped = [...document.querySelectorAll('.dash .audit .ln>:last-child')].filter(t => new Set([...t.querySelectorAll('.ih')].map(s => Math.round(box(s).top))).size > 1).length;
+      return { docW: document.documentElement.scrollWidth, cellH: Math.max(...[...document.querySelectorAll('.dash-dead td')].map(td => box(td).height)),
+        times: [...document.querySelectorAll('.dash .audit time')].map(t => t.textContent).filter(t => t.includes(' ')), wrapped, bad };
+    });
+    // 360 is where an id once split after its ellipsis ("thr_…" / "XC1M8").
+    for (const width of [390, 360, 320]) {
+      await page.setViewportSize({ width, height: 844 });
+      const p = await phone();
+      assert(p.docW === width, `dashboard is ${p.docW} px wide at ${width}`);
+      assert(p.cellH <= 120, `a dead letter cell is ${p.cellH} px tall at ${width}`);
+      assert(p.times.length >= 1 && p.wrapped >= 1 && !p.bad.length, `phone audit at ${width}: ${JSON.stringify(p)}`);
+    }
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.unroute('**/v1/admin/audit*');
+
     // Subscription health follows another client's pause and resume while the
     // dashboard stays mounted (operator_view "subscription" names peers).
     const subsList = await (await asPeer('operator', 'GET', '/v1/admin/subscriptions')).json();

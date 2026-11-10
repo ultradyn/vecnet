@@ -35,3 +35,6 @@
 .attn-item .meta{font:400 11.5px var(--mono);color:var(--dim);margin-top:4px}
 .attn-item .err{margin:6px 0 0;font-size:12.5px;overflow-wrap:anywhere}
 .attn-item .btn.resume{white-space:nowrap}
+/* Phone width: the summary takes the card's full width under the chip and Resume.
+   The chip keeps its own width rather than stretching into an empty bar. */
+@media (max-width:560px){.attn-item{grid-template-columns:minmax(0,1fr) auto}.attn-item .chip{justify-self:start}.attn-item .body{grid-column:1/-1;grid-row:2}}

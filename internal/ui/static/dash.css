@@ -86,6 +86,19 @@ body[data-route=dash] .va .col{max-width:1120px}
 .dash .peer-activity .spark-readout{position:static;min-width:0;padding:0;border:0;box-shadow:none}
 .dash tr.off td.peer-activity{opacity:1}
 @media(max-width:1200px){.activity-overview{grid-template-columns:minmax(120px,1fr) minmax(180px,1.5fr)}.activity-metric{padding-top:4px}}
-@media(max-width:600px){.activity-overview{grid-template-columns:1fr 1fr;gap:14px}.activity-volume{grid-column:1/-1}.activity-chart{grid-column:1/-1}.dash .dash-sec>.body{max-width:100%;overflow-x:auto}.dash .dash-counters{overflow-wrap:anywhere}}
+@media(max-width:600px){.activity-overview{grid-template-columns:1fr 1fr;gap:14px}.activity-volume{grid-column:1/-1}.activity-chart{grid-column:1/-1}.dash .dash-sec>.body{max-width:100%;overflow-x:auto}.dash .dash-counters{overflow-wrap:anywhere}
+  /* whole words: a cell may run wide, its .body scrolls sideways, but never one letter per line */
+  .dash td{overflow-wrap:break-word}
+  /* Audit: a grid per entry, so a long action narrows only its own actor. "28 Sept 14:40"
+     wraps date over clock; targets sit under the actor and wrap only between ids (never
+     after an id's ellipsis); a hairline makes each entry a unit. */
+  .dash .audit{padding:2px 12px;line-height:1.5}
+  .dash .audit .ln{grid-template-columns:7.5ch minmax(8ch,1fr) auto;row-gap:0;padding:6px 0}
+  .dash .audit .ln+.ln{border-top:1px solid #161d33}
+  .dash .audit .ln>:is(time,.act,:last-child),.dash .audit .tg{white-space:normal}
+  .dash .audit .act{overflow-wrap:anywhere}
+  .dash .audit .tg>*{white-space:nowrap}
+  .dash .audit .ln>time{grid-row:span 2}
+  .dash .audit .ln>:last-child{grid-column:2/-1}}
 @media(forced-colors:active){.spark-line{stroke:CanvasText}.spark-baseline,.spark-cursor{stroke:CanvasText}.spark-area{fill:none}.sparkline svg:focus-visible{outline-color:Highlight}}
 @media print{.spark-line{stroke:#111}.spark-area{fill:none}}
