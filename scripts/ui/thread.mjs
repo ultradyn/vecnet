@@ -178,6 +178,30 @@ try {
       assert(Date.now() < deadline, 'the live delivery stayed unread while the thread was open');
     }
 
+    // Live messages follow the actual scroll owner: main on desktop, the
+    // document on phones, whether or not the composer is sticky.
+    await quiet();
+    assert(await page.locator('#main').evaluate(el => el.scrollHeight - el.scrollTop - el.clientHeight <= 1), 'desktop main did not follow the live delivery to the bottom');
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.evaluate(async () => {
+      document.scrollingElement.scrollTop = document.scrollingElement.scrollHeight;
+      await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+    });
+    await quiet();
+    const phoneLive = await api('POST', '/v1/messages', { idempotency_key: 'thread-phone-live', thread_id: hark, priority: 'hold', content: { text: 'Phone follow: finalize now runs after over.' } }, 'sleuth');
+    await msgEl(phoneLive.message_id).waitFor();
+    await quiet();
+    const phoneFollow = await msgEl(phoneLive.message_id).evaluate(el => {
+      const doc = document.scrollingElement;
+      return { gap: doc.scrollHeight - doc.scrollTop - doc.clientHeight, max: doc.scrollHeight - doc.clientHeight, top: el.getBoundingClientRect().top, vh: innerHeight };
+    });
+    assert(phoneFollow.max > 0 && phoneFollow.gap <= 1, `phone did not follow the live delivery to the page bottom: ${JSON.stringify(phoneFollow)}`);
+    assert(phoneFollow.top >= 0 && phoneFollow.top < phoneFollow.vh, `phone live message is below the viewport: ${JSON.stringify(phoneFollow)}`);
+    await shot('t10-thread-phone-follow');
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.locator('#main').evaluate(el => { el.scrollTop = el.scrollHeight; });
+    await quiet();
+
     // reply link jumps to parent
     assert(!(await inView(first.message_id)), 'the first message was already on screen');
     // Hold back the jump's scroll event so a hub event re-renders the thread

@@ -643,7 +643,10 @@ export function mount(root, ctx) {
     gate();
     const at = openAt && (list.querySelector('.newdiv') || document.getElementById('m-' + openAt));
     if (at) { at.scrollIntoView({ block: 'start' }); onScroll(); }
-    else if (S.pinned) scroller.scrollTop = scroller.scrollHeight;
+    else if (S.pinned) {
+      const el = scroller.scrollHeight > scroller.clientHeight + 1 ? scroller : document.scrollingElement;
+      el.scrollTop = el.scrollHeight;
+    }
   }
 
   // pinned: at the bottom of the column (of the page at phone width).

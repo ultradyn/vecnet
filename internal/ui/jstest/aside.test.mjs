@@ -247,6 +247,7 @@ class AsideEl {
   get textContent() { return this.kids.map(k => typeof k === 'string' ? k : k.textContent).join(''); }
   setAttribute(k, v) { this.attrs[k] = String(v); }
   addEventListener(type, fn) { (this.on[type] ||= []).push(fn); }
+  removeEventListener(type, fn) { this.on[type] = (this.on[type] || []).filter(f => f !== fn); }
   append(...xs) { for (const x of xs) this.kids.push(x); }
   replaceChildren(...xs) { this.kids = []; this.append(...xs); }
   remove() {}

@@ -95,6 +95,8 @@ export function mountAside(root, ctx) {
     root.classList.toggle('open', S.open);
     toggle.setAttribute('aria-expanded', String(S.open));
   });
+  const onEsc = e => { if (e.key === 'Escape' && S.open && !e.defaultPrevented) { e.preventDefault(); S.open = false; root.classList.remove('open'); toggle.setAttribute('aria-expanded', 'false'); toggle.focus(); } };
+  root.addEventListener('keydown', onEsc);
   root.replaceChildren(toggle, body);
   // One button for the life of the panel, outside the part that redraws: the
   // matrix returns focus to the element that opened it, so a redraw must
@@ -252,6 +254,7 @@ export function mountAside(root, ctx) {
     off.forEach(fn => fn());
     for (const url of urls) URL.revokeObjectURL(url);
     urls.clear();
+    root.removeEventListener('keydown', onEsc);
     root.classList.remove('open');
   };
 }
