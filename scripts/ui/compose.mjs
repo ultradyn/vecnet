@@ -63,6 +63,25 @@ try {
     for (const key of ['codex', 'sleuth']) await view.locator(`.pick[title="${id(key)}"] button`).click();
     assert(await search.evaluate(el => el === document.activeElement), 'removing a chip did not focus search');
 
+    // A peer-page handoff replaces a typed draft, not just its recipients.
+    await pick(id('codex'));
+    await view.locator('#c-title').fill('Superseded draft');
+    await text.fill('Do not carry this into a peer-page message.');
+    await view.getByRole('button', { name: 'hold', exact: true }).click();
+    await page.evaluate(peer => { location.hash = '#peer/' + peer; }, id('grok'));
+    await page.locator('.pv-acts a.pv-new').click();
+    await opt(id('grok')).waitFor();
+    assert(await view.locator('.pick').count() === 1 && await view.locator(`.pick[title="${id('grok')}"]`).count() === 1, 'handoff did not replace kept recipients');
+    assert(await text.inputValue() === '' && await view.locator('#c-title').inputValue() === '', 'handoff kept the old title or text');
+    assert(await view.locator('.seg button.on').getAttribute('value') === 'wake_idle', 'handoff kept the old priority');
+    assert(await text.evaluate(el => el === document.activeElement), 'handoff did not focus the message');
+    await page.evaluate(() => { location.hash = '#dash'; });
+    await page.getByRole('heading', { name: 'Dashboard', exact: true }).waitFor();
+    await page.locator('#nav-new').click();
+    await opt(id('codex')).waitFor();
+    assert(await view.locator('.pick').count() === 0, 'recipient-only handoff resurrected the replaced draft');
+    assert(await view.locator('.seg button.on').getAttribute('value') === 'wake', 'recipient-only handoff kept its priority');
+
     // Named assertion: empty text or no recipient keeps Send disabled.
     await text.fill('Text but nobody to send it to.');
     assert(await send.isDisabled(), 'Send enabled with no recipient');
@@ -102,6 +121,21 @@ try {
     await view.locator('#c-history').selectOption('full');
     await view.locator('#c-locked').check();
 
+    // Leaving a typed draft keeps its fields in memory and resumes at Message.
+    await page.locator('#nav-dash').click();
+    await page.getByRole('heading', { name: 'Dashboard', exact: true }).waitFor();
+    await page.locator('#nav-new').click();
+    await opt(id('codex')).waitFor();
+    assert(JSON.stringify(await view.locator('.pick').evaluateAll(els => els.map(el => el.title))) === JSON.stringify([id('codex'), id('sleuth')]), 'navigation lost draft recipients');
+    assert(await view.locator('#c-title').inputValue() === 'Release checklist', 'navigation lost draft title');
+    assert(await text.inputValue() === body, 'navigation lost draft message');
+    assert(await text.evaluate(el => el === document.activeElement), 'restored draft did not focus Message');
+    assert(await view.locator('.seg button.on').getAttribute('value') === 'wake_idle', 'navigation lost manual priority');
+    assert(await view.locator('.bytes').textContent() === `${body.length} / 4096 B`, 'restored counter is stale');
+    assert(await send.isEnabled(), 'restored draft cannot send');
+    await view.locator('summary', { hasText: 'Advanced' }).click();
+    assert(await view.locator('#c-history').inputValue() === 'full' && await view.locator('#c-locked').isChecked(), 'navigation lost advanced fields');
+
     // Progress: the send is held at the network.
     // lib.mjs hold() unroutes as it releases; a second route keeps Playwright's
     // interception on so the held request is continued by the handler.
@@ -139,6 +173,8 @@ try {
     // Error: scope_denied names the recipient and keeps the form.
     await page.evaluate(() => { location.hash = '#new'; });
     await opt(id('grok')).waitFor();
+    assert(await text.inputValue() === '' && await view.locator('#c-title').inputValue() === '' && await view.locator('.pick').count() === 0, 'a successful send left a kept draft');
+    assert(await view.locator('.seg button.on').getAttribute('value') === 'wake', 'a successful send left its priority');
     await pick(id('codex'));
     await pick(id('grok'));
     await view.locator('#c-title').fill('Review the hosting plan');
@@ -362,6 +398,67 @@ try {
     assert(tipBox && tipBox.x >= 0 && tipBox.x + tipBox.width <= 390, `narrow tip off screen ${JSON.stringify(tipBox)}`);
     await shot('t10-compose-keyboard-narrow');
     await page.setViewportSize({ width: 1440, height: 900 });
+
+    // Automatic Grok priority and its note survive a round trip too.
+    await text.fill('Resume the automatic Grok draft.');
+    await page.evaluate(() => { location.hash = '#dash'; });
+    await page.getByRole('heading', { name: 'Dashboard', exact: true }).waitFor();
+    await page.locator('#nav-new').click();
+    await opt(id('grok')).waitFor();
+    assert(await on() === 'wake_idle' && await quota.textContent() === quotaLine, 'restoration made automatic priority manual');
+    assert(await text.evaluate(el => el === document.activeElement), 'automatic draft did not focus Message');
+
+    // A recipient that disappeared from the directory cannot be restored.
+    await page.evaluate(() => { location.hash = '#dash'; });
+    await page.getByRole('heading', { name: 'Dashboard', exact: true }).waitFor();
+    await page.route('**/v1/peers', async route => {
+      const res = await route.fetch(), body = await res.json();
+      body.peers = body.peers.filter(p => p.peer_id !== id('grok'));
+      await route.fulfill({ response: res, json: body });
+    });
+    const updated = page.waitForResponse(r => new URL(r.url()).pathname === '/v1/peers');
+    await page.evaluate(() => window.refreshDirectory());
+    await updated;
+    await ctx.quiet();
+    await page.locator('#nav-new').click();
+    await opt(id('codex')).waitFor();
+    assert(await view.locator('.pick').count() === 0, 'restored an ineligible recipient');
+    assert(await text.inputValue() === 'Resume the automatic Grok draft.', 'directory filtering lost the message');
+    assert(await on() === 'wake' && await quota.isHidden() && await send.isDisabled(), 'restored gate or Grok note is stale');
+    await page.unroute('**/v1/peers');
+
+    // The sign-out hook can forget a kept draft without any browser storage.
+    await page.evaluate(() => { location.hash = '#dash'; });
+    await page.getByRole('heading', { name: 'Dashboard', exact: true }).waitFor();
+    await page.evaluate(async () => { (await import('./compose.js')).forgetDrafts(); });
+    await page.locator('#nav-new').click();
+    await opt(id('codex')).waitFor();
+    assert(await text.inputValue() === '' && await view.locator('.pick').count() === 0, 'forgetDrafts kept typed work');
+
+    // A lost reply may already be sent: navigation must keep its retry key.
+    allowConsole(/net::ERR_FAILED/);
+    await pick(id('codex'));
+    await text.fill('Lost reply across navigation must not send twice.');
+    const replies = [];
+    await page.route('**/v1/messages', async route => {
+      const response = await route.fetch();
+      replies.push({ status: response.status(), body: await response.json() });
+      if (replies.length === 1) await route.abort('failed');
+      else await route.fulfill({ response });
+    });
+    const beforeRetry = sends.length;
+    await send.click();
+    await view.locator('.err', { hasText: 'network' }).waitFor();
+    await page.locator('#nav-dash').click();
+    await page.getByRole('heading', { name: 'Dashboard', exact: true }).waitFor();
+    await page.locator('#nav-new').click();
+    await opt(id('codex')).waitFor();
+    await send.click();
+    await page.waitForFunction(() => location.hash.startsWith('#thread/thr_'));
+    await page.unroute('**/v1/messages');
+    const retrySends = sends.slice(beforeRetry);
+    assert(retrySends.length === 2 && retrySends[0].idempotency_key === retrySends[1].idempotency_key, 'navigation lost the pending key and sent twice');
+    assert(replies.length === 2 && replies[0].status === 202 && replies[1].status === 200 && replies[0].body.message_id === replies[1].body.message_id, 'restored retry created another message');
   });
-  console.log('Compose passed: eligible peers, Send gating, search, ids not names, held send, new thread opens, scope_denied and rate_limited keep the form, stable key, grokbot wake_idle preselect stays sticky and retries the same priority');
+  console.log('Compose passed: eligible peers, Send gating, search, ids not names, held send, new thread opens, scope_denied and rate_limited keep the form, stable key, grokbot wake_idle preselect stays sticky and retries the same priority, in-memory drafts restore fields and focus, handoff replaces and sends clear drafts, removed recipients and forgetDrafts clear safely, lost replies replay once across navigation');
 } finally { await cleanBuild(); }

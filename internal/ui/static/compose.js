@@ -9,13 +9,13 @@ import { createAttachments } from './attach.js';
 import { avatar, h, idText } from './dom.js';
 import { kindShort } from './format.js';
 import { markPriority, prioritySeg } from './prio.js';
-import { anyGrokbot, buildSend, canSend, composePriority, counter, draftOf, eligible, errorText, GROK_QUOTA_DETAIL, grokQuotaNote, INITIAL_PRIORITY, keepKey, keyFor, matches, priorityLocked, sendRefusal } from './compose-model.js';
+import { anyGrokbot, buildSend, canSend, composePriority, counter, draftOf, eligible, errorText, GROK_QUOTA_DETAIL, grokQuotaNote, INITIAL_PRIORITY, keepKey, keyFor, matches, priorityLocked, sendRefusal, shouldKeepDraft } from './compose-model.js';
 
-// The draft for the next mount only. The caller sets it and routes to #new in
-// the same click, and that mount takes it, so a later New message (the nav
-// link, a reload) starts empty.
-let handoff = null;
+// A peer-page handoff is one-shot and replaces any draft kept on navigation.
+// Both live only in this module, never in browser storage.
+let handoff = null, kept = null;
 export function prefill(draft) { handoff = draftOf(draft); }
+export function forgetDrafts() { handoff = kept = null; }
 
 function randKey() {
   const b = crypto.getRandomValues(new Uint8Array(16));
@@ -24,14 +24,16 @@ function randKey() {
 
 export function mount(root, ctx) {
   const { api, store, me, nameOf, kindOf, peers, toast, nav } = ctx;
-  const draft = handoff;
-  handoff = null;
+  const prefilled = !!handoff, draft = handoff || kept;
+  handoff = kept = null;
+  const allowed = new Set(eligible(peers.get(), me).map(p => p.peer_id));
   const S = {
-    recipients: draft ? draft.recipients : [],
+    recipients: draft ? draft.recipients.filter(id => prefilled || allowed.has(id)) : [],
     priority: draft ? draft.priority : INITIAL_PRIORITY,
-    priorityManual: !!draft, // a prefilled draft is an explicit choice too
-    pending: null,   // {key, sig}: the unsent body keeps its idempotency_key across retries
+    priorityManual: prefilled || !!(draft && draft.priorityManual),
+    pending: draft && draft.pending || null, // unchanged retries keep their key across navigation too
     sending: false,
+    sent: false,
     error: '',
     denied: '',      // recipient named by the last scope_denied
   };
@@ -49,6 +51,12 @@ export function mount(root, ctx) {
     h('option', { value: 'from_join', text: 'from_join: people added later see only what follows' }),
     h('option', { value: 'full', text: 'full: people added later see the whole thread' }));
   const locked = h('input', { type: 'checkbox', id: 'c-locked' });
+  if (draft) {
+    titleIn.value = draft.title || '';
+    text.value = draft.text || '';
+    history.value = draft.historyAccess || 'from_join';
+    locked.checked = !!draft.locked;
+  }
   // The Grok Bot note: one line under the Priority row whose space is kept
   // while it is empty (.off), so picking or removing a Grok Bot moves
   // nothing. The timing and second-run detail are its title and a hidden
@@ -180,6 +188,7 @@ export function mount(root, ctx) {
     render();
     try {
       const r = await api.send(body);
+      S.sent = true;
       S.pending = null;
       att.clear();
       store.invalidate('threads');
@@ -228,6 +237,12 @@ export function mount(root, ctx) {
   (draft ? text : search).focus();
   const off = peers.subscribe(render);
   return () => {
+    kept = shouldKeepDraft({ ...S, title: titleIn.value, text: text.value }) ? {
+      recipients: [...S.recipients], title: titleIn.value, text: text.value,
+      priority: S.priority, priorityManual: S.priorityManual, pending: S.pending,
+      historyAccess: history.value, locked: locked.checked,
+    } : null;
+    // Attachment chips are not kept; their uploads belong to this mount.
     gone = true;
     off();
     att.destroy();

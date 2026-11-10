@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { SPILL, TEXT_CAP, anyGrokbot, buildSend, canSend, composePriority, counter, draftOf, eligible, errorText, GROK_QUOTA_DETAIL, GROK_QUOTA_NOTE, GROK_QUOTA_PLAIN, GROK_QUOTA_TITLE, grokQuotaNote, keepKey, keyFor, matches, pendingMatches, priorityLocked, sendRefusal } from '../static/compose-model.js';
+import { SPILL, TEXT_CAP, anyGrokbot, buildSend, canSend, composePriority, counter, draftOf, eligible, errorText, GROK_QUOTA_DETAIL, GROK_QUOTA_NOTE, GROK_QUOTA_PLAIN, GROK_QUOTA_TITLE, grokQuotaNote, keepKey, keyFor, matches, pendingMatches, priorityLocked, sendRefusal, shouldKeepDraft } from '../static/compose-model.js';
 import { SPILL_SLOT } from '../static/attach-model.js';
 
 const peers = [
@@ -349,4 +349,14 @@ test('draftOf keeps the id recipients once each and a priority the form offers',
   // What the draft makes is a valid send once there is text.
   const d = draftOf({ recipients: ['peer_a'], priority: 'wake_idle' });
   assert.equal(buildSend({ ...d, text: 'hi' }, 'k').priority, 'wake_idle');
+});
+
+// Only typed work is worth keeping; sends (including resolved sends) are not.
+test('shouldKeepDraft keeps title or text, never empty, sending or sent forms', () => {
+  assert.equal(shouldKeepDraft({ title: 'Plan', text: '' }), true);
+  assert.equal(shouldKeepDraft({ title: '', text: 'Message' }), true);
+  assert.equal(shouldKeepDraft({ title: '', text: ' ' }), true);
+  assert.equal(shouldKeepDraft({ recipients: ['peer_c'], title: '', text: '' }), false);
+  assert.equal(shouldKeepDraft({ title: 'Plan', text: 'Message', sending: true }), false);
+  assert.equal(shouldKeepDraft({ title: 'Plan', text: 'Message', sent: true }), false);
 });
