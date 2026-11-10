@@ -19,6 +19,9 @@ const PAGE = 200, MAX_PAGES = 50, PIN_SLACK = 80;
 // views tall reports once it fills 60% of the view.
 const STEPS = [0, ...Array.from({ length: 13 }, (_, i) => 0.002 * 1.5 ** i), ...Array.from({ length: 20 }, (_, i) => (i + 1) / 20)];
 const enc = new TextEncoder();
+// Text only: attachment chips, reply targets and priorities are not kept.
+const drafts = new Map();
+export function forgetDrafts() { drafts.clear(); }
 
 function randKey() {
   const b = crypto.getRandomValues(new Uint8Array(16));
@@ -231,7 +234,7 @@ export function mount(root, ctx) {
     }
     // Choose again before minting. An unchanged draft keeps the captured
     // priority and key; an edit after a 503 does not.
-    const submitted = ta.value, draft = syncPriority();
+    const submitted = ta.value, saved = drafts.get(threadId), draft = syncPriority();
     S.pending = replyKey(S.pending, draft, randKey);
     const body = { idempotency_key: S.pending.key, thread_id: threadId, priority: draft.prio, content: { text: draft.text } };
     if (draft.replyTo) body.in_reply_to = draft.replyTo;
@@ -243,6 +246,8 @@ export function mount(root, ctx) {
     try {
       const r = await api.send(body);
       S.pending = null;
+      // A late success must not erase a newer mount's saved draft.
+      if (drafts.get(threadId) === saved) drafts.delete(threadId);
       // The editable composer may already hold the next message.
       if (ta.value === submitted) ta.value = '';
       atts.clear(carried);
@@ -524,6 +529,12 @@ export function mount(root, ctx) {
 
   const head = h('div', { class: 'thead' }), list = h('div', { class: 'msgs' }), comp = composer();
   root.replaceChildren(head, list, comp, R.picker);
+  const saved = drafts.get(threadId);
+  if (saved) {
+    const ta = comp.querySelector('textarea');
+    ta.value = saved.text;
+    syncPriority(); counter(ta); gate();
+  }
   const cover = new ResizeObserver(coverChanged);
   cover.observe(comp);
 
@@ -595,6 +606,8 @@ export function mount(root, ctx) {
   function render() {
     if (gone) return;
     const t = thread(), all = msgs(), d = detail.get();
+    const dead = !history.get() && history.error() && history.error().code === 'unknown_thread';
+    comp.hidden = !!dead;
     head.replaceChildren(t ? h('h1', { class: t.title ? null : 'un', text: title(t, me, nameOf) }) : h('h1', null, idText(threadId)),
       h('div', { class: 'ids', text: threadId + (t ? ' · ' + plural(t.message_count, 'message') : '') }));
     ticks = [];
@@ -605,7 +618,8 @@ export function mount(root, ctx) {
     const openAt = ready ? place(all, d) : null;
     if (io) io.disconnect(); // the old nodes are going; watch() takes the new ones
     if (history.error() && !history.get()) {
-      list.replaceChildren(h('div', { class: 'empty error' }, h('b', { text: 'Thread unavailable' }), history.error().message));
+      list.replaceChildren(h('div', { class: 'empty error' }, h('b', { text: 'Thread unavailable' }), history.error().message,
+        h('div', null, h('a', { href: '#inbox', text: 'Back to the inbox' }))));
     } else if ((history.loading() && !all.length) || (!opened && !history.error() && !matrix.error())) {
       // The first draw waits for unread, to open there, not jump from the bottom.
       list.replaceChildren(h('div', { class: 'loading', text: 'Loading thread…' }));
@@ -681,6 +695,9 @@ export function mount(root, ctx) {
   const timer = setInterval(tick, 1000);
   const off = [history.subscribe(onHistory), detail.subscribe(render), matrix.subscribe(render), ctx.threads.subscribe(render), ctx.peers.subscribe(render)];
   return () => {
+    const ta = comp.querySelector('textarea');
+    if (!S.pending && !S.sending && ta.value.trim()) drafts.set(threadId, { text: ta.value });
+    else drafts.delete(threadId);
     gone = true;
     clearInterval(timer);
     clearTimeout(expiryTimer);

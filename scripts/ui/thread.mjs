@@ -555,6 +555,72 @@ try {
     await noteFits('explicit wake at 390');
     await shot('t10-thread-narrow');
     await page.setViewportSize({ width: 1440, height: 900 });
+    // Reply drafts survive a real unmount, but belong to just one thread.
+    const openThread = async id => {
+      await page.evaluate(id => { location.hash = `#thread/${id}`; }, id);
+      await page.locator('#view .thead .ids', { hasText: id }).waitFor();
+      await quiet();
+    };
+    const inbox = async () => {
+      await page.evaluate(() => { location.hash = '#inbox'; });
+      await page.locator('#view h1', { hasText: /^Inbox$/ }).waitFor();
+    };
+    await openThread(hosting);
+    assert(await comp.isVisible(), 'a real thread hid its composer');
+    const savedDraft = 'Navigation draft: café 漢字.';
+    await ta.fill(savedDraft);
+    await inbox();
+    await openThread(hark);
+    assert(await ta.inputValue() === '', 'a draft leaked into another thread');
+    await openThread(hosting);
+    assert(await ta.inputValue() === savedDraft, 'navigation lost the reply draft');
+    assert(await comp.locator('.bytes').textContent() === new TextEncoder().encode(savedDraft).length + ' / 4096 B', 'restored draft byte count is wrong');
+    await ta.press('Enter');
+    await page.locator('.msg .txt', { hasText: savedDraft }).waitFor();
+    await comp.locator('.send:enabled').waitFor();
+    assert(await ta.inputValue() === '', 'the restored successful draft did not clear');
+    await inbox();
+    await openThread(hosting);
+    assert(await ta.inputValue() === '', 'navigation restored an already sent draft');
+
+    // A send from an old mount must not erase a newer mount's saved draft.
+    const oldDraft = 'Sending while away from this thread.';
+    const newerDraft = 'New draft saved before the old send finishes.';
+    let releaseOld;
+    const oldGate = new Promise(resolve => { releaseOld = resolve; });
+    const holdOld = async route => { await oldGate; await route.continue(); };
+    await page.route('**/v1/messages', holdOld);
+    const stopIgnoring = ignore(req => req.method() === 'POST' && req.url().endsWith('/v1/messages'));
+    await ta.fill(oldDraft);
+    await ta.press('Enter');
+    await comp.locator('.send:disabled').waitFor();
+    await inbox();
+    await openThread(hosting);
+    assert(await ta.inputValue() === '', 'an in-flight send was restored as a draft');
+    await ta.fill(newerDraft);
+    await inbox();
+    const oldResponse = page.waitForResponse(r => r.request().method() === 'POST' && r.url().endsWith('/v1/messages'));
+    releaseOld();
+    await oldResponse;
+    stopIgnoring();
+    await quiet();
+    await page.unroute('**/v1/messages', holdOld);
+    await openThread(hosting);
+    assert(await ta.inputValue() === newerDraft, 'an old send erased a newer saved draft');
+    const oldMessages = (await api('GET', `/v1/threads/${hosting}/messages?limit=200`)).messages.filter(m => m.content.text === oldDraft);
+    assert(oldMessages.length === 1, 'the send completing after unmount did not land exactly once');
+    await ta.fill('');
+
+    // Run last: an unknown id must offer an exit, not a working Send button.
+    allowConsole(/status of 404/);
+    await page.evaluate(() => { location.hash = '#thread/thr_01ZZZZZZZZZZZZZZZZZZZZZZZZ'; });
+    await page.locator('#view .empty.error', { hasText: 'Thread unavailable' }).waitFor();
+    assert(await comp.isHidden(), 'unknown thread shows a live composer');
+    await page.getByRole('link', { name: 'Back to the inbox', exact: true }).click();
+    await page.locator('#view h1', { hasText: /^Inbox$/ }).waitFor();
+    assert(await page.evaluate(() => location.hash) === '#inbox', 'unknown thread exit did not open the inbox');
+    await openThread(hosting);
+    assert(await comp.isVisible(), 'returning to a real thread hid its composer');
     assert(countRequests(isRead) === 0, 'the thread view posted mark-all');
   });
   console.log('Thread passed: opens at New and reads by receipt, receipts, live delivery, reply jump, literal full text, held retry key, budget banner, inline approvals, join notice, grokbot wake_idle preselect stays sticky');
