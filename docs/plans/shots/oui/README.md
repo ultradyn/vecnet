@@ -13,6 +13,7 @@ Task 23 runs both clients against one disposable hub. Its assertions verify cros
 - [07-shell-success.png](07-shell-success.png) — Web shell and connection handling — success state.
 - [08-inbox-error.png](08-inbox-error.png) — Web inbox triage — error state.
 - [08-inbox-initial.png](08-inbox-initial.png) — Web inbox triage — initial state.
+- [08-inbox-phone.png](08-inbox-phone.png) — Web inbox at 390 px: each decision's countdown and thread, and each failed delivery's Retry and Discard, sit under the card's text.
 - [08-inbox-progress.png](08-inbox-progress.png) — Web inbox triage — progress state.
 - [08-inbox-success.png](08-inbox-success.png) — Web inbox triage — success state.
 - [09-thread-error.png](09-thread-error.png) — Web thread chat and receipts — error state.
