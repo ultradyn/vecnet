@@ -164,9 +164,30 @@ try {
     const activate = async name => { await button(name).focus(); await page.keyboard.press('Enter'); };
     const focused = async name => assert(await button(name).evaluate(el => el === document.activeElement), name + ' lost focus');
     await activate('Disable');
+    await button('Confirm disable').waitFor();
+    assert(await button('Re-enable').count() === 0, 'Disable skipped confirmation');
+    assert(await pv.locator('.pv-head h1 .chip').count() === 0, 'arming Disable disabled the peer');
+    assert((await button('Confirm disable').getAttribute('title')).includes('will not reconnect by itself'), 'Disable omits the stream warning');
+    await button('Disable').waitFor({ timeout: 5000 });
+    assert(await button('Re-enable').count() === 0 && await pv.locator('.pv-head h1 .chip').count() === 0, 'Disable timeout changed the peer');
+    await focused('Disable');
+    await activate('Disable');
+    await button('Confirm disable').waitFor();
+    const armed = await button('Confirm disable').elementHandle();
+    // A new newest thread changes the action cache key, but not the armed
+    // lifecycle control or its timeout. Unrelated redraws must not disarm it.
+    const newer = await asPeer('operator', 'POST', '/v1/messages', { idempotency_key: 'peer-actions-armed', recipients: [id('dot')], priority: 'hold', thread_title: 'Disable confirmation redraw', content: { text: 'Still enabled.' } });
+    assert(newer.ok, `send while armed: ${newer.status}`);
+    const latest = (await newer.json()).thread_id;
+    await acts.locator(`a.pv-open[href="#thread/${latest}"]`).waitFor();
+    assert(await armed.evaluate(el => el.isConnected && el.textContent === 'Confirm disable' && el.classList.contains('armed')), 'an unrelated action redraw disarmed Disable');
+    await focused('Confirm disable');
+    assert(await button('Re-enable').count() === 0 && await pv.locator('.pv-head h1 .chip').count() === 0, 'a redraw confirmed Disable');
+    await activate('Confirm disable');
     await pv.locator('.pv-head h1 .chip', { hasText: 'disabled' }).waitFor();
     await button('Re-enable').waitFor();
     await focused('Re-enable');
+    assert(!await button('Re-enable').evaluate(el => el.classList.contains('armed') || el.classList.contains('bad')), 'Re-enable inherited destructive confirmation state');
     await activate('Re-enable');
     await button('Disable').waitFor();
     await focused('Disable');
@@ -187,5 +208,5 @@ try {
     assert(await button('Disable').count() === 0 && await button('Unarchive').count() === 0, 'Unarchive did not leave the peer disabled');
     assert(await mounted.evaluate(el => el.isConnected), 'lifecycle mutations remounted the peer page');
   });
-  console.log('Peer actions passed: quick link to the newest shared thread, else New message prefilled; New message always beside it, wake_idle for a Grok Bot; hover, focus kept across a redraw, modified click, later New message empty, source and operator offer none; Disable/Re-enable and Archive/Unarchive redraw in place with focus');
+  console.log('Peer actions passed: quick link to the newest shared thread, else New message prefilled; New message always beside it, wake_idle for a Grok Bot; hover, focus kept across a redraw, modified click, later New message empty, source and operator offer none; Disable confirms, times out safely and stays armed across action redraws; Disable/Re-enable and Archive/Unarchive redraw in place with focus');
 } finally { await cleanBuild(); }

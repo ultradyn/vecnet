@@ -280,7 +280,7 @@ export function mount(root, ctx) {
   // focus off a button.
   const headMain = h('div', { class: 'pv-main' });
   const acts = h('div', { class: 'pv-acts', role: 'group', 'aria-label': 'Message this peer' });
-  let actsKey = '';
+  let actsKey = '', lifeKey = '', life = [];
   const head = h('header', { class: 'pv-head' }, headMain, acts);
 
   // The Invite card reads the invite status only once the peer row shows a
@@ -347,17 +347,28 @@ export function mount(root, ctx) {
     // A new offer (another thread became the newest, say) replaces the
     // buttons; focus on one moves to its replacement.
     const had = acts.contains(document.activeElement) && ['pv-new', 'pv-open', 'pv-toggle', 'pv-archive'].find(c => document.activeElement.classList.contains(c));
-    const life = [];
-    if (f && f.kind !== 'operator' && f.kind !== 'source') {
-      const run = async action => {
-        try { await api.peerLifecycle(id, action); toast('Peer ' + (action === 'enable' ? 'enabled' : action + 'd') + '.'); res.peers.reload(); }
-        catch (e) { toast('Could not ' + action + ' peer: ' + errText(e), true); }
-      };
-      if (f.archivedAt) life.push(h('button', {type: 'button', class: 'btn pv-archive', text: 'Unarchive', onclick: () => run('unarchive')}));
-      else {
-        life.push(h('button', {type: 'button', class: 'btn pv-toggle', text: f.disabled ? 'Re-enable' : 'Disable', onclick: () => run(f.disabled ? 'enable' : 'disable')}));
-        const archive = confirmButton('Archive', 'Confirm archive', () => run('archive'));
-        archive.classList.add('bad', 'pv-archive'); life.push(archive);
+    // Keep lifecycle nodes (and confirmation timers) when only message
+    // offers change. A lifecycle change gets fresh, unarmed controls.
+    const lk = peerActionsKey(f, null);
+    if (lk !== lifeKey) {
+      lifeKey = lk; life = [];
+      if (f && f.kind !== 'operator' && f.kind !== 'source') {
+        const run = async action => {
+          try { await api.peerLifecycle(id, action); toast('Peer ' + (action === 'enable' ? 'enabled' : action + 'd') + '.'); res.peers.reload(); }
+          catch (e) { toast('Could not ' + action + ' peer: ' + errText(e), true); }
+        };
+        if (f.archivedAt) life.push(h('button', {type: 'button', class: 'btn pv-archive', text: 'Unarchive', onclick: () => run('unarchive')}));
+        else {
+          if (f.disabled) life.push(h('button', {type: 'button', class: 'btn pv-toggle', text: 'Re-enable', onclick: () => run('enable')}));
+          else {
+            const disable = confirmButton('Disable', 'Confirm disable', () => run('disable'));
+            disable.classList.add('bad', 'pv-toggle');
+            disable.title = 'Stops its sends and event stream. A running watch or MCP relay exits and will not reconnect by itself.';
+            life.push(disable);
+          }
+          const archive = confirmButton('Archive', 'Confirm archive', () => run('archive'));
+          archive.classList.add('bad', 'pv-archive'); life.push(archive);
+        }
       }
     }
     acts.replaceChildren(...messageActions(a, { name: (f && f.name) || id, threadName: t => threadTitle(t, ctx.me, nameOf), age, prefill, nav: ctx.nav }), ...life);

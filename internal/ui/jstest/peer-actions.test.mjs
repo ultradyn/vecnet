@@ -140,3 +140,13 @@ test('action cache includes lifecycle state even without message actions', () =>
     assert.notEqual(key(null), base, 'loading has no lifecycle buttons');
   }
 });
+
+
+test('lifecycle-only cache survives a changed message offer, but not Re-enable', () => {
+  const f = facts('session'), renamed = { ...f, name: 'new name' };
+  const a = peerActions(f, shared, ME, null);
+  const next = peerActions(renamed, { threads: [] }, ME, null);
+  assert.notEqual(peerActionsKey(f, a, t => t.title), peerActionsKey(renamed, next, t => t.title));
+  assert.equal(peerActionsKey(f, null), peerActionsKey(renamed, null), 'message changes keep the armed lifecycle node');
+  assert.notEqual(peerActionsKey(f, null), peerActionsKey({ ...f, disabled: true }, null), 'Re-enable gets a fresh unarmed node');
+});
