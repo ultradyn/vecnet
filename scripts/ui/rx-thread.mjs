@@ -58,6 +58,15 @@ try {
     assert(rows[2].text === CHECK + '2' && rows[2].title === nameOf('claw') + ', ' + hostileClean && !rows[2].mine, 'the ✅ chip is wrong: ' + JSON.stringify(rows[2]));
     assert(!CONTROLS.test(rows[2].title) && rows[2].title.includes('<img src=x onerror=alert(1)>'), 'the hostile name is not cleaned literal text');
     assert(await page.locator('#view img').count() === 0, 'a hostile name became an element');
+    // Light theme: only the emoji glyph is re-inverted (base.css .rx-g), so a
+    // chip's face and count, and a picker button, invert with the page.
+    await page.evaluate(() => { document.documentElement.dataset.theme = 'light'; });
+    const lit = await page.evaluate(id => {
+      const f = el => getComputedStyle(el).filter, c = document.querySelector(`[id="m-${id}"] .rx-chip`), e = document.querySelector('.rx-pick .rx-e');
+      return { chip: f(c), glyph: f(c.querySelector('.rx-g')), count: f(c.querySelector('b')), emo: f(e), emoGlyph: f(e.querySelector('.rx-g')) };
+    }, target);
+    await page.evaluate(() => { document.documentElement.dataset.theme = 'dark'; });
+    assert(lit.chip === 'none' && lit.count === 'none' && lit.emo === 'none' && /invert/.test(lit.glyph) && /invert/.test(lit.emoGlyph), 'light theme re-inverts more than the emoji glyph: ' + JSON.stringify(lit));
     // Reserved height (Review Focus 5): every message has its chips row, the
     // react button first, so the first chip arriving on the question and the
     // last one leaving it move neither it nor the answer below it.

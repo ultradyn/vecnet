@@ -35,7 +35,7 @@ body[data-route=dash] .va .col{max-width:1120px}
 .dash .pd.unknown{background:none;border:1.5px dashed #64748b;width:9px;height:9px}
 .dash .pd.na{background:none}
 .dash .rch{width:9px;height:9px;border-radius:50%;border:2px solid #475569;flex:none;box-sizing:border-box}
-.dash .rch.connected{border-color:#818cf8;background:#818cf855}.dash .rch.reachable{border-color:#818cf8}
+.dash .rch.connected{border-color:var(--ok);background:#34d39955}.dash .rch.reachable{border-color:#818cf8}
 .dash .rch.unreachable{border-color:var(--bad)}.dash .rch.unknown{border-style:dotted}
 .dash .cred{font:12px var(--mono);color:var(--muted)}
 .dash .cred.active{color:var(--ok)}.dash .cred.revoked{color:var(--bad)}

@@ -6,13 +6,16 @@ import { markPriority, prioritySeg } from './prio.js';
 import { chips, errorText, nextOp, reactBody, REACTIONS } from './react-model.js';
 
 const SAYS = { wake: 'wakes now', wake_idle: 'wakes if idle', hold: 'no wake' };
+// The light theme re-inverts only the glyph (base.css .rx-g): the chip's face
+// and count invert with the page.
+const glyph = emoji => h('span', { class: 'rx-g', text: emoji });
 // main takes focus only from script (the shell's route handoff): not a control.
 const FOCUSABLE = 'a,button,input,textarea,select,[tabindex]:not(main)';
 
 export function createReactions({ api, me, nameOf, onDone, toast }) {
   let open = '', cur = null, override = null, busy = false;
   const seg = prioritySeg(p => { override = override === p ? null : p; paint(); });
-  const emo = REACTIONS.map(r => h('button', { type: 'button', class: 'rx-e', onclick: () => send(cur, r.emoji, true) }, r.emoji, h('i')));
+  const emo = REACTIONS.map(r => h('button', { type: 'button', class: 'rx-e', onclick: () => send(cur, r.emoji, true) }, glyph(r.emoji), h('i')));
   const picker = h('div', { class: 'rx-pick', role: 'dialog', 'aria-label': 'React', hidden: true },
     h('div', { class: 'rx-es' }, emo), seg.el);
 
@@ -138,7 +141,7 @@ export function createReactions({ api, me, nameOf, onDone, toast }) {
       return h('div', { class: 'rx-row' }, button(m), chips(m.reactions, me, nameOf).map(c => keep(h('button', {
         type: 'button', class: 'rx-chip' + (c.mine ? ' mine' : ''), 'aria-pressed': c.mine ? 'true' : 'false', title: c.title,
         'data-rx': m.message_id + c.emoji, onclick: () => send(m, c.emoji, false),
-      }, c.emoji, h('b', { text: String(c.count) })))));
+      }, glyph(c.emoji), h('b', { text: String(c.count) })))));
     },
     destroy() {
       document.removeEventListener('keydown', onKey);

@@ -2,7 +2,7 @@
    style anywhere (CSP). Screens own their stylesheet. */
 :root{
   --bg:#0b0f19;--panel:#10162a;--panel2:#151c33;--line:#222b45;--line2:#2c3756;
-  --text:#f3f4f6;--muted:#9aa4b8;--dim:#5f6a84;
+  --text:#f3f4f6;--muted:#9aa4b8;--dim:#7d89a3;
   --grad:linear-gradient(135deg,#6366f1 0%,#a855f7 100%);
   --wake:#fbbf24;--widle:#38bdf8;--hold:#8391ad;--ok:#34d399;--bad:#fb7185;--violet:#a5b4fc;
   --sans:'Inter',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
@@ -61,7 +61,8 @@ span,b,time,code,a{unicode-bidi:isolate}
 .linkbtn:hover{color:var(--text)}
 #toast{position:fixed;top:18px;left:50%;transform:translateX(-50%) translateY(-90px);z-index:70;background:#1e2640;border:1px solid var(--line2);color:var(--text);padding:9px 14px;border-radius:8px;font-size:13px;transition:transform .25s ease;box-shadow:0 10px 30px #0008;max-width:80vw}
 #toast.on{transform:translateX(-50%) translateY(0)}
-#toast.bad{border-color:#fb718580}
+/* a failure must not look like a success */
+#toast.bad{border-color:#fb718599;background:#2a1626;color:#fecdd3}
 
 /* login */
 .login{min-height:100%;display:grid;place-items:center;padding:24px}
@@ -163,6 +164,7 @@ body[data-route=dash] aside,body[data-route=new] aside,body[data-route=peer] asi
 a.plink,span.plink{color:inherit;text-decoration:none;cursor:pointer;border-bottom:1px dotted #a5b4fc66}
 a.plink:hover,span.plink:hover{color:var(--violet);border-bottom-color:var(--violet)}
 .empty.error{border-color:#fb718580}
+.hub-down .btn{margin-top:10px}
 
 @media (min-width:1101px){body[data-route=dash] .va,body[data-route=new] .va,body[data-route=peer] .va{grid-template-columns:240px minmax(0,1fr)}}
 @media (max-width:1100px){.va{grid-template-columns:220px minmax(0,1fr)}.va aside{display:none}}
@@ -192,11 +194,20 @@ a.plink:hover,span.plink:hover{color:var(--violet);border-bottom-color:var(--vio
 
 /* This browser's appearance (appearance.js; set before first paint by
    appearance-boot.js). Light inverts the dark palette, hue kept, until a
-   dedicated light palette exists; pictures, the logo, emoji reactions and the
-   top-layer dialogs (which the root filter does not reach) are put back. */
+   dedicated light palette exists; pictures, the logo and emoji glyphs (not a
+   chip's face) are put back. Top-layer dialogs, out of the root filter's reach,
+   invert themselves over a light scrim; the image viewer stays a dark lightbox. */
 :root[data-theme=light]{filter:invert(1) hue-rotate(180deg)}
-:root[data-theme=light] :is(img,video,canvas,.logo,.rx-chip,.rx-e){filter:invert(1) hue-rotate(180deg)}
+:root[data-theme=light] :is(img,video,canvas,.logo,.rx-g){filter:invert(1) hue-rotate(180deg)}
 :root[data-theme=light] dialog[open]{filter:invert(1) hue-rotate(180deg)}
+:root[data-theme=light] dialog[open]:not(.viewer){box-shadow:0 24px 60px #fff3}
+:root[data-theme=light] dialog[open]:not(.viewer)::backdrop{background:#c8cfe0b3}
+:root[data-theme=light] :is(dialog.viewer,dialog.viewer img){filter:none}
+/* Tokens that invert under 4.5:1 get light values (dim renders #566179, 4.6:1 on
+   a selected row); the ring renders dark violet, and :where keeps its weight so
+   rules that set their own outline still win. */
+:root[data-theme=light]{--dim:#949fb7;--muted:#b4bccd;--bad:#fda4af;--widle:#7dd3fc;--hold:#a0aec4}
+:where(:root[data-theme=light]) :focus-visible{outline-color:#d8b4fe}
 /* Compact density: tighter rows in the shell and lists (Settings has its own). */
 :root[data-density=compact] .va .nav a{padding:4px 9px}
 :root[data-density=compact] .va .nav.rows a{padding:3px 9px}
