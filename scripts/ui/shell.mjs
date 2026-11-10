@@ -17,6 +17,141 @@ try {
     await quiet();
     await shot('07-shell-initial');
 
+    // Each shell regression owns a tab: a failed check cannot mask the other
+    // failures, and signing out never resets another check's module memory.
+    const regressions = [];
+    async function regression(name, signedIn, run) {
+      const context = await page.context().browser().newContext();
+      try {
+        await context.addInitScript(() => addEventListener('securitypolicyviolation', e => { window.__shellCSP = e.violatedDirective; }));
+        if (signedIn) await context.addInitScript(secret => localStorage.setItem('vecnet.ui.secret', secret), demo.operator_secret);
+        const p = await context.newPage(), errors = [], q = networkQuiet(p).quiet;
+        p.setDefaultTimeout(12000);
+        p.on('pageerror', e => errors.push(e.message));
+        await p.goto(demo.url + '/ui/');
+        await run(p, q);
+        assert(!errors.length, errors.join('; '));
+        assert(!await p.evaluate(() => window.__shellCSP), 'shell regression violated CSP');
+        console.log(`Shell regression passed: ${name}`);
+      } catch (e) { regressions.push(`${name}: ${e.message}`); }
+      finally { await context.close(); }
+    }
+    const login = async p => {
+      await p.locator('#secret').fill(demo.operator_secret);
+      await p.locator('#login-form button').click();
+      await p.locator('#conn.live').waitFor();
+    };
+    await regression('sign-out forgets drafts after unmount', true, async (p, q) => {
+      await p.locator('#conn.live').waitFor();
+      await p.evaluate(id => { location.hash = '#thread/' + id; }, demo.threads.hark);
+      await p.locator('.composer textarea').fill('private unsent reply');
+      // Keep both an unmounted compose draft and a mounted reply draft.
+      await p.locator('#nav-new').click();
+      await p.locator('#c-title').fill('private unsent title');
+      await p.locator('#c-text').fill('private unsent message');
+      await p.evaluate(id => { location.hash = '#thread/' + id; }, demo.threads.hark);
+      await p.locator('.composer textarea').waitFor();
+      await p.locator('#signout').click();
+      assert(await p.title() === 'vecnet · operator inbox', 'sign-out kept the page title');
+      await login(p);
+      await p.locator('.composer textarea').waitFor();
+      await q();
+      assert(await p.locator('.composer textarea').inputValue() === '', 'reply draft crossed sign-out');
+      await p.locator('#nav-new').click();
+      assert(await p.locator('#c-title').inputValue() === '' && await p.locator('#c-text').inputValue() === '', 'compose draft crossed sign-out');
+      // This time compose is still mounted when session.close() saves it.
+      await p.locator('#c-title').fill('mounted title');
+      await p.locator('#c-text').fill('mounted text');
+      await p.locator('#signout').click();
+      await login(p);
+      await p.locator('#c-text').waitFor();
+      assert(await p.locator('#c-title').inputValue() === '' && await p.locator('#c-text').inputValue() === '', 'mounted compose draft crossed sign-out');
+    });
+    await regression('stored-secret outage and both recovery paths', true, async (p, q) => {
+      await p.locator('#conn.live').waitFor();
+      for (const manual of [false, true]) {
+        await p.route('**/v1/**', r => r.abort('connectionrefused'));
+        await p.reload();
+        const notice = p.locator('#view .empty.error.hub-down[role=alert]');
+        await notice.waitFor({ timeout: 5000 });
+        assert(await notice.locator('b').textContent() === 'Hub unreachable', 'missing outage heading');
+        assert((await notice.textContent()).includes('hub unreachable. Trying again automatically.'), 'outage did not explain automatic retry');
+        const retry = notice.getByRole('button', { name: 'Retry now', exact: true });
+        await retry.focus();
+        // Another resource notification/route redraw must keep this node.
+        await p.evaluate(() => { window.__shellRetry = document.activeElement; location.hash = '#inbox'; });
+        await q();
+        assert(await retry.evaluate(el => el === window.__shellRetry && el === document.activeElement), 'redraw replaced focused Retry');
+        // Keep the event pump offline for the manual path: only reloading
+        // peers can name the operator and replace this notice.
+        if (manual) await p.route('**/v1/events*', r => r.abort('connectionrefused'));
+        await p.unroute('**/v1/**');
+        if (manual) await retry.click();
+        await p.getByRole('heading', { name: 'Inbox', exact: true }).waitFor({ timeout: 45000 });
+        assert(await notice.count() === 0, 'recovery kept outage notice');
+        if (manual) await p.unroute('**/v1/events*');
+        await p.locator('#conn.live').waitFor();
+      }
+      // A stored but rejected secret must bypass the outage view entirely.
+      await p.route('**/v1/peers', r => r.fulfill({ status: 401, contentType: 'application/json', body: JSON.stringify({ error: { code: 'unauthenticated', message: 'rejected' } }) }));
+      await p.reload();
+      await p.locator('#login:not([hidden])').waitFor();
+      assert(await p.locator('.hub-down').count() === 0, '401 became hub-down');
+    });
+    await regression('route titles and live unread', true, async (p, q) => {
+      await p.locator('#conn.live').waitFor();
+      async function titleIs(label) {
+        await p.waitForFunction(label => {
+          const n = Number(document.getElementById('inbox-count').textContent) || 0;
+          return document.title === (n > 0 ? `(${n}) ` : '') + label + ' · vecnet';
+        }, label, { timeout: 5000 }).catch(async e => { throw new Error(`${label}: got ${await p.title()} (${e.message})`); });
+      }
+      for (const [hash, label] of [['#inbox', 'Inbox'], ['#new', 'New message'], ['#dash', 'Dashboard'], ['#settings', 'Settings'], ['#peer/' + demo.peers.dot.id, 'dot-research']]) {
+        await p.evaluate(hash => { location.hash = hash; }, hash);
+        await q();
+        await titleIs(label);
+      }
+      const hostile = p.locator('#threads a', { hasText: '<img src=x onerror=alert(1)>' });
+      await hostile.click();
+      await p.locator('.thead h1', { hasText: '<img src=x onerror=alert(1)>' }).waitFor();
+      await titleIs(await p.locator('.thead h1').textContent());
+      assert((await p.title()).includes('<img src=x onerror=alert(1)>'), 'hostile title was not literal text');
+      assert(await p.locator('img').count() === 0, 'title parsed hostile markup');
+      await p.locator('#nav-inbox').click();
+      await q();
+      const before = Number(await p.locator('#inbox-count').textContent());
+      const sent = await asPeer('codex', 'POST', '/v1/messages', { idempotency_key: 'shell-title-unread', thread_id: demo.threads.hark, priority: 'wake', content: { text: 'Unread title regression' } });
+      assert(sent.ok, `title send failed: ${sent.status}`);
+      await p.waitForFunction(n => Number(document.getElementById('inbox-count').textContent) === n + 1, before);
+      await titleIs('Inbox');
+      await p.locator('#signout').click();
+      assert(await p.title() === 'vecnet · operator inbox', 'login title not reset');
+    });
+    await regression('sign-in distinguishes refusal and connection failures', false, async p => {
+      assert(await p.title() === 'vecnet · operator inbox', 'sign-in title changed');
+      for (const status of [503, 0, 401]) {
+        await p.route('**/v1/peers', r => status ? r.fulfill({ status, contentType: 'application/json', body: JSON.stringify({ error: { code: 'unavailable', message: 'hub is starting' } }) }) : r.abort('connectionrefused'));
+        await p.locator('#secret').fill(demo.operator_secret);
+        await p.locator('#login-form button').click();
+        const expected = status === 503 ? 'The hub answered 503: hub is starting. Try again shortly.' : status === 0 ? 'Could not reach the hub (hub unreachable). Check your connection, then try again.' : 'The hub rejected that secret.';
+        await p.waitForFunction(text => document.getElementById('login-err').textContent === text, expected, { timeout: 5000 });
+        const field = await p.locator('#secret').evaluate(el => ({ value: el.value, start: el.selectionStart, end: el.selectionEnd, focus: el === document.activeElement }));
+        assert(field.value === (status === 401 ? '' : demo.operator_secret), `status ${status} lost or kept the wrong secret`);
+        assert(field.focus && field.start === 0 && field.end === field.value.length, `status ${status} did not select the secret`);
+        assert(await p.evaluate(() => localStorage.getItem('vecnet.ui.secret')) === null, 'failed sign-in stored secret');
+        await p.unroute('**/v1/peers');
+      }
+      // Preserve the secret on one last transient error, then Enter retries it.
+      await p.route('**/v1/peers', r => r.abort('connectionrefused'));
+      await p.locator('#secret').fill(demo.operator_secret);
+      await p.locator('#login-form button').click();
+      await p.locator('#login-err', { hasText: 'Check your connection' }).waitFor();
+      await p.unroute('**/v1/peers');
+      await p.keyboard.press('Enter');
+      await p.locator('#conn.live').waitFor();
+    });
+    assert(!regressions.length, regressions.join('\n'));
+
     // A blocked storage getter or method must not prevent a memory-only session.
     for (const mode of ['getter', 'getItem', 'setItem', 'both', 'removeItem', 'normal']) {
       const context = await page.context().browser().newContext();
@@ -109,6 +244,7 @@ try {
     await page.getByRole('button', { name: 'Sign in' }).click();
     await page.locator('#login-err', { hasText: 'rejected' }).waitFor();
     assert(await page.locator('#login').isVisible(), 'bad secret left the login card');
+    assert(await page.locator('#secret').inputValue() === '', 'wrong secret was not cleared');
     assert(await page.evaluate(() => localStorage.getItem('vecnet.ui.secret')) === null, 'bad secret was stored');
     assert(countRequests('/v1/events') === 0, 'bad secret started the event loop');
     await quiet();

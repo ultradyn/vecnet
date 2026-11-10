@@ -15,7 +15,7 @@ import * as compose from './compose.js';
 import { connectionState } from './connection-model.js';
 import * as dash from './dash.js';
 import { h, peerLink, toast } from './dom.js';
-import { short } from './format.js';
+import { clean, short, title } from './format.js';
 import * as inbox from './inbox.js';
 import { addAgentPrefill } from './invite-model.js';
 import { closeInvite, openInvite } from './invite.js';
@@ -31,6 +31,7 @@ import { createStore } from './store.js';
 import * as threadAside from './thread-aside.js';
 import * as thread from './thread.js';
 
+const LOGIN_TITLE = 'vecnet · operator inbox';
 const SECRET_KEY = 'vecnet.ui.secret';
 const PEERS_REFRESH = 60000;
 const CONN_CLASS = { live: 'live', reconnecting: 'retry', stopped: 'off', restarting: 'warn' };
@@ -73,17 +74,22 @@ function parseRoute(hash) {
 
 let session = null;
 
-function showLogin(msg) {
+function showLogin(msg, secret = '') {
+  if (document.title !== LOGIN_TITLE) document.title = LOGIN_TITLE;
   document.body.dataset.route = 'login';
   $('app').hidden = true;
   $('login').hidden = false;
   $('login-err').textContent = msg || '';
-  $('secret').value = '';
+  $('secret').value = secret;
   $('secret').focus();
+  if (secret) $('secret').select();
 }
 
 function signOut(msg) {
   if (session) session.close();
+  // close() unmounts the screen, saving its draft: erase only afterwards.
+  thread.forgetDrafts();
+  compose.forgetDrafts();
   session = null;
   removeLocal(SECRET_KEY);
   showLogin(msg);
@@ -94,6 +100,22 @@ function renderNav(s, route) {
   const head = s.inboxHead.get() || {}, count = $('inbox-count'), unread = head.unread;
   count.textContent = unread ? String(unread) : '';
   count.className = 'cnt' + (unread ? ' hot' : '');
+  // A deep link can name a thread outside both sidebar pages. Keep its
+  // title live with the thread tag, and stop listening when the route leaves.
+  const id = route.view === 'thread' ? route.id : '';
+  if (s.ctx && id !== s.titleId) {
+    s.titleOff();
+    s.titleId = id;
+    s.titleThread = id ? s.store.resource('thread:' + id, () => s.ctx.api.thread(id)) : null;
+    s.titleOff = s.titleThread ? s.titleThread.subscribe(() => { if (session === s) renderNav(s, parseRoute(location.hash)); }) : () => {};
+  }
+  const detail = s.titleThread && s.titleThread.get();
+  const named = ((s.peers.get() || {}).peers || []).find(p => p.peer_id === route.id);
+  const label = route.view === 'thread' ? title((detail && detail.row && detail.row.thread) || threads.find(t => t.thread_id === id), s.me, s.nameOf) || 'Thread'
+    : route.view === 'peer' ? (named && named.name) || 'Peer'
+    : ({ inbox: 'Inbox', new: 'New message', dash: 'Dashboard', settings: 'Settings' })[route.view];
+  const tabTitle = (unread > 0 ? '(' + unread + ') ' : '') + clean(label) + ' · vecnet';
+  if (document.title !== tabTitle) document.title = tabTitle;
   for (const n of ['inbox', 'new', 'dash', 'settings']) {
     const a = $('nav-' + n), on = route.name === n;
     a.className = on ? 'on' : '';
@@ -204,7 +226,19 @@ function renderRoute(s) {
   document.body.dataset.route = route.name;
   s.shownHash = location.hash;
   renderNav(s, route);
-  if (!s.ctx) return; // the directory has not named the operator yet
+  if (!s.ctx) {
+    const err = s.peers.error(), message = err && err.status !== 401 ? err.message || String(err) : '';
+    // Snapshot notifications (including a retry starting) must not steal focus.
+    if (message !== s.hubError) {
+      s.hubError = message;
+      $('view').replaceChildren(message ? h('div', { class: 'empty error hub-down', role: 'alert' },
+        h('b', { text: 'Hub unreachable' }),
+        h('div', { text: message.replace(/\.?$/, '.') + ' Trying again automatically.' }),
+        h('button', { type: 'button', class: 'btn', text: 'Retry now', onclick: () => s.peers.reload() }))
+        : h('div', { class: 'loading', text: 'Connecting to the hub…' }));
+    }
+    return; // the directory has not named the operator yet
+  }
   const key = routeKey(route), changed = !!s.mounted && key !== s.mounted;
   if (key !== s.mounted) {
     s.unmount();
@@ -275,11 +309,12 @@ function start(secret) {
     threads, inboxHead, peers, nameOf, store, mine: null, others: null, otherLimit: OTHER_PAGE, search: null,
     me: '', ctx: null, mounted: '', matrixHash: '', addAgentHash: '', unmount: () => {}, offs: [],
     // leaveGuard: a screen with unsaved work (Settings) names what leaving loses.
-    leaveGuard: null, shownHash: '',
+    leaveGuard: null, shownHash: '', hubError: '', titleId: '', titleThread: null, titleOff: () => {},
     close() {
       stop.abort();
       closeInvite(); // a shown token goes with the session
       this.unmount();
+      this.titleOff();
       for (const off of this.offs) if (typeof off === 'function') off();
       avatars.release();
       $('view').replaceChildren();
@@ -372,7 +407,10 @@ async function signIn(secret) {
     start(secret);
     if (!saved && !storageWarned) { storageWarned = true; toast('Secret not saved in this browser. Sign in again after closing this page.'); }
   } catch (e) {
-    showLogin(e.status === 401 ? 'The hub rejected that secret.' : 'Could not reach the hub: ' + e.message);
+    const msg = e.status === 401 ? 'The hub rejected that secret.'
+      : e.status === 0 ? 'Could not reach the hub (' + e.message + '). Check your connection, then try again.'
+      : 'The hub answered ' + e.status + ': ' + e.message + '. Try again shortly.';
+    showLogin(msg, e.status === 401 ? '' : secret);
   } finally { submit.disabled = false; }
 }
 
