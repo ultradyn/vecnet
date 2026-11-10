@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bannerItems, isNoticeEvent, restartLine, restartState } from '../static/notice-model.js';
-import { renderBanner } from '../static/notice.js';
+import { createNotices, renderBanner } from '../static/notice.js';
 
 // A minimal document, installed only while a test renders: md-dom.test.mjs
 // keeps its own shim on globalThis.document for the rest of the run.
@@ -173,4 +173,25 @@ test('banner updates in place: ticks keep rows, focus and the live text', () => 
     assert.equal(root.kids[0], movingRow);
     assert.equal(root.kids.length, 3);
   } finally { globalThis.document = prev; }
+});
+
+test('blocked sessionStorage getter keeps notice dismissals in memory', () => {
+  const prev = globalThis.document, descriptor = Object.getOwnPropertyDescriptor(globalThis, 'sessionStorage');
+  globalThis.document = { createElement: tag => new El(tag) };
+  Object.defineProperty(globalThis, 'sessionStorage', { configurable: true, get() { throw new Error('blocked'); } });
+  let notices, draw;
+  try {
+    const root = new El('div'), res = { get: () => ({ notices: [notice('maintenance')] }), subscribe(fn) { draw = fn; fn(); return () => {}; } };
+    notices = createNotices({ api: {}, root, store: { resource: () => res, hubNow: () => NOW } });
+    assert.equal(root.hidden, false);
+    find(root, e => e.tag === 'button')[0].on.click();
+    assert.equal(root.hidden, true);
+    draw();
+    assert.equal(root.hidden, true, 'dismissal was lost on redraw');
+  } finally {
+    notices?.close();
+    globalThis.document = prev;
+    if (descriptor) Object.defineProperty(globalThis, 'sessionStorage', descriptor);
+    else delete globalThis.sessionStorage;
+  }
 });

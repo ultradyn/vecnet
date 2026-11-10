@@ -50,6 +50,10 @@ const SCREENS = {
 let localStore = null;
 try { localStore = window.localStorage; } catch { /* blocked: defaults */ }
 const appearance = createAppearance({ storage: localStore, root: document.documentElement, win: window });
+function readLocal(key) { try { return localStore?.getItem(key); } catch { return null; } }
+function writeLocal(key, value) { try { if (localStore) { localStore.setItem(key, value); return true; } } catch {} return false; }
+function removeLocal(key) { try { localStore?.removeItem(key); } catch { /* session teardown must finish */ } }
+let storageWarned = false;
 
 function parseRoute(hash) {
   // #add-agent?kind=&name=&request_id= opens the dialog. The query is a
@@ -81,7 +85,7 @@ function showLogin(msg) {
 function signOut(msg) {
   if (session) session.close();
   session = null;
-  localStorage.removeItem(SECRET_KEY);
+  removeLocal(SECRET_KEY);
   showLogin(msg);
 }
 
@@ -90,10 +94,11 @@ function renderNav(s, route) {
   const head = s.inboxHead.get() || {}, count = $('inbox-count'), unread = head.unread;
   count.textContent = unread ? String(unread) : '';
   count.className = 'cnt' + (unread ? ' hot' : '');
-  $('nav-inbox').className = route.name === 'inbox' ? 'on' : '';
-  $('nav-new').className = route.name === 'new' ? 'on' : '';
-  $('nav-dash').className = route.name === 'dash' ? 'on' : '';
-  $('nav-settings').className = route.name === 'settings' ? 'on' : '';
+  for (const n of ['inbox', 'new', 'dash', 'settings']) {
+    const a = $('nav-' + n), on = route.name === n;
+    a.className = on ? 'on' : '';
+    if (on) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
+  }
   $('nav-add').disabled = !s.ctx; // the invite needs the session's api
   const now = s.store.hubNow(), mineRes = s.mine;
   if (s.search) s.search.refresh(); // a directory rename also updates the scope chip
@@ -109,6 +114,9 @@ function renderNav(s, route) {
     return;
   }
   $('results').replaceChildren();
+  // Only the normal lists own this focus; search restores its own results.
+  const active = document.activeElement, list = active.closest('#threads, #others');
+  const href = list && active.getAttribute('href');
   const yours = yourThreads({
     page: mineRes && mineRes.get(), summaries: s.threads.get() ? threads : null,
     error: s.threads.error() || (mineRes && mineRes.error()), me: s.me, nameOf: s.nameOf, now,
@@ -116,6 +124,10 @@ function renderNav(s, route) {
   });
   $('threads').replaceChildren(...(yours.rows.length ? yours.rows.map(r => threadLink(r, route, s.nameOf)) : [h('div', { class: 'none', text: yours.note })]));
   renderOthers(s, route, threads, now);
+  if (list) {
+    const back = [...list.children].find(el => href ? el.getAttribute('href') === href : el.tagName === 'BUTTON');
+    if (back) back.focus({ preventScroll: true });
+  }
 }
 
 // Search summaries (§2.8) have no activity time. Reuse ThreadRows from
@@ -134,7 +146,7 @@ function lastActive(s) {
 // takes the message count's place (base.css); zero shows nothing.
 function threadLink(r, route, nameOf) {
   const cls = [r.id === route.id ? 'on' : '', r.unread ? 'unread' : ''].filter(Boolean).join(' ');
-  return h('a', { href: r.href, class: cls, title: r.tip },
+  return h('a', { href: r.href, class: cls, title: r.tip, 'aria-current': r.id === route.id ? 'page' : null },
     h('span', { class: 'tt' + (r.untitled ? ' un' : ''), text: r.title }),
     h('span', { class: 'nums' }, h('span', { class: 'cnt', text: r.count }), ...(r.unread ? [h('span', { class: 'ur', text: r.unreadText, 'aria-label': r.unread + ' unread' })] : [])),
     r.ids && r.ids.length ? h('span', { class: 'pp' }, peopleLinks(r, nameOf)) : h('span', { class: 'pp', text: r.people }),
@@ -188,7 +200,7 @@ function renderRoute(s) {
   s.shownHash = location.hash;
   renderNav(s, route);
   if (!s.ctx) return; // the directory has not named the operator yet
-  const key = routeKey(route);
+  const key = routeKey(route), changed = !!s.mounted && key !== s.mounted;
   if (key !== s.mounted) {
     s.unmount();
     const entry = SCREENS[route.view], ctx = { ...s.ctx, threadId: route.view === 'thread' ? route.id : undefined, peerId: route.view === 'peer' ? route.id : undefined };
@@ -206,6 +218,9 @@ function renderRoute(s) {
     s.addAgentHash = location.hash;
     openInvite(s.ctx, () => s.ctx.peers.reload(), $('nav-add'), route.prefill);
   } else if (route.name !== 'add-agent') s.addAgentHash = '';
+  // A screen's mount focus (compose) and modal focus take precedence.
+  const active = document.activeElement;
+  if (changed && route.name !== 'matrix' && route.name !== 'add-agent' && !document.querySelector('dialog[open]') && !(active.isConnected && $('view').contains(active))) $('main').focus({ preventScroll: true });
 }
 
 function start(secret) {
@@ -343,13 +358,19 @@ async function signIn(secret) {
   $('login-err').textContent = '';
   try {
     await createApi({ secret }).peers();
-    localStorage.setItem(SECRET_KEY, secret);
+    const saved = writeLocal(SECRET_KEY, secret);
     start(secret);
+    if (!saved && !storageWarned) { storageWarned = true; toast('Secret not saved in this browser. Sign in again after closing this page.'); }
   } catch (e) {
     showLogin(e.status === 401 ? 'The hub rejected that secret.' : 'Could not reach the hub: ' + e.message);
   } finally { submit.disabled = false; }
 }
 
+$('skip').addEventListener('click', e => {
+  e.preventDefault();
+  $('main').focus({ preventScroll: true });
+  $('main').scrollIntoView({ block: 'start' });
+});
 $('login-form').addEventListener('submit', e => {
   e.preventDefault();
   const secret = $('secret').value.trim();
@@ -386,10 +407,10 @@ document.addEventListener('click', e => {
 }, true);
 
 // The local read list was replaced by the hub's read state.
-localStorage.removeItem('vecnet.ui.read');
+removeLocal('vecnet.ui.read');
 
 showBuildInfo($('build-info'));
 
-const stored = localStorage.getItem(SECRET_KEY);
+const stored = readLocal(SECRET_KEY);
 if (stored) start(stored);
 else showLogin('');

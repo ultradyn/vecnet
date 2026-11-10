@@ -1,6 +1,6 @@
 // Task 7: sign-in, the shell, the event pump and reply, in a real browser;
 // also the favicon set and brand mark.
-import { assert, cleanBuild, shotPath, withDemo } from './lib.mjs';
+import { assert, cleanBuild, networkQuiet, shotPath, withDemo } from './lib.mjs';
 
 const OPERATOR_INBOX = { name: 'Operator inbox', exact: true };
 
@@ -16,6 +16,67 @@ try {
     await page.getByRole('heading', OPERATOR_INBOX).waitFor();
     await quiet();
     await shot('07-shell-initial');
+
+    // A blocked storage getter or method must not prevent a memory-only session.
+    for (const mode of ['getter', 'getItem', 'setItem', 'both', 'removeItem', 'normal']) {
+      const context = await page.context().browser().newContext();
+      try {
+        await context.addInitScript(mode => {
+          const blocked = () => { throw new DOMException('Storage blocked', 'SecurityError'); };
+          if (mode === 'getter' || mode === 'both') Object.defineProperty(window, 'localStorage', { get: blocked });
+          else if (mode !== 'normal') Storage.prototype[mode] = blocked;
+          if (mode === 'both') Object.defineProperty(window, 'sessionStorage', { get: blocked });
+        }, mode);
+        const p = await context.newPage(), errors = [], q = networkQuiet(p).quiet;
+        p.on('pageerror', e => errors.push(e.message));
+        await p.goto(demo.url + '/ui/');
+        await p.locator('#login:not([hidden])').waitFor();
+        await p.locator('#secret').fill(demo.operator_secret);
+        await p.locator('#login-form button').click();
+        if (['getter', 'setItem', 'both'].includes(mode)) {
+          await p.locator('#toast.on', { hasText: 'not saved in this browser' }).waitFor();
+        }
+        await p.locator('#conn.live').waitFor();
+        await p.getByRole('heading', { name: 'Inbox', exact: true }).waitFor();
+        await q();
+        await p.locator('#signout').click();
+        await p.locator('#login:not([hidden])').waitFor();
+        if (mode === 'normal') assert(await p.evaluate(() => localStorage.getItem('vecnet.ui.secret')) === null, 'signed-out secret stayed stored');
+        assert(!errors.length, `${mode}: ${errors.join('; ')}`);
+      } finally { await context.close(); }
+    }
+
+    // A fresh stored session starts with the skip link first in the tab order.
+    const keyboard = await page.context().browser().newContext();
+    try {
+      await keyboard.addInitScript(secret => localStorage.setItem('vecnet.ui.secret', secret), demo.operator_secret);
+      const p = await keyboard.newPage(), q = networkQuiet(p).quiet;
+      await p.goto(demo.url + '/ui/');
+      await p.locator('#conn.live').waitFor();
+      await q();
+      const hash = await p.evaluate(() => location.hash);
+      await p.keyboard.press('Tab');
+      assert(await p.locator('.skip').evaluate(el => el === document.activeElement), 'skip link is not first');
+      await p.keyboard.press('Enter');
+      assert(await p.evaluate(() => document.activeElement.id === 'main' && location.hash === '') && hash === '', 'skip changed hash or missed main');
+      await p.locator('#nav-dash').click();
+      await p.getByRole('heading', { name: 'Dashboard', exact: true }).waitFor();
+      assert(await p.evaluate(() => document.activeElement.id === 'main'), 'route focus stayed in sidebar');
+      await p.keyboard.press('Tab');
+      assert(await p.evaluate(() => document.getElementById('view').contains(document.activeElement)), 'Tab did not enter view');
+      await p.locator('#nav-new').click();
+      await p.locator('#c-search').waitFor();
+      assert(await p.locator('#c-search').evaluate(el => el === document.activeElement), 'compose mount focus lost');
+      await p.evaluate(() => { location.hash = '#inbox'; });
+      await p.getByRole('heading', { name: 'Inbox', exact: true }).waitFor();
+      await p.setViewportSize({ width: 390, height: 844 });
+      await p.locator('.skip').focus();
+      await p.keyboard.press('Enter');
+      await q();
+      const heading = await p.getByRole('heading', { name: 'Inbox', exact: true }).boundingBox();
+      assert(heading && heading.y >= 0 && heading.y + heading.height <= 844, `mobile skip missed heading: ${JSON.stringify(heading)}`);
+      assert(await p.evaluate(() => document.activeElement.id === 'main' && location.hash === '#inbox'), 'mobile skip changed hash or missed main');
+    } finally { await keyboard.close(); }
 
     // The favicon set: linked (SVG first choice, PNG fallbacks), served as
     // images, the brand mark on the card, and each rendered at tab sizes on
@@ -92,6 +153,16 @@ try {
     await page.getByRole('heading', { name: 'Dashboard', exact: true }).waitFor();
     assert(await page.evaluate(() => document.body.dataset.route) === 'dash', 'route not on body');
     assert(await page.locator('#nav-dash.on').count() === 1, 'dashboard not active in nav');
+    // The active link is also the current page for assistive technology, and alone in that.
+    const current = await page.locator('nav.side [aria-current]').evaluateAll(els => els.map(e => e.id + '=' + e.getAttribute('aria-current')).join());
+    assert(current === 'nav-dash=page', `aria-current in the sidebar: ${current}`);
+    await quiet();
+    await page.locator('#main').evaluate(el => { el.scrollTop = 300; });
+    assert(await page.locator('#main').evaluate(el => el.scrollTop > 0), 'dashboard did not scroll');
+    await page.evaluate(() => { location.hash = '#inbox'; });
+    await page.getByRole('heading', { name: 'Inbox', exact: true }).waitFor();
+    await quiet();
+    assert(await page.locator('#main').evaluate(el => el.scrollTop === 0), 'inbox retained dashboard scroll');
     await page.evaluate(() => { location.hash = '#new'; });
     await page.getByRole('heading', { name: 'New message', exact: true }).waitFor();
     await page.evaluate(() => { location.hash = '#inbox'; });

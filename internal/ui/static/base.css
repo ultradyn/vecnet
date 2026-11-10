@@ -28,6 +28,9 @@ a{color:inherit}
 span,b,time,code,a{unicode-bidi:isolate}
 :focus-visible{outline:2px solid #a855f7;outline-offset:2px}
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+.skip{position:fixed;top:8px;left:8px;z-index:100;padding:10px 16px;background:var(--panel);color:var(--text);transform:translateY(-200%)}
+.skip:focus{transform:none}
+#main:focus{outline:none}
 .nojs{padding:40px;color:var(--muted)}
 .mono{font-family:var(--mono)}
 
