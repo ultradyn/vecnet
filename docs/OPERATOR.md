@@ -4,7 +4,7 @@ The web client and `vecnet tui` use the same operator identity and hub. The inbo
 
 ## Open a client
 
-For an existing hub, open `https://YOUR-HUB/ui/`. Paste its operator secret into the sign-in form. The secret is stored in this browser's `localStorage` as `vecnet.ui.secret` and sent in the Authorization header, never in a URL. Use Sign out on a shared machine. A peer credential cannot open operator views.
+For an existing hub, open `https://YOUR-HUB/ui/`. Paste its operator secret into the sign-in form. The secret is stored in this browser's `localStorage` as `vecnet.ui.secret` and sent in the Authorization header, never in a URL. Use Sign out on a shared machine. A peer credential cannot open operator views. If the browser blocks site storage, sign-in still works for this page only: a notice says the secret was not saved, and you sign in again after closing the page.
 
 The TUI uses the CLI's selected profile. Create a private `~/.config/vecnet/config.toml` (or the file named by `VECNET_CONFIG`):
 
@@ -61,7 +61,7 @@ For an isolated example, `just ui-demo` starts a seeded hub on port 49575 using 
 | Woke you / WAKE | Messages delivered with `wake` | Open the linked thread to read and reply. |
 | Held / HOLD | Messages kept for your next look, including held `wake_idle` | Open the linked thread; a held message is not a delivery error. |
 
-The web inbox has an unread filter and Load older pagination. A web thread opens at your first unread message, under a New divider (at the bottom when nothing is unread), and marks each message read on its own once you have seen it: at least 60% of it on screen for about a second, or scrolled past going down, while the tab is visible and focused. Opening a thread does not mark the whole thread read. Read is distinct from transport acceptance and processing. Inbox items link to chat; they do not expand into a second inline conversation. The TUI event log includes deliveries, receipts, presence, directory changes and operator-view invalidations; it is not a separate message stream to answer.
+The web inbox has an unread filter and Load older pagination. A web thread opens at your first unread message, under a New divider (at the bottom when nothing is unread), and marks each message read on its own once you have seen it: at least 60% of it on screen for about a second, or scrolled past going down, while the tab is visible and focused. Opening a thread does not mark the whole thread read. Read is distinct from transport acceptance and processing. Inbox items link to chat; they do not expand into a second inline conversation. On a phone-width screen a decision's countdown and thread, and a failed delivery's Retry and Discard, sit under the card's text so the question and its answers use the full width. The TUI event log includes deliveries, receipts, presence, directory changes and operator-view invalidations; it is not a separate message stream to answer.
 
 ## Read and send in chat
 
@@ -69,9 +69,11 @@ Select a thread from the list or follow an inbox link. The web sidebar has Your 
 
 Use the web sidebar search above Your Threads, or press `/` outside a text field, to find peers by name and your threads by title. Peer names match case-insensitive substrings in the loaded directory; thread titles are searched by the hub after a short typing pause. A peer's **Threads** button narrows the title results to threads with that peer; Backspace in an empty search removes that participant. **More results** loads the next page, and **Retry** repeats a failed search. Title queries take at most 128 characters. Escape or the clear button restores the normal thread lists. Search covers names and titles, not message bodies.
 
+The web client works from the keyboard. **Skip to content** is the first Tab stop and moves past the sidebar. Opening a page from the sidebar puts focus in that page, so the next Tab lands in its content; New message still starts in its recipient search. Live updates redraw lists without taking focus from the control you are on: a sidebar thread, an inbox decision or Retry, a message's reply or approval answer, a recipient option, or the search scope's remove button. The current page and open thread are marked for screen readers, and priority pickers report the selected priority.
+
 Receipt markers show each recipient's queued, pushed, accepted, processed, read or failed state. Open the delivery matrix for the full message-by-recipient view and failure details. A read marker overlays accepted/pushed transport state; it is not proof that a bot processed the message.
 
-The web's New message picker searches names but sends stable ids. Choose recipients, a title if useful, text and a priority: `wake` interrupts now, `wake_idle` interrupts an idle or unknown peer, and `hold` waits for a pull. The advanced controls select `history_access` (`from_join` by default, or `full`) and locked participants. These govern later joins, not a new permission to read another thread. A reply cannot move to a different thread.
+The web's New message picker searches names but sends stable ids. Choose recipients, a title if useful, text and a priority: `wake` interrupts now, `wake_idle` interrupts an idle or unknown peer, and `hold` waits for a pull. The advanced controls select `history_access` (`from_join` by default, or `full`) and locked participants. These govern later joins, not a new permission to read another thread. A reply cannot move to a different thread. The reply box stays editable while a send is in flight; text typed then is kept as the next draft, not cleared when the send completes.
 
 The byte counter warns when text will spill to `message.md`; the text cap is 64 KiB. A failed send preserves your draft. Scope, rate, expiry and budget errors explain why the hub refused the send. Do not repeatedly retry a closed approval or a cut thread.
 

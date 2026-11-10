@@ -1,4 +1,5 @@
 # Changelog
+- 2026-11-10: web UI review fixes: a reply typed during a send is kept; peer Disable/Archive buttons refresh in place; blocked browser storage no longer blanks the page (memory-only sign-in with a notice); Skip to content link and focus handoff into the page on navigation; keyboard focus survives live redraws in the sidebar, inbox, thread, recipient picker and search scope chip; `aria-current` on the active nav link and thread, `aria-pressed` on priority pickers, forced-colors focus outlines on borderless fields; phone-width inbox cards stack their side column (`internal/ui/static/`, docs/OPERATOR.md).
 - 2026-11-10: Document operator route statistics across HTTP, MCP and CLI JSON, with bounded route-wide request samples, separate retained-delivery evidence, null/last-status semantics and fixed private errors (docs/PROTOCOL.md §§2.12–2.13,3,4.3–4.4,5.3,13.7).
 
 - 2026-11-10: Hub URL environment defaults stay out of flag help and parse diagnostics; explicit URL flags, including empty overrides, retain precedence (`cmd/vecnet-hub/main.go`).
