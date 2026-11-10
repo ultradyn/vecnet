@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { peerActions, peerFacts } from '../static/peer-model.js';
-import { messageActions } from '../static/peer.js';
+import { messageActions, peerActionsKey } from '../static/peer.js';
 
 // The peer header's message actions as the browser gets them: which element,
 // where it goes, and what a click hands the composer. A minimal document,
@@ -124,4 +124,19 @@ test('a modified click (new tab) leaves the link alone and hands over no draft',
 test('nothing is drawn for a peer the operator cannot message', () => {
   assert.deepEqual(render(peerActions(facts('source'), { threads: [] }, ME, null)).els, []);
   assert.deepEqual(render(null).els, []);
+});
+
+
+test('action cache includes lifecycle state even without message actions', () => {
+  const f = facts('session');
+  for (const a of [null, peerActions(f, shared, ME, null)]) {
+    const key = v => peerActionsKey(v, a, t => t.title);
+    const base = key(f);
+    assert.equal(key({ ...f, presence: 'working' }), base, 'presence keeps the buttons');
+    assert.notEqual(key({ ...f, disabled: true }), base, 'Disable replaces its closure and label');
+    assert.notEqual(key({ ...f, archivedAt: '2026-11-10T00:00:00Z' }), base, 'Archive replaces its buttons');
+    assert.notEqual(key({ ...f, kind: 'operator' }), base, 'operator has no lifecycle buttons');
+    assert.notEqual(key({ ...f, kind: 'source' }), base, 'source has no lifecycle buttons');
+    assert.notEqual(key(null), base, 'loading has no lifecycle buttons');
+  }
 });

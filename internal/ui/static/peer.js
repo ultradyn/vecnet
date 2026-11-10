@@ -85,6 +85,14 @@ export function messageActions(acts, o) {
   return [open, compose];
 }
 
+// Include lifecycle offers even when there are no message actions. Ages
+// refresh in place; only changes to the offered controls replace them.
+export function peerActionsKey(f, a, threadName) {
+  const q = a && a.open;
+  return JSON.stringify([!!(f && f.kind !== 'operator' && f.kind !== 'source'), !!(f && f.disabled), f && f.archivedAt,
+    a && [q.state, q.href || '', q.thread ? threadName(q.thread) : '', !!q.at, !!q.more, errText(q.error || ''), f && f.name, a.compose.draft]]);
+}
+
 // INVITE_CHIP labels the card's state chip.
 const INVITE_CHIP = { pending: 'pending', expired: 'expired', revoked: 'revoked', none: 'no invite', loading: 'checking' };
 
@@ -329,7 +337,7 @@ export function mount(root, ctx) {
   function renderActs(f) {
     const a = f && res.threads ? peerActions(f, res.threads.get(), ctx.me, res.threads.error()) : null;
     const q = a && a.open;
-    const key = JSON.stringify(a && [q.state, q.href || '', q.thread ? threadTitle(q.thread, ctx.me, nameOf) : '', !!q.at, !!q.more, errText(q.error || ''), f.name, a.compose.draft]);
+    const key = peerActionsKey(f, a, t => threadTitle(t, ctx.me, nameOf));
     if (key === actsKey) {
       const ago = acts.querySelector('.ago');
       if (ago && q.at) ago.textContent = age(q.at);
@@ -338,22 +346,22 @@ export function mount(root, ctx) {
     actsKey = key;
     // A new offer (another thread became the newest, say) replaces the
     // buttons; focus on one moves to its replacement.
-    const had = acts.contains(document.activeElement) ? (document.activeElement.classList.contains('pv-new') ? '.pv-new' : '.pv-open') : '';
+    const had = acts.contains(document.activeElement) && ['pv-new', 'pv-open', 'pv-toggle', 'pv-archive'].find(c => document.activeElement.classList.contains(c));
     const life = [];
     if (f && f.kind !== 'operator' && f.kind !== 'source') {
       const run = async action => {
         try { await api.peerLifecycle(id, action); toast('Peer ' + (action === 'enable' ? 'enabled' : action + 'd') + '.'); res.peers.reload(); }
         catch (e) { toast('Could not ' + action + ' peer: ' + errText(e), true); }
       };
-      if (f.archivedAt) life.push(h('button', {type: 'button', class: 'btn', text: 'Unarchive', onclick: () => run('unarchive')}));
+      if (f.archivedAt) life.push(h('button', {type: 'button', class: 'btn pv-archive', text: 'Unarchive', onclick: () => run('unarchive')}));
       else {
-        life.push(h('button', {type: 'button', class: 'btn', text: f.disabled ? 'Re-enable' : 'Disable', onclick: () => run(f.disabled ? 'enable' : 'disable')}));
+        life.push(h('button', {type: 'button', class: 'btn pv-toggle', text: f.disabled ? 'Re-enable' : 'Disable', onclick: () => run(f.disabled ? 'enable' : 'disable')}));
         const archive = confirmButton('Archive', 'Confirm archive', () => run('archive'));
-        archive.classList.add('bad'); life.push(archive);
+        archive.classList.add('bad', 'pv-archive'); life.push(archive);
       }
     }
     acts.replaceChildren(...messageActions(a, { name: (f && f.name) || id, threadName: t => threadTitle(t, ctx.me, nameOf), age, prefill, nav: ctx.nav }), ...life);
-    const next = had && acts.querySelector(had);
+    const next = had && acts.querySelector('.' + had);
     if (next && !next.disabled) next.focus({ preventScroll: true });
   }
 
