@@ -26,6 +26,7 @@ import (
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/eventlog"
 	"github.com/XertroV/vecnet/internal/hub"
+	"github.com/XertroV/vecnet/internal/inboxview"
 )
 
 // mcpIngress is Delivery.ingress of a tool send [SCH].
@@ -342,9 +343,10 @@ type inboxResult struct {
 // GET /v1/events does: the stream's acked cursor, else the oldest event.
 func callInbox(ctx context.Context, s *Server, c auth.Caller, raw []byte) (any, error) {
 	var a struct {
-		After string    `json:"after"`
-		Limit pageLimit `json:"limit"`
-		Peer  string    `json:"peer"`
+		After              string    `json:"after"`
+		Limit              pageLimit `json:"limit"`
+		Peer               string    `json:"peer"`
+		IncludeSenderChain bool      `json:"include_sender_chain"`
 	}
 	if err := decodeArgs(raw, &a); err != nil {
 		return nil, err
@@ -373,6 +375,9 @@ func callInbox(ctx context.Context, s *Server, c auth.Caller, raw []byte) (any, 
 	}
 	res := inboxResult{NextCursor: cur.String()}
 	if res.Events, err = withoutBlobURLs(evs); err != nil {
+		return nil, err
+	}
+	if res.Events, err = inboxview.Project(res.Events, a.IncludeSenderChain); err != nil {
 		return nil, err
 	}
 	if n := len(evs); n > 0 {
@@ -960,8 +965,9 @@ func toolSpecs(defs schema) []toolSpec {
 		input: object(schema{
 			"after": schema{"type": "string", "pattern": `^(e[0-9]+\.[0-9]+|head)$`,
 				"description": "Read after this cursor; \"head\" means from now. Omitted: after the last acked cursor."},
-			"limit": pageLimitSchema(),
-			"peer":  peer,
+			"limit":                pageLimitSchema(),
+			"peer":                 peer,
+			"include_sender_chain": schema{"type": "boolean", "default": false, "description": "Include message loop ancestry (omitted by default)."},
 		}),
 		annotations: readAnnotations(), call: callInbox,
 	}, {

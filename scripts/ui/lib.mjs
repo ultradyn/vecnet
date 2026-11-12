@@ -242,22 +242,48 @@ export function longLived(url) {
 // (the response's render, and any request that render starts). A shot taken
 // after it shows every snapshot the view had asked for.
 export function networkQuiet(page) {
-  const open = new Set(), ignored = [];
-  const track = req => { if (!longLived(req.url())) open.add(req); };
-  const done = req => open.delete(req);
+  const open = new Set(), ambiguous = new WeakSet(), ignored = [];
+  let navigation = null, observing = 1;
+  const documentTime = frame => frame.evaluate(() => performance.timeOrigin).catch(() => null);
+  let document = documentTime(page.mainFrame());
+  document.then(() => { observing--; });
+  const track = req => {
+    if (!longLived(req.url())) open.add(req);
+    if (!req.isNavigationRequest()) return;
+    try { if (req.frame() === page.mainFrame()) navigation = req; }
+    catch { ambiguous.add(req); } // Early navigation may not have a Frame yet.
+  };
+  const done = req => { open.delete(req); ambiguous.delete(req); if (navigation === req) navigation = null; };
   page.on('request', track);
   page.on('requestfinished', done);
   page.on('requestfailed', done);
+  page.on('framenavigated', frame => {
+    if (frame !== page.mainFrame()) return;
+    // Capture at commit, before evaluating: later requests belong to the new
+    // document. Keep its navigation response until the normal terminal event.
+    // Unknown navigation ownership must remain busy until its own terminal.
+    const candidates = [...open].filter(req => req !== navigation && !ambiguous.has(req));
+    const before = document, after = documentTime(frame);
+    document = after;
+    observing++;
+    Promise.all([before, after]).then(([previous, current]) => {
+      // Hash changes keep timeOrigin. Unknown or backwards observations retain
+      // requests rather than reporting quiet without proof of replacement.
+      if (Number.isFinite(previous) && Number.isFinite(current) && current > previous) {
+        for (const req of candidates) open.delete(req);
+      }
+    }).finally(() => { observing--; });
+  });
   const busy = () => [...open].filter(req => !ignored.some(match => match(req)));
   const frames = () => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   async function quiet({ idleMs = 150, timeout = 60000 } = {}) {
     const deadline = Date.now() + timeout;
     for (let still = 0; ;) {
       if (Date.now() > deadline) throw new Error(`network never went quiet: ${busy().map(req => req.method() + ' ' + new URL(req.url()).pathname).join(', ')}`);
-      if (busy().length) { still = 0; await new Promise(resolve => setTimeout(resolve, 25)); continue; }
+      if (observing || busy().length) { still = 0; await new Promise(resolve => setTimeout(resolve, 25)); continue; }
       if (still >= idleMs) {
         await frames();
-        if (!busy().length) return;
+        if (!observing && !busy().length) return;
         still = 0;
         continue;
       }

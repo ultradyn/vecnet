@@ -15,6 +15,7 @@ import (
 
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/eventlog"
+	"github.com/XertroV/vecnet/internal/inboxview"
 )
 
 const (
@@ -216,6 +217,9 @@ func (s *Server) resourcesRead(ctx context.Context, sess *Session, req *Request)
 		return nil, err
 	}
 	if evs, err = withoutBlobURLs(evs); err != nil {
+		return nil, err
+	}
+	if evs, err = inboxview.Project(evs, false); err != nil {
 		return nil, err
 	}
 	text, err := json.Marshal(map[string]any{"events": evs, "next_cursor": next})
