@@ -202,7 +202,10 @@ func appHookIDs(t *testing.T, got appHookOutput, want ...string) {
 func (f *appHookFixture) release(t *testing.T, nonce string, n int) {
 	t.Helper()
 	out, _ := runHook(t, f.env, "--release", "--claim", nonce, "--thread", bindT1, "--codex-home", f.env["CODEX_HOME"], "--expect-generation", appHookGeneration, "--expect-hub", f.hub, "--expect-caller", "peer_test")
-	if out != fmt.Sprintf("{\"released\":%d}\n", n) {
+	var result struct {
+		Released int `json:"released"`
+	}
+	if json.Unmarshal([]byte(out), &result) != nil || result.Released != n {
 		t.Fatalf("release %q: %q, want %d", nonce, out, n)
 	}
 }

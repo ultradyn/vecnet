@@ -1475,3 +1475,19 @@ test('every retry persists a distinct guard attempt and settles only its own att
   assert.ok(settles.length > 0);
   assert.ok(settles.every(r => r.argv[r.argv.indexOf('--attempt') + 1] === attempts[1]));
 });
+
+// The release can commit in Go before the engine commits its KV cleanup.
+test('restart clears recovery after the claim release already committed', async t => {
+  const h = await harness(t, { status: active });
+  h.fake.failNext('turn/steer', { code: -32602, message: 'invalid input' });
+  h.plan.releaseFailure = true; h.save(); await h.wake();
+  const rejected = h.rows()[0];
+  assert.ok(rejected); assert.ok(h.kv.get('releasing:' + rejected.claim));
+  await h.engine.stop();
+  // Simulate the CLI's durable release succeeding just before the crash.
+  writeFileSync(h.plan.claims, '{}');
+  h.plan.releaseFailure = false; h.save();
+  await h.restart();
+  assert.equal(h.kv.get('inflight:' + rejected.key), undefined);
+  assert.equal(h.kv.get('releasing:' + rejected.claim), undefined);
+});

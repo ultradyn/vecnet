@@ -94,7 +94,7 @@ if (argv.includes('codex') && argv.includes('verify')) {
     const released = !accepted()[nonce] && !existsSync(marker) ? (claims[nonce]?.length ?? 0) : 0;
     if (released) delete claims[nonce];
     writeFileSync(plan.claims, JSON.stringify(claims));
-    console.log(JSON.stringify({ version: 1, released }));
+    console.log(JSON.stringify({ version: 1, released, remaining: claims[nonce]?.length ?? 0 }));
   } else if (flag('--event') === 'user-prompt') {
     const claimed = new Set(Object.values(claims).flat());
     console.log(JSON.stringify({ deliveries: (plan.items ?? []).filter((i: { id: string }) => !claimed.has(i.id)).map((i: { id: string }) => i.id) }));

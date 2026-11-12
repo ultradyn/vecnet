@@ -178,7 +178,10 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     // the delivery lane, after new claims and turn RPCs have been disabled.
     if (attempt) await runHook(['settle', '--outcome', 'rejected', ...ownerArgs(owner), '--claim', claim, '--attempt', attempt], true, 'codex');
     const result = obj(await runHook(['--release', '--claim', claim, ...ownerArgs(owner)], true));
-    if (result.refused || !Number.isInteger(result.released) || result.released < expected) throw new Error('claim_release_refused');
+    // Explicit absence also covers a crash after Go committed the release but
+    // before the KV cleanup. Older CLIs must confirm a positive release count.
+    const complete = result.remaining === undefined ? result.released >= expected : result.remaining === 0;
+    if (result.refused || !Number.isInteger(result.released) || result.released < 0 || !complete) throw new Error('claim_release_refused');
   }
   function scheduleClaimRecovery() {
     if (!running || claimRecovery) return;

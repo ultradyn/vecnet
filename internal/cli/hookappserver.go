@@ -177,13 +177,16 @@ func (a *app) hookAppServer(o opts, afterPoll func(), publish func([]byte) error
 			refuse()
 			return hookResult{}
 		}
-		n := 0
+		n, remaining := 0, 0
 		err = codexUpdateState(a.ctx, path, false, func(s *hookState) error {
 			if s.Hub != "" && (s.Hub != id.Hub || s.Caller != id.Caller || s.As != id.As) {
 				return usageErr("delivery state identity changed")
 			}
 			claims := make([]claimRef, 0, len(s.Claims))
 			for _, r := range s.Claims {
+				if r.Claim == nonce && r.Generation == owner.Generation && r.Accepted {
+					remaining++
+				}
 				if r.Claim != nonce || r.Generation != owner.Generation || r.Accepted {
 					claims = append(claims, r)
 					continue
@@ -198,8 +201,9 @@ func (a *app) hookAppServer(o opts, afterPoll func(), publish func([]byte) error
 		})
 		if err == nil {
 			_ = publish(appServerJSON(struct {
-				Released int `json:"released"`
-			}{n}))
+				Released  int `json:"released"`
+				Remaining int `json:"remaining"`
+			}{n, remaining}))
 		}
 		return hookResult{}
 	}
