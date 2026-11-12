@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 
@@ -119,6 +120,9 @@ func (s *server) getPeersMe(w http.ResponseWriter, r *http.Request) {
 	if peer := r.URL.Query().Get("peer"); peer != "" {
 		owners, _, _, err := s.Hub.StreamOwners(r.Context(), c, peer)
 		if err != nil {
+			if errors.Is(err, hub.ErrPeerDisabled) {
+				err = hub.E(http.StatusServiceUnavailable, "peer_disabled", "recipient is disabled")
+			}
 			writeError(w, err)
 			return
 		}
