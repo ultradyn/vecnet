@@ -1,9 +1,10 @@
 package httpapi_test
 
 import (
-	"github.com/XertroV/vecnet/internal/testhub"
 	"strings"
 	"testing"
+
+	"github.com/XertroV/vecnet/internal/testhub"
 )
 
 func TestDisabledRecipientIdentityUnavailable(t *testing.T) {
