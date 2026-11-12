@@ -20,6 +20,8 @@ import (
 
 // Each invocation goes through the CLI dispatcher and a fake HTTP hub. Every
 // environment path, including unused connector paths, belongs to this test.
+const appHookGeneration = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
 type appHookFixture struct {
 	env       map[string]string
 	path, hub string
@@ -100,7 +102,10 @@ func newAppHookFixture(t *testing.T) *appHookFixture {
 		hookPage(w, f.events[start:], next)
 	})
 	f.env["CODEX_HOME"] = filepath.Join(filepath.Dir(f.path), "codex")
-	f.env["VECNET_CODEX_BINDINGS"] = filepath.Join(filepath.Dir(f.path), "bindings.json")
+	f.env["VECNET_CODEX_BINDINGS"] = filepath.Join(f.env["HOME"], ".local", "state", "vecnet", "codex", "bindings.json")
+	if err := os.MkdirAll(filepath.Dir(f.env["VECNET_CODEX_BINDINGS"]), 0700); err != nil {
+		t.Fatal(err)
+	}
 	raw, err := os.ReadFile(f.env["VECNET_CONFIG"])
 	if err != nil {
 		t.Fatal(err)
@@ -113,6 +118,25 @@ func newAppHookFixture(t *testing.T) *appHookFixture {
 			}
 			break
 		}
+	}
+	if err := os.MkdirAll(f.env["CODEX_HOME"], 0700); err != nil {
+		t.Fatal(err)
+	}
+	home, err := canonicalCodexPath(f.env["CODEX_HOME"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	config, err := canonicalCodexPath(f.env["VECNET_CONFIG"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := codexBinding{Profile: "p", Hub: normalizeHub(f.hub), Caller: "peer_test", ConfigPath: config, CodexHome: home, ThreadID: bindT1, Generation: appHookGeneration, CreatedAt: time.Now(), ExpiresAt: time.Now().Add(24 * time.Hour)}
+	authority, err := json.Marshal(codexBindingsFile{Version: 1, Bindings: []codexBinding{binding}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f.env["VECNET_CODEX_BINDINGS"], authority, 0600); err != nil {
+		t.Fatal(err)
 	}
 	seedHook(t, f.path, "e1.0")
 	f.seed(t, `{"poll_cursor":"e1.0","app_cursor":"e1.0","shown":[]}`)
@@ -157,7 +181,7 @@ func (f *appHookFixture) add(t *testing.T, priority, text, name string) {
 }
 func (f *appHookFixture) run(t *testing.T, nonce, priorities string, extra ...string) (appHookOutput, string, string) {
 	t.Helper()
-	args := []string{"--event", "app-server", "--claim", nonce, "--priorities", priorities, "--expect-hub", f.hub, "--expect-caller", "peer_test"}
+	args := []string{"--event", "app-server", "--claim", nonce, "--priorities", priorities, "--expect-hub", f.hub, "--expect-caller", "peer_test", "--thread", bindT1, "--codex-home", f.env["CODEX_HOME"], "--expect-generation", appHookGeneration}
 	args = append(args, extra...)
 	out, errs := runHook(t, f.env, args...)
 	var got appHookOutput
@@ -177,7 +201,7 @@ func appHookIDs(t *testing.T, got appHookOutput, want ...string) {
 }
 func (f *appHookFixture) release(t *testing.T, nonce string, n int) {
 	t.Helper()
-	out, _ := runHook(t, f.env, "--release", "--claim", nonce)
+	out, _ := runHook(t, f.env, "--release", "--claim", nonce, "--thread", bindT1, "--codex-home", f.env["CODEX_HOME"], "--expect-generation", appHookGeneration, "--expect-hub", f.hub, "--expect-caller", "peer_test")
 	if out != fmt.Sprintf("{\"released\":%d}\n", n) {
 		t.Fatalf("release %q: %q, want %d", nonce, out, n)
 	}
@@ -301,10 +325,11 @@ func TestHookAppServerLeavesHookCursor(t *testing.T) {
 		t.Fatal("hook cursor moved")
 	}
 	out, _ := runHook(t, f.env, "--event", "user-prompt")
-	ctx := contextOf(t, out)
-	if strings.Contains(ctx, "claimed wake") || !strings.Contains(ctx, "held message") || !strings.Contains(ctx, "deferred idle") {
-		t.Fatalf("hook context %q", ctx)
+	if out != "" || f.state(t).PollCursor != before {
+		t.Fatalf("legacy hook touched Codex-owned delivery: %q", out)
 	}
+	got, _, _ := f.run(t, "c2", "wake,wake_idle")
+	appHookIDs(t, got, "dly_3")
 }
 func TestHookAppServerReleaseReplaysAcrossRuns(t *testing.T) {
 	f := newAppHookFixture(t)
@@ -365,6 +390,7 @@ func TestHookAppServerEntryCap(t *testing.T) {
 		t.Fatal(e)
 	}
 	f.env["VECNET_PROFILE"] = profile
+	f.updateOwner(t, func(b *codexBinding) { b.Profile = profile })
 	f.path, e = statePath(func(k string) string { return f.env[k] }, profile, "")
 	if e != nil {
 		t.Fatal(e)
@@ -393,6 +419,7 @@ func TestHookAppServerPointerWhenTooBig(t *testing.T) {
 		t.Fatal(e)
 	}
 	f.env["VECNET_CONFIG"] = config
+	f.updateOwner(t, func(b *codexBinding) { b.ConfigPath = config })
 	f.mu.Lock()
 	ev := &f.events[0]
 	var data map[string]any
@@ -468,10 +495,11 @@ func TestHookAppServerSharesShownWithHook(t *testing.T) {
 	}
 	f.add(t, "wake", "second", "")
 	out, _ = runHook(t, f.env, "--event", "user-prompt")
-	ctx := contextOf(t, out)
-	if !strings.Contains(ctx, "second") || strings.Contains(ctx, "first") {
-		t.Fatalf("hook context %q", ctx)
+	if out != "" {
+		t.Fatalf("legacy hook bypassed Codex ownership: %q", out)
 	}
+	got, _, _ := f.run(t, "c2", "wake")
+	appHookIDs(t, got, "dly_2")
 }
 func TestHookAppServerRefusesChangedIdentity(t *testing.T) {
 	for _, tc := range []struct{ name, hub, caller string }{{"caller", "same", "peer_other"}, {"hub", "https://other.invalid", "peer_test"}, {"missing hub", "", "peer_test"}, {"missing caller", "same", ""}} {
@@ -516,7 +544,7 @@ func TestHookAppServerNeverFails(t *testing.T) {
 				defer func() { hookAfterPoll = prev }()
 			}
 			start := time.Now()
-			out, _ := runHook(t, f.env, "--event", "app-server", "--claim", "c1", "--priorities", "wake", "--expect-hub", f.hub, "--expect-caller", "peer_test")
+			out, _ := runHook(t, f.env, "--event", "app-server", "--claim", "c1", "--priorities", "wake", "--expect-hub", f.hub, "--expect-caller", "peer_test", "--thread", bindT1, "--codex-home", f.env["CODEX_HOME"], "--expect-generation", appHookGeneration)
 			if out != "" && !json.Valid([]byte(out)) {
 				t.Fatalf("invalid output %q", out)
 			}
@@ -578,7 +606,7 @@ func TestHookAppServerPipeCap(t *testing.T) {
 	defer reader.Close()
 	defer writer.Close()
 	var errs bytes.Buffer
-	code := RunContext(context.Background(), []string{"hook", "--event", "app-server", "--claim", "c1", "--priorities", "wake", "--expect-hub", f.hub, "--expect-caller", "peer_test"}, strings.NewReader(""), writer, &errs, func(k string) string { return f.env[k] })
+	code := RunContext(context.Background(), []string{"hook", "--event", "app-server", "--claim", "c1", "--priorities", "wake", "--expect-hub", f.hub, "--expect-caller", "peer_test", "--thread", bindT1, "--codex-home", f.env["CODEX_HOME"], "--expect-generation", appHookGeneration}, strings.NewReader(""), writer, &errs, func(k string) string { return f.env[k] })
 	_ = writer.Close()
 	var raw bytes.Buffer
 	if _, e := raw.ReadFrom(reader); e != nil {
@@ -596,7 +624,7 @@ func TestHookAppServerFailedPublishCanRelease(t *testing.T) {
 	f := newAppHookFixture(t)
 	f.add(t, "wake", "one", "")
 	var errs bytes.Buffer
-	code := RunContext(context.Background(), []string{"hook", "--event", "app-server", "--claim", "c1", "--priorities", "wake", "--expect-hub", f.hub, "--expect-caller", "peer_test"}, strings.NewReader(""), hookErrWriter{}, &errs, func(k string) string { return f.env[k] })
+	code := RunContext(context.Background(), []string{"hook", "--event", "app-server", "--claim", "c1", "--priorities", "wake", "--expect-hub", f.hub, "--expect-caller", "peer_test", "--thread", bindT1, "--codex-home", f.env["CODEX_HOME"], "--expect-generation", appHookGeneration}, strings.NewReader(""), hookErrWriter{}, &errs, func(k string) string { return f.env[k] })
 	if code != 0 || !slices.Equal(f.state(t).Shown, []string{"dly_1"}) || len(f.state(t).Claims) != 1 {
 		t.Fatalf("claim not durable before publish: code=%d state=%+v", code, f.state(t))
 	}
@@ -604,16 +632,16 @@ func TestHookAppServerFailedPublishCanRelease(t *testing.T) {
 	got, _, _ := f.run(t, "c2", "wake")
 	appHookIDs(t, got, "dly_1")
 }
-func TestHookAppServerHookDropsShownReplay(t *testing.T) {
+func TestHookAppServerHookPreservesDeferredReplay(t *testing.T) {
 	f := newAppHookFixture(t)
 	f.add(t, "wake_idle", "one", "")
 	f.run(t, "c1", "wake")
 	out, _ := runHook(t, f.env, "--event", "user-prompt")
-	if !strings.Contains(contextOf(t, out), "one") {
-		t.Fatal("hook missed deferred delivery")
+	if out != "" {
+		t.Fatal("legacy hook consumed deferred Codex delivery")
 	}
 	got, _, _ := f.run(t, "c2", "wake,wake_idle")
-	appHookIDs(t, got)
+	appHookIDs(t, got, "dly_1")
 	if len(f.state(t).Replay) != 0 {
 		t.Fatal("shown replay not removed")
 	}
@@ -655,14 +683,30 @@ func TestHookAppServerBoundedLists(t *testing.T) {
 func TestHookAppServerCorruptStateRechecksIdentity(t *testing.T) {
 	f := newAppHookFixture(t)
 	f.add(t, "wake", "backlog", "")
-	// A type error can leave partially decoded identity fields. The existing
-	// hook state reader treats the entire record as empty on any decode error.
-	f.seed(t, fmt.Sprintf(`{"hub":%q,"caller":"peer_stale","cred":%q,"app_cursor":"e1.0","poll_cursor":"e1.0","shown":42}`, f.hub, hookCredential("vn_peer_test")))
+	f.seed(t, fmt.Sprintf(`{"hub":%q,"caller":"peer_stale","shown":42}`, f.hub))
+	before := f.bytes(t)
 	got, _, _ := f.run(t, "c1", "wake")
-	if got.Refused != "" || len(got.Entries) != 1 || got.Entries[0].Key != "vecnet_summary" {
-		t.Fatalf("corrupt state reused a partial identity: %+v", got)
+	if got.Refused == "" || !bytes.Equal(before, f.bytes(t)) {
+		t.Fatal("corrupt state must remain unchanged")
 	}
-	if s := f.state(t); s.AppCursor != "e1.1" || len(s.Shown) != 0 || len(s.Claims) != 0 {
-		t.Fatalf("corrupt state recovery %+v", s)
+}
+
+func (f *appHookFixture) updateOwner(t *testing.T, change func(*codexBinding)) {
+	t.Helper()
+	raw, err := os.ReadFile(f.env["VECNET_CODEX_BINDINGS"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var file codexBindingsFile
+	if err := json.Unmarshal(raw, &file); err != nil {
+		t.Fatal(err)
+	}
+	change(&file.Bindings[0])
+	raw, err = json.Marshal(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f.env["VECNET_CODEX_BINDINGS"], raw, 0600); err != nil {
+		t.Fatal(err)
 	}
 }

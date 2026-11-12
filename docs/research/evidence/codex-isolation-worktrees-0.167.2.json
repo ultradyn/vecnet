@@ -1,0 +1,70 @@
+{
+  "checks": [
+    {
+      "check": "two roots in one checkout and an unregistered neighboring worktree"
+    },
+    {
+      "check": "generic setup and recipient alias exclusion"
+    },
+    {
+      "check": "authenticated readiness and single connector"
+    },
+    {
+      "check": "parent-id-only and neighboring lifecycle hooks emit no context"
+    },
+    {
+      "check": "idle automatic wake with isolated model-context canaries",
+      "a": {
+        "thread": "01a1cd60-ecff-7f23-9e5f-9d43b48a7c67",
+        "turn": "01a1cd61-419b-7773-8cf7-d1e3f563751f",
+        "delivery": "dly_01M76P2FVC2SJ81467982XQ3ZX"
+      },
+      "b": {
+        "thread": "01a1cd60-fb23-74f0-a56b-df087679b2a6",
+        "turn": "01a1cd61-41cd-7213-ba75-5315e40dd052",
+        "delivery": "dly_01M76P2FVHN4DZK9DEDK11HMZP"
+      }
+    },
+    {
+      "check": "hold never wakes and acknowledgement remains explicit"
+    },
+    {
+      "check": "busy urgent steering and deferred wake_idle",
+      "busyTurn": "01a1cd61-6602-7472-933d-e7ab6f012eda",
+      "urgentDelivery": "dly_01M76P30HPTVN527ZD5SZ0DHS4",
+      "idleTurn": "01a1cd61-cb5b-7b20-9aa4-e7f2e471b42b",
+      "idleDelivery": "dly_01M76P2YJXCZNSP5YMMHQ4PTJB"
+    },
+    {
+      "check": "connector restart preserves accepted delivery deduplication"
+    },
+    {
+      "check": "addressed handoff reaches only new owner; stale generation refused",
+      "thread": "01a1cd61-0956-7160-b83f-f788b15e9682",
+      "turn": "01a1cd62-54d8-7c22-b646-ba49720ef85f",
+      "delivery": "dly_01M76P4MMT2CQDHSVGR6S8QN5Q"
+    }
+  ],
+  "threads": [
+    {
+      "label": "A",
+      "id": "01a1cd60-ecff-7f23-9e5f-9d43b48a7c67",
+      "source": "vscode",
+      "parentThreadId": null
+    },
+    {
+      "label": "B",
+      "id": "01a1cd60-fb23-74f0-a56b-df087679b2a6",
+      "source": "vscode",
+      "parentThreadId": null
+    },
+    {
+      "label": "neighbor",
+      "id": "01a1cd61-0956-7160-b83f-f788b15e9682",
+      "source": "vscode",
+      "parentThreadId": null
+    }
+  ],
+  "runtime": "0.167.2",
+  "complete": true
+}

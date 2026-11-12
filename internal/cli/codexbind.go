@@ -2,6 +2,8 @@ package cli
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,14 +21,24 @@ func unsafeCodexBindings(path, why string) error {
 
 // codexBindingsPath is shared with the launcher connector's default path.
 func codexBindingsPath(getenv func(string) string) (string, error) {
-	config, err := configPath(getenv)
+	home := getenv("HOME")
+	if home == "" || !filepath.IsAbs(home) {
+		return "", usageErr("Codex ownership requires an absolute HOME")
+	}
+	home, err := canonicalCodexPath(home)
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(filepath.Dir(config), "codex", "bindings.json"), nil
+	path := filepath.Join(home, ".local", "state", "vecnet", "codex", "bindings.json")
+	if override := getenv("VECNET_CODEX_BINDINGS"); override != "" && filepath.Clean(override) != path {
+		return "", usageErr("VECNET_CODEX_BINDINGS cannot select a separate ownership authority; use a private HOME for fixtures")
+	}
+	return path, nil
 }
 
 type codexBinding struct {
+	ConfigPath       string    `json:"config_path"`
+	Generation       string    `json:"generation"`
 	Profile          string    `json:"profile"`
 	As               string    `json:"as"`
 	Hub              string    `json:"hub"`
@@ -65,8 +77,9 @@ func (a *app) codexBindCaller(c *client) (string, error) {
 		Kind        string `json:"kind"`
 		PeerID      string `json:"peer_id"`
 		PrincipalID string `json:"principal_id"`
+		RecipientID string `json:"recipient_id"`
 	}
-	if err := c.do(ctx, http.MethodGet, "/v1/peers/me", nil, nil, &me); err != nil {
+	if err := c.do(ctx, http.MethodGet, "/v1/peers/me", a.peerQuery(), nil, &me); err != nil {
 		var he *hubError
 		if errors.As(err, &he) {
 			return "", err
@@ -76,8 +89,17 @@ func (a *app) codexBindCaller(c *client) (string, error) {
 	var caller string
 	switch me.Kind {
 	case "peer":
+		if a.as != "" && a.as != me.PeerID {
+			return "", usageErr("--as must name the authenticated peer")
+		}
 		caller = me.PeerID
 	case "principal":
+		if a.as == "" {
+			return "", usageErr("Codex principal bindings require --as with one peer")
+		}
+		if me.RecipientID != a.as {
+			return "", usageErr("hub cannot verify the scoped Codex recipient")
+		}
 		caller = me.PrincipalID
 	}
 	if !hookID.MatchString(caller) {
@@ -90,18 +112,30 @@ func (a *app) codexBindCaller(c *client) (string, error) {
 // deterministic without changing the clock used by other CLI commands.
 func (a *app) cmdCodex(args []string, nowTime func() time.Time) error {
 	if len(args) == 0 {
-		return usageErr("codex: expected bind, unbind or bindings")
+		return usageErr("codex: expected setup, status, bind, unbind or bindings")
+	}
+	if args[0] == "setup" {
+		return a.cmdCodexSetup(args[1:], nowTime)
+	}
+	if args[0] == "status" {
+		return a.cmdCodexStatus(args[1:], nowTime)
+	}
+	if args[0] == "verify" {
+		return a.cmdCodexVerify(args[1:], nowTime)
+	}
+	if args[0] == "guard" || args[0] == "settle" {
+		return a.cmdCodexGuard(args[1:], nowTime, args[0] == "settle")
 	}
 	var spec map[string]flagKind
 	switch args[0] {
 	case "bind":
-		spec = map[string]flagKind{"thread": strFlag, "codex-home": strFlag, "ttl": strFlag, "idle-dormant": strFlag, "attended": boolFlag, "renew": boolFlag}
+		spec = map[string]flagKind{"thread": strFlag, "codex-home": strFlag, "ttl": strFlag, "idle-dormant": strFlag, "attended": boolFlag, "renew": boolFlag, "expect-generation": strFlag}
 	case "unbind":
-		spec = map[string]flagKind{"thread": strFlag}
+		spec = map[string]flagKind{"thread": strFlag, "codex-home": strFlag}
 	case "bindings":
 		spec = map[string]flagKind{}
 	default:
-		return usageErr("codex: expected bind, unbind or bindings")
+		return usageErr("codex: expected setup, status, bind, unbind or bindings")
 	}
 	o, err := parseFlags("codex "+args[0], args[1:], spec)
 	if err != nil {
@@ -111,8 +145,19 @@ func (a *app) cmdCodex(args []string, nowTime func() time.Time) error {
 		return usageErr("codex " + args[0] + ": unexpected arguments")
 	}
 	thread := o.str("thread")
+	if args[0] == "bind" && !o.has("thread") {
+		thread = a.getenv("CODEX_THREAD_ID")
+	}
 	if (args[0] == "bind" || o.has("thread")) && !codexThreadID.MatchString(thread) {
 		return usageErr("--thread must be a lowercase UUID")
+	}
+	configFile, err := configPath(a.getenv)
+	if err != nil {
+		return err
+	}
+	namespace, err := canonicalCodexPath(configFile)
+	if err != nil {
+		return err
 	}
 	now := nowTime().UTC()
 	var binding codexBinding
@@ -179,7 +224,19 @@ func (a *app) cmdCodex(args []string, nowTime func() time.Time) error {
 		if err != nil {
 			return err
 		}
-		binding = codexBinding{Profile: name, As: a.as, Hub: normalizeHub(p.Hub), Caller: caller, CodexHome: home, ThreadID: thread, CreatedAt: now, ExpiresAt: now.Add(ttl), IdleDormantHours: idle.Hours(), Attended: o.has("attended")}
+		config, err = filepath.EvalSymlinks(config)
+		if err != nil {
+			return fmt.Errorf("config namespace: %w", err)
+		}
+		config, err = filepath.Abs(config)
+		if err != nil {
+			return err
+		}
+		var generation [16]byte
+		if _, err := rand.Read(generation[:]); err != nil {
+			return err
+		}
+		binding = codexBinding{ConfigPath: config, Generation: hex.EncodeToString(generation[:]), Profile: name, As: a.as, Hub: normalizeHub(p.Hub), Caller: caller, CodexHome: home, ThreadID: thread, CreatedAt: now, ExpiresAt: now.Add(ttl), IdleDormantHours: idle.Hours(), Attended: o.has("attended")}
 	}
 	if args[0] == "unbind" && thread == "" && a.namedProfile() == "" {
 		return usageErr("codex unbind: pass --net <profile> or --thread <uuid>")
@@ -244,9 +301,24 @@ func (a *app) cmdCodex(args []string, nowTime func() time.Time) error {
 	case "unbind":
 		kept := make([]codexBinding, 0, len(file.Bindings))
 		for _, b := range file.Bindings {
-			remove := b.Profile == a.namedProfile() && b.As == a.as
+			remove := b.ConfigPath == namespace && b.Profile == a.namedProfile() && b.As == a.as
 			if thread != "" {
-				remove = b.ThreadID == thread
+				remove = b.ConfigPath == namespace && b.ThreadID == thread
+				if o.has("codex-home") {
+					home, e := canonicalCodexPath(o.str("codex-home"))
+					if e != nil {
+						return e
+					}
+					remove = remove && home == b.CodexHome
+				}
+			}
+			if remove && codexHasPending(path, b) {
+				return usageErr("unresolved Codex send blocks unbind; recover its receipt first")
+			}
+			if remove {
+				if err := a.codexTransferClaims(b); err != nil {
+					return err
+				}
 			}
 			if !remove {
 				kept = append(kept, b)
@@ -256,20 +328,69 @@ func (a *app) cmdCodex(args []string, nowTime func() time.Time) error {
 	case "bind":
 		existing := -1
 		for i, b := range file.Bindings {
-			sameProfile := b.Profile == binding.Profile && b.As == binding.As
-			if sameProfile && b.ThreadID == thread {
+			sameProfile := b.ConfigPath == binding.ConfigPath && b.Profile == binding.Profile && b.As == binding.As
+			if b.ConfigPath == "" && b.Profile == binding.Profile && b.As == binding.As {
+				return usageErr("legacy binding has no config namespace; migrate it explicitly")
+			}
+			if b.ConfigPath != binding.ConfigPath && filepath.Dir(b.ConfigPath) == filepath.Dir(binding.ConfigPath) && b.Profile == binding.Profile && b.As == binding.As {
+				return usageErr("config files share delivery state; use distinct config directories")
+			}
+			sameRecipient := normalizeHub(b.Hub) == binding.Hub && codexRecipient(b) == codexRecipient(binding)
+			if sameProfile {
+				if b.ConfigPath != "" && b.ConfigPath != binding.ConfigPath {
+					return usageErr("config namespace differs from binding")
+				}
+				if o.has("expect-generation") {
+					if codexHasPending(path, b) {
+						return usageErr("unresolved Codex send blocks handoff; recover its receipt first")
+					}
+					if o.has("renew") {
+						return usageErr("handoff and renewal cannot be combined")
+					}
+					if b.Generation == "" || b.Generation != o.str("expect-generation") {
+						return usageErr("binding generation changed; inspect codex bindings before handoff")
+					}
+					if !sameRecipient {
+						return usageErr("identity changed since bind; unbind and bind again")
+					}
+					existing = i
+					continue
+				}
+				if b.ThreadID != thread {
+					return usageErr("already bound: " + binding.Profile + " to Codex thread " + b.ThreadID)
+				}
+				if b.CodexHome != binding.CodexHome {
+					return usageErr("Codex home differs from binding; use an addressed handoff")
+				}
+				if !sameRecipient {
+					return usageErr("identity changed since bind; unbind and bind again")
+				}
 				existing = i
 				continue
 			}
-			if sameProfile {
-				return usageErr("already bound: " + binding.Profile + " to Codex thread " + b.ThreadID)
+			if sameRecipient {
+				return usageErr("recipient already bound through profile " + b.Profile)
 			}
-			if b.ThreadID == thread {
+			if b.ThreadID == thread && b.CodexHome == binding.CodexHome {
 				return usageErr("already bound: Codex thread " + thread + " to " + b.Profile)
 			}
 		}
+		if o.has("expect-generation") && existing < 0 {
+			return usageErr("binding generation does not exist")
+		}
 		if existing >= 0 {
 			b := file.Bindings[existing]
+			if b.Generation == "" && b.ConfigPath == "" {
+				b.Generation, b.ConfigPath = binding.Generation, binding.ConfigPath
+				file.Bindings[existing] = b
+			}
+			if o.has("expect-generation") {
+				if err := a.codexTransferClaims(b); err != nil {
+					return err
+				}
+				b = binding
+				file.Bindings[existing] = b
+			}
 			if o.has("renew") {
 				if b.Hub != binding.Hub || b.Caller != binding.Caller {
 					return usageErr("identity changed since bind; unbind and bind again")
@@ -323,7 +444,7 @@ func (a *app) cmdCodex(args []string, nowTime func() time.Time) error {
 	if err != nil {
 		return err
 	}
-	if err := writeFileAtomic(path, encoded); err != nil {
+	if err := writeCodexDurable(path, encoded); err != nil {
 		return err
 	}
 	if args[0] == "unbind" {
@@ -336,4 +457,22 @@ func (a *app) cmdCodex(args []string, nowTime func() time.Time) error {
 	}
 	fmt.Fprintf(a.stdout, "bound %s to Codex thread %s; the launcher connector picks it up within 10 s%s\n", binding.Profile, binding.ThreadID, hint)
 	return nil
+}
+
+// Acting as a peer addresses that peer's inbox; the credential's principal is
+// retained separately for authentication and rotation checks.
+func codexRecipient(b codexBinding) string {
+	if b.As != "" {
+		return b.As
+	}
+	return b.Caller
+}
+
+func isCodexEnvironment(getenv func(string) string) bool {
+	for _, key := range []string{"CODEX_THREAD_ID", "CODEX_CI", "CODEX_SANDBOX", "CODEX_SANDBOX_NETWORK_DISABLED"} {
+		if getenv(key) != "" {
+			return true
+		}
+	}
+	return false
 }

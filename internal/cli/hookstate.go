@@ -113,6 +113,10 @@ var errStateBusy = errors.New("vecnet: state file busy")
 // update serializes the complete read/modify/atomic-write transaction with
 // other processes as well as other stateFile values in this process.
 func (f stateFile) update(ctx context.Context, fn func(*hookState) error) error {
+	return f.updateMode(ctx, fn, false, true)
+}
+
+func (f stateFile) updateMode(ctx context.Context, fn func(*hookState) error, strict, allowMissing bool) error {
 	if err := os.MkdirAll(filepath.Dir(f.path), 0o700); err != nil {
 		return err
 	}
@@ -123,28 +127,55 @@ func (f stateFile) update(ctx context.Context, fn func(*hookState) error) error 
 	defer unlock()
 	var s hookState
 	raw, err := os.ReadFile(f.path)
+	stateExisted := err == nil
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	if strict {
+		if errors.Is(err, os.ErrNotExist) && !allowMissing {
+			return err
+		}
+		if err == nil {
+			if validateCodexStateJSON(raw) != nil {
+				return usageErr("corrupt delivery state; explicit recovery required")
+			}
+		}
+	}
 	if json.Unmarshal(raw, &s) != nil {
+		if strict && err == nil {
+			return usageErr("corrupt delivery state; explicit recovery required")
+		}
 		s = hookState{}
 	}
 	// The binding file wins; without one, adopt a binding that 8631cc0
-	// kept inside the state file. A corrupt binding reads as unbound.
+	// kept inside the state file. Only non-strict callers treat corruption as unbound.
 	bpath := bindingPath(f.path)
 	braw, err := os.ReadFile(bpath)
+	bindingExisted := err == nil
 	switch {
 	case err == nil:
+		if strict {
+			if validateCodexStateJSON(braw) != nil {
+				return usageErr("corrupt hook binding; explicit recovery required")
+			}
+		}
 		if json.Unmarshal(braw, &s.hookBinding) != nil {
+			if strict {
+				return usageErr("corrupt hook binding; explicit recovery required")
+			}
 			s.hookBinding = hookBinding{}
 		}
 	case errors.Is(err, os.ErrNotExist):
 		if json.Unmarshal(raw, &s.hookBinding) != nil {
+			if strict && stateExisted {
+				return usageErr("corrupt embedded hook binding; explicit recovery required")
+			}
 			s.hookBinding = hookBinding{}
 		}
 	default:
 		return err
 	}
+	beforeBinding, _ := json.Marshal(s.hookBinding)
 	if err := fn(&s); err != nil {
 		return err
 	}
@@ -152,8 +183,12 @@ func (f stateFile) update(ctx context.Context, fn func(*hookState) error) error 
 	if err != nil {
 		return err
 	}
-	if !bytes.Equal(nb, braw) {
-		if err := writeFileAtomic(bpath, nb); err != nil {
+	write := writeFileAtomic
+	if strict {
+		write = writeCodexDurable
+	}
+	if !bytes.Equal(nb, braw) && (!strict || !bindingExisted || !bytes.Equal(nb, beforeBinding)) {
+		if err := write(bpath, nb); err != nil {
 			return err
 		}
 	}
@@ -161,7 +196,7 @@ func (f stateFile) update(ctx context.Context, fn func(*hookState) error) error 
 	if err != nil {
 		return err
 	}
-	return writeFileAtomic(f.path, raw)
+	return write(f.path, raw)
 }
 
 // claimOne fails open: inability to persist a claim must not lose a delivery.

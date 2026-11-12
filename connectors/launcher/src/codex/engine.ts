@@ -1,3 +1,5 @@
+import { acquireGuard, authorityPath, ownerArgs, ownerOf, sameOwner, validOwner, verifyOwner } from './ownership.ts';
+import type { Owner } from './ownership.ts';
 import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
@@ -13,13 +15,15 @@ import type { CodexRpc } from './rpc.ts';
 import { buildThreadResume, buildThreadUnsubscribe, buildTurnStart, buildTurnSteer, buildTurnsPage, mapStatus, parseResumePolicy } from './protocol.ts';
 
 export interface Binding {
+  configPath?: string; generation?: string;
   profile: string; as?: string; hub: string; caller: string; codexHome: string; threadId: string;
   createdAt: number; expiresAt: number; idleDormantMs?: number;
   attended: boolean; origin: 'explicit' | 'launcher'; ensureLoaded?: () => Promise<boolean>;
 }
 export type DormantReason = 'expired' | 'archived' | 'not_loaded' | 'idle_stale' | 'approval_policy' |
-  'waiting_approval' | 'waiting_input' | 'over_limit' | 'identity_changed';
+  'waiting_approval' | 'waiting_input' | 'over_limit' | 'identity_changed' | 'ownership_changed' | 'unverified_thread' | 'identity_unverified' | 'watch_stopped' | 'delivery_unresolved';
 export type InflightRow = {
+  owner?: Owner; attempt?: string;
   threadId: string; key: string; claim: string; deliveries: string[]; method: 'turn/start' | 'turn/steer';
   attemptTurnId: string | null; priorTurnId: string | null; acceptedAt: number | null; state: 'sending' | 'pending' | 'unresolved';
 };
@@ -51,14 +55,18 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
   // launcher's helper intentionally preserves ordinary non-secret variables.
   const env = Object.fromEntries(Object.entries(scrubEnv(d.env, envKeys)).filter(([k]) => envKeys.includes(k)));
   const baseArgs = ['--net', b.profile, ...(b.as ? ['--as', b.as] : [])];
-  const configPath = vecnetConfigPath(env);
+  const configPath = b.configPath;
+  const owner = ownerOf(b);
+  if (b.configPath) env.VECNET_CONFIG = b.configPath;
+  let ownershipChanged = !validOwner(owner) || !authorityPath(d.env);
+  let rootVerified = false, watchVerified = false, authenticatedConfig: string | undefined;
   let running = false, rpc: CodexRpc | undefined, watch: ChildProcess | undefined;
   let connectionState: ReturnType<Engine['state']> = 'connecting';
   let status: unknown = { type: 'notLoaded' }, attached = false, archived = false, overLimit = false;
   // createdAt changes on a fresh bind, but survives TTL/attendance renewal.
   // Keep refusals scoped to this Codex home/thread and binding generation.
-  const identityKey = 'identity_changed:' + JSON.stringify([b.codexHome, b.threadId]);
-  const generation = JSON.stringify([b.createdAt, b.profile, b.as ?? null, b.hub, b.caller, b.origin]);
+  const identityKey = 'identity_changed:' + JSON.stringify([b.configPath, b.codexHome, b.threadId]);
+  const generation = JSON.stringify([b.generation, b.createdAt, b.profile, b.as ?? null, b.hub, b.caller, b.origin]);
   const refusedGeneration = kv.get(identityKey);
   if (refusedGeneration !== undefined && refusedGeneration !== generation) kv.delete(identityKey);
   let policyDenied = false, identityChanged = refusedGeneration === generation, lastActivity = clock.now(), lastEnsure = -Infinity;
@@ -77,14 +85,54 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
   function enqueue(fn: () => Promise<void>) {
     queue = queue.then(async () => { if (running) await fn(); }).catch(() => { log.warn('codex_engine_operation_failed', { threadId: b.threadId }); });
   }
+  const quarantined = new Set<string>();
+  function quarantine(key: string) {
+    ownershipChanged = true; watch?.kill();
+    if (!quarantined.has(key)) { quarantined.add(key); log.warn('codex_recovery_quarantined', { threadId: b.threadId }); }
+  }
+  function parseRow(key: string): InflightRow | undefined {
+    const raw = kv.get(key);
+    if (raw === undefined) return undefined;
+    try {
+      const r = obj(JSON.parse(raw));
+      // Unrelated threads remain for their own engine; never reinterpret them
+      // using this engine's profile, config, credentials, or home.
+      if (validOwner(r.owner) && (r.owner.configPath !== owner.configPath || r.owner.codexHome !== owner.codexHome || r.owner.threadId !== owner.threadId)) return;
+      if (typeof r.threadId === 'string' && r.threadId !== owner.threadId && !sameOwner(r.owner, owner)) return;
+      if (r.threadId !== owner.threadId || !sameOwner(r.owner, owner)) { quarantine(key); return; }
+      if (key.startsWith('claiming:')) {
+        if (!Number.isFinite(r.at) || !key.slice('claiming:'.length)) { quarantine(key); return; }
+      } else if (typeof r.attempt !== 'string' || !/^[a-f0-9]{32}$/.test(r.attempt) || typeof r.key !== 'string' || !r.key || typeof r.claim !== 'string' || !r.claim ||
+        !Array.isArray(r.deliveries) || !r.deliveries.every((id: unknown) => typeof id === 'string') ||
+        !['turn/start', 'turn/steer'].includes(r.method) || !['sending', 'pending', 'unresolved'].includes(r.state) ||
+        !(r.attemptTurnId === null || typeof r.attemptTurnId === 'string') ||
+        !(r.priorTurnId === null || typeof r.priorTurnId === 'string') ||
+        !(r.acceptedAt === null || Number.isFinite(r.acceptedAt)) ||
+        key !== (key.startsWith('releasing:') ? 'releasing:' + r.claim : 'inflight:' + r.key)) {
+        quarantine(key); return;
+      }
+      return r as InflightRow;
+    } catch { quarantine(key); return; }
+  }
   function rows(): InflightRow[] {
-    return kv.keys('inflight:').map(key => JSON.parse(kv.get(key)!) as InflightRow).filter(row => row.threadId === b.threadId);
+    return kv.keys('inflight:').map(parseRow).filter((r): r is InflightRow => r !== undefined);
   }
   const write = (r: InflightRow) => kv.set('inflight:' + r.key, JSON.stringify(r));
-  function clear(r: InflightRow) { kv.delete('inflight:' + r.key); kv.delete('releasing:' + r.claim); kv.delete('diagnostic:unresolved:' + r.key); waitingRetry.delete(r.key); waitForIdle.delete(r.key); receipts.delete(r.key); unresolvedLogged.delete(r.key); pendingLogged.delete(r.key); }
+  async function clear(r: InflightRow, outcome: 'accepted' | 'released' = 'accepted') {
+    // Keep recovery evidence until durable outcome persistence succeeds.
+    if (outcome === 'accepted') await runHook(['settle', '--outcome', 'accepted', ...ownerArgs(owner), '--claim', r.claim, '--attempt', r.attempt!], true, 'codex');
+    kv.delete('inflight:' + r.key); kv.delete('releasing:' + r.claim); kv.delete('diagnostic:unresolved:' + r.key);
+    waitingRetry.delete(r.key); waitForIdle.delete(r.key); receipts.delete(r.key); unresolvedLogged.delete(r.key); pendingLogged.delete(r.key);
+  }
   function reason(requireSubscription = true): DormantReason | undefined {
+    if (ownershipChanged || !sameOwner(ownerOf(b), owner)) return 'ownership_changed';
     if (identityChanged) return 'identity_changed';
+    if (!rootVerified) return 'unverified_thread';
     if (clock.now() >= b.expiresAt) return 'expired';
+    if (authenticatedConfig !== configSignature()) return 'identity_unverified';
+    if (watchStopped) return 'watch_stopped';
+    if (requireSubscription && rows().some(r => r.state === 'unresolved' && !waitingRetry.has(r.key))) return 'delivery_unresolved';
+    if (ownershipChanged) return 'ownership_changed';
     if (archived) return 'archived';
     if (overLimit) return 'over_limit';
     if (policyDenied) return 'approval_policy';
@@ -98,12 +146,21 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
   function liveness(): Liveness { const r = reason(); return r ? { live: false, reason: r } : { live: true }; }
   async function call<T = RecordValue>(method: Parameters<CodexRpc['call']>[0], params: unknown): Promise<T> {
     if (!rpc) throw new CodexRpcError(-1, 'unreachable', true);
-    return rpc.call<T>(method, params, timeout);
+    const result = await rpc.call<T>(method, params, timeout);
+    if (method === 'thread/read') {
+      const thread = obj(obj(result).thread);
+      rootVerified = thread.id === owner.threadId && ['cli', 'vscode', 'exec', 'appServer'].includes(thread.source) && thread.parentThreadId == null;
+      if (!rootVerified) {
+        watch?.kill(); watchVerified = false;
+        log.warn('codex_thread_source_unverified', { threadId: b.threadId });
+      }
+    }
+    return result;
   }
-  function runHook(args: string[], cleanup = false): Promise<unknown> {
+  function runHook(args: string[], cleanup = false, command = 'hook'): Promise<unknown> {
     if (!running && !cleanup) return Promise.reject(new Error('engine_stopped'));
     return new Promise((resolve, reject) => {
-      const child = spawn(d.vecnetBin, [...baseArgs, 'hook', ...args], { env, stdio: ['ignore', 'pipe', 'ignore'] });
+      const child = spawn(d.vecnetBin, [...baseArgs, command, ...args], { env, stdio: ['ignore', 'pipe', 'ignore'] });
       children.add(child); let text = '', tooLarge = false;
       child.stdout!.setEncoding('utf8');
       child.stdout!.on('data', (part: string) => { text += part; if (Buffer.byteLength(text) > 1_048_576) { tooLarge = true; child.kill(); } });
@@ -112,14 +169,16 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
       child.once('close', code => {
         timer.cancel(); children.delete(child);
         if (code !== 0 || tooLarge) { reject(new Error('hook_failed')); return; }
-        try { resolve(JSON.parse(text)); } catch { reject(new Error('hook_invalid_output')); }
+        try { resolve(command === 'codex' && !text.trim() ? {} : JSON.parse(text)); } catch { reject(new Error('hook_invalid_output')); }
       });
     });
   }
-  async function release(claim: string) {
+  async function release(claim: string, attempt?: string) {
     // Releasing known-unsent claims must remain possible while stop drains
     // the delivery lane, after new claims and turn RPCs have been disabled.
-    await runHook(['--release', '--claim', claim], true);
+    if (attempt) await runHook(['settle', '--outcome', 'rejected', ...ownerArgs(owner), '--claim', claim, '--attempt', attempt], true, 'codex');
+    const result = obj(await runHook(['--release', '--claim', claim, ...ownerArgs(owner)], true));
+    if (result.refused || !Number.isInteger(result.released) || result.released < 0) throw new Error('claim_release_refused');
   }
   function scheduleClaimRecovery() {
     if (!running || claimRecovery) return;
@@ -137,7 +196,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     // history scan. Persist that fact before invoking the fallible child.
     kv.set('releasing:' + r.claim, JSON.stringify(r));
     waitingRetry.delete(r.key); waitForIdle.delete(r.key);
-    try { await release(r.claim); clear(r); }
+    try { await release(r.claim, r.attempt); await clear(r, 'released'); }
     catch { log.warn('codex_claim_release_failed', { threadId: b.threadId }); scheduleClaimRecovery(); }
   }
   async function releaseDormantRetries() {
@@ -148,13 +207,14 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     for (const r of rows()) if (waitingRetry.has(r.key)) await releaseInflight(r);
   }
   async function recoverClaims() {
+    if (!validOwner(owner)) return;
     for (const key of kv.keys('releasing:')) {
-      const r = JSON.parse(kv.get(key)!) as InflightRow;
-      if (r.threadId === b.threadId) await releaseInflight(r);
+      const r = parseRow(key);
+      if (r) await releaseInflight(r);
     }
     const owned = new Set(rows().map(r => r.claim));
     for (const key of kv.keys('claiming:')) {
-      const r = obj(JSON.parse(kv.get(key)!)); if (r.threadId !== b.threadId) continue;
+      const r = parseRow(key); if (!r) continue;
       const claim = key.slice('claiming:'.length);
       if (owned.has(claim)) kv.delete(key);
       else await releaseUnsentClaim(claim);
@@ -256,10 +316,10 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     if ((method === 'item/started' || method === 'item/completed') && obj(p.item).type === 'userMessage' && typeof p.item.clientId === 'string') {
       const key = p.item.clientId;
       // A receipt may arrive before the RPC's acceptance response.
-      if (kv.get('inflight:' + key)) {
+      if (parseRow('inflight:' + key)) {
         receipts.add(key);
         const r = JSON.parse(kv.get('inflight:' + key)!) as InflightRow;
-        if (r.state !== 'sending') clear(r);
+        if (r.state !== 'sending') enqueue(async () => { await clear(r); await verifyWatch(); arm(0); });
       }
     }
     enqueue(async () => {
@@ -272,6 +332,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
   }
   async function reconcile() {
     if (!running) return;
+    await verifyAdmission();
     await releaseDormantRetries();
     if (!rpc) return;
     let r = reason(false);
@@ -337,10 +398,10 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
       for (let page = 0; page < 20; page++) {
         const result = await call('thread/turns/list', buildTurnsPage(b.threadId, cursor));
         // A subscription receipt can settle this row while the scan awaits I/O.
-        if (!kv.get('inflight:' + r.key) || receipts.has(r.key)) { clear(r); return; }
+        if (!kv.get('inflight:' + r.key) || receipts.has(r.key)) { await clear(r); return; }
         if (!Array.isArray(result.data)) break;
         for (const turn of result.data) {
-          if (Array.isArray(turn.items) && turn.items.some((item: RecordValue) => item.type === 'userMessage' && item.clientId === r.key)) { clear(r); return; }
+          if (Array.isArray(turn.items) && turn.items.some((item: RecordValue) => item.type === 'userMessage' && item.clientId === r.key)) { await clear(r); return; }
           // A start can race into the turn returned by latest(). Include that
           // prior turn: an accepted start/steer may still record its item there.
           if (turn.status === 'inProgress') inProgress = true;
@@ -355,7 +416,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
         cursor = result.nextCursor;
       }
     } catch { /* A partial scan never proves absence. */ }
-    if (!kv.get('inflight:' + r.key) || receipts.has(r.key)) { clear(r); return; }
+    if (!kv.get('inflight:' + r.key) || receipts.has(r.key)) { await clear(r); return; }
     if (reached && !inProgress) { await releaseInflight(r); return; }
     r.state = 'unresolved'; write(r);
     if (!unresolvedLogged.has(r.key) && !kv.get('diagnostic:unresolved:' + r.key)) {
@@ -364,6 +425,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
   }
   async function recover() {
     await recoverClaims();
+    if (!rootVerified) return;
     for (const r of rows()) if (!waitingRetry.has(r.key)) await scan(r);
   }
   async function connect() {
@@ -381,7 +443,9 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
       const at = turn?.completedAt ?? turn?.startedAt;
       if (typeof at === 'number' && Number.isFinite(at)) lastActivity = at * 1000;
       else if (typeof at === 'string' && Number.isFinite(Date.parse(at))) lastActivity = Date.parse(at);
-      await reconcile(); await recover();
+      await reconcile();
+      if (rootVerified) await recover();
+      await verifyWatch();
       if (!rpc) return;
       connectionState = 'ready'; retryIndex = 0; arm(0);
     } catch (e) {
@@ -403,11 +467,17 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
       const entries = fallback ? [] : batch.entries;
       const pointer = `vecnet: messages remain available. Run vecnet --net ${b.profile}${b.as ? ' --as ' + b.as : ''} inbox.`;
       const input = { threadId: b.threadId, stub: fallback ? pointer : batch.stub, entries, key: r.key };
+      r.attempt = randomBytes(16).toString('hex'); write(r);
+      let guard;
+      try { guard = await acquireGuard(d.vecnetBin, env, owner, r.claim, r.attempt, clock); }
+      catch { ownershipChanged = true; watch?.kill(); log.warn('codex_binding_ownership_changed', { threadId: b.threadId }); return; }
+      if (!running || !liveness().live || !guard.valid()) { await guard.finish('rejected'); await releaseInflight(r); return; }
       write(r);
       try {
         lastPush = clock.now();
         const result = r.method === 'turn/steer' ? await call('turn/steer', buildTurnSteer({ ...input, expectedTurnId: r.attemptTurnId! })) :
           await call('turn/start', buildTurnStart(input));
+        await guard.finish('accepted');
         r.acceptedAt = clock.now(); r.state = 'pending';
         if (r.method === 'turn/start') {
           const id = obj(result.turn).id;
@@ -417,9 +487,11 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
           }
         }
         waitingRetry.delete(r.key);
-        if (receipts.has(r.key)) clear(r); else write(r);
+        if (receipts.has(r.key)) await clear(r); else write(r);
         return;
       } catch (e) {
+        try { await guard.finish(e instanceof CodexRpcError && !e.ambiguous ? 'rejected' : 'ambiguous'); }
+        catch { e = new CodexRpcError(-1, 'ownership_guard_lost', true); }
         if (!(e instanceof CodexRpcError) || e.ambiguous) {
           // This attempt may have been accepted. Only checkpoint recovery may
           // settle it; a previous definite-rejection retry is no longer safe.
@@ -476,6 +548,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
         await transmit(r, batch); return;
       }
     }
+    if (rows().some(r => r.state !== 'pending')) return;
     const s = mapStatus(status);
     if (s !== 'idle' && s !== 'turn_running') return;
     const action = s === 'idle' ? 'start' : 'steer';
@@ -490,11 +563,12 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     }
     historyRetry?.cancel(); historyRetry = undefined; historyRetryIndex = 0;
     if (!liveness().live || (action === 'steer' && (turn?.status !== 'inProgress' || typeof turn.id !== 'string'))) return;
+    if (!verifyOwner(env, owner, d.euid, clock.now())) { ownershipChanged = true; watch?.kill(); return; }
     const nonce = randomBytes(12).toString('hex');
-    kv.set('claiming:' + nonce, JSON.stringify({ threadId: b.threadId, at: clock.now() }));
+    kv.set('claiming:' + nonce, JSON.stringify({ owner, threadId: b.threadId, at: clock.now() }));
     let output: RecordValue;
     try {
-      output = obj(await runHook(['--event', 'app-server', '--claim', nonce, '--priorities', priorities.join(','), '--expect-hub', b.hub, '--expect-caller', b.caller]));
+      output = obj(await runHook(['--event', 'app-server', '--claim', nonce, '--priorities', priorities.join(','), ...ownerArgs(owner)]));
     } catch {
       // Go may have committed the claim before its output was lost. No turn
       // RPC can have happened yet, so this exact nonce is safe to release.
@@ -504,19 +578,23 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     if (output.refused === 'identity_changed') {
       kv.set(identityKey, generation); identityChanged = true;
       kv.delete('claiming:' + nonce); await unsubscribe();
+      watch?.kill();
       log.warn('codex_binding_identity_changed', { threadId: b.threadId }); return;
+    }
+    if (output.refused) {
+      ownershipChanged = true; kv.delete('claiming:' + nonce); watch?.kill(); await unsubscribe(); return;
     }
     if (!Array.isArray(output.deliveries) || !output.deliveries.every((id: unknown) => typeof id === 'string') ||
       !Array.isArray(output.entries ?? []) || (output.entries ?? []).some((e: unknown) => typeof obj(e).key !== 'string' || typeof obj(e).value !== 'string' || Buffer.byteLength(obj(e).value) > 1000)) {
       await releaseUnsentClaim(nonce); return;
     }
     const batch: Batch = { deliveries: output.deliveries, stub: typeof output.stub === 'string' ? output.stub : '', entries: output.entries ?? [] };
-    if (!batch.deliveries.length && !batch.entries.some(e => e.key === 'vecnet_summary')) { kv.delete('claiming:' + nonce); return; }
-    const key = 'vn.' + createHash('sha256').update(b.threadId + '\n' + [...batch.deliveries].sort().join(',')).digest('hex').slice(0, 24);
-    const row: InflightRow = { threadId: b.threadId, key, claim: nonce, deliveries: batch.deliveries, method: action === 'start' ? 'turn/start' : 'turn/steer',
+    if (!batch.deliveries.length) { kv.delete('claiming:' + nonce); return; }
+    const key = 'vn.' + createHash('sha256').update(JSON.stringify(owner) + '\n' + [...batch.deliveries].sort().join(',')).digest('hex').slice(0, 24);
+    const row: InflightRow = { owner, attempt: randomBytes(16).toString('hex'), threadId: b.threadId, key, claim: nonce, deliveries: batch.deliveries, method: action === 'start' ? 'turn/start' : 'turn/steer',
       attemptTurnId: action === 'steer' ? turn!.id : null, priorTurnId: action === 'start' ? turn?.id ?? null : null, acceptedAt: null, state: 'sending' };
     // Do not overwrite an unresolved attempt if a summary produces its key again.
-    if (kv.get('inflight:' + key)) { await releaseUnsentClaim(nonce); return; }
+    if (parseRow('inflight:' + key)) { await releaseUnsentClaim(nonce); return; }
     write(row); kv.delete('claiming:' + nonce); await transmit(row, batch);
   }
   function configSignature(): string {
@@ -524,8 +602,38 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     try { const st = statSync(configPath); return [st.dev, st.ino, st.size, st.mtimeMs, st.ctimeMs].join(':'); }
     catch { return 'missing'; }
   }
+  async function verifyAdmission(force = false) {
+    if (!running || ownershipChanged || identityChanged || !rootVerified || clock.now() >= b.expiresAt) return;
+    if (!verifyOwner(env, owner, d.euid, clock.now())) { ownershipChanged = true; watch?.kill(); return; }
+    const signature = configSignature();
+    if (!force && authenticatedConfig === signature) return;
+    try {
+      const result = obj(await runHook(['verify', ...ownerArgs(owner)], false, 'codex'));
+      if (result.verified !== true || signature !== configSignature()) throw new Error('ownership_unverified');
+      authenticatedConfig = signature;
+    } catch {
+      authenticatedConfig = undefined; watch?.kill();
+      log.warn('codex_binding_auth_unverified', { threadId: b.threadId });
+    }
+  }
+  async function verifyWatch() {
+    if (!running || ownershipChanged || identityChanged || !rootVerified || clock.now() >= b.expiresAt) return;
+    await verifyAdmission();
+    if (authenticatedConfig !== configSignature()) return;
+    // A pending ambiguity marker must be settled by exact-thread recovery before
+    // even the notification stream is started under this owner.
+    if (rows().some(r => r.state !== 'pending') || ownershipChanged) return;
+    if (!verifyOwner(env, owner, d.euid, clock.now())) {
+      ownershipChanged = true; watch?.kill();
+      log.warn('codex_binding_ownership_changed', { threadId: b.threadId });
+      return;
+    }
+    watchVerified = true;
+    startWatch();
+  }
   function startWatch() {
-    if (!running) return;
+    if (!running || watch || !watchVerified || !rootVerified || ownershipChanged || identityChanged || clock.now() >= b.expiresAt) return;
+    if (!verifyOwner(env, owner, d.euid, clock.now())) { ownershipChanged = true; return; }
     const child = spawn(d.vecnetBin, [...baseArgs, 'watch', '--json'], { env, stdio: ['ignore', 'pipe', 'ignore'] });
     watch = child;
     // Set from the watch's own last line: it hit 401/403/204 (or another
@@ -546,7 +654,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     child.once('close', () => {
       reader.close();
       if (watch === child) watch = undefined;
-      if (!running) return;
+      if (!running || ownershipChanged || identityChanged || !rootVerified || authenticatedConfig === undefined) return;
       if (stoppedStatus !== undefined) {
         // Respawning would only repeat the refused request every second.
         // Resume on a credential/config change or a binding renewal.
@@ -554,7 +662,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
         log.warn('codex_watch_stopped', { threadId: b.threadId, status: stoppedStatus });
         return;
       }
-      const timer = clock.timer(1000, () => { watchRetry = undefined; startWatch(); }); watchRetry = timer;
+      const timer = clock.timer(1000, () => { watchRetry = undefined; enqueue(verifyWatch); }); watchRetry = timer;
     });
   }
   let watchRetry: { cancel(): void } | undefined;
@@ -564,14 +672,20 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     if (configSignature() === watchStopped.config && b.expiresAt === watchStopped.expiresAt) return;
     watchStopped = undefined;
     log.info('codex_watch_resumed', { threadId: b.threadId });
-    startWatch();
+    enqueue(verifyWatch);
   }
   function heartbeat() {
-    minute = clock.timer(60_000, () => { enqueue(reconcile); resumeWatch(); if (running) heartbeat(); });
+    minute = clock.timer(60_000, () => {
+      resumeWatch();
+      enqueue(async () => {
+        try { await verifyAdmission(true); await reconcile(); if (!watchStopped) await verifyWatch(); }
+        finally { if (running) heartbeat(); }
+      });
+    });
   }
   return {
     start() { if (running) { enqueue(async () => { await recover(); arm(0); }); return; }
-      running = true; reconnect = undefined; gap = undefined; claimRecovery = undefined; warmCheck = undefined; historyRetry = undefined; historyRetryIndex = 0; watchStopped = undefined; startWatch(); heartbeat();
+      running = true; reconnect = undefined; gap = undefined; claimRecovery = undefined; warmCheck = undefined; historyRetry = undefined; historyRetryIndex = 0; watchStopped = undefined; watchVerified = false; heartbeat();
       // Unsent claims need only Go, including when Codex is unreachable or
       // refused by the version gate. Release them before any RPC recovery.
       enqueue(async () => { await recoverClaims(); await connect(); }); },

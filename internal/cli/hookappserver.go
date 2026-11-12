@@ -40,7 +40,9 @@ type replayRef struct {
 	Order               uint64 `json:",omitempty"`
 }
 type claimRef struct {
+	Accepted                   bool `json:",omitempty"`
 	ID, After, Priority, Claim string
+	Generation                 string `json:",omitempty"`
 	Order                      uint64 `json:",omitempty"`
 }
 
@@ -95,8 +97,19 @@ func (a *app) appServerBound(s *hookState) {
 func (a *app) hookAppServer(o opts, afterPoll func(), publish func([]byte) error, limit int) hookResult {
 	empty := func() { _ = publish(appServerEmpty()) }
 	refuse := func() { _ = publish([]byte("{\"version\":1,\"deliveries\":[],\"refused\":\"identity_changed\"}\n")) }
+	authority, unlock, ownerErr := a.lockCodexOwner()
+	if ownerErr != nil {
+		refuse()
+		return hookResult{}
+	}
+	defer unlock()
+	owner, ownerErr := a.codexOwner(o, hookNow(), o.has("release"))
+	if ownerErr != nil {
+		refuse()
+		return hookResult{}
+	}
 	release := o.has("release")
-	if !release && (o.str("expect-hub") == "" || o.str("expect-caller") == "") {
+	if o.str("expect-hub") == "" || o.str("expect-caller") == "" {
 		refuse()
 		return hookResult{}
 	}
@@ -117,7 +130,7 @@ func (a *app) hookAppServer(o opts, afterPoll func(), publish func([]byte) error
 	// Verify before update: refusal must not create, lock or rewrite
 	// a state or binding file, including when the flags themselves are invalid.
 	var id hookIdentity
-	if !release {
+	{
 		if normalizeHub(c.base) != normalizeHub(o.str("expect-hub")) {
 			refuse()
 			return hookResult{}
@@ -125,10 +138,16 @@ func (a *app) hookAppServer(o opts, afterPoll func(), publish func([]byte) error
 		var previous hookState
 		if raw, e := os.ReadFile(path); e == nil {
 			if json.Unmarshal(raw, &previous) != nil {
-				previous = hookState{}
+				refuse()
+				return hookResult{}
 			}
 		}
-		id = a.resolveIdentity(c, &previous)
+		caller, e := a.codexBindCaller(c)
+		if e != nil {
+			refuse()
+			return hookResult{}
+		}
+		id = hookIdentity{Hub: normalizeHub(c.base), As: a.as, Cred: hookCredential(c.secret), Caller: caller}
 		if id.Caller == "" || id.Hub != normalizeHub(o.str("expect-hub")) || id.Caller != o.str("expect-caller") {
 			refuse()
 			return hookResult{}
@@ -153,13 +172,19 @@ func (a *app) hookAppServer(o opts, afterPoll func(), publish func([]byte) error
 			allowed[p] = true
 		}
 	}
-	f := stateFile{path: path}
 	if release {
+		if codexHasPending(authority, owner) {
+			refuse()
+			return hookResult{}
+		}
 		n := 0
-		err = f.update(a.ctx, func(s *hookState) error {
+		err = codexUpdateState(a.ctx, path, false, func(s *hookState) error {
+			if s.Hub != "" && (s.Hub != id.Hub || s.Caller != id.Caller || s.As != id.As) {
+				return usageErr("delivery state identity changed")
+			}
 			claims := make([]claimRef, 0, len(s.Claims))
 			for _, r := range s.Claims {
-				if r.Claim != nonce {
+				if r.Claim != nonce || r.Generation != owner.Generation || r.Accepted {
 					claims = append(claims, r)
 					continue
 				}
@@ -184,13 +209,16 @@ func (a *app) hookAppServer(o opts, afterPoll func(), publish func([]byte) error
 	poll := func(after string) (pollBody, error) {
 		body, e := a.poll(c, after, 0)
 		afterPoll()
+		if _, err := a.codexOwner(o, hookNow()); err != nil {
+			return pollBody{}, err
+		}
 		if a.ctx.Err() != nil {
 			return pollBody{}, a.ctx.Err()
 		}
 		return body, e
 	}
 	claimed := []envelope.Event{}
-	err = f.update(a.ctx, func(s *hookState) error {
+	err = codexUpdateState(a.ctx, path, true, func(s *hookState) error {
 		if s.bind(id) {
 			fmt.Fprintln(a.stderr, "vecnet: app-server: state belonged to another hub or peer; starting afresh")
 		}
@@ -267,7 +295,7 @@ func (a *app) hookAppServer(o opts, afterPoll func(), publish func([]byte) error
 			} else {
 				deliveryOrder = nextOrder()
 			}
-			s.Claims = append(s.Claims, claimRef{ID: item.Delivery, After: after, Priority: priority, Claim: nonce, Order: deliveryOrder})
+			s.Claims = append(s.Claims, claimRef{ID: item.Delivery, After: after, Priority: priority, Claim: nonce, Generation: owner.Generation, Order: deliveryOrder})
 			s.Replay = slices.DeleteFunc(s.Replay, func(r replayRef) bool { return r.ID == item.Delivery })
 			delete(more, item.Delivery)
 			claimed = append(claimed, ev)
@@ -388,6 +416,10 @@ func (a *app) hookAppServer(o opts, afterPoll func(), publish func([]byte) error
 		}
 		return a.ctx.Err()
 	})
+	if err != nil {
+		empty()
+		return hookResult{}
+	}
 	if err == nil {
 		if len(out.Deliveries) == 0 && len(out.Entries) == 0 {
 			empty()

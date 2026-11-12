@@ -1,0 +1,70 @@
+{
+  "checks": [
+    {
+      "check": "three independent root conversations in one checkout"
+    },
+    {
+      "check": "generic setup and recipient alias exclusion"
+    },
+    {
+      "check": "authenticated readiness and single connector"
+    },
+    {
+      "check": "parent-id-only and neighboring lifecycle hooks emit no context"
+    },
+    {
+      "check": "idle automatic wake with isolated model-context canaries",
+      "a": {
+        "thread": "01a1cd5e-026f-7e83-9091-c5ceaa8e1f1f",
+        "turn": "01a1cd5e-59d7-76b1-9471-65469c8f7627",
+        "delivery": "dly_01M76NWNXW8ZAHFCM0Z0EWQZYV"
+      },
+      "b": {
+        "thread": "01a1cd5e-0eff-7981-ae7c-e16267b4af29",
+        "turn": "01a1cd5e-59de-7943-9d75-4af39dead330",
+        "delivery": "dly_01M76NWNY1JWR5FXSZDWB5RF3Y"
+      }
+    },
+    {
+      "check": "hold never wakes and acknowledgement remains explicit"
+    },
+    {
+      "check": "busy urgent steering and deferred wake_idle",
+      "busyTurn": "01a1cd5e-8175-78c3-83de-396bb080b136",
+      "urgentDelivery": "dly_01M76NY174VW66G3RW97VVEY8S",
+      "idleTurn": "01a1cd5f-43df-7cb0-b992-033b9858ba39",
+      "idleDelivery": "dly_01M76NXZ8C0PAX3AD7KV9KN8QH"
+    },
+    {
+      "check": "connector restart preserves accepted delivery deduplication"
+    },
+    {
+      "check": "addressed handoff reaches only new owner; stale generation refused",
+      "thread": "01a1cd5e-1b8d-7b00-bc48-9ad8c310052f",
+      "turn": "01a1cd5f-cad2-7821-91d3-616ed5628742",
+      "delivery": "dly_01M76NZJ5WG10BWZEAHB82WAMJ"
+    }
+  ],
+  "threads": [
+    {
+      "label": "A",
+      "id": "01a1cd5e-026f-7e83-9091-c5ceaa8e1f1f",
+      "source": "vscode",
+      "parentThreadId": null
+    },
+    {
+      "label": "B",
+      "id": "01a1cd5e-0eff-7981-ae7c-e16267b4af29",
+      "source": "vscode",
+      "parentThreadId": null
+    },
+    {
+      "label": "neighbor",
+      "id": "01a1cd5e-1b8d-7b00-bc48-9ad8c310052f",
+      "source": "vscode",
+      "parentThreadId": null
+    }
+  ],
+  "runtime": "0.167.2",
+  "complete": true
+}

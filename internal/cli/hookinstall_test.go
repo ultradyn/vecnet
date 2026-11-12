@@ -84,7 +84,7 @@ func settingsCommands(t *testing.T, body []byte, event string) []string {
 				t.Fatalf("bad handler %v", handler)
 			}
 			command, _ := h["command"].(string)
-			if strings.Contains(command, "vecnet hook --profile ") {
+			if strings.Contains(command, "vecnet hook --profile ") || strings.Contains(command, "vecnet hook --client codex ") {
 				commands = append(commands, command)
 			}
 		}
@@ -1118,7 +1118,14 @@ func TestHookInstallCodexPrintsStanza(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit=%d stdout=%q stderr=%q", code, out, errs)
 	}
-	hooks := decodeSettings(t, []byte(out))["hooks"].(map[string]any)
+	var proposed strings.Builder
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++") {
+			proposed.WriteString(line[1:])
+			proposed.WriteByte('\n')
+		}
+	}
+	hooks := decodeSettings(t, []byte(proposed.String()))["hooks"].(map[string]any)
 	if len(hooks) != 3 {
 		t.Fatalf("installed events=%v", hooks)
 	}
@@ -1128,7 +1135,7 @@ func TestHookInstallCodexPrintsStanza(t *testing.T) {
 			t.Fatalf("%s groups=%v", event, hooks[event])
 		}
 		group := groups[0].(map[string]any)
-		want := map[string]any{"hooks": []any{map[string]any{"type": "command", "command": "/opt/vecnet hook --profile p --event " + name, "timeout": float64(5), "additionalContextLimit": float64(18000)}}}
+		want := map[string]any{"hooks": []any{map[string]any{"type": "command", "command": "/opt/vecnet hook --client codex --event " + name, "timeout": float64(5), "additionalContextLimit": float64(18000)}}}
 		if event == "PostToolUse" {
 			want["matcher"] = "*"
 		}
@@ -1325,16 +1332,15 @@ func TestHookInstallCodexPreservesForeign(t *testing.T) {
 		t.Fatalf("changed %d commas, want one", commas)
 	}
 	_, errs := installRun(t, u, "--client", "codex", "--profile", "q", "--write", "--settings", path)
-	for _, want := range []string{"VECNET_PROFILE=q codex", "Session binding", "vecnet hook rebind --profile P"} {
-		if !strings.Contains(errs, want) {
-			t.Fatalf("missing %q: %q", want, errs)
-		}
+	if !strings.Contains(errs, "unchanged "+path) {
+		t.Fatalf("generic hooks changed for another profile: %s", errs)
 	}
 	for event, name := range map[string]string{"SessionStart": "session-start", "UserPromptSubmit": "user-prompt", "PostToolUse": "post-tool"} {
-		if got := settingsCommands(t, readSettings(t, path), event); !reflect.DeepEqual(got, []string{"vecnet hook --profile p --event " + name, "vecnet hook --profile q --event " + name}) {
+		if got := settingsCommands(t, readSettings(t, path), event); !reflect.DeepEqual(got, []string{"vecnet hook --client codex --event " + name}) {
 			t.Fatalf("%s commands=%v", event, got)
 		}
 	}
+
 }
 
 func TestHookInstallRejectsUnknownClient(t *testing.T) {

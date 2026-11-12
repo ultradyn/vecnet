@@ -1,0 +1,64 @@
+{
+  "checks": [
+    {
+      "check": "three independent root conversations in one checkout"
+    },
+    {
+      "check": "generic setup and recipient alias exclusion"
+    },
+    {
+      "check": "authenticated readiness and single connector"
+    },
+    {
+      "check": "parent-id-only and neighboring lifecycle hooks emit no context"
+    },
+    {
+      "check": "idle automatic wake with isolated model-context canaries",
+      "a": {
+        "thread": "01a1cd5c-e46c-7da1-a1aa-8dd9392ba6f7",
+        "turn": "01a1cd5d-3572-7c60-9ee9-d3c5c064b3b7",
+        "delivery": "dly_01M76NTCTT94SKH0VP15AF345R"
+      },
+      "b": {
+        "thread": "01a1cd5c-f28e-7ee0-92ce-1f68f4aa6056",
+        "turn": "01a1cd5d-3580-78d1-9049-ab28d008140a",
+        "delivery": "dly_01M76NTCV05R3JE8EDT5YAKK5P"
+      }
+    },
+    {
+      "check": "hold never wakes and acknowledgement remains explicit"
+    },
+    {
+      "check": "busy urgent steering and deferred wake_idle",
+      "busyTurn": "01a1cd5d-5d12-7c33-8251-d762acd961be",
+      "urgentDelivery": "dly_01M76NTYPP407RRGA5R3ZXBM9M",
+      "idleTurn": "01a1cd5d-b922-78f0-a89c-49f9470a4df8",
+      "idleDelivery": "dly_01M76NTWQYD8TCCRJET2F3C0MC"
+    },
+    {
+      "check": "connector restart preserves accepted delivery deduplication"
+    }
+  ],
+  "threads": [
+    {
+      "label": "A",
+      "id": "01a1cd5c-e46c-7da1-a1aa-8dd9392ba6f7",
+      "source": "vscode",
+      "parentThreadId": null
+    },
+    {
+      "label": "B",
+      "id": "01a1cd5c-f28e-7ee0-92ce-1f68f4aa6056",
+      "source": "vscode",
+      "parentThreadId": null
+    },
+    {
+      "label": "neighbor",
+      "id": "01a1cd5c-fd8a-7513-8735-349ec3c5d042",
+      "source": "vscode",
+      "parentThreadId": null
+    }
+  ],
+  "runtime": "0.167.0",
+  "complete": true
+}
