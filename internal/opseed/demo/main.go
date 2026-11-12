@@ -4,6 +4,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -331,6 +332,16 @@ func (p prefFlags) Set(s string) error {
 func run(ctx context.Context, args []string, stdin io.Reader, out io.Writer) error {
 	fs := flag.NewFlagSet("demo", flag.ContinueOnError)
 	listen := fs.String("listen", "127.0.0.1:0", "loopback address")
+	var publicURL string
+	fs.Func("public-url", "canonical HTTP 127.0.0.1 origin advertised by this demo", func(value string) error {
+		portText, ok := strings.CutPrefix(value, "http://127.0.0.1:")
+		publicPort, err := strconv.Atoi(portText)
+		if !ok || err != nil || publicPort < 1 || publicPort > 65535 || strconv.Itoa(publicPort) != portText {
+			return errors.New("demo public URL must be a canonical HTTP 127.0.0.1 origin with a nonzero port")
+		}
+		publicURL = value
+		return nil
+	})
 	dir := fs.String("data-dir", "", "demo data directory (default: temporary)")
 	ui := fs.String("dev-ui-dir", "", "UI asset directory")
 	scale := fs.Bool("scale", false, "include large threads")
@@ -409,6 +420,9 @@ func run(ctx context.Context, args []string, stdin io.Reader, out io.Writer) err
 	cfg := hub.DefaultConfig()
 	cfg.DataDir = *dir
 	cfg.PublicURL = url
+	if publicURL != "" {
+		cfg.PublicURL = publicURL
+	}
 	cfg.AllowPrivateEgress = true
 	if len(prefFlag) > 0 {
 		cfg.PreferenceBootstrap = map[string]prefs.Effective(prefFlag)
@@ -417,6 +431,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, out io.Writer) err
 	if err != nil {
 		return err
 	}
+	previousURL := m.URL
 	if m.OperatorSecret == "" {
 		op, sec, _, err := h.EnsureOperator(ctx, "max")
 		if err != nil {
@@ -436,14 +451,60 @@ func run(ctx context.Context, args []string, stdin io.Reader, out io.Writer) err
 		}
 		m.Peers["operator"] = peer{ID: op, Secret: sec}
 	} else {
-		old := m.URL
 		m.URL = url
-		// Port 0 changes the origin on restart. Repoint both kinds of local sinks.
-		for _, table := range []string{"event_subscriptions", "routes"} {
-			if _, err := db.ExecContext(ctx, `UPDATE `+table+` SET url=? || substr(url,?) WHERE url LIKE ?`, url, len(old)+1, old+"/__demo/sink/%"); err != nil {
+	}
+	// Keep only the known fixture receivers on the listener, never the public proxy.
+	triage, dot := m.Peers["triage"].ID, m.Peers["dot"].ID
+	callbackOrigins := []string{url, cfg.PublicURL, previousURL}
+	// Old manifests record U, not P. Seeded OAuth resources retain that original P.
+	rows, err := db.QueryContext(ctx, `SELECT DISTINCT t.resource FROM oauth_tokens t
+        JOIN event_subscriptions s ON s.token_hash=t.token_hash
+        WHERE t.client_id='demo' AND s.principal_kind='oauth'
+        AND s.peer_id=? AND s.name='vecnet.message'`, dot)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var resource string
+		if err := rows.Scan(&resource); err != nil {
+			rows.Close()
+			return err
+		}
+		origin, hasMCP := strings.CutSuffix(resource, "/mcp")
+		portText, local := strings.CutPrefix(origin, "http://127.0.0.1:")
+		publicPort, parseErr := strconv.Atoi(portText)
+		if hasMCP && local && parseErr == nil && publicPort > 0 && publicPort <= 65535 && strconv.Itoa(publicPort) == portText {
+			callbackOrigins = append(callbackOrigins, origin)
+		}
+	}
+	readErr = rows.Err()
+	closeErr := rows.Close()
+	if readErr != nil {
+		return readErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if err := db.Tx(ctx, func(tx *sql.Tx) error {
+		for _, origin := range callbackOrigins {
+			if origin == "" {
+				continue
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE routes SET url=?
+                WHERE owner_kind='peer' AND owner_id=? AND kind='http' AND verified_at IS NOT NULL AND url=?`,
+				url+"/__demo/sink/push", triage, origin+"/__demo/sink/push"); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE event_subscriptions SET url=? || sub_id
+                WHERE principal_kind='oauth' AND peer_id=? AND name='vecnet.message'
+                AND token_hash IN (SELECT token_hash FROM oauth_tokens WHERE client_id='demo')
+                AND url=? || sub_id`, url+"/__demo/sink/", dot, origin+"/__demo/sink/"); err != nil {
 				return err
 			}
 		}
+		return nil
+	}); err != nil {
+		return err
 	}
 	raw, err = json.Marshal(m)
 	if err != nil {

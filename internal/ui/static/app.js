@@ -86,16 +86,100 @@ function showLogin(msg, secret = '') {
 }
 
 function signOut(msg) {
-  if (session) session.close();
-  // close() unmounts the screen, saving its draft: erase only afterwards.
-  thread.forgetDrafts();
-  compose.forgetDrafts();
-  session = null;
-  removeLocal(SECRET_KEY);
-  showLogin(msg);
+  if (!session) {
+    thread.forgetDrafts(); compose.forgetDrafts();
+    removeLocal(SECRET_KEY); showLogin(msg); return;
+  }
+  session.loginMessage = msg;
+  requestExit(session, 'close');
+}
+
+function retireActions(actions, pending = false) {
+  let failed = false, first;
+  for (let i = 0; i < actions.length; i++) if (actions[i]) {
+    try { const done = actions[i](); if (!pending || done !== false) actions[i] = null; }
+    catch (error) { if (!failed) { failed = true; first = error; } }
+  }
+  if (failed) throw first;
+}
+function emptyUnmount() {}
+emptyUnmount.done = () => true;
+
+function retireTitle(s) {
+  s.titleOff();
+  s.titleOff = () => {}; s.titleId = ''; s.titleThread = null;
+}
+
+function mountedExit(s, view, aside, threaded) {
+  let invoking = false, awaiting = false, title = true;
+  const settled = result => {
+    if (s.unmount !== unmount) return;
+    awaiting = false;
+    if (result.failed) s.exitFailed = true; else view = null;
+    if (!invoking) finishExit(s);
+  };
+  function unmount() {
+    if (invoking || awaiting) return;
+    invoking = true;
+    let failed = false, first;
+    try {
+      for (const action of [
+        () => {
+          if (!view) return;
+          if (threaded) { awaiting = true; view(settled); }
+          else { view(); view = null; }
+        },
+        () => { if (aside) { aside(); aside = null; } },
+        () => { if (title) { retireTitle(s); title = false; } },
+      ]) {
+        try { action(); } catch (error) { if (!failed) { failed = true; first = error; } }
+      }
+    } finally { invoking = false; }
+    if (failed) throw first;
+  }
+  unmount.done = () => !view && !aside && !title;
+  return unmount;
+}
+
+function finishExit(s) {
+  if (session !== s || s.invoking || s.exitFailed || !s.intent || !s.unmount.done()) return;
+  if (s.closing) {
+    if (s.closeSteps.some(Boolean) || s.offs.some(Boolean)) return;
+    s.invoking = true;
+    try { retireActions(s.domSteps); } finally { s.invoking = false; }
+  }
+  const closing = s.closing, changed = !!s.mounted;
+  s.intent = null; s.unmount = emptyUnmount; s.mounted = '';
+  if (closing) {
+    // Unmount may save a draft. Erase only after every cleanup step succeeds.
+    thread.forgetDrafts(); compose.forgetDrafts();
+    const msg = s.loginMessage; s.loginMessage = null;
+    session = null; showLogin(msg);
+  } else renderRoute(s, changed);
+}
+
+function requestExit(s, kind) {
+  if (session !== s) return;
+  if (kind === 'close') s.closing = true;
+  s.intent = s.closing ? 'close' : 'route';
+  if (s.invoking) return;
+  s.invoking = true; s.exitFailed = false;
+  let failed = false, first;
+  try {
+    for (const action of [
+      () => { $('view').inert = true; }, () => { $('aside').inert = true; },
+      () => s.unmount(),
+      () => { if (s.closing) retireActions(s.closeSteps, true); },
+      () => { if (s.closing) retireActions(s.offs); }]) {
+      try { action(); } catch (error) { s.exitFailed = true; if (!failed) { failed = true; first = error; } }
+    }
+  } finally { s.invoking = false; }
+  if (failed) throw first;
+  finishExit(s);
 }
 
 function renderNav(s, route) {
+  if (s.closing || s.intent) return;
   const threads = (s.threads.get() || {}).threads || [];
   const head = s.inboxHead.get() || {}, count = $('inbox-count'), unread = head.unread;
   count.textContent = unread ? String(unread) : '';
@@ -107,7 +191,7 @@ function renderNav(s, route) {
     s.titleOff();
     s.titleId = id;
     s.titleThread = id ? s.store.resource('thread:' + id, () => s.ctx.api.thread(id)) : null;
-    s.titleOff = s.titleThread ? s.titleThread.subscribe(() => { if (session === s) renderNav(s, parseRoute(location.hash)); }) : () => {};
+    s.titleOff = s.titleThread ? s.titleThread.subscribe(() => { if (session === s && !s.closing && !s.intent) renderNav(s, parseRoute(location.hash)); }) : () => {};
   }
   const detail = s.titleThread && s.titleThread.get();
   const named = ((s.peers.get() || {}).peers || []).find(p => p.peer_id === route.id);
@@ -189,7 +273,10 @@ function renderOthers(s, route, mine, now) {
   });
   const rows = v.rows.map(r => threadLink(r, route, s.nameOf));
   const tail = v.more === 'show'
-    ? h('button', { type: 'button', class: 'linkbtn more', text: 'Show more', onclick: () => { s.otherLimit = nextLimit(s.otherLimit); res.reload(); } })
+    ? h('button', { type: 'button', class: 'linkbtn more', text: 'Show more', onclick: () => {
+      if (session !== s || s.closing) return;
+      s.otherLimit = nextLimit(s.otherLimit); res.reload();
+    } })
     : v.more === 'dash' ? h('a', { href: '#dash', class: 'more', text: 'All threads on the dashboard' }) : null;
   $('others').replaceChildren(...(rows.length ? rows : [h('div', { class: 'none', text: v.note })]), ...(tail ? [tail] : []));
 }
@@ -217,12 +304,15 @@ const routeKey = route => route.view + (route.id ? '/' + route.id : '');
 // So the leave guard lives here, ahead of shownHash and the unmount: a dirty
 // screen asks before any caller replaces it, and staying puts the shown hash
 // back without a new history entry, leaving the late event nothing to do.
-function renderRoute(s) {
+function renderRoute(s, changed = false) {
+  if (s.closing || s.intent) return;
   let route = parseRoute(location.hash);
   if (s.ctx && s.mounted && routeKey(route) !== s.mounted && !leaving(s)) {
     history.replaceState(null, '', s.shownHash || '#settings');
     route = parseRoute(location.hash);
   }
+  const key = routeKey(route);
+  if (s.ctx && s.mounted && key !== s.mounted) { requestExit(s, 'route'); return; }
   document.body.dataset.route = route.name;
   s.shownHash = location.hash;
   renderNav(s, route);
@@ -234,14 +324,13 @@ function renderRoute(s) {
       $('view').replaceChildren(message ? h('div', { class: 'empty error hub-down', role: 'alert' },
         h('b', { text: 'Hub unreachable' }),
         h('div', { text: message.replace(/\.?$/, '.') + ' Trying again automatically.' }),
-        h('button', { type: 'button', class: 'btn', text: 'Retry now', onclick: () => s.peers.reload() }))
+        h('button', { type: 'button', class: 'btn', text: 'Retry now', onclick: () => { if (!s.closing) s.peers.reload(); } }))
         : h('div', { class: 'loading', text: 'Connecting to the hub…' }));
     }
     return; // the directory has not named the operator yet
   }
-  const key = routeKey(route), changed = !!s.mounted && key !== s.mounted;
   if (key !== s.mounted) {
-    s.unmount();
+    $('view').inert = $('aside').inert = false;
     const entry = SCREENS[route.view], ctx = { ...s.ctx, threadId: route.view === 'thread' ? route.id : undefined, peerId: route.view === 'peer' ? route.id : undefined };
     $('view').replaceChildren();
     $('aside').replaceChildren();
@@ -253,7 +342,7 @@ function renderRoute(s) {
     // into view. A no-op when main is its own scroller. A thread with unread
     // places itself at New once its data lands, after this.
     if (changed && route.name !== 'matrix' && route.name !== 'add-agent') $('main').scrollIntoView({ block: 'start' });
-    s.unmount = () => { offView(); offAside(); s.unmount = () => {}; };
+    s.unmount = mountedExit(s, offView, offAside, route.view === 'thread');
     s.mounted = key;
   }
   if (route.name === 'matrix' && location.hash !== s.matrixHash) matrix.openMatrix(route.id, s.ctx);
@@ -268,13 +357,17 @@ function renderRoute(s) {
 }
 
 function start(secret) {
+  if (session) {
+    try { requestExit(session, 'close'); } catch { return false; }
+    if (session) return false;
+  }
   const stop = new AbortController();
   // Transfer deadlines are judged on the hub's clock (store.hubNow), so an
   // operator clock a few seconds off cannot refuse honest R2 grants.
   let hubClock = Date.now;
   const api = createApi({
     secret,
-    onUnauthorized: () => { if (session === s) signOut('The hub rejected that secret.'); },
+    onUnauthorized: () => { if (session === s && !s.closing) signOut('The hub rejected that secret.'); },
     now: () => hubClock(),
   });
   const store = createStore({ api });
@@ -283,7 +376,7 @@ function start(secret) {
   // by the sidebar and the dashboard. Activity in threads the operator is not
   // in reaches it only this way.
   const activity = createActivity({ api, signal: stop.signal });
-  const notices = createNotices({ api, store, root: $('notices'), onPhase: () => renderConn(store, activity, notices) });
+  const notices = createNotices({ api, store, root: $('notices'), onPhase: () => { if (session === s && !s.closing) renderConn(store, activity, notices); } });
   const peers = store.resource('peers', () => api.peers());
   const threads = store.resource('threads', () => api.myThreads({ limit: 200 }));
   // limit pages deliveries; the unread count and `me` do not depend on it.
@@ -303,43 +396,45 @@ function start(secret) {
   // stops naming has its object URL revoked.
   const avatars = createAvatarCache({ api, URL });
   const avatarOf = id => avatarHash(byId().get(id));
-  const pruneAvatars = () => { const d = peers.get(); if (d) avatars.prune((d.peers || []).map(avatarHash).filter(Boolean)); };
+  const pruneAvatars = () => { const d = peers.get(); if (d && !s.closing) avatars.prune((d.peers || []).map(avatarHash).filter(Boolean)); };
+  let avatarAction = avatars, avatarPhase = 'fresh';
+  function closeAvatars() {
+    if (avatarPhase === 'done') return true;
+    if (avatarPhase === 'releasing' || avatarPhase === 'pruning') return false;
+    const fresh = avatarPhase === 'fresh';
+    avatarPhase = fresh ? 'releasing' : 'pruning';
+    try { if (fresh) avatarAction.release(); else avatarAction.prune([]); }
+    catch (error) { avatarPhase = 'needs-prune'; throw error; }
+    avatarPhase = 'done'; avatarAction = null;
+    return true;
+  }
 
   const s = {
     threads, inboxHead, peers, nameOf, store, mine: null, others: null, otherLimit: OTHER_PAGE, search: null,
-    me: '', ctx: null, mounted: '', matrixHash: '', addAgentHash: '', unmount: () => {}, offs: [],
+    me: '', ctx: null, mounted: '', matrixHash: '', addAgentHash: '', unmount: emptyUnmount, offs: [],
+    closing: false, invoking: false, exitFailed: false, intent: null, loginMessage: null,
+    closeSteps: [() => stop.abort(), closeInvite, () => removeLocal(SECRET_KEY), closeAvatars,
+      () => { if (!s.mounted) retireTitle(s); }],
+    domSteps: ['view', 'aside', 'me', 'threads', 'others', 'results'].map(id => () => $(id).replaceChildren()),
     // leaveGuard: a screen with unsaved work (Settings) names what leaving loses.
     leaveGuard: null, shownHash: '', hubError: '', titleId: '', titleThread: null, titleOff: () => {},
-    close() {
-      stop.abort();
-      closeInvite(); // a shown token goes with the session
-      this.unmount();
-      this.titleOff();
-      for (const off of this.offs) if (typeof off === 'function') off();
-      avatars.release();
-      $('view').replaceChildren();
-      $('aside').replaceChildren();
-      $('me').replaceChildren();
-      $('threads').replaceChildren();
-      $('others').replaceChildren();
-      $('results').replaceChildren();
-      $('results').hidden = true;
-      $('lists').hidden = false;
-    },
+    close() { requestExit(this, 'close'); },
   };
+  s.domSteps.push(() => { $('results').hidden = true; }, () => { $('lists').hidden = false; });
+  const whenLive = fn => (...args) => { if (session === s && !s.closing) return fn(...args); };
   session = s;
   // Peer names use the shared directory (PROTOCOL §2.10); titles use §2.8.
-  s.search = createSearchBox($('search'), { api, nameOf, results: $('results'), onChange: () => { if (session === s) renderNav(s, parseRoute(s.shownHash || location.hash)); } });
+  s.search = createSearchBox($('search'), { api, nameOf, results: $('results'), onChange: whenLive(() => renderNav(s, parseRoute(s.shownHash || location.hash))) });
   s.offs.push(() => s.search.close());
 
   const ready = () => {
-    if (s.ctx) return;
+    if (s.ctx || s.closing) return;
     const op = ((peers.get() || {}).peers || []).find(p => p.kind === 'operator');
     if (!op) return;
     s.me = op.peer_id;
     s.ctx = {
       api, store, activity, me: s.me, nameOf, kindOf, avatars, avatarOf, peers, threads, inboxHead, toast, appearance,
-      nav: hash => { location.hash = hash; },
+      nav: hash => { if (!s.closing) location.hash = hash; },
       setLeaveGuard: fn => { s.leaveGuard = fn || null; },
     };
     s.offs.push(presence.renderNav($('me'), s.ctx), presence.startHeartbeat(s.ctx));
@@ -347,40 +442,41 @@ function start(secret) {
     // The activity feed keeps it live otherwise; Your Threads' own threads
     // are left to its delivery Events.
     s.others = store.resource('threads', () => api.threads({ excludeParticipant: s.me, limit: s.otherLimit }));
-    s.offs.push(s.others.subscribe(() => { if (session === s) renderRoute(s); }));
+    s.offs.push(s.others.subscribe(whenLive(() => renderRoute(s))));
     // Your Threads as ThreadRows, for their last activity; the shell's own
     // list (GET /v1/threads) carries no times and stands in until this loads.
     s.mine = store.resource('threads', () => api.threads({ participant: s.me, limit: 200 }));
-    s.offs.push(s.mine.subscribe(() => { if (session === s) renderRoute(s); }));
-    s.offs.push(activity.subscribe(ev => {
+    s.offs.push(s.mine.subscribe(whenLive(() => renderRoute(s))));
+    s.offs.push(activity.subscribe(whenLive(ev => {
       const mine = new Set(((threads.get() || {}).threads || []).map(t => t.thread_id));
       const act = activityAction(s.others.get(), ev, mine);
       if (act && act.reload) s.others.reload();
       else if (act && act.page) s.others.set(act.page);
-    }));
+    })));
   };
-  const redraw = () => { if (session === s) { ready(); renderRoute(s); } };
+  const redraw = whenLive(() => { ready(); renderRoute(s); });
 
   $('login').hidden = true;
   $('app').hidden = false;
+  $('view').inert = $('aside').inert = false;
   $('hubname').textContent = location.host;
   $('view').replaceChildren(h('div', { class: 'loading', text: 'Connecting to the hub…' }));
   renderConn(store, activity, notices);
   s.offs.push(
-    store.onConn(() => renderConn(store, activity, notices)),
-    activity.onConn(() => renderConn(store, activity, notices)),
-    store.onRestart(ms => notices.poll(ms)),
-    activity.onRestart(ms => notices.poll(ms)),
-    activity.subscribe(ev => notices.activity(ev)),
+    store.onConn(whenLive(() => renderConn(store, activity, notices))),
+    activity.onConn(whenLive(() => renderConn(store, activity, notices))),
+    store.onRestart(whenLive(ms => notices.poll(ms))),
+    activity.onRestart(whenLive(ms => notices.poll(ms))),
+    activity.subscribe(whenLive(ev => notices.activity(ev))),
     () => notices.close(),
     threads.subscribe(redraw),
     inboxHead.subscribe(redraw),
     peers.subscribe(redraw),
     peers.subscribe(pruneAvatars),
   );
-  const refresh = setInterval(() => peers.reload(), PEERS_REFRESH);
+  const refresh = setInterval(() => { if (!s.closing) peers.reload(); }, PEERS_REFRESH);
   // A tab shown again re-reads Other Threads, so its relative times are fresh.
-  const reloadOthers = () => { if (s.others && !document.hidden) s.others.reload(); };
+  const reloadOthers = () => { if (!s.closing && s.others && !document.hidden) s.others.reload(); };
   document.addEventListener('visibilitychange', reloadOthers);
   s.offs.push(() => clearInterval(refresh), () => document.removeEventListener('visibilitychange', reloadOthers));
   redraw();
@@ -389,10 +485,11 @@ function start(secret) {
   // shell can show something, and a rejected secret never reaches the loop.
   // If the hub is down, the pump's first answered poll retries all three views.
   peers.reload().then(() => {
-    if (session !== s) return;
+    if (session !== s || s.closing) return;
     store.pump(stop.signal);
     activity.start();
   });
+  return true;
 }
 
 // A typed secret is proved before the shell opens, so a wrong one stays on the
@@ -403,14 +500,15 @@ async function signIn(secret) {
   $('login-err').textContent = '';
   try {
     await createApi({ secret }).peers();
-    const saved = writeLocal(SECRET_KEY, secret);
-    start(secret);
-    if (!saved && !storageWarned) { storageWarned = true; toast('Secret not saved in this browser. Sign in again after closing this page.'); }
+    if (start(secret)) {
+      const saved = writeLocal(SECRET_KEY, secret);
+      if (!saved && !storageWarned) { storageWarned = true; toast('Secret not saved in this browser. Sign in again after closing this page.'); }
+    }
   } catch (e) {
     const msg = e.status === 401 ? 'The hub rejected that secret.'
       : e.status === 0 ? 'Could not reach the hub (' + e.message + '). Check your connection, then try again.'
       : 'The hub answered ' + e.status + ': ' + e.message + '. Try again shortly.';
-    showLogin(msg, e.status === 401 ? '' : secret);
+    if (!session) showLogin(msg, e.status === 401 ? '' : secret);
   } finally { submit.disabled = false; }
 }
 
@@ -440,11 +538,15 @@ $('side-tog').addEventListener('click', e => showThreads(e.currentTarget.getAttr
 // dashboard follows the hub's directory_updated event.
 $('nav-add').addEventListener('click', e => {
   const s = session;
-  if (s && s.ctx) openInvite(s.ctx, () => s.ctx.peers.reload(), e.currentTarget);
+  if (s && s.ctx && !s.closing) openInvite(s.ctx, () => { if (!s.closing) s.ctx.peers.reload(); }, e.currentTarget);
 });
 // A dirty Settings page asks before another route unmounts it: renderRoute
 // holds the leave guard for every caller.
-window.addEventListener('hashchange', () => { if (session) renderRoute(session); });
+window.addEventListener('hashchange', () => {
+  if (!session) return;
+  if (session.intent || session.closing) requestExit(session, session.closing ? 'close' : 'route');
+  else renderRoute(session);
+});
 // A peer named inside another link (an inbox row, a sidebar row) is a span
 // with data-peer: a plain click on it opens the peer instead of the row.
 // Modified clicks fall through to the row's own link.

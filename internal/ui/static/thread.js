@@ -112,10 +112,10 @@ export function mount(root, ctx) {
   // ticks: live approval countdowns; agos: the relative times on the right
   // of each header. The one-second tick refreshes both.
   let gone = false, ticks = [], agos = [];
-  // Reply attachments, and the thread's inline thumbnails: a settled fetch or
-  // an upload's change draws again.
+  // Upload changes redraw the thread. Thumbnail completion patches its own
+  // current controls without replacing messages or the reply composer.
   const atts = createAttachments({ api, onChange: () => render(), now: () => store.hubNow() });
-  const thumbs = createThumbs({ api, onReady: () => render() });
+  const thumbs = createThumbs({ api });
   // R2 references for the Files panel beside this thread (thread-aside.js):
   // blob id -> { att, state } from the loaded history. Messages carry the
   // recorded class, deadline and trust; the hub's projection says the rest.
@@ -166,8 +166,9 @@ export function mount(root, ctx) {
   // opened: the first full snapshot placed the view; considered: unread
   // messages already placed, so any other is a live arrival.
   let unread = [], opened = false, considered = new Set();
-  const onActive = () => { reader.activeChanged(); if (io) observe(); };
+  const onActive = () => { if (gone) return; reader.activeChanged(); if (io) observe(); };
   const onVisible = () => {
+    if (gone) return;
     onActive();
     if (document.visibilityState !== 'visible') return;
     tick(); // relative times caught up at once, not on the next second
@@ -175,8 +176,9 @@ export function mount(root, ctx) {
 
   // The observer's view is the viewport less the composer floating over its
   // bottom (nothing under it is seen); rebuilt when the composer resizes.
-  let io = null, ioQueued = false;
+  let io = null, ioQueued = false, coverFrame = null;
   function onIntersect(entries) {
+    if (gone) return;
     for (const e of entries) {
       const el = e.target;
       if (!el.isConnected || !el.id.startsWith('m-')) continue;
@@ -193,6 +195,7 @@ export function mount(root, ctx) {
     }
   }
   function observe() {
+    if (gone) return;
     if (io) io.disconnect();
     io = new IntersectionObserver(onIntersect, { threshold: STEPS, rootMargin: '0px 0px -' + Math.round(comp.offsetHeight) + 'px 0px' });
     watch();
@@ -207,9 +210,9 @@ export function mount(root, ctx) {
     }
   }
   const coverChanged = () => {
-    if (ioQueued) return;
+    if (gone || ioQueued) return;
     ioQueued = true;
-    requestAnimationFrame(() => { ioQueued = false; if (!gone) observe(); });
+    coverFrame = requestAnimationFrame(() => { coverFrame = null; ioQueued = false; if (!gone) observe(); });
   };
 
   async function send(ta, btn) {
@@ -347,12 +350,14 @@ export function mount(root, ctx) {
   // fitHint keeps the composer bar on one row: the keyboard hint may wrap to two
   // lines at its · breaks, and is dropped (bar.tight) when even that would clip it.
   // Measured, not a width breakpoint, so the byte count, fonts and zoom all count.
-  let fitQueued = false;
+  let fitQueued = false, fitFrame = null, fitObserver = null;
   function fitHint() {
-    if (fitQueued) return;
+    if (gone || fitQueued) return;
     fitQueued = true;
-    requestAnimationFrame(() => {
+    fitFrame = requestAnimationFrame(() => {
+      fitFrame = null;
       fitQueued = false;
+      if (gone) return;
       const bar = comp && comp.querySelector('.composer .bar'), hint = bar && bar.querySelector('.hint');
       if (!hint) return;
       bar.classList.remove('tight');
@@ -383,7 +388,8 @@ export function mount(root, ctx) {
       h('div', { class: 'bar' }, prio.el, h('span', { class: 'bytes', text: '0 / ' + SPILL_BYTES + ' B' }), h('span', { class: 'hint' }, h('span', { text: 'Drop or paste files' }), ' · ', h('span', { text: 'Enter to send' }), ' · ', h('span', { text: 'Shift+Enter for a new line' })), pick, btn),
       quota, quotaMore);
     atts.wire(wrap, ta, pick);
-    new ResizeObserver(fitHint).observe(wrap);
+    fitObserver = new ResizeObserver(fitHint);
+    fitObserver.observe(wrap);
     return h('div', { class: 'composer' }, h('div', { class: 'cbanner', role: 'alert', hidden: true }), wrap);
   }
 
@@ -499,7 +505,12 @@ export function mount(root, ctx) {
     const delta = prev ? deltaLabel(prev.created_at, m.created_at) : '';
     const others = (m.recipients || []).map(nameOf).join(', ');
     // Images show inline from the thumbnail cache; everything else is a chip.
-    const files = (m.attachments || []).filter(a => a !== it.spill).map(a => (a.blob_id ? r2Chip(a, blobView(a, stateOf(a.blob_id), store.hubNow())) : thumbs.render(a, hostedOf(m.message_id, a.sha256))));
+    const files = (m.attachments || []).flatMap((a, index) => {
+      const occurrence = JSON.stringify([m.message_id, index, a.sha256]);
+      if (a === it.spill) return [];
+      return [a.blob_id ? r2Chip(a, blobView(a, stateOf(a.blob_id), store.hubNow())) :
+        thumbs.render(a, hostedOf(m.message_id, a.sha256), occurrence)];
+    });
     const full = S.full.get(m.message_id), showTxt = m.content && m.content.text && !(full && full.state === 'ok');
     const cls = 'msg' + (m.message_id === S.replyTo ? ' target' : '') + (m.message_id === S.flash ? ' flash' : '');
     const el = h('div', { class: cls, id: 'm-' + m.message_id, onanimationend: e => { if (e.animationName === 'flash') { S.flash = ''; e.currentTarget.classList.remove('flash'); } } },
@@ -523,7 +534,7 @@ export function mount(root, ctx) {
         R.chipsRow(m),
         it.receipts.length ? h('div', { class: 'rc' }, it.receipts.map(r => h('span', { class: 'st-' + r.display, title: r.delivery_id + ' · ' + r.state }, h('i'), nameOf(r.recipient) + ' ' + r.display))) : null));
     el.querySelectorAll('a.plink').forEach((a, i) => { a.dataset.focus = 'peer-' + i; });
-    el.querySelectorAll('button.thumb').forEach(b => { b.dataset.focus = 'thumb-' + b.dataset.sha; });
+    el.querySelectorAll('button.thumb').forEach(b => { b.dataset.focus = 'thumb-' + b.dataset.occurrence; });
     return el;
   }
 
@@ -605,6 +616,25 @@ export function mount(root, ctx) {
 
   function render() {
     if (gone) return;
+    const focused = document.activeElement;
+    const occurrence = focused && list.contains(focused) && focused.matches('button.thumb') ? focused.dataset.occurrence : null;
+    let failed = false, first;
+    try { thumbs.beginRender(); renderContents(); }
+    catch (error) { failed = true; first = error; }
+    finally {
+      try {
+        if (occurrence) {
+          const next = [...list.querySelectorAll('button.thumb')].find(b => b.dataset.occurrence === occurrence);
+          if (next) next.focus({ preventScroll: true });
+        }
+      } catch (error) { if (!failed) { failed = true; first = error; } }
+      try { thumbs.endRender({ viewport: scroller, composer: comp }); }
+      catch (error) { if (!failed) { failed = true; first = error; } }
+    }
+    if (failed) throw first;
+  }
+
+  function renderContents() {
     const t = thread(), all = msgs(), d = detail.get();
     const dead = !history.get() && history.error() && history.error().code === 'unknown_thread';
     comp.hidden = !!dead;
@@ -665,6 +695,7 @@ export function mount(root, ctx) {
 
   // pinned: at the bottom of the column (of the page at phone width).
   function onScroll() {
+    if (gone) return;
     const el = scroller.scrollHeight > scroller.clientHeight + 1 ? scroller : document.scrollingElement;
     S.pinned = el.scrollHeight - el.scrollTop - el.clientHeight < PIN_SLACK;
   }
@@ -673,6 +704,7 @@ export function mount(root, ctx) {
   // explicit dismissal ('') survives reloads as well as renders.
   let loaded;
   const onHistory = () => {
+    if (gone) return;
     if (history.get() !== loaded) {
       loaded = history.get();
       const list = msgs();
@@ -694,27 +726,66 @@ export function mount(root, ctx) {
   window.addEventListener('blur', onActive);
   const timer = setInterval(tick, 1000);
   const off = [history.subscribe(onHistory), detail.subscribe(render), matrix.subscribe(render), ctx.threads.subscribe(render), ctx.peers.subscribe(render)];
-  return () => {
-    const ta = comp.querySelector('textarea');
-    if (!S.pending && !S.sending && ta.value.trim()) drafts.set(threadId, { text: ta.value });
-    else drafts.delete(threadId);
+  // Retain only unfinished cleanup steps; the app retries this same teardown
+  // after a published resource failed to detach or revoke.
+  const cleanup = [
+    () => {
+      const ta = comp.querySelector('textarea');
+      if (!S.pending && !S.sending && ta.value.trim()) drafts.set(threadId, { text: ta.value });
+      else drafts.delete(threadId);
+    },
+    () => clearInterval(timer), () => clearTimeout(expiryTimer),
+    () => { if (coverFrame !== null) cancelAnimationFrame(coverFrame); coverFrame = null; },
+    () => { if (fitFrame !== null) cancelAnimationFrame(fitFrame); fitFrame = null; },
+    () => refSubs.clear(),
+    () => { if (ctx.blobRefs && ctx.blobRefs.get() === refs) delete ctx.blobRefs; },
+    () => scroller.removeEventListener('scroll', onScroll),
+    () => window.removeEventListener('scroll', onScroll),
+    () => document.removeEventListener('visibilitychange', onVisible),
+    () => document.removeEventListener('close', onActive, true),
+    () => window.removeEventListener('focus', onActive),
+    () => window.removeEventListener('blur', onActive),
+    () => cover.disconnect(), () => fitObserver?.disconnect(),
+    () => io?.disconnect(), () => reader.destroy(),
+    ...off, () => atts.destroy(), () => R.destroy(),
+  ];
+  let teardown = null, teardownDepth = 0;
+  function finishTeardown() {
+    if (!teardown || teardownDepth || teardown.waiting) return;
+    const { observer, failed, error } = teardown;
+    teardown = null;
+    observer?.({ failed, error });
+  }
+  const onThumbsSettled = result => {
+    if (!teardown) return;
+    teardown.waiting = false;
+    if (result.failed && !teardown.failed) { teardown.failed = true; teardown.error = result.error; }
+    finishTeardown();
+  };
+  return onSettled => {
+    teardown ||= { observer: null, waiting: false, failed: false, error: undefined };
+    teardownDepth++;
     gone = true;
-    clearInterval(timer);
-    clearTimeout(expiryTimer);
-    refSubs.clear();
-    if (ctx.blobRefs && ctx.blobRefs.get() === refs) delete ctx.blobRefs;
-    scroller.removeEventListener('scroll', onScroll);
-    window.removeEventListener('scroll', onScroll);
-    document.removeEventListener('visibilitychange', onVisible);
-    document.removeEventListener('close', onActive, true);
-    window.removeEventListener('focus', onActive);
-    window.removeEventListener('blur', onActive);
-    cover.disconnect();
-    if (io) io.disconnect();
-    reader.destroy();
-    off.forEach(fn => fn());
-    atts.destroy();
-    thumbs.release();
-    R.destroy();
+    let failed = false, first;
+    const attempt = action => {
+      try { action(); } catch (error) {
+        if (!failed) { failed = true; first = error; }
+        if (!teardown.failed) { teardown.failed = true; teardown.error = error; }
+      }
+    };
+    attempt(() => {
+      if (onSettled === undefined) return;
+      if (typeof onSettled !== 'function' || (teardown.observer && teardown.observer !== onSettled)) throw new TypeError('Conflicting teardown observer');
+      teardown.observer = onSettled;
+    });
+    for (let i = 0; i < cleanup.length; i++) {
+      if (!cleanup[i]) continue;
+      attempt(() => { cleanup[i](); cleanup[i] = null; });
+    }
+    teardown.waiting = true;
+    attempt(() => thumbs.release(onThumbsSettled));
+    teardownDepth--;
+    try { finishTeardown(); } catch (error) { if (!failed) { failed = true; first = error; } }
+    if (failed) throw first;
   };
 }

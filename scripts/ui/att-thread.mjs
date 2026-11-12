@@ -1,8 +1,8 @@
 // Attachments Task 4: reply attachments and inline images in the thread, in a
-// real browser. A peer's PNG shows inline; its SVG, an HTML file typed as PNG
-// and a bidi-named file stay chips. The operator pastes a screenshot, the
+// real browser. A peer's PNG shows inline; a fake PNG keeps a deferred opener,
+// while SVG/text stay chips. The operator pastes a screenshot, the
 // reply is lost and retried under the same key, and opens the image full size.
-import { assert, cleanBuild, hex, png, withDemo } from './lib.mjs';
+import { assert, cleanBuild, hex, png, scrollIntoViewStable, withDemo } from './lib.mjs';
 
 // A terminal window with coloured log lines: the peer's "failing run".
 const terminal = png(480, 300, (x, y) => {
@@ -42,8 +42,9 @@ try {
     // Chromium logs every non-2xx fetch and every aborted request; these are provoked on purpose.
     allowConsole(/status of 429/);
     allowConsole(/net::ERR_FAILED/);
-    let dialogs = 0;
-    page.on('dialog', d => { dialogs++; d.dismiss().catch(() => {}); });
+    let dialogs = 0, downloads = 0;
+    page.on('dialog', async d => { dialogs++; await d.dismiss(); });
+    page.on('download', () => { downloads++; });
 
     const api = async (method, path, body, as = 'operator') => {
       const r = await asPeer(as, method, path, body);
@@ -59,7 +60,17 @@ try {
     const blobGets = sha => countRequests(req => req.method() === 'GET' && new URL(req.url()).pathname === '/v1/blobs/' + sha);
     const isUpload = url => url.pathname === '/v1/blobs';
     const msgEl = id => page.locator(`[id="m-${id}"]`);
-    const urls = () => page.evaluate(() => window.__urls);
+    const urls = () => page.evaluate(() => {
+      const s = window.__urls;
+      return { made: s.made, revoked: s.revoked, invalid: s.invalid,
+        detachViolations: s.detachViolations, live: [...s.live.values()] };
+    });
+    const demand = selector => scrollIntoViewStable(page, selector);
+    const focusOccurrence = occurrence => {
+      assert(occurrence, 'the thumbnail has no occurrence identity');
+      return page.waitForFunction(key => document.activeElement?.matches('button.thumb') &&
+        document.activeElement.dataset.occurrence === key, occurrence, { timeout: 5000 });
+    };
     const imgLoaded = loc => loc.evaluate(img => img.complete ? img.naturalWidth > 0 : new Promise(resolve => {
       img.addEventListener('load', () => resolve(img.naturalWidth > 0), { once: true });
       img.addEventListener('error', () => resolve(false), { once: true });
@@ -67,14 +78,34 @@ try {
 
     await page.locator('#threads a', { hasText: 'Ticket 18' }).waitFor();
     await page.locator('#conn.live').waitFor();
-    // Watch every object URL the page makes and revokes.
-    await page.evaluate(() => {
-      const make = URL.createObjectURL.bind(URL), drop = URL.revokeObjectURL.bind(URL);
-      window.__urls = { made: [], revoked: [] };
-      URL.createObjectURL = b => { const u = make(b); window.__urls.made.push({ url: u, type: b.type, size: b.size }); return u; };
-      URL.revokeObjectURL = u => { window.__urls.revoked.push(u); drop(u); };
-      window.__noReload = true;
+    // withDemo already loaded the app. Reload with context hooks installed
+    // before module capture; keep only scalars and live URL metadata.
+    await page.context().addInitScript(() => {
+      const make = URL.createObjectURL, drop = URL.revokeObjectURL;
+      const s = window.__urls = { made: 0, revoked: 0, live: new Map(), invalid: false, detachViolations: 0 };
+      URL.createObjectURL = function (b) {
+        const u = Reflect.apply(make, this, [b]);
+        s.made++;
+        const type = typeof b.type === 'string' ? b.type : '';
+        if (!['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(type.split(';')[0].trim().toLowerCase())) s.invalid = true;
+        if (s.live.size >= 4096 || !Number.isFinite(b.size)) s.invalid = true;
+        else s.live.set(u, { type, size: b.size });
+        return u;
+      };
+      URL.revokeObjectURL = function (u) {
+        const attached = [...document.querySelectorAll('img[src]')].some(img => img.getAttribute('src') === u);
+        const result = Reflect.apply(drop, this, [u]);
+        // A native failure must leave counts and metadata unchanged.
+        s.revoked++;
+        if (attached) s.detachViolations++;
+        s.live.delete(u);
+        return result;
+      };
     });
+    await page.reload({ waitUntil: 'load' });
+    await page.locator('#threads a', { hasText: 'Ticket 18' }).waitFor();
+    await page.locator('#conn.live').waitFor();
+    await page.evaluate(() => { window.__noReload = true; });
 
     // The peer's message: a real PNG and three hostile attachments.
     const pngUp = await upload(terminal, 'image/png');
@@ -95,19 +126,27 @@ try {
     await page.evaluate(id => { location.hash = `#thread/${id}`; }, thr);
     const peer = msgEl(peerMsg.message_id);
     await peer.locator('.txt', { hasText: peerText }).waitFor();
+    const peerSelector = `[id="m-${peerMsg.message_id}"]`;
+    const pngSelector = `${peerSelector} button.thumb[data-sha="${pngUp.sha256}"]`;
+    await demand(pngSelector);
     // The fake PNG is briefly an <img> too, until its decode error: pick the real one by hash.
     const thumb = peer.locator(`button.thumb[data-sha="${pngUp.sha256}"] img`);
     await thumb.waitFor();
     assert(await imgLoaded(thumb), 'the peer PNG did not decode inline');
     assert(await thumb.getAttribute('alt') === 'run-failure.png', 'the thumbnail alt is not the cleaned name');
-    // The SVG never fetches; the HTML typed as PNG fails to decode and falls back.
+    // The SVG never fetches; the failed raster keeps its safe deferred opener.
     await peer.locator('.att', { hasText: 'diagram.svg' }).waitFor();
-    await peer.locator('.att', { hasText: 'preview.png' }).waitFor();
-    await peer.locator(`button.thumb[data-sha="${fakeUp.sha256}"]`).waitFor({ state: 'detached' });
+    const fakeSelector = `${peerSelector} button.thumb[data-sha="${fakeUp.sha256}"]`;
+    const fake = page.locator(fakeSelector);
+    await demand(fakeSelector);
+    await fake.filter({ hasText: 'Image unavailable. Retry in viewer or use Files.' }).waitFor();
+    assert(await fake.getAttribute('aria-label') === 'Open preview.png', 'the failed raster lost its accessible opener');
+    assert(await fake.evaluate(b => b.isConnected && b.matches('.thumb.deferred') && !b.querySelector('img, [src]')), 'the failed raster kept an image/source or lost its deferred opener');
     const named = peer.locator('.att', { hasText: 'gnp.exe' });
     await named.waitFor();
-    assert(await peer.locator('button.thumb').count() === 1, 'a hostile attachment rendered as an image');
-    assert(await peer.locator('.att').count() === 3, 'the three hostile attachments are not three chips');
+    assert(await peer.locator('button.thumb').count() === 2, 'the two raster openers were not retained');
+    assert(await peer.locator('button.thumb img').count() === 1, 'the failed raster retained an image');
+    assert(await peer.locator('.att').count() === 2, 'SVG/text did not stay two chips');
     assert(blobGets(svgUp.sha256) === 0, 'the declared SVG was fetched');
     assert(blobGets(nameUp.sha256) === 0, 'a text attachment was fetched for a thumbnail');
     // Read the live node in one go: every update rebuilds the message, and a
@@ -121,22 +160,73 @@ try {
     assert(nm.bidi === 'isolate', `the attachment name is not bidi-isolated: ${nm.bidi}`);
     assert(await page.locator('iframe, object, embed, a[href^="blob:"]').count() === 0, 'an attachment became a frame, an object or a blob link');
     // Every object URL is an allowed raster type; the fake PNG's URL is revoked on its decode error.
-    await page.waitForFunction(n => window.__urls.revoked.length >= n, 1);
+    await page.waitForFunction(() => window.__urls.revoked >= 1);
     let u = await urls();
-    assert(u.made.every(m => ALLOWED.includes(m.type.split(';')[0].trim().toLowerCase())), `an object URL of a hostile type: ${u.made.map(m => m.type)}`);
-    assert(u.made.length === 2 && u.revoked.length === 1, `made ${u.made.length} object URLs and revoked ${u.revoked.length}`);
+    assert(!u.invalid && !u.detachViolations && u.live.every(m => ALLOWED.includes(m.type.split(';')[0].trim().toLowerCase())), 'unsafe URL type, overflow or revoke before source detachment');
+    assert(u.made === 2 && u.revoked === 1 && u.live.length === 1, `initial URL accounting: ${JSON.stringify(u)}`);
+    assert(!u.live.some(m => m.size === fakeUp.size), 'the failed raster kept a live URL');
     assert(dialogs === 0, 'an attachment ran script');
+    assert(downloads === 0, 'a hostile attachment downloaded automatically');
+    assert(blobGets(pngUp.sha256) === 1, 'initial demand fetched the real PNG more than once');
     await shot('att04-thread-initial');
 
+    // Open may make another finite attempt. Observe its actual decode failure,
+    // then one explicit Retry; no timer substitutes for a terminal state.
+    const fakeOccurrence = await fake.getAttribute('data-occurrence');
+    const hostileViewer = page.getByRole('dialog', { name: 'preview.png', exact: true });
+    const hostileError = async () => {
+      await hostileViewer.getByRole('status').filter({ hasText: 'Image unavailable. Retry in viewer or use Files.' }).waitFor();
+      assert(await hostileViewer.locator('img, [src]').count() === 0, 'the hostile viewer retained an image/source');
+      for (const name of ['Retry', 'Files', 'Cancel', 'Close']) await hostileViewer.getByRole('button', { name, exact: true }).waitFor();
+      const state = await urls();
+      assert(!state.invalid && !state.detachViolations && !state.live.some(m => m.size === fakeUp.size), 'the hostile viewer leaked a URL or revoked an attached source');
+    };
+    await fake.click();
+    await hostileError();
+    const beforeRetry = { gets: blobGets(fakeUp.sha256), urls: await urls() };
+    const [retried] = await Promise.all([
+      page.waitForResponse(r => r.request().method() === 'GET' && new URL(r.url()).pathname === '/v1/blobs/' + fakeUp.sha256),
+      hostileViewer.getByRole('button', { name: 'Retry', exact: true }).click(),
+    ]);
+    assert(retried.ok() && await retried.finished() === null, 'the explicit Retry did not complete its native request');
+    await page.waitForFunction(({ made, revoked, size }) => window.__urls.made > made &&
+      window.__urls.revoked > revoked && ![...window.__urls.live.values()].some(m => m.size === size),
+    { made: beforeRetry.urls.made, revoked: beforeRetry.urls.revoked, size: fakeUp.size });
+    await hostileError();
+    assert(blobGets(fakeUp.sha256) === beforeRetry.gets + 1, 'Retry did not make exactly one finite request');
+    await hostileViewer.getByRole('button', { name: 'Files', exact: true }).click();
+    await hostileViewer.waitFor({ state: 'detached' });
+    await page.waitForFunction(() => {
+      const f = document.querySelector('#aside .files');
+      return f && f.getBoundingClientRect().height > 0 && document.activeElement === f;
+    });
+    assert(blobGets(fakeUp.sha256) === beforeRetry.gets + 1, 'the failed viewer retried automatically');
+    await demand(fakeSelector);
+    await fake.click();
+    await hostileError();
+    const afterReopen = blobGets(fakeUp.sha256);
+    await hostileViewer.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await hostileViewer.waitFor({ state: 'detached' });
+    await focusOccurrence(fakeOccurrence);
+    assert(blobGets(fakeUp.sha256) === afterReopen, 'Cancel started another hostile request');
+    assert(dialogs === 0 && downloads === 0, 'the hostile viewer ran script or downloaded automatically');
+    assert(await page.locator('iframe, object, embed, a[href^="blob:"]').count() === 0, 'the hostile viewer embedded the body');
+
+    // Explicit viewer attempts change totals. Re-demand the real raster and
+    // snapshot only after that subcase, before testing redraw/cache reuse.
+    await demand(pngSelector);
+    await thumb.waitFor();
+    assert(await imgLoaded(thumb), 'the real PNG did not survive the hostile viewer');
+    const redrawURLs = (await urls()).made;
     // Redraws read the cache: a new message does not fetch again or leak URLs.
     const pngGets = blobGets(pngUp.sha256);
-    assert(pngGets === 1, `the PNG was fetched ${pngGets} times`);
+    assert(pngGets >= 1, 'the real PNG was never fetched');
     const nudge = 'Rerunning with the fix now.';
     await api('POST', '/v1/messages', { idempotency_key: 'att-thread-nudge', thread_id: thr, priority: 'hold', content: { text: nudge } }, 'codex');
     await page.locator('.msg .txt', { hasText: nudge }).waitFor();
     await thumb.waitFor();
-    assert(blobGets(pngUp.sha256) === 1, 'a redraw fetched the thumbnail again');
-    assert((await urls()).made.length === 2, 'a redraw made a new object URL');
+    assert(blobGets(pngUp.sha256) === pngGets, 'a redraw fetched the thumbnail again');
+    assert((await urls()).made === redrawURLs, 'a redraw made a new object URL');
 
     // A near miss: a file dropped just outside the composer neither navigates nor loses the draft.
     const ta = page.locator('.composer textarea');
@@ -161,11 +251,12 @@ try {
     await page.evaluate(() => { location.hash = '#inbox'; });
     await page.locator('.composer').waitFor({ state: 'detached' });
     u = await urls();
-    assert(u.made.every(m => u.revoked.includes(m.url)), 'leaving the thread left an object URL alive');
+    assert(u.live.length === 0 && !u.invalid && !u.detachViolations, 'leaving the thread leaked URLs or revoked attached sources');
     await page.evaluate(id => { location.hash = `#thread/${id}`; }, thr);
+    await demand(pngSelector);
     await thumb.waitFor();
     assert(await imgLoaded(thumb), 'the thumbnail did not come back');
-    assert(blobGets(pngUp.sha256) === 2, 'returning to the thread did not fetch the thumbnail again');
+    assert(blobGets(pngUp.sha256) === pngGets + 1, 'returning to the thread did not fetch the thumbnail again');
 
     // Paste a screenshot into the reply; the upload is held to show progress.
     const reply = 'Here is what I see on my side.';
@@ -215,8 +306,10 @@ try {
 
     // The operator's screenshot shows inline and opens full size.
     const ownThumb = msgEl(mine[0].message_id).locator('button.thumb');
+    await demand(`[id="m-${mine[0].message_id}"] button.thumb`);
     await ownThumb.locator('img').waitFor();
     assert(await imgLoaded(ownThumb.locator('img')), 'the pasted screenshot did not decode inline');
+    const ownOccurrence = await ownThumb.getAttribute('data-occurrence');
     await ownThumb.click();
     const viewer = page.locator('dialog.viewer[open]');
     await viewer.waitFor();
@@ -228,13 +321,17 @@ try {
     // Focus returns in the dialog's close event, a task after [open] goes; a
     // redraw meanwhile (a read receipt reloads the thread) replaces the
     // thumbnail, and the handler then focuses its replacement.
-    await page.waitForFunction(sha => document.activeElement && document.activeElement.matches(`button.thumb[data-sha="${sha}"]`), sentAtt.sha256, { timeout: 5000 }).catch(() => {});
-    const focusInfo = await page.evaluate(sha => { const a = document.activeElement; return { ok: !!a && a.matches(`button.thumb[data-sha="${sha}"]`), tag: a && a.tagName, cls: a && a.className, n: document.querySelectorAll('button.thumb').length }; }, sentAtt.sha256);
-    assert(focusInfo.ok, 'focus did not return to the thumbnail: ' + JSON.stringify(focusInfo));
+    await focusOccurrence(ownOccurrence);
     await ownThumb.click();
     await viewer.waitFor();
     await page.mouse.click(8, 450);
     await viewer.waitFor({ state: 'detached' });
+    await focusOccurrence(ownOccurrence);
+    await ownThumb.click();
+    await viewer.waitFor();
+    await viewer.getByRole('button', { name: 'Close', exact: true }).click();
+    await viewer.waitFor({ state: 'detached' });
+    await focusOccurrence(ownOccurrence);
 
     // Pin local browser time so the 90-minute retry always crosses midnight.
     // setFixedTime leaves timers running for page updates and locators.
@@ -274,6 +371,7 @@ try {
     }, 'codex');
     const originEl = msgEl(originMsg.message_id);
     await originEl.locator('.txt', { hasText: originText }).waitFor();
+    await demand(`[id="m-${originMsg.message_id}"] button.thumb[data-sha="${originUp.sha256}"]`);
     const originThumb = originEl.locator(`button.thumb[data-sha="${originUp.sha256}"] img`);
     await originThumb.waitFor();
     assert(await imgLoaded(originThumb), 'hosted bytes with an origin_url did not show inline');
@@ -295,9 +393,11 @@ try {
     const sendGate = new Promise(resolve => { releaseSend = resolve; });
     const holdSend = async route => { heldPosts.push(route.request().postDataJSON()); await sendGate; await route.continue(); };
     await page.route('**/v1/messages', holdSend);
-    await page.locator('.composer .send').click();
+    await Promise.all([
+      page.waitForRequest(req => req.method() === 'POST' && new URL(req.url()).pathname === '/v1/messages'),
+      page.locator('.composer .send').click(),
+    ]);
     await page.waitForFunction(() => document.querySelector('.composer .send').disabled);
-    while (!heldPosts.length) await new Promise(r => setTimeout(r, 20));
     {
       const [ch] = await Promise.all([page.waitForEvent('filechooser'), page.locator('.composer .attach').click()]);
       await ch.setFiles({ name: 'picked-later.log', mimeType: 'text/plain', buffer: Buffer.from('picked while sending\n') });
@@ -353,7 +453,15 @@ try {
     assert(renamePosts[0].attachments[0].sha256 === renamePosts[1].attachments[0].sha256, 'the two names did not carry the same bytes');
     assert(renamePosts[1].idempotency_key !== renamePosts[0].idempotency_key, 'the same bytes under a new name kept the key');
     assert(renameReplies.join() === '202,202', `the hub answered ${renameReplies}, not two new messages`);
+    await dt.dispose();
     assert(dialogs === 0, 'an attachment ran script');
+    assert(downloads === 0, 'an attachment downloaded without an explicit original-download action');
+    assert(blobGets(svgUp.sha256) === 0 && blobGets(nameUp.sha256) === 0 && blobGets(REF_ONLY) === 0, 'an ineligible attachment was fetched');
+    assert(await page.locator('iframe, object, embed, a[href^="blob:"]').count() === 0, 'an attachment became embedded content');
+    await page.evaluate(() => { location.hash = '#inbox'; });
+    await page.locator('.composer').waitFor({ state: 'detached' });
+    u = await urls();
+    assert(u.live.length === 0 && !u.invalid && !u.detachViolations, 'final route exit leaked URLs or revoked attached sources');
   });
-  console.log('Attachments thread passed: inline PNG, hostile SVG/fake PNG/bidi name as chips, no refetch on redraw, URLs revoked on leave, near-miss drop, pasted reply sent once under one key, viewer, quota error, hosted+origin_url inline and reference-only chip, files added during a held reply kept, same bytes renamed mint a new key');
+  console.log('Attachments thread passed: inline PNG, hostile PNG deferred error/Retry/Files/Cancel, SVG/text chips, exact occurrence focus, no refetch on redraw, URLs revoked on leave, near-miss drop, pasted reply sent once under one key, viewer, quota error, hosted+origin_url inline and reference-only chip, files added during a held reply kept, same bytes renamed mint a new key');
 } finally { await cleanBuild(); }

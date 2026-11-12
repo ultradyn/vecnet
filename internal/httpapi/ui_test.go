@@ -45,8 +45,12 @@ import (
 // the parent at 657,219 bytes (smallest 16 KiB step above it: 656 KiB);
 // to 672 KiB on 2026-11-10 for the UI review's phone layout, draft keeping,
 // light theme and feedback fixes, measured at 667,480 bytes before them with
-// 4,264 bytes of headroom left (one 16 KiB step).
-const uiMaxBytes = 672 << 10
+// 4,264 bytes of headroom left (one 16 KiB step); to 736 KiB on 2026-11-12
+// for the reviewed thumbnail memory slice integrated with the current UI,
+// measured from filesystem stats at 749,561 bytes across all 76 static files
+// (ceil(749561 / 16384) * 16384 = 753664 bytes, the smallest 16 KiB step;
+// 720 KiB is 12,281 bytes too small, 736 KiB leaves 4,103 bytes).
+const uiMaxBytes = 736 << 10
 
 var (
 	scriptTag   = regexp.MustCompile(`(?is)<script\b([^>]*)>(.*?)</script>`)
