@@ -42,7 +42,7 @@ test('socketPathFor and verifySocket accept the fake layout', { timeout: 5000 },
   const relative = join(dirname(fake.socketPath), 'relative.sock');
   await symlink('../../d/' + (await readlink(fake.socketPath)).split('/').at(-1), relative);
   assert.deepEqual(verifySocket(relative, euid), { ok: true, target: await readlink(fake.socketPath) });
-  assert.deepEqual(CODEX_APPSERVER_VERSIONS, ['0.166.0', '0.167.0']);
+  assert.deepEqual(CODEX_APPSERVER_VERSIONS, ['0.166.0', '0.167.0', '0.167.2']);
   assert.equal(parseServerVersion('codex-tui/0.166.0 (fake)'), '0.166.0');
   for (const bad of ['', '0.166.0', ' codex/0.166.0', 'codex/0.166', 'codex tui/0.166.0']) assert.equal(parseServerVersion(bad), null);
 });
@@ -81,11 +81,13 @@ test('connects with path / only', { timeout: 5000 }, async t => {
   assert.equal(initialize.capabilities.experimentalApi, true);
 });
 
-test('connects to re-verified 0.167.0', { timeout: 5000 }, async t => {
-  const { open } = await setup(t, '0.167.0'), rpc = await open();
-  assert.equal(rpc.version, '0.167.0');
-  assert.equal((await read(rpc)).thread.id, 't');
-});
+for (const version of ['0.167.0', '0.167.2']) {
+  test(`connects to re-verified ${version}`, { timeout: 5000 }, async t => {
+    const { open } = await setup(t, version), rpc = await open();
+    assert.equal(rpc.version, version);
+    assert.equal((await read(rpc)).thread.id, 't');
+  });
+}
 
 test('unknown version is refused', { timeout: 5000 }, async t => {
   const { fake, open, log } = await setup(t, '0.168.0');

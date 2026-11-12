@@ -14,6 +14,9 @@ import (
 // next hook run from any session takes the binding; from Bash that is the
 // same session's PostToolUse right after this command.
 func (a *app) cmdHookRebind(args []string) error {
+	if isCodexEnvironment(a.getenv) {
+		return usageErr("Codex does not use next-hook rebind; use vecnet codex bind with an exact thread and --expect-generation for an ownership handoff")
+	}
 	o, err := parseFlags("hook rebind", args, map[string]flagKind{"profile": strFlag})
 	if err != nil {
 		return err
@@ -43,6 +46,15 @@ func (a *app) cmdHookRebind(args []string) error {
 	if v := strings.TrimSpace(a.getenv("VECNET_PROFILE")); v != "" && v != name {
 		return usageErr(fmt.Sprintf("hook rebind: this session has VECNET_PROFILE=%s, so its hook ignores profile %s; binding %s here would silence it in every session", inert(v, 64), inert(name, 64), inert(name, 64)))
 	}
+	c, _, _, err := a.connect()
+	if err != nil {
+		return err
+	}
+	unlock, err := a.lockLegacyHookRecipient(c)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	sp, err := statePath(a.getenv, name, a.as)
 	if err != nil {
 		return err

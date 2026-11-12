@@ -248,8 +248,6 @@ func hookOutput(event, context string) []byte {
 
 type hookResult struct {
 	diagnostics []byte
-	client      *client
-	ackCursor   string
 }
 
 func (a *app) cmdHook(args []string) (err error) {
@@ -298,18 +296,6 @@ func (a *app) cmdHook(args []string) (err error) {
 		return nil
 	case result = <-done:
 	}
-	if result.ackCursor != "" && ctx.Err() == nil {
-		acked := make(chan struct{})
-		go func() {
-			defer close(acked)
-			defer func() { _ = recover() }()
-			_ = a.ack(result.client, result.ackCursor)
-		}()
-		select {
-		case <-ctx.Done():
-		case <-acked:
-		}
-	}
 	if len(result.diagnostics) > 0 {
 		_ = hookWrite(ctx, stderr, result.diagnostics)
 	}
@@ -356,7 +342,7 @@ func hookWrite(ctx context.Context, w io.Writer, data []byte) error {
 // the encoded output in bytes as well as the context in UTF-16 units.
 func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(), publish func([]byte) error, limit int) hookResult {
 	ctx := a.ctx
-	o, e := parseFlags("hook", args, map[string]flagKind{"event": strFlag, "profile": strFlag, "auto-ack": boolFlag, "mcp": strFlag, "release": boolFlag, "claim": strFlag, "priorities": strFlag, "expect-hub": strFlag, "expect-caller": strFlag})
+	o, e := parseFlags("hook", args, map[string]flagKind{"event": strFlag, "profile": strFlag, "auto-ack": boolFlag, "mcp": strFlag, "release": boolFlag, "claim": strFlag, "priorities": strFlag, "expect-hub": strFlag, "expect-caller": strFlag, "client": strFlag, "thread": strFlag, "codex-home": strFlag, "expect-generation": strFlag})
 	if e != nil || len(o.pos) != 0 {
 		return hookResult{}
 	}
@@ -370,6 +356,15 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 	}
 	if o.has("release") || o.str("event") == "app-server" {
 		return a.hookAppServer(o, afterPoll, publish, limit)
+	}
+	// Codex lifecycle input shares the root session ID with children. No
+	// lifecycle event proves where additionalContext will be consumed. Keep
+	// these hooks signal-only; delivery goes to an explicitly bound RPC thread.
+	if o.str("client") == "codex" || isCodexEnvironment(a.getenv) {
+		return hookResult{}
+	}
+	if o.has("client") && o.str("client") != "claude" {
+		return hookResult{}
 	}
 	event := o.str("event")
 	// Claude Code sends JSON on stdin even when --event names the event; its
@@ -434,6 +429,12 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 	if v := strings.TrimSpace(a.getenv("VECNET_PROFILE")); v != "" && v != name {
 		return hookResult{}
 	}
+	unlock, e := a.lockLegacyHookRecipient(c)
+	if e != nil {
+		fmt.Fprintln(a.stderr, "vecnet: hook: automatic delivery refused; check codex status")
+		return hookResult{}
+	}
+	defer unlock()
 	// --mcp names the registered relay only when it is exactly this
 	// profile's server; anything else falls back to the CLI-only hints.
 	mcp := ""
@@ -663,11 +664,12 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 	if e != nil {
 		return hookResult{}
 	}
-	result := hookResult{client: c}
 	if o.has("auto-ack") {
-		result.ackCursor = processed
+		if processed != "" && ctx.Err() == nil {
+			_ = a.ack(c, processed)
+		}
 	}
-	return result
+	return hookResult{}
 }
 
 var errHookRateLimited = errors.New("hook poll rate limited")

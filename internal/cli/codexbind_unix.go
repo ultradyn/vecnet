@@ -36,5 +36,9 @@ func readCodexBindings(path string) ([]byte, error) {
 	case info.Mode().Perm()&0o022 != 0:
 		return nil, unsafeCodexBindings(path, "group or world writable")
 	}
-	return io.ReadAll(f)
+	raw, err := io.ReadAll(io.LimitReader(f, (1<<20)+1))
+	if len(raw) > 1<<20 {
+		return nil, unsafeCodexBindings(path, "exceeds 1 MiB")
+	}
+	return raw, err
 }

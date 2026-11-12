@@ -2,12 +2,14 @@ import { test } from 'node:test';
 import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
-import { CODEX_RELOAD_MS, startCodexConnector } from '../src/codex/connector.ts';
+import { CODEX_RELOAD_MS, codexBindingsPath, startCodexConnector } from '../src/codex/connector.ts';
+import type { CodexRpc } from '../src/codex/rpc.ts';
+import { openCodexRpc } from '../src/codex/rpc.ts';
 import { startFakeCodexAppServer } from './fake-codex-appserver.ts';
 import { fakeClock, memoryLog } from '../../hub-client/testing/fixtures.ts';
 import type { KeyValue } from '../src/backend.ts';
@@ -28,7 +30,7 @@ async function eventually(fn: () => boolean, what: string, ms = 8000) {
   }
 }
 
-async function setup(t: TestContext, o: { threads?: { id: string; status?: unknown; approvalPolicy?: string }[]; maxBindings?: string; startAt?: number; unsubscribeDelayMs?: number } = {}) {
+async function setup(t: TestContext, o: { threads?: { id: string; status?: unknown; approvalPolicy?: string }[]; maxBindings?: string; startAt?: number; unsubscribeDelayMs?: number; source?: string; blockHooks?: boolean } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'vn-cc-'));
   const fake = await startFakeCodexAppServer({ dir: join(dir, 'fake'), unsubscribeDelayMs: o.unsubscribeDelayMs });
   const home = join(dir, 'fake', 'home');
@@ -39,25 +41,32 @@ async function setup(t: TestContext, o: { threads?: { id: string; status?: unkno
   const bin = join(dir, 'bin'), trace = join(dir, 'trace.log'), trap = join(dir, 'codex-spawned');
   mkdirSync(bin, { mode: 0o700 });
   writeFileSync(trace, '');
+  const configTrace = join(dir, 'config-trace.log'); writeFileSync(configTrace, '');
   // A shell stand-in for the Go CLI: watch idles until killed; hooks claim nothing.
   writeFileSync(join(bin, 'vecnet'), `#!/bin/sh
 printf '%s\\n' "$*" >> '${trace}'
+printf '%s\\n' "$VECNET_CONFIG" >> '${configTrace}'
 case " $* " in
+  *" codex verify "*) echo '{"verified":true}'; exit 0 ;;
+  *" codex guard "*) echo '{"ready":true}'; read outcome; exit 0 ;;
   *" watch "*) exec sleep 3600 ;;
-  *" --release "*) echo '{"version":1,"released":true}' ;;
-  *" hook "*) echo '{"version":1,"deliveries":[]}' ;;
+  *" --release "*) echo '{"version":1,"released":0}' ;;
+  *" hook "*) ${o.blockHooks ? 'exec sleep 3600' : `echo '{"version":1,"deliveries":[]}'`} ;;
   *) exit 2 ;;
 esac
 `, { mode: 0o700 });
   writeFileSync(join(bin, 'codex'), `#!/bin/sh\necho forbidden > '${trap}'\nexit 99\n`, { mode: 0o700 });
   for (const p of ['home', 'config', 'cache', 'runtime', 'codex-home-unused', 'bindings']) mkdirSync(join(dir, p), { mode: 0o700 });
-  const bindingsPath = join(dir, 'bindings', 'bindings.json');
+  const bindingsDir = join(dir, 'home', '.local', 'state', 'vecnet', 'codex');
+  mkdirSync(bindingsDir, { recursive: true, mode: 0o700 });
+  const bindingsPath = join(bindingsDir, 'bindings.json');
   const env: NodeJS.ProcessEnv = {
     HOME: join(dir, 'home'), PATH: `${bin}:/usr/bin:/bin`, VECNET_CONFIG: join(dir, 'config', 'config.toml'),
     XDG_CONFIG_HOME: join(dir, 'config'), XDG_CACHE_HOME: join(dir, 'cache'), XDG_RUNTIME_DIR: join(dir, 'runtime'),
     CODEX_HOME: join(dir, 'codex-home-unused'), VECNET_CODEX_BINDINGS: bindingsPath, VECNET_BIN: join(bin, 'vecnet'),
     ...(o.maxBindings ? { VECNET_CODEX_MAX_BINDINGS: o.maxBindings } : {}),
   };
+  writeFileSync(env.VECNET_CONFIG!, '', { mode: 0o600 });
   const map = new Map<string, string>();
   const kv: KeyValue = { get: k => map.get(k), set: (k, v) => { map.set(k, v); }, delete: k => { map.delete(k); }, keys: (p = '') => [...map.keys()].filter(k => k.startsWith(p)) };
   const clock = fakeClock(o.startAt ?? T), log = memoryLog();
@@ -77,6 +86,7 @@ esac
   const connectors: Connector[] = [];
   let live = 0;
   const binding = (id: string, i: number, extra: FileBinding = {}): FileBinding => ({
+    config_path: env.VECNET_CONFIG, generation: i.toString(16).padStart(32, '0'),
     profile: `p${i}`, as: '', hub: 'https://hub.invalid', caller: `peer_${i}`, codex_home: home, thread_id: id,
     created_at: new Date(T + i * 1000).toISOString(), expires_at: new Date(T + 24 * hour).toISOString(), ...extra,
   });
@@ -84,8 +94,15 @@ esac
     writeFileSync(bindingsPath, JSON.stringify({ version: 1, bindings: list }, null, 2), { mode });
     chmodSync(bindingsPath, mode);
   };
-  const start = () => {
-    const c = startCodexConnector({ kv, clock, log, env }), stop = c.stop;
+  const start = (extraEnv: NodeJS.ProcessEnv = {}) => {
+    const c = startCodexConnector({ kv, clock, log, env: { ...env, ...extraEnv }, openRpc: async options => {
+      const rpc = await openCodexRpc(options);
+      return { ...rpc, async call<T>(method: Parameters<CodexRpc['call']>[0], params: unknown, timeout: number): Promise<T> {
+        const response = await rpc.call<any>(method, params, timeout);
+        if (method === 'thread/read') response.thread.source = o.source ?? 'cli';
+        return response;
+      } };
+    } }), stop = c.stop;
     let stopped = false;
     c.stop = () => { if (!stopped) { stopped = true; live--; } return stop(); };
     live++; connectors.push(c); return c;
@@ -116,7 +133,7 @@ esac
     assert.deepEqual(fake.replies, []);
     rmSync(dir, { recursive: true, force: true });
   });
-  return { dir, fake, home, env, kv, clock, log, bindingsPath, binding, writeBindings, start, resumed, unsubscribed, subscribed, logged, reload, ready, trace };
+  return { dir, fake, home, env, kv, clock, log, bindingsPath, binding, writeBindings, start, resumed, unsubscribed, subscribed, logged, reload, ready, trace, configTrace };
 }
 
 test('connector starts one engine per binding and stops removed ones', async t => {
@@ -168,8 +185,27 @@ test('reload waits for a slow engine shutdown before the next reload', async t =
   await s.reload();
   s.writeBindings([s.binding(a, 1), s.binding(c, 9)]);
   await s.reload();
-  await eventually(() => s.subscribed(c) && connOf(c) !== cc, 're-bound thread subscribed by a new engine');
+  try { await eventually(() => s.subscribed(c) && connOf(c) !== cc, 're-bound thread subscribed by a new engine'); }
+  catch (error) { t.diagnostic(JSON.stringify({ log: s.log.entries, trace: readFileSync(s.trace, 'utf8') })); throw error; }
   assert.equal(s.fake.requests.filter(r => r.method === 'initialize').length, 4);
+});
+
+test('reload releases an interrupted claim before replacing its owner', async t => {
+  const id = uuid(8);
+  const s = await setup(t, { threads: [{ id }], blockHooks: true });
+  s.writeBindings([s.binding(id, 1)]);
+  s.start();
+  await eventually(() => s.subscribed(id) && / watch --json\n/.test(readFileSync(s.trace, 'utf8')), 'verified engine started');
+  const previous = s.fake.subscribers(id)[0];
+  s.clock.advance(2500);
+  await eventually(() => readFileSync(s.trace, 'utf8').includes('--event app-server'), 'hook blocked with a durable claim intent');
+  assert.equal(s.kv.keys('claiming:').length, 1);
+  s.writeBindings([s.binding(id, 2)]);
+  await s.reload();
+  assert.deepEqual(s.kv.keys('claiming:'), [], 'shutdown released the interrupted claim');
+  await eventually(() => s.subscribed(id) && s.fake.subscribers(id)[0] !== previous, 'replacement owner subscribed');
+  assert.deepEqual(s.logged('codex_claim_release_failed'), []);
+  assert.deepEqual(s.logged('codex_recovery_quarantined'), []);
 });
 
 test('limit groups symlinked codex homes together', async t => {
@@ -231,13 +267,14 @@ test('daemon start and stop drive the connector', async t => {
   await eventually(() => quiet.log.entries.some(e => e.msg === 'codex_connector_disabled'), 'connector disabled at daemon start');
   assert.deepEqual(s.fake.requests, []);
   await quiet.daemon.stop();
-  // With a binding, the daemon's connector subscribes; stop() unsubscribes it.
-  s.writeBindings([s.binding(id, 1, { expires_at: new Date(Date.parse('2026-11-05T00:00:00.000Z') + 24 * hour).toISOString() })]);
+  // With a binding the daemon inspects the exact thread. This raw fake lacks
+  // root source metadata, so it must remain inactive until stop().
+  s.writeBindings([s.binding(id, 1, { created_at: '2026-11-04T00:00:00.000Z', expires_at: '2026-11-06T00:00:00.000Z' })]);
   const h = await harness(t, { env: s.env });
-  await eventually(() => s.subscribed(id), 'daemon connector subscribed the bound thread');
+  await eventually(() => s.fake.requests.some(r => r.method === 'thread/read'), 'daemon connector inspects bound thread');
   await h.daemon.stop();
   assert.equal(s.subscribed(id), false);
-  assert.ok(s.unsubscribed(id), 'daemon stop sends thread/unsubscribe');
+  assert.equal(s.resumed(id), false, 'a host without verified root source stays inactive');
   const n = s.fake.requests.length;
   await delay(100);
   assert.equal(s.fake.requests.length, n, 'nothing is sent after the daemon stops');
@@ -245,44 +282,22 @@ test('daemon start and stop drive the connector', async t => {
   assert.deepEqual(h.inspect(l => l.kv('codex').keys('inflight:')), []);
 });
 
-test('launcher bindings live until expiresAt and are never written to the file', async t => {
-  const [explicit, launched, removed, unloaded] = [uuid(40), uuid(41), uuid(42), uuid(43)];
-  const s = await setup(t, { threads: [{ id: explicit }, { id: launched, approvalPolicy: 'on-request' }, { id: removed }, { id: unloaded, status: { type: 'notLoaded' } }] });
+test('memory-only launcher registration cannot authorize a thread or bypass recipient ownership', async t => {
+  const [explicit, job] = [uuid(40), uuid(41)];
+  const s = await setup(t, { threads: [{ id: explicit }, { id: job }] });
   s.writeBindings([s.binding(explicit, 1)]);
-  const before = readFileSync(s.bindingsPath), listing = readdirSync(join(s.dir, 'bindings')).sort();
+  const before = readFileSync(s.bindingsPath);
   const c = s.start();
-  await eventually(() => s.subscribed(explicit), 'explicit binding subscribed');
+  await s.ready();
   let ensured = 0;
-  const lb = (threadId: string, ms: number) => ({ profile: 'job', hub: 'https://hub.invalid', caller: 'peer_job', codexHome: s.home, threadId,
-    createdAt: s.clock.now(), expiresAt: s.clock.now() + ms, attended: false, ensureLoaded: async () => { ensured++; return false; } });
-  c.addLauncherBinding(lb(launched, hour));
-  c.addLauncherBinding(lb(removed, hour));
-  c.addLauncherBinding(lb(unloaded, hour));
-  // Launcher bindings are attended: an asking policy keeps the subscription.
-  await eventually(() => s.subscribed(launched) && s.subscribed(removed), 'launcher bindings subscribed');
-  // A notLoaded launcher thread is the launcher's to load, never the connector's.
-  await eventually(() => ensured === 1, 'ensureLoaded called for the notLoaded launcher thread');
-  assert.equal(s.resumed(unloaded), false);
-  // Reloads of the file never drop or write launcher bindings.
-  await s.reload(); await s.reload();
-  assert.ok(s.subscribed(launched) && s.subscribed(removed));
+  c.addLauncherBinding({ configPath: s.env.VECNET_CONFIG, generation: 'a'.repeat(32),
+    profile: 'alias', hub: 'https://HUB.invalid:443/', caller: 'peer_1', codexHome: s.home, threadId: job,
+    createdAt: T, expiresAt: T + hour, attended: false, ensureLoaded: async () => { ensured++; return true; } });
+  await s.reload();
+  assert.equal(s.resumed(job), false);
+  assert.equal(ensured, 0);
   assert.deepEqual(readFileSync(s.bindingsPath), before);
-  assert.deepEqual(readdirSync(join(s.dir, 'bindings')).sort(), listing);
-  c.removeLauncherBinding(removed);
-  await eventually(() => !s.subscribed(removed) && s.unsubscribed(removed), 'removed launcher binding unsubscribed');
-  assert.ok(s.subscribed(launched));
-  // At expiresAt the launcher binding stops; the explicit one is untouched.
-  s.clock.advance(hour);
-  await eventually(() => !s.subscribed(launched) && s.unsubscribed(launched), 'expired launcher binding unsubscribed');
-  assert.ok(s.subscribed(explicit));
-  assert.deepEqual(readFileSync(s.bindingsPath), before);
-  assert.deepEqual(readdirSync(join(s.dir, 'bindings')).sort(), listing);
-  // An already-expired launcher binding never starts.
-  const late = uuid(44);
-  s.fake.setThread({ id: late, status: { type: 'idle' } }); s.fake.attachOther(late);
-  c.addLauncherBinding({ ...lb(late, 0), expiresAt: s.clock.now() - 1 });
-  await delay(150);
-  assert.equal(s.resumed(late), false);
+  assert.ok(s.logged('codex_launcher_binding_unauthorized').length);
 });
 
 test('connector subscribes at most the limit, oldest first', async t => {
@@ -294,7 +309,7 @@ test('connector subscribes at most the limit, oldest first', async t => {
   c.addLauncherBinding({ profile: 'job', hub: 'https://hub.invalid', caller: 'peer_job', codexHome: s.home, threadId: job,
     createdAt: T - hour, expiresAt: T + hour, attended: false, ensureLoaded: async () => false });
   await eventually(() => ids.slice(0, 8).every(s.subscribed), 'oldest eight subscribed');
-  await eventually(() => s.subscribed(job), 'launcher binding subscribed, not counted');
+  assert.equal(s.resumed(job), false, 'unregistered launcher binding stays inactive');
   await s.reload();
   assert.equal(s.resumed(ids[8]), false); assert.equal(s.resumed(ids[9]), false);
   assert.deepEqual(s.logged('codex_binding_over_limit').map(e => e.meta?.threadId).sort(), [ids[8], ids[9]].sort());
@@ -305,7 +320,7 @@ test('connector subscribes at most the limit, oldest first', async t => {
   await s.reload();
   assert.equal(s.resumed(ids[9]), false);
   // Expired bindings do not hold a place in the limit.
-  s.writeBindings(ids.filter((_, i) => i !== 3).map(id => s.binding(id, ids.indexOf(id) + 1, id === ids[0] ? { expires_at: new Date(T - 1).toISOString() } : {})));
+  s.writeBindings(ids.filter((_, i) => i !== 3).map(id => s.binding(id, ids.indexOf(id) + 1, id === ids[0] ? { expires_at: new Date(T + 1500).toISOString() } : {})));
   await s.reload();
   await eventually(() => s.subscribed(ids[9]) && !s.subscribed(ids[0]), 'tenth subscribed once an older binding expired');
   // VECNET_CODEX_MAX_BINDINGS is honoured.
@@ -324,9 +339,10 @@ test('connector stop unsubscribes every engine', async t => {
   const c = s.start();
   c.addLauncherBinding({ profile: 'job', hub: 'https://hub.invalid', caller: 'peer_job', codexHome: s.home, threadId: job,
     createdAt: T, expiresAt: T + hour, attended: false, ensureLoaded: async () => false });
-  await eventually(() => [...ids, job].every(s.subscribed), 'all subscribed');
+  await eventually(() => ids.every(s.subscribed), 'all authoritative threads subscribed');
+  await eventually(() => readFileSync(s.trace, 'utf8').split('\n').filter(l => / watch --json$/.test(l)).length === 3, 'all verified watches started');
   await c.stop();
-  for (const id of [...ids, job]) {
+  for (const id of ids) {
     assert.deepEqual(s.fake.subscribers(id), [], `${id} still subscribed`);
     assert.ok(s.unsubscribed(id), `${id} got no thread/unsubscribe`);
   }
@@ -335,7 +351,7 @@ test('connector stop unsubscribes every engine', async t => {
   assert.equal(s.fake.requests.length, n, 'no reload or engine runs after stop');
   // Every watch child was started and is gone with its engine.
   const watches = readFileSync(s.trace, 'utf8').split('\n').filter(l => / watch --json$/.test(l));
-  assert.equal(watches.length, 4);
+  assert.equal(watches.length, 3);
 });
 
 // The live smoke is coordinator-run on xsm. Only its skip paths run here,
@@ -409,4 +425,177 @@ test('smoke refuses a CODEX_HOME that is not a directory and a busy state direct
   assert.equal(existsSync(f.trap), false);
   // A refusal after the version check still sent nothing but the handshake.
   assert.deepEqual(handshakeOnly(fake), ['initialize']);
+});
+
+
+test('complete authority rejects every legacy, malformed, or unresolved row without partial admission', async t => {
+  const [a, b] = [uuid(100), uuid(101)];
+  const s = await setup(t, { threads: [{ id: a }, { id: b }] });
+  s.start();
+  for (const extra of [
+    { generation: undefined }, { generation: 'bad' }, { config_path: undefined },
+    { config_path: 'relative' }, { config_path: join(s.dir, 'missing') },
+    { codex_home: join(s.dir, 'missing') }, { caller: '' }, { hub: 'not-a-url' },
+    { profile: '  ' }, { thread_id: 'bad' }, { created_at: 'November 1, 2026' },
+    { expires_at: 'bad' }, { idle_dormant_hours: -1 }, { attended: 'yes' },
+  ]) {
+    s.writeBindings([s.binding(a, 1), s.binding(b, 2, extra)]);
+    await s.reload();
+    assert.deepEqual(s.fake.requests, [], JSON.stringify(extra));
+  }
+  s.writeBindings([s.binding(a, 1)]);
+  await s.reload();
+  await eventually(() => s.subscribed(a), 'valid authority starts');
+  writeFileSync(s.bindingsPath, '{broken');
+  await s.reload();
+  assert.equal(s.subscribed(a), false, 'corruption revokes existing admission');
+});
+
+test('recipient aliases, delegated recipients, and canonical thread conflicts reject the whole authority', async t => {
+  const [a, b] = [uuid(110), uuid(111)];
+  const s = await setup(t, { threads: [{ id: a }, { id: b }] });
+  const alias = join(s.dir, 'home-alias');
+  symlinkSync(s.home, alias);
+  s.start();
+  for (const extra of [
+    { caller: 'peer_1', hub: 'https://HUB.invalid:443/' },
+    { as: 'peer_1', caller: 'operator' },
+    { thread_id: a, codex_home: alias },
+    { profile: 'p1' },
+  ]) {
+    s.writeBindings([s.binding(a, 1), s.binding(b, 2, extra)]);
+    await s.reload();
+    assert.deepEqual(s.fake.requests, [], JSON.stringify(extra));
+  }
+});
+
+test('same thread id in distinct canonical homes has independent engines and status', async t => {
+  const id = uuid(120);
+  const s = await setup(t, { threads: [{ id }] });
+  const other = await startFakeCodexAppServer({ dir: join(s.dir, 'other') });
+  t.after(() => other.close());
+  other.setThread({ id, status: { type: 'idle' } }); other.attachOther(id);
+  const otherHome = join(s.dir, 'other', 'home');
+  s.writeBindings([s.binding(id, 1), s.binding(id, 2, { codex_home: otherHome })]);
+  s.start();
+  await eventually(() => s.subscribed(id) && other.subscribers(id).length === 1, 'both homes subscribed');
+  await s.reload();
+  const status = JSON.parse(readFileSync(s.bindingsPath + '.status.json', 'utf8'));
+  assert.deepEqual(status.bindings.map((b: any) => b.codex_home).sort(), [s.home, otherHome].sort());
+  s.writeBindings([s.binding(id, 2, { codex_home: otherHome })]);
+  await s.reload();
+  assert.equal(s.subscribed(id), false);
+  assert.equal(other.subscribers(id).length, 1);
+});
+
+test('readiness is private, exact-owner, refreshed, and removed only by its connector', async t => {
+  const id = uuid(130);
+  const s = await setup(t, { threads: [{ id }] });
+  s.writeBindings([s.binding(id, 1)]);
+  const first = s.start();
+  const path = s.bindingsPath + '.status.json';
+  await s.ready();
+  assert.ok(existsSync(path), 'startup publishes status');
+  await eventually(() => s.subscribed(id), 'first subscribed');
+  await eventually(() => / watch --json\n/.test(readFileSync(s.trace, 'utf8')), 'verified watch started');
+  await s.reload();
+  const raw = readFileSync(path, 'utf8'), status = JSON.parse(raw);
+  assert.equal(statSync(path).mode & 0o777, 0o600);
+  assert.deepEqual(status, { version: 1, updated_at: new Date(s.clock.now()).toISOString(), bindings: [{
+    config_path: s.env.VECNET_CONFIG, profile: 'p1', as: '', codex_home: s.home,
+    thread_id: id, generation: '0'.repeat(31) + '1', state: 'ready', liveness: { live: true },
+  }] });
+  const otherConfig = join(s.dir, 'second-config'); writeFileSync(otherConfig, '');
+  const second = s.start({ VECNET_CONFIG: otherConfig, XDG_CONFIG_HOME: join(s.dir, 'other-xdg') });
+  await eventually(() => s.logged('codex_connector_duplicate').length > 0, 'duplicate refused');
+  assert.equal(s.fake.requests.filter(r => r.method === 'initialize').length, 1);
+  await second.stop();
+  assert.equal(readFileSync(path, 'utf8'), raw, 'non-owner stop preserves status');
+  await s.reload();
+  assert.notEqual(JSON.parse(readFileSync(path, 'utf8')).updated_at, status.updated_at);
+  await first.stop();
+  assert.equal(existsSync(path), false);
+  const third = s.start();
+  await eventually(() => s.subscribed(id), 'replacement after stop');
+  await third.stop();
+});
+
+
+test('authority path is per canonical HOME and rejects cross-config overrides', async t => {
+  const s = await setup(t);
+  const homeAlias = join(s.dir, 'user-home-alias'); symlinkSync(s.env.HOME!, homeAlias);
+  assert.equal(codexBindingsPath({ HOME: homeAlias, VECNET_CONFIG: '/different/config', XDG_CONFIG_HOME: '/different/xdg' }), s.bindingsPath);
+  assert.equal(codexBindingsPath({ HOME: s.env.HOME }), s.bindingsPath);
+  assert.equal(codexBindingsPath({ ...s.env, VECNET_CODEX_BINDINGS: join(s.dir, 'other-bindings') }), undefined);
+  assert.equal(codexBindingsPath({ VECNET_CONFIG: s.env.VECNET_CONFIG }), undefined);
+  assert.equal(codexBindingsPath({ HOME: '.' }), undefined);
+  s.start({ VECNET_CODEX_BINDINGS: join(s.dir, 'other-bindings') });
+  await s.ready();
+  assert.equal(existsSync(s.bindingsPath + '.status.json'), false, 'rejected override starts no publisher');
+});
+
+
+test('generation-only replacement restarts the engine and publishes the new exact owner', async t => {
+  const id = uuid(140), s = await setup(t, { threads: [{ id }] });
+  s.writeBindings([s.binding(id, 1)]); s.start();
+  await eventually(() => s.subscribed(id), 'initial owner');
+  const first = s.fake.subscribers(id)[0];
+  s.writeBindings([s.binding(id, 1, { generation: 'b'.repeat(32) })]);
+  await s.reload();
+  await eventually(() => s.subscribed(id) && s.fake.subscribers(id)[0] !== first, 'replacement generation');
+  assert.equal(JSON.parse(readFileSync(s.bindingsPath + '.status.json', 'utf8')).bindings[0].generation, 'b'.repeat(32));
+});
+
+test('launcher callbacks require exact current authority and disappear on revocation', async t => {
+  const id = uuid(150), s = await setup(t, { threads: [{ id, status: { type: 'notLoaded' } }] });
+  s.writeBindings([s.binding(id, 1, { attended: true })]);
+  const c = s.start(); await s.ready();
+  let ensured = 0;
+  c.addLauncherBinding({ configPath: s.env.VECNET_CONFIG, generation: '0'.repeat(31) + '1', profile: 'p1',
+    hub: 'https://hub.invalid', caller: 'peer_1', codexHome: s.home, threadId: id,
+    createdAt: T + 1000, expiresAt: T + 24 * hour, attended: true, ensureLoaded: async () => { ensured++; return false; } });
+  await eventually(() => ensured > 0, 'authoritative launcher callback');
+  s.writeBindings([]); await s.reload();
+  const before = ensured; await s.reload();
+  assert.equal(ensured, before);
+  assert.deepEqual(JSON.parse(readFileSync(s.bindingsPath + '.status.json', 'utf8')).bindings, []);
+});
+
+
+test('readiness exposes approval refusal and corruption removes ready owners', async t => {
+  const id = uuid(160), s = await setup(t, { threads: [{ id, approvalPolicy: 'on-request' }] });
+  s.writeBindings([s.binding(id, 1)]); s.start();
+  await eventually(() => / watch --json\n/.test(readFileSync(s.trace, 'utf8')), 'ownership verification completed');
+  await s.reload();
+  const statusPath = s.bindingsPath + '.status.json';
+  const row = JSON.parse(readFileSync(statusPath, 'utf8')).bindings[0];
+  assert.equal(row.state, 'ready');
+  assert.deepEqual(row.liveness, { live: false, reason: 'approval_policy' });
+  writeFileSync(s.bindingsPath, '{broken'); await s.reload();
+  assert.deepEqual(JSON.parse(readFileSync(statusPath, 'utf8')).bindings, []);
+});
+
+
+test('global authority runs every config namespace using each row config', async t => {
+  const [a, b] = [uuid(170), uuid(171)], s = await setup(t, { threads: [{ id: a }, { id: b }] });
+  const otherConfig = join(s.dir, 'other-config.toml'); writeFileSync(otherConfig, '');
+  s.writeBindings([s.binding(a, 1), s.binding(b, 2, { config_path: otherConfig, profile: 'p1' })]);
+  s.start();
+  await eventually(() => s.subscribed(a) && s.subscribed(b), 'both namespaces subscribed');
+  await eventually(() => readFileSync(s.configTrace, 'utf8').includes(otherConfig), 'row-specific config reaches CLI guard');
+  assert.ok(readFileSync(s.configTrace, 'utf8').includes(s.env.VECNET_CONFIG!));
+  await s.reload();
+  assert.deepEqual(JSON.parse(readFileSync(s.bindingsPath + '.status.json', 'utf8')).bindings.map((b: any) => b.config_path).sort(),
+    [s.env.VECNET_CONFIG, otherConfig].sort());
+});
+
+test('unverified root source never publishes live readiness or starts a watch', async t => {
+  const id = uuid(180), s = await setup(t, { threads: [{ id }], source: 'unknown' });
+  s.writeBindings([s.binding(id, 1)]); s.start();
+  await eventually(() => s.logged('codex_thread_source_unverified').length > 0, 'source refused');
+  await s.reload();
+  const row = JSON.parse(readFileSync(s.bindingsPath + '.status.json', 'utf8')).bindings[0];
+  assert.deepEqual(row.liveness, { live: false, reason: 'unverified_thread' });
+  assert.equal(s.subscribed(id), false);
+  assert.equal(readFileSync(s.trace, 'utf8'), '');
 });

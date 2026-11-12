@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -110,7 +111,7 @@ func defaultBin(exe string) (bin, warning string) {
 
 func (a *app) cmdHookInstall(args []string) error {
 	o, err := parseFlags("hook install", args, map[string]flagKind{
-		"client": strFlag, "profile": strFlag, "write": boolFlag, "settings": strFlag, "auto-ack": boolFlag, "bin": strFlag, "mcp": boolFlag,
+		"client": strFlag, "profile": strFlag, "write": boolFlag, "settings": strFlag, "auto-ack": boolFlag, "bin": strFlag, "mcp": boolFlag, "dry-run": boolFlag, "rollback": strFlag,
 	})
 	if err != nil {
 		return err
@@ -128,9 +129,14 @@ func (a *app) cmdHookInstall(args []string) error {
 	if client == "codex" && o.has("mcp") {
 		return usageErr("hook install: --mcp registration is supported only for --client claude")
 	}
-	events := claudeHookEvents
-	if client == "codex" {
-		events = codexHookEvents
+	if o.has("write") && o.has("dry-run") {
+		return usageErr("hook install: --write and --dry-run are mutually exclusive")
+	}
+	if client != "codex" && (o.has("rollback") || o.has("dry-run")) {
+		return usageErr("hook install: --rollback and --dry-run require --client codex")
+	}
+	if client == "codex" && o.has("auto-ack") {
+		return usageErr("hook install: Codex hooks never claim or acknowledge messages; omit --auto-ack")
 	}
 	codexAdvice := func() {
 		if client == "codex" {
@@ -139,7 +145,7 @@ func (a *app) cmdHookInstall(args []string) error {
 		}
 	}
 	profile := o.str("profile")
-	if !o.has("profile") {
+	if client != "codex" && !o.has("profile") {
 		// A hook is an agent's identity: never the operator of a bare run.
 		if a.namedProfile() == "" {
 			return usageErr("hook install: name the agent's profile with --profile P (or --net P, or $VECNET_PROFILE)")
@@ -149,7 +155,7 @@ func (a *app) cmdHookInstall(args []string) error {
 			return err
 		}
 	}
-	if !hookInstallProfile.MatchString(profile) {
+	if client != "codex" && !hookInstallProfile.MatchString(profile) {
 		return usageErr("hook install: profile must match [A-Za-z0-9._][A-Za-z0-9._-]{0,63}")
 	}
 	mcp := ""
@@ -243,22 +249,37 @@ func (a *app) cmdHookInstall(args []string) error {
 		path = filepath.Join(root, ".claude", "settings.local.json")
 		fmt.Fprintf(a.stderr, "settings target %s (%s)\n", path, reason)
 	}
+	if client == "codex" {
+		if o.has("write") && !o.has("settings") {
+			if codexUnknown != nil {
+				return fmt.Errorf("hook install: cannot tell whether %s is tracked by git (repository discovery failed: %s); pass --settings %s to write it anyway", path, hookGitReason(codexUnknown), path)
+			}
+			if codexRoot != "" {
+				if err := a.checkCodexUntracked(codexRoot, path); err != nil {
+					return err
+				}
+			}
+			if err := defaultSettingsRedirect(path, "the project .codex/hooks.json"); err != nil {
+				return err
+			}
+		}
+		err := a.installCodexHooks(path, bin, o)
+		if err == nil {
+			codexAdvice()
+			fmt.Fprintln(a.stderr, "codex: generic hooks never deliver peer content; use vecnet --net P codex setup for exact-thread app-server delivery")
+		}
+		return err
+	}
 	if raw, err := os.ReadFile(path); err == nil {
 		if others := otherHookProfiles(raw, profile); len(others) > 0 {
 			also := ""
 			if mcp != "" {
 				also = "; every session there also sees each registered vecnet MCP server's tools"
 			}
-			if client == "codex" {
-				a.warn("%s already has vecnet hooks for profile(s) %s; every Codex session that reads it runs all of them. Session binding keeps each profile's deliveries in one session, and a session that runs several profiles' hooks binds none of them until its agent runs `vecnet hook rebind --profile P` (PROTOCOL §13.9). Launch each session with its own profile, e.g. VECNET_PROFILE=%s codex, so the other profiles' hooks stay silent there. Codex has no Claude session/process environment guarantee; rebind without a session id lets the next hook run take the binding", path, strings.Join(others, ", "), profile)
-			} else {
-				a.warn("%s already has vecnet hooks for profile(s) %s; every Claude Code session that reads it runs all of them. Session binding keeps each profile's deliveries in one session, and a session that runs several profiles' hooks binds none of them until its agent runs `vecnet hook rebind --profile P` (PROTOCOL §13.9). Launch each session with its own profile, e.g. VECNET_PROFILE=%s claude, so the other profiles' hooks stay silent there%s", path, strings.Join(others, ", "), profile, also)
-			}
+			a.warn("%s already has vecnet hooks for profile(s) %s; every Claude Code session that reads it runs all of them. Session binding keeps each profile's deliveries in one session, and a session that runs several profiles' hooks binds none of them until its agent runs `vecnet hook rebind --profile P` (PROTOCOL §13.9). Launch each session with its own profile, e.g. VECNET_PROFILE=%s claude, so the other profiles' hooks stay silent there%s", path, strings.Join(others, ", "), profile, also)
 		}
 	}
-	if client == "claude" {
-		a.warnNestedCheckouts(path)
-	}
+	a.warnNestedCheckouts(path)
 	var register []string
 	if mcp != "" {
 		register = []string{"mcp", "add", "--scope", "local", mcp}
@@ -272,7 +293,7 @@ func (a *app) cmdHookInstall(args []string) error {
 		register = append(register, "--", bin, "--net", profile, "mcp")
 	}
 	if !o.has("write") {
-		stanza, _, err := mergeHooks(nil, bin, profile, o.has("auto-ack"), mcp, events)
+		stanza, _, err := mergeHooks(nil, bin, profile, o.has("auto-ack"), mcp, claudeHookEvents)
 		if err != nil {
 			return err
 		}
@@ -283,25 +304,10 @@ func (a *app) cmdHookInstall(args []string) error {
 		if register != nil {
 			a.printMCPRegistration(register)
 		}
-		codexAdvice()
 		return nil
 	}
 	if !o.has("settings") {
-		if codexUnknown != nil {
-			return fmt.Errorf("hook install: cannot tell whether %s is tracked by git (repository discovery failed: %s); writing it could share your profile with everyone; pass --settings %s to write it anyway", path, hookGitReason(codexUnknown), path)
-		}
-		if codexRoot != "" {
-			if err := a.checkCodexUntracked(codexRoot, path); err != nil {
-				return err
-			}
-		}
-		// A symlink at the default file or its parent could redirect the
-		// write to shared or global settings; require explicit --settings.
-		what := "the personal settings.local.json"
-		if client == "codex" {
-			what = "the project .codex/hooks.json"
-		}
-		if err := defaultSettingsRedirect(path, what); err != nil {
+		if err := defaultSettingsRedirect(path, "the personal settings.local.json"); err != nil {
 			return err
 		}
 	}
@@ -328,7 +334,7 @@ func (a *app) cmdHookInstall(args []string) error {
 		}
 		mode = info.Mode()
 	}
-	merged, changed, err := mergeHooks(existing, bin, profile, o.has("auto-ack"), mcp, events)
+	merged, changed, err := mergeHooks(existing, bin, profile, o.has("auto-ack"), mcp, claudeHookEvents)
 	if err != nil {
 		return err
 	}
@@ -338,17 +344,12 @@ func (a *app) cmdHookInstall(args []string) error {
 		if err := writeHookSettings(target, merged, mode); err != nil {
 			return err
 		}
-		if client == "codex" {
-			fmt.Fprintf(a.stderr, "wrote %s (SessionStart, UserPromptSubmit, PostToolUse)\n", path)
-		} else {
-			fmt.Fprintf(a.stderr, "wrote %s (UserPromptSubmit, PostToolUse)\n", path)
-		}
+		fmt.Fprintf(a.stderr, "wrote %s (UserPromptSubmit, PostToolUse)\n", path)
 	}
 	if register != nil {
 		a.printMCPRegistration(register)
 		a.registerMCP(start, mcp, register)
 	}
-	codexAdvice()
 	return nil
 }
 
@@ -878,4 +879,345 @@ func mergeHooks(existing []byte, bin, profile string, autoAck bool, mcp string, 
 	root.raw = existing
 	out = root.encode(detectIndent(existing))
 	return out, !bytes.Equal(out, existing), nil
+}
+
+// Codex shared project hooks contain no recipient. Only exactly known legacy
+// handlers are migrated; custom matchers, options and shell commands survive.
+func mergeCodexHooks(existing []byte, bin string) ([]byte, bool, error) {
+	src := existing
+	if len(bytes.TrimSpace(src)) == 0 {
+		src = []byte("{}")
+	}
+	root, err := parseJSONNode(src)
+	if err != nil {
+		return nil, false, fmt.Errorf("hook install: invalid settings JSON: %w", err)
+	}
+	if root.kind != '{' {
+		return nil, false, errors.New("hook install: settings must be an object")
+	}
+	hooks := root.member("hooks")
+	if hooks == nil {
+		hooks = &jsonNode{kind: '{'}
+		root.appendMember("hooks", hooks)
+	}
+	if hooks.kind != '{' {
+		return nil, false, errors.New("hook install: hooks must be an object")
+	}
+	for i, event := range hooks.vals {
+		if event.kind != '[' {
+			return nil, false, fmt.Errorf("hook install: hooks.%s must be an array", hooks.keys[i])
+		}
+	}
+	for _, event := range codexHookEvents {
+		groups := hooks.member(event.key)
+		if groups == nil {
+			groups = &jsonNode{kind: '['}
+			hooks.appendMember(event.key, groups)
+		}
+		kept := make([]*jsonNode, 0, len(groups.vals)+1)
+		for _, group := range groups.vals {
+			handlers := group.member("hooks")
+			if !codexOwnedGroup(group, event.matcher) || handlers == nil || handlers.kind != '[' {
+				kept = append(kept, group)
+				continue
+			}
+			retained := make([]*jsonNode, 0, len(handlers.vals))
+			removed := false
+			for _, handler := range handlers.vals {
+				if codexOwnedHandler(handler, bin, event.name) {
+					removed = true
+				} else {
+					retained = append(retained, handler)
+				}
+			}
+			if !removed || len(retained) > 0 {
+				handlers.vals = retained
+				kept = append(kept, group)
+			}
+		}
+		raw, _ := json.Marshal(hookGroup{Matcher: event.matcher, Hooks: []hookHandler{{Type: "command", Command: hookShellWord(bin) + " hook --client codex --event " + event.name, Timeout: 5, AdditionalContextLimit: event.contextLimit}}})
+		group, err := parseJSONNode(raw)
+		if err != nil {
+			return nil, false, err
+		}
+		groups.vals = append(kept, group)
+	}
+	root.raw = existing
+	out := root.encode(detectIndent(existing))
+	return out, !bytes.Equal(existing, out), nil
+}
+
+func codexOwnedGroup(group *jsonNode, matcher string) bool {
+	if group == nil || group.kind != '{' || group.member("matcher").scalarString() != matcher {
+		return false
+	}
+	// A non-string matcher is never one the installer wrote.
+	if m := group.member("matcher"); m != nil {
+		var value string
+		if json.Unmarshal(m.raw, &value) != nil {
+			return false
+		}
+	}
+	for _, key := range group.keys {
+		var name string
+		_ = json.Unmarshal(key, &name)
+		if name != "hooks" && name != "matcher" {
+			return false
+		}
+	}
+	return true
+}
+
+func codexOwnedHandler(handler *jsonNode, bin, event string) bool {
+	if handler == nil || handler.kind != '{' || handler.member("type").scalarString() != "command" {
+		return false
+	}
+	for _, key := range handler.keys {
+		var name string
+		_ = json.Unmarshal(key, &name)
+		switch name {
+		case "type", "command", "timeout", "additionalContextLimit":
+		default:
+			return false
+		}
+	}
+	timeout := handler.member("timeout")
+	if timeout == nil || string(timeout.raw) != "5" {
+		return false
+	}
+	if limit := handler.member("additionalContextLimit"); limit != nil && string(limit.raw) != fmt.Sprint(hookCodexContextLimit) {
+		return false
+	}
+	command := handler.member("command").scalarString()
+	// Reuse exact command and binary recognition for generic commands too.
+	if strings.Contains(command, " hook --client codex --event ") {
+		command = strings.Replace(command, " hook --client codex --event ", " hook --profile generic --event ", 1)
+		raw, _ := json.Marshal(hookHandler{Type: "command", Command: command})
+		candidate, _ := parseJSONNode(raw)
+		return command == hookCommand(bin, "generic", event, false, "") || (oursHook(candidate, bin, "generic", event) && !strings.Contains(command, " --auto-ack") && !strings.Contains(command, " --mcp"))
+	}
+	m := hookOwnedCommand.FindStringSubmatch(command)
+	if m == nil || !hookInstallProfile.MatchString(m[2]) || m[3] != event {
+		return false
+	}
+	// Old --mcp is owned only when it names that handler's profile.
+	if m[5] != "" && m[5] != " --mcp "+mcpServerName(m[2], "") {
+		return false
+	}
+	return oursHook(handler, bin, m[2], event)
+}
+
+type codexHookBackup struct {
+	Version     int    `json:"version"`
+	Target      string `json:"target"`
+	Existed     bool   `json:"existed"`
+	Mode        uint32 `json:"mode"`
+	Before      []byte `json:"before"`
+	AfterSHA256 string `json:"after_sha256"`
+}
+
+func hookDigest(raw []byte) string { return fmt.Sprintf("%x", sha256.Sum256(raw)) }
+
+// The backup carries the exact preimage and the expected postimage hash. A
+// rollback never overwrites changes made since installation, including modes.
+func (a *app) installCodexHooks(path, bin string, o opts) error {
+	target, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	if resolved, e := filepath.EvalSymlinks(target); e == nil {
+		target = resolved
+	} else if !errors.Is(e, os.ErrNotExist) {
+		return e
+	} else {
+		if st, e := os.Lstat(target); e == nil && st.Mode()&os.ModeSymlink != 0 {
+			return errors.New("hook install: dangling settings symlink")
+		}
+		// Canonicalize an existing parent even for a new file.
+		if parent, e := filepath.EvalSymlinks(filepath.Dir(target)); e == nil {
+			target = filepath.Join(parent, filepath.Base(target))
+		}
+	}
+	if o.has("write") {
+		if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+			return err
+		}
+		unlock, err := lockPath(a.ctx, target+".vecnet.lock")
+		if err != nil {
+			return err
+		}
+		defer unlock()
+	}
+	before, err := os.ReadFile(target)
+	existed := err == nil
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	mode := os.FileMode(0644)
+	if existed {
+		st, e := os.Stat(target)
+		if e != nil {
+			return e
+		}
+		mode = st.Mode().Perm()
+	}
+	var after []byte
+	remove := false
+	if o.has("rollback") {
+		raw, e := os.ReadFile(o.str("rollback"))
+		if e != nil {
+			return e
+		}
+		var backup codexHookBackup
+		if _, e := parseJSONNode(raw); e != nil {
+			return fmt.Errorf("invalid hook backup: %w", e)
+		}
+		if json.Unmarshal(raw, &backup) != nil || backup.Version != 1 || backup.Target != target || backup.Mode > 0777 {
+			return errors.New("invalid hook backup or target mismatch")
+		}
+		if !existed || hookDigest(before) != backup.AfterSHA256 || uint32(mode) != backup.Mode {
+			return errors.New("hook rollback refused: settings drift since migration")
+		}
+		after = backup.Before
+		remove = !backup.Existed
+	} else {
+		if custom := customCodexHookCount(before, bin); custom > 0 {
+			fmt.Fprintf(a.stderr, "codex: preserved %d custom vecnet-like handler(s); inspect their commands and trust explicitly before use\n", custom)
+		}
+		var changed bool
+		after, changed, err = mergeCodexHooks(before, bin)
+		if err != nil {
+			return err
+		}
+		if !changed {
+			fmt.Fprintf(a.stderr, "unchanged %s\n", path)
+			return nil
+		}
+	}
+	if !o.has("write") {
+		if err := printHookDiff(a.stdout, path, before, after); err != nil {
+			return err
+		}
+		fmt.Fprintf(a.stderr, "would update %s; rerun with --write\n", path)
+		return nil
+	}
+	// Recheck after preparing the new content; other installer processes are
+	// serialized by the lock, and pre-existing external edits are refused.
+	current, e := os.ReadFile(target)
+	if (e == nil) != existed || (e != nil && !errors.Is(e, os.ErrNotExist)) || !bytes.Equal(current, before) {
+		return errors.New("hook migration refused: settings drift while preparing update")
+	}
+	if !o.has("rollback") {
+		backup := codexHookBackup{Version: 1, Target: target, Existed: existed, Mode: uint32(mode), Before: before, AfterSHA256: hookDigest(after)}
+		raw, e := json.MarshalIndent(backup, "", "  ")
+		if e != nil {
+			return e
+		}
+		f, e := os.CreateTemp(filepath.Dir(target), filepath.Base(target)+".vecnet-backup-*")
+		if e != nil {
+			return e
+		}
+		name := f.Name()
+		_, e = f.Write(raw)
+		if e == nil {
+			e = f.Sync()
+		}
+		closeErr := f.Close()
+		if e == nil {
+			e = closeErr
+		}
+		if e != nil {
+			_ = os.Remove(name)
+			return e
+		}
+		fmt.Fprintf(a.stderr, "backup %s; rollback: vecnet hook install --client codex --settings %s --rollback %s --write\n", name, hookShellWord(path), hookShellWord(name))
+	}
+	if remove {
+		err = os.Remove(target)
+	} else {
+		err = writeHookSettings(target, after, mode)
+	}
+	if err != nil {
+		return err
+	}
+	if o.has("rollback") {
+		fmt.Fprintf(a.stderr, "restored %s\n", path)
+	} else {
+		fmt.Fprintf(a.stderr, "wrote %s (SessionStart, UserPromptSubmit, PostToolUse)\n", path)
+	}
+	return nil
+}
+
+// Full-file unified diff avoids invoking a shell or exposing hooks in a temp
+// file. Original scalar spellings remain visible in the review.
+func printHookDiff(w io.Writer, path string, before, after []byte) error {
+	lines := func(b []byte) []string {
+		if len(b) == 0 {
+			return nil
+		}
+		return strings.Split(strings.TrimSuffix(string(b), "\n"), "\n")
+	}
+	old, newLines := lines(before), lines(after)
+	var out strings.Builder
+	oldStart, newStart := 1, 1
+	if len(old) == 0 {
+		oldStart = 0
+	}
+	if len(newLines) == 0 {
+		newStart = 0
+	}
+	fmt.Fprintf(&out, "--- %s\n+++ %s\n@@ -%d,%d +%d,%d @@\n", path, path, oldStart, len(old), newStart, len(newLines))
+	for _, s := range old {
+		fmt.Fprintf(&out, "-%s\n", s)
+	}
+	if len(before) > 0 && before[len(before)-1] != '\n' {
+		out.WriteString("\\ No newline at end of file\n")
+	}
+	for _, s := range newLines {
+		fmt.Fprintf(&out, "+%s\n", s)
+	}
+	if len(after) > 0 && after[len(after)-1] != '\n' {
+		out.WriteString("\\ No newline at end of file\n")
+	}
+	_, err := io.WriteString(w, out.String())
+	return err
+}
+
+func customCodexHookCount(raw []byte, bin string) int {
+	root, err := parseJSONNode(raw)
+	if err != nil {
+		return 0
+	}
+	hooks := root.member("hooks")
+	if hooks == nil || hooks.kind != '{' {
+		return 0
+	}
+	count := 0
+	for i, groups := range hooks.vals {
+		var key string
+		_ = json.Unmarshal(hooks.keys[i], &key)
+		for _, group := range groups.vals {
+			handlers := group.member("hooks")
+			if handlers == nil || handlers.kind != '[' {
+				continue
+			}
+			for _, handler := range handlers.vals {
+				command := handler.member("command").scalarString()
+				if !strings.Contains(command, "vecnet") || !strings.Contains(command, " hook") {
+					continue
+				}
+				owned := false
+				for _, event := range codexHookEvents {
+					if event.key == key && codexOwnedGroup(group, event.matcher) && codexOwnedHandler(handler, bin, event.name) {
+						owned = true
+						break
+					}
+				}
+				if !owned {
+					count++
+				}
+			}
+		}
+	}
+	return count
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 
@@ -113,6 +114,23 @@ func (s *server) getPeersMe(w http.ResponseWriter, r *http.Request) {
 		me["peer_id"] = c.PeerID
 	case "principal":
 		me["principal_id"] = c.PrincipalID
+	}
+	// Verify a single automatic-delivery recipient without reading its event
+	// stream. The unfiltered identity response remains backwards compatible.
+	if peer := r.URL.Query().Get("peer"); peer != "" {
+		owners, _, _, err := s.Hub.StreamOwners(r.Context(), c, peer)
+		if err != nil {
+			if errors.Is(err, hub.ErrPeerDisabled) {
+				err = hub.E(http.StatusServiceUnavailable, "peer_disabled", "recipient is disabled")
+			}
+			writeError(w, err)
+			return
+		}
+		if len(owners) != 1 {
+			writeError(w, hub.E(http.StatusForbidden, "not_your_peer", "a single owned recipient is required"))
+			return
+		}
+		me["recipient_id"] = owners[0]
 	}
 	writeJSON(w, http.StatusOK, me)
 }

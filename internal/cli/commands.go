@@ -65,14 +65,28 @@ messaging:
        does not ack; use --auto-ack or vecnet ack <cursor> to avoid replaying
        the log after a restart
   hook [--event user-prompt|post-tool|session-start|app-server] [--profile P] [--auto-ack] [--mcp vecnet-P]
-       Claude Code / Codex hook: always exits 0; --mcp names the registered MCP server in its hints
+       Claude Code hook: always exits 0; --mcp names the registered MCP server in its hints
+  hook --client codex --event user-prompt|post-tool|session-start
+       generic shared Codex hook: no peer content or claims; delivery uses the exact-thread connector
   hook --event app-server --claim NONCE --priorities wake[,wake_idle] --expect-hub URL --expect-caller PEER_ID
   hook --release --claim NONCE
   hook install [--client claude|codex] [--profile P] [--write] [--settings PATH] [--auto-ack] [--mcp] (--mcp: Claude-only)
        --mcp: the hooks name MCP server vecnet-P, and --write registers it (claude mcp add)
+  hook install --client codex [--settings PATH] [--bin PATH] [--dry-run|--write] [--rollback BACKUP]
+       generic hook migration; default previews a diff; --write saves a rollback backup; custom hooks survive
+       rollback refuses drift; review trust in Codex /hooks yourself (never changed automatically)
+  codex setup [--thread UUID] [--codex-home DIR] [--settings PATH] [--bin PATH] [--dry-run]
+       [--ttl DUR] [--idle-dormant DUR] [--attended] [--renew] [--expect-generation GENERATION]
+       existing --net profile; defaults to CODEX_THREAD_ID, never a recent thread; dry-run does not bind
+  codex status [--thread UUID] [--codex-home DIR] [--json]
+       read-only: ready requires fresh (30s), matching-owner, ready/live connector status; unresolved legacy bindings block readiness
+       preferred standalone: stage with scripts/install-codex-delivery.py (Node >=22.18, same HOME; no launcher config)
+       activate explicitly: systemctl --user daemon-reload && systemctl --user enable --now vecnet-codex-delivery.service
+       setup: docs/connectors/codex-appserver.md; an existing configured launcher also runs the same connector
   hook rebind [--profile P]
        bind the profile's hook to this Claude Code session (run from its Bash tool)
-  codex bind --thread UUID [--codex-home DIR] [--ttl DUR] [--idle-dormant DUR] [--attended] [--renew]
+  codex bind [--thread UUID] [--codex-home DIR] [--ttl DUR] [--idle-dormant DUR] [--attended] [--renew]
+       [--expect-generation GENERATION]; thread defaults to CODEX_THREAD_ID; handoff requires expected generation
        opt in to app-server delivery; ttl defaults to 24h (1h–168h); unattended needs -a never or auto reviewer
   codex unbind [--thread UUID] | codex bindings [--json]
   threads [--limit N]
@@ -468,6 +482,9 @@ func (a *app) ok(human string) error {
 // dispatch runs one command.
 func (a *app) dispatch(cmd string, args []string) error {
 	err := a.dispatchOnce(cmd, args)
+	if cmd == "codex" && len(args) > 0 && (args[0] == "verify" || args[0] == "guard" || args[0] == "settle" || args[0] == "status") {
+		return err // Ownership-pinned operations never relocate profiles implicitly.
+	}
 	// enrol has no profile yet (a 410 there must not follow another one);
 	// guide makes no hub request.
 	switch cmd {

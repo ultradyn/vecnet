@@ -1,6 +1,7 @@
 package httpapi_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -374,5 +375,36 @@ func TestGetPeersMe(t *testing.T) {
 	// The GET route must not shadow the existing PATCH on the same path.
 	if resp, body := env.Do(peerSecret, "PATCH", "/v1/peers/me", map[string]string{"subscribe_presence": "none"}); resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("PATCH /v1/peers/me = %d; %s", resp.StatusCode, body)
+	}
+}
+
+func TestGetPeersMeValidatesRecipient(t *testing.T) {
+	env := testhub.Start(t)
+	peer, secret := env.NewPeer("session", "owner")
+	other, _ := env.NewPeer("session", "other")
+	resp, body := env.Do(secret, "GET", "/v1/peers/me?peer="+peer, nil)
+	if resp.StatusCode != 200 || !bytes.Contains(body, []byte(`"recipient_id":"`+peer+`"`)) {
+		t.Fatalf("recipient identity %d %s", resp.StatusCode, body)
+	}
+	resp, _ = env.Do(secret, "GET", "/v1/peers/me?peer="+other, nil)
+	if resp.StatusCode != 403 {
+		t.Fatalf("foreign recipient status %d", resp.StatusCode)
+	}
+	principal, principalSecret := env.NewPrincipal("scoped-owner")
+	owned, _, err := env.Hub.AddPeer(t.Context(), "session", "owned", principal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, body = env.Do(principalSecret, "GET", "/v1/peers/me?peer="+owned, nil)
+	var me map[string]string
+	if err := json.Unmarshal(body, &me); err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 || me["principal_id"] != principal || me["recipient_id"] != owned {
+		t.Fatalf("scoped principal identity %d %s", resp.StatusCode, body)
+	}
+	resp, _ = env.Do(principalSecret, "GET", "/v1/peers/me?peer="+other, nil)
+	if resp.StatusCode != 403 {
+		t.Fatalf("principal foreign recipient status %d", resp.StatusCode)
 	}
 }

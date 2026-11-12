@@ -24,6 +24,11 @@ import (
 func hookUser(t *testing.T, hub, secret string) *user {
 	t.Helper()
 	u := profileUser(t, hub, secret)
+	// Legacy-hook admission canonicalizes the shared per-user authority even
+	// for Claude fixtures. Never fall back to the build-box user's HOME.
+	if err := os.MkdirAll(u.env["HOME"], 0700); err != nil {
+		t.Fatal(err)
+	}
 	u.env["XDG_CONFIG_HOME"] = filepath.Join(filepath.Dir(u.conf), "xdg")
 	return u
 }
@@ -203,63 +208,43 @@ func TestHookCodexStdinShapes(t *testing.T) {
 	aID, aSec := env.NewPeer("session", "A")
 	_, bSec := env.NewPeer("session", "B")
 	a, b := hookUser(t, env.URL, aSec), hookUser(t, env.URL, bSec)
-	for _, u := range []*user{a, b} {
-		u.env["CODEX_HOME"] = filepath.Join(t.TempDir(), "codex")
-	}
-	run := func(input string) string {
+	a.env["CODEX_HOME"] = t.TempDir()
+	a.env["CODEX_THREAD_ID"] = "01234567-89ab-cdef-0123-456789abcdef"
+	first := b.send(aID, "codex hello", "--wake")
+	second := b.send(aID, "codex second", "--hold")
+	run := func(input string) {
 		t.Helper()
-		var out, errs bytes.Buffer
-		if code := cli.RunContext(context.Background(), []string{"hook"}, strings.NewReader(input), &out, &errs, a.getenv); code != 0 {
-			t.Fatalf("exit=%d stderr=%q", code, errs.String())
-		}
-		return out.String()
-	}
-	if out := run(`{"hook_event_name":"UserPromptSubmit","session_id":"s1"}`); out != "" {
-		t.Fatalf("seed printed %q", out)
-	}
-	b.send(aID, "codex hello", "--wake")
-	out := run(`{"session_id":"s1","transcript_path":"/x","cwd":"/w","hook_event_name":"SessionStart","model":"m","source":"resume","permission_mode":"default"}`)
-	ctx := hookE2EContext(t, out, "SessionStart")
-	for _, want := range []string{`text="codex hello"`, "vecnet --net "} {
-		if !strings.Contains(ctx, want) {
-			t.Fatalf("missing %q in %q", want, ctx)
+		for _, args := range [][]string{{"hook", "--auto-ack"}, {"hook", "--client", "codex", "--auto-ack"}} {
+			var out, errs bytes.Buffer
+			if code := cli.RunContext(context.Background(), args, strings.NewReader(input), &out, &errs, a.getenv); code != 0 || out.Len() != 0 {
+				t.Fatalf("Codex hook %v exit=%d output=%q stderr=%q", args, code, out.String(), errs.String())
+			}
 		}
 	}
-	raw, err := json.Marshal(map[string]any{"hook_event_name": "PostToolUse", "session_id": "s1", "tool_name": "shell_command", "tool_input": map[string]any{}, "tool_response": strings.Repeat("x", 900*1024)})
+	run(`{"hook_event_name":"UserPromptSubmit","session_id":"01234567-89ab-cdef-0123-456789abcdef"}`)
+	run(`{"session_id":"01234567-89ab-cdef-0123-456789abcdef","transcript_path":"/x","cwd":"/w","hook_event_name":"SessionStart","model":"m","source":"resume","permission_mode":"default"}`)
+	raw, err := json.Marshal(map[string]any{"hook_event_name": "PostToolUse", "session_id": a.env["CODEX_THREAD_ID"], "tool_name": "shell_command", "tool_input": map[string]any{}, "tool_response": strings.Repeat("x", 900*1024)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(raw) >= 1<<20 {
 		t.Fatalf("fixture exceeds stdin cap: %d", len(raw))
 	}
-	// SessionStart just recorded a post-tool poll; clear it so the large
-	// input must be accepted and reach the poll, not the five-second rate
-	// limit. A second canary proves delivery; the first must not repeat.
+	// Parent session IDs are also inherited by ambiguous children: neither
+	// SessionStart nor a large post-tool response authorizes peer context.
+	run(string(raw))
+	run(string(raw))
 	statePath := filepath.Join(filepath.Dir(a.conf), "state", "p.json")
-	state, err := os.ReadFile(statePath)
+	if _, err := os.Stat(statePath); !os.IsNotExist(err) {
+		t.Fatalf("Codex hook touched delivery state: %v", err)
+	}
+	events, err := json.Marshal(a.inboxJSON())
 	if err != nil {
 		t.Fatal(err)
 	}
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(state, &fields); err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := fields["last_post_tool_poll"]; !ok {
-		t.Fatalf("SessionStart recorded no post-tool poll: %s", state)
-	}
-	delete(fields, "last_post_tool_poll")
-	if state, err = json.Marshal(fields); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(statePath, state, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	b.send(aID, "codex second", "--wake")
-	ctx = hookE2EContext(t, run(string(raw)), "PostToolUse")
-	if !strings.Contains(ctx, `text="codex second"`) || strings.Contains(ctx, "codex hello") {
-		t.Fatalf("large post-tool context %q", ctx)
-	}
-	if out := run(string(raw)); out != "" {
-		t.Fatalf("post-tool repeated delivery: %q", out)
+	for _, id := range []string{first.MessageID, second.MessageID} {
+		if !bytes.Contains(events, []byte(id)) {
+			t.Fatalf("Codex hook acknowledged pending message %s: %s", id, events)
+		}
 	}
 }

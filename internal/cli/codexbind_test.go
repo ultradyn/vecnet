@@ -32,11 +32,19 @@ type bindFixture struct {
 func newBindFixture(t *testing.T) *bindFixture {
 	t.Helper()
 	d := t.TempDir()
-	f := &bindFixture{t: t, home: filepath.Join(d, "codex-home"), path: filepath.Join(d, "codex", "bindings.json"), now: time.Date(2026, 11, 6, 0, 0, 0, 0, time.UTC)}
+	f := &bindFixture{t: t, home: filepath.Join(d, "codex-home"), path: filepath.Join(d, ".local", "state", "vecnet", "codex", "bindings.json"), now: time.Date(2026, 11, 6, 0, 0, 0, 0, time.UTC)}
 	f.peer.Store("peer_A")
 	f.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/peers/me" {
-			_ = json.NewEncoder(w).Encode(map[string]string{"kind": "peer", "peer_id": f.peer.Load().(string)})
+			if peer := r.URL.Query().Get("peer"); peer != "" {
+				_ = json.NewEncoder(w).Encode(map[string]string{"kind": "principal", "principal_id": "principal_A", "recipient_id": peer})
+				return
+			}
+			peer := f.peer.Load().(string)
+			if suffix := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer vn_peer_test_"); suffix != r.Header.Get("Authorization") && suffix != "p" {
+				peer += "_" + suffix
+			}
+			_ = json.NewEncoder(w).Encode(map[string]string{"kind": "peer", "peer_id": peer})
 			return
 		}
 		http.NotFound(w, r)
@@ -54,7 +62,11 @@ func (f *bindFixture) config(hub string) {
 	f.t.Helper()
 	profiles := map[string]Profile{}
 	for _, p := range []string{"p", "q", "r", "p0", "p1", "p2", "p3", "p4", "p5", "p6", "p7", "p8", "p9"} {
-		profiles[p] = Profile{Hub: hub, Secret: "vn_peer_test"}
+		secret := "vn_peer_test"
+		if p != "p" {
+			secret += "_" + p
+		}
+		profiles[p] = Profile{Hub: hub, Secret: secret}
 	}
 	if err := saveConfig(f.env["VECNET_CONFIG"], Config{Profiles: profiles}); err != nil {
 		f.t.Fatal(err)
@@ -587,14 +599,26 @@ func TestCodexBindCallerKinds(t *testing.T) {
 			f := newBindFixture(t)
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path == "/v1/peers/me" {
-					_, _ = fmt.Fprint(w, tc.body)
+					if r.URL.Query().Get("peer") != "" && tc.name == "principal" {
+						_, _ = fmt.Fprint(w, `{"kind":"principal","principal_id":"principal_A","recipient_id":"peer_scoped"}`)
+					} else {
+						_, _ = fmt.Fprint(w, tc.body)
+					}
 					return
 				}
 				http.NotFound(w, r)
 			}))
 			t.Cleanup(srv.Close)
 			f.config(srv.URL)
-			code, _, errs := pinRun(func(k string) string { return f.env[k] }, "codex", "bind", "--thread", bindT1)
+			args := []string{"codex", "bind", "--thread", bindT1}
+			if tc.name == "principal" {
+				code, _, _ := pinRun(func(k string) string { return f.env[k] }, args...)
+				if code == 0 {
+					t.Fatal("unscoped principal admitted")
+				}
+				args = append(args, "--as", "peer_scoped")
+			}
+			code, _, errs := pinRun(func(k string) string { return f.env[k] }, args...)
 			if tc.caller == "" {
 				if code != 1 || !strings.Contains(errs, "cannot resolve binding identity") {
 					t.Fatalf("exit %d: %s", code, errs)

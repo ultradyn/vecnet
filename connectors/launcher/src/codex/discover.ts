@@ -1,7 +1,7 @@
 import { lstatSync, readlinkSync, realpathSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 
-export const CODEX_APPSERVER_VERSIONS: readonly string[] = Object.freeze(['0.166.0', '0.167.0']);
+export const CODEX_APPSERVER_VERSIONS: readonly string[] = Object.freeze(['0.166.0', '0.167.0', '0.167.2']);
 export function socketPathFor(codexHome: string): string {
   return join(codexHome, 'app-server-control', 'app-server-control.sock');
 }
