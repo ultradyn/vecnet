@@ -26,6 +26,11 @@ legacy/mismatched rows are quarantined instead of released through a replacement
 profile. An uncertain send is reconciled against exact-thread receipts before
 retry. Accepted, presented, processed and acknowledged are distinct states.
 
+`hook --release` reports both `released` and `remaining`. An accepted claim with
+`remaining > 0` retains its recovery rows; `released: 0` alone does not prove
+cleanup. `remaining: 0` confirms cleanup even after a crash between the release
+and local row deletion, so retrying that cleanup is idempotent.
+
 ## Capability matrix
 
 | Surface | Automatic idle wake / busy steer | Current migration state |
@@ -103,8 +108,30 @@ Review and stop older delivery services before activation. In particular, an
 older `vecnet-delivery@` runner uses a separate registry: preserve that registry
 and its ledger, and review each exact owner before explicit enrollment. Expired
 registrations must not be renewed merely because software was upgraded.
-The standalone service and launcher use the same singleton lock. Its durable
-ledger lives beside the authority in `~/.local/state/vecnet/codex/delivery.sqlite`.
+The standalone service and launcher use the same singleton lock and recovery
+ledger, beside the authority at `~/.local/state/vecnet/codex/delivery.sqlite`.
+The connector validates private ownership, modes and paths for this database and
+its SQLite sidecars in either mode. Only the singleton lock holder imports rows
+or starts engines; stopping closes the recovery ledger before releasing the lock.
+
+On its first upgraded start, each launcher imports its existing `codex` namespace
+into the shared ledger in one transaction. It preserves original-owner rows and
+leaves the launcher's other namespaces unchanged. The launcher namespace remains
+a compatibility mirror; the shared ledger is authoritative. A durable source ID
+and shared import marker prevent retained offline rows from replaying after the
+other mode settles them. Different values for the same recovery key refuse the
+whole import and start no engines (`codex_recovery_refused`); retain both ledgers
+for deliberate owner-specific repair.
+
+Before switching from an older launcher to standalone, start the upgraded launcher
+once with its original state directory so its rows are imported. An upgrade cannot
+discover a launcher ledger in an arbitrary state directory. Preserve all old
+ledgers. If an old launcher cannot be upgraded first, switching requires its
+recovery to be fully drained: no claiming, inflight or releasing rows and no
+unsettled CLI ambiguity fence. Do not run an older launcher against the retained
+compatibility mirror after switching modes; drain shared recovery and review
+original ownership before rolling back.
+
 To roll back software, stop the new service, restore the saved CLI/unit and restart
 the previous service only after reviewing its ownership state. Never restore an
 old binding snapshot over newer ownership or delete a ledger to resolve a send.

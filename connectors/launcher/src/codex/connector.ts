@@ -1,8 +1,10 @@
-import { realpathSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, realpathSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import type { Clock, Log } from '../../../hub-client/src/ports.ts';
 import type { KeyValue } from '../backend.ts';
 import { redactingLog } from '../redact.ts';
+import { openLedger } from '../ledger.ts';
 import { createEngine } from './engine.ts';
 import type { Binding, Engine } from './engine.ts';
 import { openCodexRpc } from './rpc.ts';
@@ -34,6 +36,74 @@ export function codexBindingsPath(env: NodeJS.ProcessEnv): string | undefined {
   } catch { return; }
 }
 
+/** Check every descendant before SQLite can open its database or sidecars.
+ * HOME is canonicalized, but state-directory symlinks are never followed. */
+export function codexRecoveryPath(env: NodeJS.ProcessEnv): string {
+  const unsafe = () => new Error('unsafe state path');
+  const uid = process.geteuid?.();
+  if (uid === undefined || !env.HOME || !isAbsolute(env.HOME)) throw unsafe();
+  const home = realpathSync(env.HOME);
+  const checkDir = (path: string, privateDir: boolean) => {
+    const st = lstatSync(path);
+    if (!st.isDirectory() || st.isSymbolicLink() || st.uid !== uid || (st.mode & (privateDir ? 0o077 : 0o022)) !== 0) throw unsafe();
+  };
+  checkDir(home, false);
+  let path = home;
+  for (const component of ['.local', 'state', 'vecnet', 'codex']) {
+    path = join(path, component);
+    try { mkdirSync(path, { mode: 0o700 }); }
+    catch (e) { if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e; }
+    checkDir(path, component === 'codex');
+  }
+  const database = join(path, 'delivery.sqlite');
+  for (const file of [database, database + '-wal', database + '-shm', database + '-journal']) {
+    try {
+      const st = lstatSync(file);
+      if (!st.isFile() || st.isSymbolicLink() || st.uid !== uid || (st.mode & 0o077) !== 0 || st.nlink !== 1) throw unsafe();
+    } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
+  }
+  const fd = openSync(database, constants.O_CREAT | constants.O_RDWR | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o600);
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile() || st.uid !== uid || (st.mode & 0o077) !== 0 || st.nlink !== 1) throw unsafe();
+  } finally { closeSync(fd); }
+  return database;
+}
+
+/** Import a caller's old namespace once, before engines can touch recovery.
+ * The source id is persisted first; its completion marker and copied rows are
+ * committed together in the shared DB. Retained offline rows can never replay
+ * after another mode has settled them. Conflicts preserve both stores and stop
+ * delivery. The caller namespace remains a compatibility mirror, not authority. */
+function openRecovery(database: string, clock: Clock, legacy?: KeyValue) {
+  const ledger = openLedger(database, clock), kv = ledger.kv('codex');
+  try {
+    if (legacy) {
+      const sourceKey = 'shared-recovery-source:v1';
+      let source = legacy.get(sourceKey);
+      if (source === undefined) { source = randomUUID(); legacy.set(sourceKey, source); }
+      if (!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(source)) throw new Error('invalid recovery source');
+      ledger.tx(() => {
+        const imports = ledger.kv('codex:imports');
+        if (imports.get(source!) !== undefined) return;
+        for (const key of legacy.keys()) {
+          if (key === sourceKey) continue;
+          const value = legacy.get(key), current = kv.get(key);
+          if (value === undefined || (current !== undefined && current !== value)) throw new Error('recovery conflict');
+          kv.set(key, value);
+        }
+        imports.set(source!, '1');
+      });
+    }
+    const store: KeyValue = {
+      get: key => kv.get(key), keys: prefix => kv.keys(prefix),
+      set(key, value) { kv.set(key, value); legacy?.set(key, value); },
+      delete(key) { kv.delete(key); legacy?.delete(key); },
+    };
+    return { kv: store, close: () => ledger.close() };
+  } catch (error) { ledger.close(); throw error; }
+}
+
 /** Resolve existing ancestors too, before the authority has been created. */
 function canonicalPath(path: string): string {
   const absolute = resolve(path);
@@ -56,14 +126,14 @@ const fingerprint = (b: Binding) => b.origin + ':' + bindingFingerprint(b);
 
 /** One engine per authoritative canonical home/thread, one connector per file.
  * Launcher registrations supply lifecycle callbacks, never delivery authority. */
-export function startCodexConnector(o: { kv: KeyValue; clock: Clock; log: Log; env: NodeJS.ProcessEnv; openRpc?: typeof openCodexRpc }): CodexConnector {
-  const log = redactingLog(o.log), { clock, kv } = o;
+export function startCodexConnector(o: { kv?: KeyValue; clock: Clock; log: Log; env: NodeJS.ProcessEnv; openRpc?: typeof openCodexRpc }): CodexConnector {
+  const log = redactingLog(o.log), { clock } = o;
   const euid = process.geteuid?.() ?? -1;
   const env = Object.fromEntries(Object.entries(o.env).filter((e): e is [string, string] => typeof e[1] === 'string'));
   const path = codexBindingsPath(o.env), limit = codexMaxBindings(o.env);
-  const deps = { clock, log: o.log, kv, vecnetBin: o.env.VECNET_BIN || 'vecnet', env, openRpc: o.openRpc ?? openCodexRpc, euid };
   const entries = new Map<string, Entry>(), registrations = new Map<string, Binding>();
   let stopped = false, stopping: Promise<void> | undefined, chain: Promise<void> = Promise.resolve(), timer: { cancel(): void } | undefined;
+  let recovery: ReturnType<typeof openRecovery> | undefined;
   let publisher: StatusPublisher | undefined, duplicateLogged = false, lastFile = '';
   const overLogged = new Set<string>();
 
@@ -72,7 +142,8 @@ export function startCodexConnector(o: { kv: KeyValue; clock: Clock; log: Log; e
     return chain;
   }
   function launch(b: Binding, over: boolean): Entry {
-    const engine = createEngine(b, deps);
+    const engine = createEngine(b, { clock, log: o.log, kv: recovery!.kv, vecnetBin: o.env.VECNET_BIN || 'vecnet',
+      env, openRpc: o.openRpc ?? openCodexRpc, euid });
     engine.setOverLimit(over);
     engine.start();
     return { binding: b, engine, print: fingerprint(b), over, expired: clock.now() >= b.expiresAt };
@@ -95,6 +166,8 @@ export function startCodexConnector(o: { kv: KeyValue; clock: Clock; log: Log; e
     const s = readBindings(path, euid);
     fileChanged(s);
     if (!publisher && path !== undefined) {
+      try { codexRecoveryPath(o.env); }
+      catch { log.warn('codex_recovery_refused'); return; }
       publisher = openStatusPublisher(path, euid);
       if (!publisher) {
         if (!duplicateLogged) { duplicateLogged = true; log.warn('codex_connector_duplicate'); }
@@ -103,6 +176,10 @@ export function startCodexConnector(o: { kv: KeyValue; clock: Clock; log: Log; e
       duplicateLogged = false;
     }
     if (!publisher) return;
+    if (!recovery) {
+      try { recovery = openRecovery(codexRecoveryPath(o.env), clock, o.kv); }
+      catch { log.warn('codex_recovery_refused'); publisher.publish(clock.now(), []); return; }
+    }
     const listed = s.state === 'ok' ? s.bindings : [];
     const sorted = [...listed].sort((a, b) => a.createdAt - b.createdAt || threadKey(a).localeCompare(threadKey(b)));
     const wanted = new Map<string, Binding>();
@@ -155,7 +232,8 @@ export function startCodexConnector(o: { kv: KeyValue; clock: Clock; log: Log; e
         stopped = true; timer?.cancel();
         await chain;
         await Promise.allSettled([...entries.keys()].map(retire));
-        publisher?.close(); publisher = undefined;
+        try { recovery?.close(); }
+        finally { publisher?.close(); publisher = undefined; }
       })();
       return stopping;
     },
