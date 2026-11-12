@@ -71,10 +71,30 @@ try {
       return page.waitForFunction(key => document.activeElement?.matches('button.thumb') &&
         document.activeElement.dataset.occurrence === key, occurrence, { timeout: 5000 });
     };
-    const imgLoaded = loc => loc.evaluate(img => img.complete ? img.naturalWidth > 0 : new Promise(resolve => {
-      img.addEventListener('load', () => resolve(img.naturalWidth > 0), { once: true });
-      img.addEventListener('error', () => resolve(false), { once: true });
-    }));
+    const imgLoaded = (loc, failure = null) => loc.evaluate((img, selector) => {
+      const finish = loaded => {
+        if (loaded || !selector) return loaded;
+        const snapshot = n => {
+          if (!n) return null;
+          const button = n.closest('button'), images = [...(button?.querySelectorAll('img') || [])];
+          return { connected: n.isConnected, complete: n.complete, hasNaturalWidth: n.naturalWidth > 0,
+            parentButtonClass: (button?.className || '').slice(0, 64),
+            images: images.length, liveImages: images.filter(image => image.isConnected).length };
+        };
+        const currentButton = document.querySelector(selector), current = currentButton?.querySelector('img') || null;
+        return { resolved: snapshot(img), current: snapshot(current), same: current === img,
+          currentButtonClass: (currentButton?.className || '').slice(0, 64),
+          matches: document.querySelectorAll(selector + ' img').length };
+      };
+      return img.complete ? finish(img.naturalWidth > 0) : new Promise(resolve => {
+        img.addEventListener('load', () => resolve(finish(img.naturalWidth > 0)), { once: true });
+        img.addEventListener('error', () => resolve(finish(false)), { once: true });
+      });
+    }, failure?.selector || null).then(result => {
+      if (typeof result === 'boolean') return result;
+      failure.snapshot = result;
+      return false;
+    });
 
     await page.locator('#threads a', { hasText: 'Ticket 18' }).waitFor();
     await page.locator('#conn.live').waitFor();
@@ -132,7 +152,8 @@ try {
     // The fake PNG is briefly an <img> too, until its decode error: pick the real one by hash.
     const thumb = peer.locator(`button.thumb[data-sha="${pngUp.sha256}"] img`);
     await thumb.waitFor();
-    assert(await imgLoaded(thumb), 'the peer PNG did not decode inline');
+    const peerDecode = { selector: pngSelector };
+    assert(await imgLoaded(thumb, peerDecode), 'the peer PNG did not decode inline: ' + JSON.stringify(peerDecode.snapshot));
     assert(await thumb.getAttribute('alt') === 'run-failure.png', 'the thumbnail alt is not the cleaned name');
     // The SVG never fetches; the failed raster keeps its safe deferred opener.
     await peer.locator('.att', { hasText: 'diagram.svg' }).waitFor();
@@ -141,7 +162,22 @@ try {
     await demand(fakeSelector);
     await fake.filter({ hasText: 'Image unavailable. Retry in viewer or use Files.' }).waitFor();
     assert(await fake.getAttribute('aria-label') === 'Open preview.png', 'the failed raster lost its accessible opener');
-    assert(await fake.evaluate(b => b.isConnected && b.matches('.thumb.deferred') && !b.querySelector('img, [src]')), 'the failed raster kept an image/source or lost its deferred opener');
+    const fakeState = await page.evaluate(selector => {
+      // Resolve and snapshot the current synthetic fixture in one turn.
+      const snapshot = n => n && ({
+        connected: n.isConnected, deferred: n.matches('.thumb.deferred'),
+        className: n.className.slice(0, 64), text: n.textContent.slice(0, 96),
+        label: (n.getAttribute('aria-label') || '').slice(0, 64),
+        images: n.querySelectorAll('img').length, sources: n.querySelectorAll('[src]').length,
+      });
+      const matches = document.querySelectorAll(selector);
+      return { current: snapshot(matches[0] || null), matches: matches.length };
+    }, fakeSelector);
+    const s = fakeState.current;
+    assert(fakeState.matches === 1 && s?.connected && s.deferred &&
+      s.text === 'Image unavailable. Retry in viewer or use Files.' && s.label === 'Open preview.png' &&
+      s.images === 0 && s.sources === 0,
+      'the failed raster kept an image/source or lost its deferred opener: ' + JSON.stringify(fakeState));
     const named = peer.locator('.att', { hasText: 'gnp.exe' });
     await named.waitFor();
     assert(await peer.locator('button.thumb').count() === 2, 'the two raster openers were not retained');
