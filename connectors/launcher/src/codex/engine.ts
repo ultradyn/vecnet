@@ -173,12 +173,12 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
       });
     });
   }
-  async function release(claim: string, attempt?: string) {
+  async function release(claim: string, attempt?: string, expected = 0) {
     // Releasing known-unsent claims must remain possible while stop drains
     // the delivery lane, after new claims and turn RPCs have been disabled.
     if (attempt) await runHook(['settle', '--outcome', 'rejected', ...ownerArgs(owner), '--claim', claim, '--attempt', attempt], true, 'codex');
     const result = obj(await runHook(['--release', '--claim', claim, ...ownerArgs(owner)], true));
-    if (result.refused || !Number.isInteger(result.released) || result.released < 0) throw new Error('claim_release_refused');
+    if (result.refused || !Number.isInteger(result.released) || result.released < expected) throw new Error('claim_release_refused');
   }
   function scheduleClaimRecovery() {
     if (!running || claimRecovery) return;
@@ -194,9 +194,11 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
   async function releaseInflight(r: InflightRow) {
     // A definite rejection (or proven absence) needs cleanup, not another
     // history scan. Persist that fact before invoking the fallible child.
+    // Accepted claims can survive a rejected settle; a zero release is not
+    // proof of cleanup, so keep both rows until the CLI confirms release.
     kv.set('releasing:' + r.claim, JSON.stringify(r));
     waitingRetry.delete(r.key); waitForIdle.delete(r.key);
-    try { await release(r.claim, r.attempt); await clear(r, 'released'); }
+    try { await release(r.claim, r.attempt, r.deliveries.length); await clear(r, 'released'); }
     catch { log.warn('codex_claim_release_failed', { threadId: b.threadId }); scheduleClaimRecovery(); }
   }
   async function releaseDormantRetries() {

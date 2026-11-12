@@ -91,8 +91,10 @@ if (argv.includes('codex') && argv.includes('verify')) {
   if (argv.includes('--release')) {
     if (plan.releaseFailure) process.exit(1);
     if (plan.releaseRefused) { console.log(JSON.stringify({ refused: 'ownership_changed' })); process.exit(0); }
-    if (!accepted()[nonce] && !existsSync(marker)) delete claims[nonce]; writeFileSync(plan.claims, JSON.stringify(claims));
-    console.log(JSON.stringify({ version: 1, released: 1 }));
+    const released = !accepted()[nonce] && !existsSync(marker) ? (claims[nonce]?.length ?? 0) : 0;
+    if (released) delete claims[nonce];
+    writeFileSync(plan.claims, JSON.stringify(claims));
+    console.log(JSON.stringify({ version: 1, released }));
   } else if (flag('--event') === 'user-prompt') {
     const claimed = new Set(Object.values(claims).flat());
     console.log(JSON.stringify({ deliveries: (plan.items ?? []).filter((i: { id: string }) => !claimed.has(i.id)).map((i: { id: string }) => i.id) }));

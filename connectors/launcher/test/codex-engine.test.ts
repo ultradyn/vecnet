@@ -1088,10 +1088,19 @@ test('replayed approval on resubscribe gets no reply', async t => {
   const h = await harness(t, { binding: { attended: true } }); h.fake.serverRequest(threadId, 'item/commandExecution/requestApproval', { threadId: threadId });
   await h.restart(); await h.sync(); assert.deepEqual(h.fake.replies, []); assert.ok(h.log.entries.some(e => e.msg === 'codex_server_request_ignored'));
 });
-test('accepted steer without a userMessage receipt is resolved by scan', async t => {
+test('cancelled accepted steer retains recovery until its claim is released', async t => {
   const h = await harness(t, { status: active }); h.fake.withholdNextItem(); await h.wake(); await eventually(() => h.rows()[0]?.state === 'pending');
   h.fake.notify('turn/completed', { threadId: threadId, turn: { id: 'active', status: 'interrupted' } }); await h.sync(); await h.tick();
-  await eventually(() => h.releases().length === 1); assert.equal(h.rows().length, 0);
+  await eventually(() => h.releases().length === 1);
+  const accepted = JSON.parse(readFileSync(h.plan.claims + '.accepted', 'utf8'));
+  const claims = JSON.parse(readFileSync(h.plan.claims, 'utf8'));
+  const retained = Object.keys(accepted).find(claim => claims[claim]?.includes('w1'));
+  assert.ok(retained, 'the Go CLI retains accepted claims');
+  assert.equal(h.rows().length, 1, 'zero release must retain recovery for the accepted claim');
+  assert.equal(h.rows()[0].claim, retained);
+  assert.equal(h.kv.keys('releasing:').length, 1);
+  await h.restart();
+  assert.equal(h.rows().length, 1, 'restart must preserve unresolved recovery');
 });
 test('receipt from the item stream clears inflight', async t => {
   const h = await harness(t, { status: active }); h.fake.withholdNextItem(); await h.wake(); await eventually(() => h.rows()[0]?.state === 'pending');
