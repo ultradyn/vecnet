@@ -32,6 +32,7 @@ import (
 
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/hubid"
+	"github.com/XertroV/vecnet/internal/inboxview"
 	"github.com/XertroV/vecnet/internal/opapi"
 )
 
@@ -56,7 +57,7 @@ messaging:
   react <message_id> <emoji|name> [--remove] [--wake|--wake-idle|--hold]
        default priority depends on the emoji: ✅ ❓ ❗ wake_idle, others hold
   mcp                                 stdio MCP relay to the hub's /mcp as this profile [--as X]; needs --net P
-  inbox [--since CURSOR] [--ack] [--limit N]
+  inbox [--since CURSOR] [--ack] [--limit N] [--include-sender-chain]
   blob get SHA [--blob-id ID] --out PATH [--json]
        URLs are short-lived; call get again whenever you need the file, as long as it hasn't expired.
   ack <cursor>
@@ -943,6 +944,14 @@ func (a *app) send(req envelope.SendRequest, text string, o opts) error {
 		return a.emitJSON(raw)
 	}
 	fmt.Fprintf(a.stdout, "sent %s thread %s deliveries %d", resp.MessageID, resp.ThreadID, len(resp.Deliveries))
+	for i, delivery := range resp.Deliveries {
+		if i == 0 {
+			fmt.Fprint(a.stdout, " to ")
+		} else {
+			fmt.Fprint(a.stdout, ", ")
+		}
+		fmt.Fprint(a.stdout, sendDestination(delivery))
+	}
 	if resp.Spilled {
 		fmt.Fprint(a.stdout, " (spilled)")
 	}
@@ -951,6 +960,26 @@ func (a *app) send(req envelope.SendRequest, text string, o opts) error {
 	}
 	fmt.Fprintln(a.stdout)
 	return nil
+}
+
+// sendDestination uses only receipt metadata; name discovery must never add
+// another operation or turn a successful send into a name-lookup failure.
+func sendDestination(raw json.RawMessage) string {
+	var destination struct {
+		Recipient string  `json:"recipient"`
+		Name      string  `json:"recipient_name"`
+		Via       *string `json:"via"`
+	}
+	_ = json.Unmarshal(raw, &destination)
+	name := peerName(destination.Name)
+	if name == "" {
+		name = "name unavailable"
+	}
+	label := strconv.QuoteToASCII(name) + "(" + unbidi(flatten(destination.Recipient)) + ")"
+	if destination.Via != nil {
+		label += " via " + unbidi(flatten(*destination.Via))
+	}
+	return label
 }
 
 // mediaTypeOf guesses a file's media type from its extension, without
@@ -1137,12 +1166,12 @@ func oldestCursor(err error) (string, bool) {
 }
 
 func (a *app) cmdInbox(args []string) error {
-	o, err := parseFlags("inbox", args, map[string]flagKind{"since": strFlag, "ack": boolFlag, "limit": strFlag})
+	o, err := parseFlags("inbox", args, map[string]flagKind{"since": strFlag, "ack": boolFlag, "limit": strFlag, "include-sender-chain": boolFlag})
 	if err != nil {
 		return err
 	}
 	if len(o.pos) != 0 {
-		return usageErr("usage: vecnet inbox [--since CURSOR] [--ack] [--limit N]")
+		return usageErr("usage: vecnet inbox [--since CURSOR] [--ack] [--limit N] [--include-sender-chain]")
 	}
 	limit := 0
 	if o.has("limit") {
@@ -1172,16 +1201,51 @@ func (a *app) cmdInbox(args []string) error {
 		next = evs[len(evs)-1].Cursor
 	}
 	a.rememberEvents(ch, evs)
+	view, err := inboxview.Project(evs, o.has("include-sender-chain"))
+	if err != nil {
+		return err
+	}
+	var output bytes.Buffer
 	if a.json {
-		if err := a.emitValue(pollBody{Events: evs, NextCursor: next}); err != nil {
+		raw, err := json.Marshal(pollBody{Events: view, NextCursor: next})
+		if err != nil {
 			return err
 		}
+		output.Write(raw)
+		output.WriteByte('\n')
 	} else {
-		fmt.Fprintln(a.stdout, inboxHeader)
+		fmt.Fprintln(&output, inboxHeader)
 		names := ch.peerNames()
-		for _, ev := range evs {
-			fmt.Fprintln(a.stdout, inboxLine(ev, names))
+		for _, ev := range view {
+			line := inboxLine(ev, names)
+			if o.has("include-sender-chain") && ev.Type == "delivery" {
+				var data struct {
+					Message struct {
+						Loop struct {
+							SenderChain []string `json:"sender_chain"`
+						} `json:"loop"`
+					} `json:"message"`
+				}
+				if err := json.Unmarshal(ev.Data, &data); err != nil {
+					return err
+				}
+				chain := data.Message.Loop.SenderChain
+				if chain == nil {
+					chain = []string{}
+				}
+				raw, err := json.Marshal(chain)
+				if err != nil {
+					return err
+				}
+				line += " sender_chain=" + string(raw)
+			}
+			fmt.Fprintln(&output, line)
 		}
+	}
+	if n, err := a.stdout.Write(output.Bytes()); err != nil {
+		return err
+	} else if n != output.Len() {
+		return io.ErrShortWrite
 	}
 	if o.has("ack") && len(evs) > 0 {
 		if err := a.ack(c, next); err != nil {
