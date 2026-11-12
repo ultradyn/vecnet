@@ -37,16 +37,16 @@ func (a *app) lockLegacyHookRecipient(c *client) (func(), error) {
 	}
 	checkIdentity := false
 	recipients := map[string]bool{}
-	config, err := configPath(a.getenv)
-	if err != nil {
-		return nil, err
-	}
-	config, err = canonicalCodexPath(config)
+	state, err := statePath(a.getenv, a.namedProfile(), a.as)
 	if err != nil {
 		return nil, err
 	}
 	for _, b := range file.Bindings {
-		if filepath.Dir(b.ConfigPath) == filepath.Dir(config) && b.Profile == a.namedProfile() && b.As == a.as {
+		reserved, err := statePathForConfig(b.ConfigPath, b.Profile, b.As)
+		if err != nil {
+			return nil, err
+		}
+		if reserved == state {
 			return nil, usageErr("delivery state reserved for Codex; use codex status")
 		}
 		r := normalizeHub(b.Hub) + "\n" + codexRecipient(b)

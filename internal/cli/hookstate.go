@@ -94,6 +94,12 @@ func statePath(getenv func(string) string, profile, as string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return statePathForConfig(config, profile, as)
+}
+
+// Derive state from the config location before resolving symlinks: a config
+// alias can read different credentials while still sharing its neighbor state.
+func statePathForConfig(config, profile, as string) (string, error) {
 	component := func(s string) string {
 		if stateComponent.MatchString(s) {
 			return s
@@ -105,7 +111,29 @@ func statePath(getenv func(string) string, profile, as string) (string, error) {
 	if as != "" {
 		base += "@" + component(as)
 	}
-	return filepath.Join(filepath.Dir(config), "state", base+".json"), nil
+	path, err := filepath.Abs(filepath.Join(filepath.Dir(config), "state", base+".json"))
+	if err != nil {
+		return "", err
+	}
+	// Resolve existing ancestors too, so directory aliases share a reservation
+	// even before the state file has been created.
+	ancestor := path
+	suffix := ""
+	for {
+		canonical, err := filepath.EvalSymlinks(ancestor)
+		if err == nil {
+			return filepath.Join(canonical, suffix), nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+		parent := filepath.Dir(ancestor)
+		if parent == ancestor {
+			return "", err
+		}
+		suffix = filepath.Join(filepath.Base(ancestor), suffix)
+		ancestor = parent
+	}
 }
 
 var errStateBusy = errors.New("vecnet: state file busy")
