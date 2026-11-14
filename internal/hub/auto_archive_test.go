@@ -41,6 +41,9 @@ func TestArchiveIdlePeersRules(t *testing.T) {
 		{"idle", "session", "", true}, {"future-presence", "session", "presence_at='2099-01-01T00:00:00Z'", true},
 		{"disabled", "session", "disabled=1", false}, {"recent", "session", "last_seen='" + envelope.FormatTime(now.Add(-time.Hour)) + "'", false},
 		{"unarchived", "session", "unarchived_at='" + envelope.FormatTime(now.Add(-time.Hour)) + "'", false},
+		{"boundary", "session", "last_seen='" + envelope.FormatTime(now.Add(-48*time.Hour)) + "',enrolled_at='" + envelope.FormatTime(now.Add(-48*time.Hour)) + "'", false},
+		{"missing", "session", "last_seen=NULL,enrolled_at=''", false},
+		{"malformed", "session", "last_seen='bad-time'", false},
 		{"launcher", "launcher", "", false}, {"grok", "grokbot", "", false}, {"source", "source", "", false},
 		{"stream", "session", "", false},
 	} {
