@@ -39,7 +39,7 @@ async function runSmoke() {
     if (!process.env[key]) throw new Error(`missing ${key}`);
   }
   const { connectUnixWebSocket } = await import('../connectors/launcher/src/codex/ws.ts');
-  const { socketPathFor, verifySocket, CODEX_APPSERVER_VERSIONS } = await import('../connectors/launcher/src/codex/discover.ts');
+  const { socketPathFor, verifySocket, isCodexVersionSupported } = await import('../connectors/launcher/src/codex/discover.ts');
   const { startCodexConnector } = await import('../connectors/launcher/src/codex/connector.ts');
   const { readBindings } = await import('../connectors/launcher/src/codex/connector-authority.ts');
   const { ownerOf } = await import('../connectors/launcher/src/codex/ownership.ts');
@@ -80,7 +80,7 @@ async function runSmoke() {
     const started = await run(codex, ['app-server', 'daemon', 'start']);
     assert(started.code === 0, 'private daemon failed to start'); daemon = true;
     const version = JSON.parse((await run(codex, ['app-server', 'daemon', 'version'])).stdout);
-    assert(CODEX_APPSERVER_VERSIONS.includes(version.appServerVersion), 'private daemon version is not supported');
+    assert(isCodexVersionSupported(version.appServerVersion), 'private daemon version is not supported');
     evidence.runtime = version.appServerVersion;
     const checked = verifySocket(socketPathFor(codexHome), process.geteuid()); assert(checked.ok, 'private socket refused');
     const ws = await connectUnixWebSocket(checked.target, { maxMessageBytes: 16 * 1024 * 1024, timeoutMs: 10000 });

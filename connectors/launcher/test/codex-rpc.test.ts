@@ -7,7 +7,7 @@ import { mkdtemp, rm, chmod, readlink, writeFile, symlink } from 'node:fs/promis
 import { join, dirname } from 'node:path';
 import { fakeClock, memoryLog } from '../../hub-client/testing/fixtures.ts';
 import { startFakeCodexAppServer } from './fake-codex-appserver.ts';
-import { socketPathFor, verifySocket, parseServerVersion, CODEX_APPSERVER_VERSIONS } from '../src/codex/discover.ts';
+import { socketPathFor, verifySocket, parseServerVersion } from '../src/codex/discover.ts';
 import { openCodexRpc, CodexRpcError } from '../src/codex/rpc.ts';
 import { buildThreadResume, buildTurnStart, CODEX_OPT_OUT_NOTIFICATIONS } from '../src/codex/protocol.ts';
 import type { AllowedMethod } from '../src/codex/protocol.ts';
@@ -42,7 +42,6 @@ test('socketPathFor and verifySocket accept the fake layout', { timeout: 5000 },
   const relative = join(dirname(fake.socketPath), 'relative.sock');
   await symlink('../../d/' + (await readlink(fake.socketPath)).split('/').at(-1), relative);
   assert.deepEqual(verifySocket(relative, euid), { ok: true, target: await readlink(fake.socketPath) });
-  assert.deepEqual(CODEX_APPSERVER_VERSIONS, ['0.166.0', '0.167.0', '0.167.2']);
   assert.equal(parseServerVersion('codex-tui/0.166.0 (fake)'), '0.166.0');
   for (const bad of ['', '0.166.0', ' codex/0.166.0', 'codex/0.166', 'codex tui/0.166.0']) assert.equal(parseServerVersion(bad), null);
 });
@@ -89,8 +88,8 @@ for (const version of ['0.167.0', '0.167.2']) {
   });
 }
 
-test('unknown version is refused', { timeout: 5000 }, async t => {
-  const { fake, open, log } = await setup(t, '0.168.0');
+test('version below the compatibility floor is refused', { timeout: 5000 }, async t => {
+  const { fake, open, log } = await setup(t, '0.165.0');
   await assert.rejects(open(), (e: any) => e instanceof CodexRpcError && e.code === -1 && e.message === 'refused_version' && !e.ambiguous);
   assert.deepEqual(fake.requests.map(r => r.method), ['initialize']);
   assert.equal(log.entries.filter(e => e.level === 'error').length, 1);

@@ -1087,6 +1087,16 @@ test('asking policy without attended unsubscribes and sends nothing', async t =>
     else await eventually(() => h.sends().length === 1);
   }
 });
+test('a tentatively admitted version still cannot deliver under an unattended asking policy', async t => {
+  const h = await harness(t);
+  h.fake.setVersion('0.169.0');
+  h.fake.setThread({ id: threadId, status: { type: 'idle' }, approvalPolicy: 'on-request' });
+  await h.restart(); await h.wake();
+  assert.equal(h.engine.state(), 'ready');
+  assert.deepEqual(h.engine.liveness(), { live: false, reason: 'approval_policy' });
+  assert.equal(h.engine.subscribed(), false);
+  assert.equal(h.sends().length, 0);
+});
 test('attended binding stays subscribed under on-request', async t => {
   const h = await harness(t, { binding: { attended: true } }); h.fake.setThread({ id: threadId, status: { type: 'idle' }, approvalPolicy: 'on-request' });
   await h.restart(); await h.wake(); await eventually(() => h.sends().length === 1); assert.equal(h.engine.subscribed(), true);
@@ -1319,6 +1329,14 @@ for (const source of [{ subAgent: { thread_spawn: { parent_thread_id: 'parent' }
     assert.equal(h.engine.liveness().live, false);
   });
 }
+test('a tentatively admitted version cannot authorize an unknown root source', async t => {
+  const h = await harness(t, { source: 'future-unknown-source' });
+  h.fake.setVersion('1.0.0');
+  await h.restart(); await h.wake();
+  assert.equal(h.engine.liveness().live, false);
+  assert.equal(h.records().filter(r => !r.ack && (r.argv.includes('watch') || r.argv.includes('hook'))).length, 0);
+  assert.equal(h.sends().length, 0);
+});
 for (const binding of [{ generation: undefined }, { configPath: undefined }, { generation: 'invalid' }]) {
   test(`missing or invalid owner ${JSON.stringify(binding)} cannot start watch`, async t => {
     const h = await harness(t, { binding });

@@ -1,7 +1,7 @@
 import { lstatSync, readlinkSync, realpathSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 
-export const CODEX_APPSERVER_VERSIONS: readonly string[] = Object.freeze(['0.166.0', '0.167.0']);
+export { CODEX_MIN_APPSERVER_VERSION, CODEX_VERIFIED_APPSERVER_VERSIONS, codexVersionCompatibility, isCodexVersionSupported, parseServerVersion } from './compatibility.ts';
 export function socketPathFor(codexHome: string): string {
   return join(codexHome, 'app-server-control', 'app-server-control.sock');
 }
@@ -25,7 +25,4 @@ export function verifySocket(path: string, euid: number): SocketCheck {
     // Missing, dangling and inaccessible rendezvous paths all fail closed.
     return { ok: false, reason: 'missing' };
   }
-}
-export function parseServerVersion(userAgent: string): string | null {
-  return /^[^/\s]+\/(\d+\.\d+\.\d+)/.exec(userAgent)?.[1] ?? null;
 }

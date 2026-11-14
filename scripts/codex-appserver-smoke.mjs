@@ -45,13 +45,14 @@ async function preflight() {
   catch { return { skip: `no Codex app-server daemon: CODEX_HOME does not exist` }; }
   // The connector's own discovery and version gate: never starts a daemon.
   const { openCodexRpc } = await import('../connectors/launcher/src/codex/rpc.ts');
-  const { CODEX_APPSERVER_VERSIONS } = await import('../connectors/launcher/src/codex/discover.ts');
+  const { CODEX_MIN_APPSERVER_VERSION, isCodexVersionSupported } = await import('../connectors/launcher/src/codex/discover.ts');
   let version;
   try {
     const rpc = await openCodexRpc({ codexHome: home, euid, log: quiet, timeoutMs: 5000 });
     version = rpc.version; rpc.close();
+    if (!isCodexVersionSupported(version)) throw new Error('refused_version');
   } catch (error) {
-    if (error?.message === 'refused_version') return { skip: `the app-server daemon version is not allowlisted (${CODEX_APPSERVER_VERSIONS.join(', ')})` };
+    if (error?.message === 'refused_version') return { skip: `the app-server daemon version is malformed or below the minimum supported version (${CODEX_MIN_APPSERVER_VERSION})` };
     return { skip: `no Codex app-server daemon reachable for CODEX_HOME (${error?.reason ?? error?.message ?? 'unreachable'})` };
   }
   const stateDir = resolve(process.env.VECNET_CODEX_APPSERVER_SMOKE_DIR || join(root, '.scratch/vecnet/build-codex-appserver/smoke'));
