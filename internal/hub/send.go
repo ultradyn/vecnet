@@ -636,6 +636,21 @@ func (h *Hub) insertMessage(ctx context.Context, tx *sql.Tx, thr *threadRow, msg
 		nullIfEmpty(jobID), nullIfEmpty(aprID)); err != nil {
 		return fmt.Errorf("hub: insert message: %w", err)
 	}
+	if msg.Kind != "reaction" {
+		result, err := tx.ExecContext(ctx, `UPDATE threads SET archived_at=NULL,archived_by=NULL,unarchived_at=? WHERE thr_id=? AND archived_at IS NOT NULL`, h.nowStr(), thr.ID)
+		if err != nil {
+			return err
+		}
+		changed, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if changed > 0 {
+			if _, err := h.noteOperatorView(ctx, tx, "archive", thr.ID); err != nil {
+				return err
+			}
+		}
+	}
 	thr.MessageCount++
 	if countBudget && thr.Budget != nil && *thr.Budget > 0 {
 		b := *thr.Budget - 1

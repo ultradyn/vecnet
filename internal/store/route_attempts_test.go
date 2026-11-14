@@ -75,7 +75,7 @@ func a1Inventory(t *testing.T) []migration {
 func a1Feature(t *testing.T) migration {
 	t.Helper()
 	all := a1Inventory(t)
-	if len(all) != 35 {
+	if len(all) < 35 {
 		t.Fatalf("embedded inventory has %d migrations, want historical 34 plus %s", len(all), a1FeatureName)
 	}
 	if all[34].name != a1FeatureName || all[34].sum != a1FeatureSum {
@@ -304,8 +304,8 @@ func TestRouteAttemptsMasterPortUpgradeRollback(t *testing.T) {
 		before := a1Sentinels(t, db)
 		ledger := a1Snapshot(t, db, a1Ledger)
 		applied, err := Migrate(context.Background(), db)
-		if err != nil || !reflect.DeepEqual(applied, []string{a1FeatureName}) {
-			t.Errorf("34 upgrade applied=%v err=%v, want only %s", applied, err, a1FeatureName)
+		if err != nil || !reflect.DeepEqual(applied, []string{a1FeatureName, "0036_thread_archive.sql"}) {
+			t.Errorf("34 upgrade applied=%v err=%v, want 0035 and 0036", applied, err)
 		}
 		a1Unchanged(t, db, before)
 		if a1Snapshot(t, db, `SELECT * FROM schema_migrations WHERE name<'0035' ORDER BY name`) != ledger {

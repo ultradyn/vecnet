@@ -19,6 +19,7 @@ func TestCompactionMigrationsFreshAndUpgradeFromMaster0026(t *testing.T) {
 		"0033_thread_seq_history_tombstones.sql",
 		"0034_thread_history_loop_parent.sql",
 		"0035_route_attempts.sql",
+		"0036_thread_archive.sql",
 	}
 	for _, fromMaster := range []bool{false, true} {
 		name := "fresh"
@@ -37,8 +38,8 @@ func TestCompactionMigrationsFreshAndUpgradeFromMaster0026(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(migs) != 35 {
-				t.Fatalf("migration count=%d, want 35", len(migs))
+			if len(migs) != 36 {
+				t.Fatalf("migration count=%d, want 36", len(migs))
 			}
 			want := make([]string, len(migs))
 			for i, m := range migs {
@@ -76,7 +77,9 @@ func TestCompactionMigrationsFreshAndUpgradeFromMaster0026(t *testing.T) {
 				if err := db.QueryRow(`SELECT value FROM meta WHERE key='hub_identity_seed'`).Scan(&identity); err != nil {
 					t.Fatal(err)
 				}
-				for _, table := range []string{"peers", "events", "blob_r2_storage", "hub_preferences", "hub_preferences_state"} {
+				// Pin historical peer values separately: 0036 adds a nullable column.
+				before["peer_values"] = []byte(a1Snapshot(t, db, `SELECT peer_id,prn_id,name,kind,enrolled_at,archived_at FROM peers ORDER BY peer_id`))
+				for _, table := range []string{"events", "blob_r2_storage", "hub_preferences", "hub_preferences_state"} {
 					before[table] = r2Snapshot(t, db, table)
 				}
 				want = pending
@@ -87,6 +90,13 @@ func TestCompactionMigrationsFreshAndUpgradeFromMaster0026(t *testing.T) {
 			}
 			if fromMaster {
 				for table, rows := range before {
+					if table == "peer_values" {
+						if string(rows) != a1Snapshot(t, db, `SELECT peer_id,prn_id,name,kind,enrolled_at,archived_at FROM peers ORDER BY peer_id`) {
+							t.Error("historical peer values changed")
+						}
+						a1Count(t, db, `SELECT count(*) FROM peers WHERE unarchived_at IS NOT NULL`, 0)
+						continue
+					}
 					if !reflect.DeepEqual(rows, r2Snapshot(t, db, table)) {
 						t.Errorf("compaction changed master %s rows", table)
 					}
