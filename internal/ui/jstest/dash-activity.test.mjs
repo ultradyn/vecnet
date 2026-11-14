@@ -46,7 +46,7 @@ test('activity refresh retains exact keyboard selection and focus without minute
     answer(snapshot({ peer_a: [8] })); await tick();
     assert.equal(root.querySelector('.activity-chart'), chart);
     assert.equal(document.activeElement, svg);
-    assert.match(chart.querySelector('.spark-readout').textContent, /8 messages.*11:00:30/);
+    assert.match(chart.querySelector('.spark-readout').textContent, /8 messages.*59 min ago/);
     for (const c of root.querySelectorAll('.sparkline')) {
       for (const tag of ['details', 'summary', 'table']) assert.equal(c.querySelectorAll(tag).length, 0);
     }
@@ -118,7 +118,7 @@ test('removed peer charts stop updating and return fresh while a survivor keeps 
     assert.equal(old.svg.getAttribute('aria-label'), label, 'removed SVG must not consume later activity');
     assert.equal(old.svg.querySelector('.spark-line').getAttribute('points'), points);
     assert.match(survivor.svg.getAttribute('aria-label'), /2 messages/);
-    assert.match(survivor.read.textContent, /2 messages.*11:01:30/, 'survivor inspection follows the rolling window');
+    assert.match(survivor.read.textContent, /2 messages.*59 min ago/, 'survivor inspection follows the rolling window');
     assert.equal(root.querySelector('.activity-count').textContent, '19', 'removal must not drop historical activity');
     peers([peer('peer_a'), peer('peer_absent')]); store.invalidate('peers'); await store.settled();
     const fresh = peerView(root, 'peer_a');
