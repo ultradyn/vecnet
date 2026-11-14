@@ -636,6 +636,12 @@ func TestTwoWatchesFollowAtTime(t *testing.T) {
 // A watch whose profile another command already followed switches to the
 // recorded destination on its next reconnect, after verifying it.
 func TestWatchAdoptsFollowByOtherCommand(t *testing.T) {
+	// Exercise adoption of the other command's committed follow. Keep the
+	// watch's independently scheduled follow from racing that command; the
+	// drain below explicitly triggers the reconnect this scenario verifies.
+	savedJitter := moveJitter
+	moveJitter = func() time.Duration { return time.Hour }
+	t.Cleanup(func() { moveJitter = savedJitter })
 	a := testhub.Start(t)
 	_, qSecret := a.NewPeer("session", "Q")
 	// B is a copy of A taken after this event, as a real move copies a frozen hub.
@@ -650,6 +656,10 @@ func TestWatchAdoptsFollowByOtherCommand(t *testing.T) {
 		}
 	})
 	awaitNotice(t, func() bool { return strings.Contains(out.String(), "before move") }, 5*time.Second)
+	// The line can be printed during initial replay, before the SSE request
+	// exists. Relocating then lets that request follow a 410 before q runs.
+	// Wait for the real stream to park on the event log before relocating.
+	awaitNotice(t, func() bool { return a.Hub.Log.Waiters(a.OperatorPeer) > 0 }, 5*time.Second)
 	a.Relocate(t, b.URL)
 	if code, _, e := pinRun(env, "--net", "q", "peers"); code != 0 {
 		t.Fatalf("q follow: %d %s", code, e)

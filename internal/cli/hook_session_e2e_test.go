@@ -177,7 +177,7 @@ func TestWatchKeepsHookBinding(t *testing.T) {
 	}
 	var s struct {
 		Session string   `json:"session"`
-		Shown   []string `json:"shown"`
+		Shown   []string `json:"displayed"`
 	}
 	if err := json.Unmarshal(braw, &s); err != nil || s.Session != "S1" {
 		t.Fatalf("binding after watch: %s (%v)", braw, err)

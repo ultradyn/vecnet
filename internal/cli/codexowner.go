@@ -221,7 +221,7 @@ func (a *app) codexClaimEligible(b codexBinding, nonce string) error {
 // survives a lost response or connector crash; an ambiguous send blocks handoff
 // until exact-thread receipt recovery settles it. EOF is deliberately ambiguous.
 func (a *app) cmdCodexGuard(args []string, nowTime func() time.Time, settle bool) error {
-	o, err := parseFlags("codex guard", args, map[string]flagKind{"thread": strFlag, "codex-home": strFlag, "expect-generation": strFlag, "expect-hub": strFlag, "expect-caller": strFlag, "claim": strFlag, "attempt": strFlag, "outcome": strFlag})
+	o, err := parseFlags("codex guard", args, map[string]flagKind{"thread": strFlag, "codex-home": strFlag, "expect-generation": strFlag, "expect-hub": strFlag, "expect-caller": strFlag, "claim": strFlag, "attempt": strFlag, "outcome": strFlag, "receipt-key": strFlag, "delivery-ids": strFlag})
 	if err != nil {
 		return err
 	}
@@ -230,6 +230,10 @@ func (a *app) cmdCodexGuard(args []string, nowTime func() time.Time, settle bool
 	}
 	if settle && o.str("outcome") != "accepted" && o.str("outcome") != "rejected" {
 		return usageErr("settle requires --outcome accepted or rejected from exact-thread recovery")
+	}
+	receipt := o.has("receipt-key") || o.has("delivery-ids")
+	if receipt && (!settle || o.str("outcome") != "accepted" || !o.has("receipt-key") || !o.has("delivery-ids")) {
+		return usageErr("receipt settlement requires accepted outcome, exact key and delivery set")
 	}
 	ctx, cancel := context.WithTimeout(a.ctx, 30*time.Second)
 	defer cancel()
@@ -266,20 +270,29 @@ func (a *app) cmdCodexGuard(args []string, nowTime func() time.Time, settle bool
 		if err != nil && !missing {
 			return err
 		}
-		if missing {
+		if missing && !receipt {
 			return nil
 		}
 		var pending codexPendingSend
-		if err := validateCodexStateJSON(raw); err != nil {
-			return err
+		if !missing {
+			if err := validateCodexStateJSON(raw); err != nil {
+				return err
+			}
+			if json.Unmarshal(raw, &pending) != nil || !sameCodexOwner(pending.Owner, b) || pending.Claim != o.str("claim") || pending.Attempt != o.str("attempt") {
+				return usageErr("unresolved Codex send belongs to another claim")
+			}
 		}
-		if json.Unmarshal(raw, &pending) != nil || !sameCodexOwner(pending.Owner, b) || pending.Claim != o.str("claim") || pending.Attempt != o.str("attempt") {
-			return usageErr("unresolved Codex send belongs to another claim")
-		}
-		if o.str("outcome") == "accepted" {
+		if receipt {
+			if err := worker.codexRecordReceipt(b, o.str("claim"), o.str("receipt-key"), o.str("delivery-ids"), missing); err != nil {
+				return err
+			}
+		} else if o.str("outcome") == "accepted" {
 			if err := worker.codexAcceptClaim(b, o.str("claim")); err != nil {
 				return err
 			}
+		}
+		if missing {
+			return nil
 		}
 		return removeCodexPending(pendingPath)
 	}

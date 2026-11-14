@@ -101,7 +101,7 @@ func TestHookStateCredentialRotationKeeps(t *testing.T) {
 	h := newIdentityHub("peer_A")
 	h.pages["e1.5"], h.next["e1.5"] = []envelope.Event{hookEvent(6, "after rotation")}, "e1.6"
 	env, path, hub := identityFixture(t, h)
-	seedState(t, path, hookState{Hub: hub, Caller: "peer_A", Cred: "0123456789abcdef", PollCursor: "e1.5", Shown: []string{"dly_9"}})
+	seedState(t, path, hookState{Hub: hub, Caller: "peer_A", Cred: "0123456789abcdef", PollCursor: "e1.5", Shown: []string{"dly_9"}, Displayed: []string{"dly_9"}})
 	out, _ := runHook(t, env, "--event", "user-prompt")
 	if ctx := contextOf(t, out); !strings.Contains(ctx, "after rotation") {
 		t.Fatalf("rotation lost the stream: %q", ctx)
@@ -120,14 +120,25 @@ func TestHookStateCredentialRotationKeeps(t *testing.T) {
 	}
 }
 
-// A legacy state (no identity) adopts the current identity once, keeping its
-// cursor and shown ids.
-func TestHookStateLegacyAdopts(t *testing.T) {
+// A legacy reservation is not proof. After explicit verified display proof,
+// the hook keeps its predecessor and bootstraps legitimate subsequent output.
+func TestHookStateLegacyReservationDefersUntilProof(t *testing.T) {
 	h := newIdentityHub("peer_A")
 	h.pages["e1.5"], h.next["e1.5"] = []envelope.Event{hookEvent(9, "already shown"), hookEvent(6, "legacy continues")}, "e1.6"
 	env, path, hub := identityFixture(t, h)
 	seedHook(t, path, "e1.5", "dly_9")
 	out, _ := runHook(t, env, "--event", "user-prompt")
+	if out != "" || readHookState(t, path).PollCursor != "e1.5" {
+		t.Fatal("legacy reservation was silently consumed")
+	}
+	if err := (stateFile{path}).update(t.Context(), func(s *hookState) error {
+		s.bind(hookIdentity{Hub: hub, Caller: "peer_A", Cred: hookCredential("vn_peer_test")})
+		s.recordDisplay("dly_9")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	out, _ = runHook(t, env, "--event", "user-prompt")
 	ctx := contextOf(t, out)
 	if !strings.Contains(ctx, "legacy continues") || strings.Contains(ctx, "already shown") {
 		t.Fatalf("legacy state not continued: %q", ctx)

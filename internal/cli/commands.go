@@ -224,11 +224,12 @@ type app struct {
 	inMCP         bool   // stdio relay startup refusals must make no requests
 	// retainedRequestID is the agent-add id for this process, generated or
 	// explicit, so a verified hub follow redispatches the same submission.
-	retainedRequestID string
-	prefsCmd          bool                        // preferences exit codes and JSON errors
-	localRuntime      func(context.Context) error // runtime port for disposable setup fixtures
-	localRepairStart  func(*exec.Cmd) error       // process port for isolated maintenance tests
-	localProjectRoot  string                      // saved enrollment target during repair; never ownership
+	retainedRequestID    string
+	prefsCmd             bool                        // preferences exit codes and JSON errors
+	localRuntime         func(context.Context) error // runtime port for disposable setup fixtures
+	localRepairStart     func(*exec.Cmd) error       // process port for isolated maintenance tests
+	localProjectRoot     string                      // saved enrollment target during repair; never ownership
+	localEnrollmentRetry bool                        // saved intent must never clear durable unbind opt-out
 }
 
 // exit prints err and maps it to an exit code. Preferences commands use the
