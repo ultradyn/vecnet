@@ -11,6 +11,8 @@ export type PermissionMode =
   | "auto"         // backend-mediated: sandboxed workspace writes, backend's own auto-review
   | "full-access"; // permissions bypassed (paseo presets today, codex full-access, claude bypassPermissions)
 
+export type WorkspaceMode = 'worktree' | 'project-root' | 'temp';
+
 export interface BackendCapabilities {
   maxInputBytes?: number;
   steer: boolean;                              // can change an in-flight turn
@@ -22,6 +24,7 @@ export interface BackendCapabilities {
   backgroundTasks: "observable" | "opaque" | "none";
   attachments: boolean;                        // can pass files into a turn
   workspace: "backend-worktree" | "launcher-dir";
+  workspaceModes?: readonly WorkspaceMode[]; // absent = legacy isolated worktree only
   branchName: "settable" | "backend-chosen";
   permissionModes: readonly PermissionMode[];
   presets: readonly PresetInfo[];
@@ -35,6 +38,7 @@ export interface LaunchSpec {
   title: string;
   prompt: string;                // job_request.instructions, plus the launcher's footer
   project: ResolvedProject;      // launcher-side alias resolved to repo root + base ref
+  workspaceMode?: WorkspaceMode;
   branch: string;                // "launch/<job_id>" when branchName is settable
   preset: string;
   permissionMode: PermissionMode;
@@ -42,11 +46,16 @@ export interface LaunchSpec {
   env: Readonly<Record<string, string>>; // already scrubbed; never contains vecnet credentials
 }
 
-export interface ResolvedProject { alias: string; repoRoot: string; baseRef: string }
+export interface ResolvedProject { alias: string; repoRoot: string; baseRef: string; scratch?: boolean }
 export interface LocalFile { path: string; name: string; mediaType: string; sha256: string }
 
 /** Opaque, JSON-serialisable; persisted in the ledger and given back to reattach(). */
 export interface SessionRef { backend: BackendId; host: string; id: string; extra?: Record<string, unknown> }
+
+/** Internal proof attached by an owning backend to the original error. It
+ * preserves RPC error identity and cannot be supplied by a wire error body. */
+export const OWNED_LAUNCH_REFUSAL = Symbol('owned-launch-refusal');
+export interface OwnedLaunchRefusal { ref: SessionRef; reason: 'effective_policy' | 'no_rollout' }
 
 export type SessionState =
   | { kind: "starting" }
@@ -139,6 +148,10 @@ export type ReattachResult =
 
 export interface Backend {
   cleanupWorkspace?(ref: SessionRef): Promise<{ removed: boolean; reason?: string }>;
+  /** Failed-launch cleanup only: prove exact owned settlement without obtaining
+   * an input-capable attachment. Reject uncertain ownership or cleanup; persist
+   * settlement before resolving. Backends without this retain reattach+settle. */
+  settleOwned?(ref: SessionRef, mode: SettleMode): Promise<void>;
   readonly id: BackendId;
   capabilities(): Promise<BackendCapabilities>;
   health(signal?: AbortSignal): Promise<BackendHealth>;

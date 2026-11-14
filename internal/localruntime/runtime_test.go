@@ -127,6 +127,30 @@ func TestCapabilityFailuresWriteNothing(t *testing.T) {
 		})
 	}
 }
+func TestProfileLauncherServiceConflicts(t *testing.T) {
+	for _, active := range []bool{false, true} {
+		t.Run(map[bool]string{true: "active", false: "inactive"}[active], func(t *testing.T) {
+			o, h := fixture(t)
+			state := "inactive dead"
+			if active {
+				state = "active running"
+			}
+			h.legacy = "vecnet-launcher-p-0123456789abcdef.service loaded " + state + " launcher\n"
+			_, err := localruntime.Ensure(context.Background(), o)
+			if active {
+				if err == nil || !strings.Contains(err.Error(), "conflicting running service") {
+					t.Fatalf("active profile launcher conflict not identified: %v", err)
+				}
+			} else if err != nil {
+				t.Fatalf("inactive profile launcher blocked activation: %v", err)
+			}
+			if !strings.Contains(strings.Join(h.calls, "\n"), "vecnet-launcher-p-*.service") {
+				t.Fatal("profile-owned launcher units omitted from systemd query")
+			}
+		})
+	}
+}
+
 func TestStageActivateUpgradeAndNoop(t *testing.T) {
 	o, h := fixture(t)
 	authority := filepath.Join(o.Home, ".local/state/vecnet/codex/bindings.json")

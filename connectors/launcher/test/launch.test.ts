@@ -145,3 +145,18 @@ test('backend-chosen branch leaves original instructions intact; missing instruc
   const withoutInstructions = {...job(),instructions:undefined};
   assert.throws(() => buildLaunchSpec(withoutInstructions,deps.projects(job()),caps,{}),/instructions missing/);
 });
+
+test('buildLaunchSpec instructs a branch only for worktrees, preserving project-root and branchless ACP temp', async t => {
+  const {deps,job,backend} = setup(t), base = job();
+  const caps = await backend.capabilities();
+  for (const mode of ['project-root','temp'] as const) {
+    const selected = {...base,input:{...base.input,workspace_mode:mode}};
+    const spec = buildLaunchSpec(selected,deps.projects(selected),{...caps,branchName:'settable'},{});
+    assert.equal(spec.workspaceMode,mode);
+    assert.ok(!spec.prompt.includes('Work on branch '),mode+' must not instruct a branch change');
+    assert.ok(spec.prompt.endsWith('Do not push.'));
+    assert.ok(spec.prompt.includes(PROMPT_FOOTER));
+  }
+  const worktree = buildLaunchSpec(base,deps.projects(base),{...caps,branchName:'settable'},{});
+  assert.ok(worktree.prompt.includes('Work on branch launch/'+base.jobId+'; do not push.'));
+});

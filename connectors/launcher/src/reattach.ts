@@ -1,4 +1,5 @@
-import type { SessionHandle } from './backend.ts';
+import { OWNED_LAUNCH_REFUSAL } from './backend.ts';
+import type { OwnedLaunchRefusal, SessionHandle } from './backend.ts';
 import type { JobRow } from './ledger.ts';
 import type { LaunchDeps } from './launch.ts';
 import { clearPending, markPending, pendingDue, recordRunning, recoverFailedLaunch, settleLateHandle, startLaunch } from './launch.ts';
@@ -50,7 +51,20 @@ async function reattach(job: JobRow, deps: LaunchDeps): Promise<ReattachOutcome>
       return {job:deps.ledger.job(job.jobId)!,outcome:'lost'};
     }
     return {job:deps.ledger.job(job.jobId)!,outcome:job.sessionRef ? result.found : 'adopted',handle:resumingHandle(result.handle,job,deps)};
-  } catch {
+  } catch (error) {
+    const refusal = error instanceof Error ? (error as Error & { [OWNED_LAUNCH_REFUSAL]?: OwnedLaunchRefusal })[OWNED_LAUNCH_REFUSAL] : undefined;
+    const current = deps.ledger.job(job.jobId)!;
+    const known = current.sessionRef, proof = refusal?.ref;
+    if (job.backend === 'codex-app-server' && current.state === 'launching' && current.terminal === null &&
+        refusal && ['effective_policy','no_rollout'].includes(refusal.reason) && known && proof &&
+        known.backend === backend.id && proof.backend === known.backend && proof.host === known.host && proof.id === known.id &&
+        Object.keys(known.extra ?? {}).length === Object.keys(proof.extra ?? {}).length &&
+        Object.entries(known.extra ?? {}).every(([key,value]) => proof.extra?.[key] === value)) {
+      deps.ledger.kv('launch-failure').set(job.jobId,JSON.stringify({ reason:`native pre-input launch refused: ${refusal.reason}`,
+        ...(current.branch ? {branch:current.branch} : {}) }));
+      const outcome = await recoverFailedLaunch(current,backend,deps,false);
+      return {job:deps.ledger.job(job.jobId)!,outcome};
+    }
     markPending(job.jobId,deps);
     return {job:deps.ledger.job(job.jobId)!,outcome:'unreachable'};
   }

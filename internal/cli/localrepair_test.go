@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -131,6 +132,61 @@ func TestLocalRepairPrefersStandaloneWithLeftoverLauncherUnit(t *testing.T) {
 	a.localRuntime = func(context.Context) error { calls++; return nil }
 	if err := a.cmdLocalRepair(nil); err != nil || calls != 1 {
 		t.Fatalf("standalone repair was blocked by leftover launcher: calls=%d error=%v", calls, err)
+	}
+}
+
+func TestLocalRepairReportsUnregisteredProfileLauncher(t *testing.T) {
+	a, _, home := localRegistryFixture(t)
+	home = filepath.Join(filepath.Dir(home), "operator[1]")
+	a.getenv = func(k string) string {
+		if k == "HOME" {
+			return home
+		}
+		return ""
+	}
+	unit := filepath.Join(home, ".config/systemd/user/vecnet-launcher-p-0123456789abcdef.service")
+	if err := os.MkdirAll(filepath.Dir(unit), 0700); err != nil {
+		t.Fatal(err)
+	}
+	before := []byte("[Service]\nExecStart=/private/old-launcher\n")
+	if err := os.WriteFile(unit, before, 0600); err != nil {
+		t.Fatal(err)
+	}
+	started := 0
+	a.localRepairStart = func(*exec.Cmd) error { started++; return nil }
+	a.localStartup([]string{"peers"})
+	if started != 1 {
+		t.Fatalf("profile launcher omitted from maintenance: %d", started)
+	}
+	if err := a.cmdLocalRepair(nil); err == nil || !strings.Contains(err.Error(), "not registered") {
+		t.Fatalf("unregistered profile launcher falsely upgraded: %v", err)
+	}
+	if got, err := os.ReadFile(unit); err != nil || !bytes.Equal(got, before) {
+		t.Fatalf("unregistered unit changed: %s %v", got, err)
+	}
+}
+
+func TestLocalLauncherInspectionFailureRemainsPending(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("root can read directories despite permission denial")
+	}
+	a, _, home := localRegistryFixture(t)
+	dir := filepath.Join(home, ".config/systemd/user")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0700) })
+	if !localLauncherPresent(home) {
+		t.Fatal("uncertain launcher discovery did not schedule inspection")
+	}
+	if err := a.unregisteredLocalLaunchers(); err == nil {
+		t.Fatal("unreadable launcher directory was reported absent")
+	}
+	if err := a.cmdLocalRepair(nil); err == nil {
+		t.Fatal("unreadable launcher directory falsely repaired")
 	}
 }
 
@@ -269,10 +325,10 @@ func TestLocalRepairConcurrentAdoptionRemainsPending(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	completed := map[string]localArtifact{}
+	completed := map[string]localArtifactRepair{}
 	for _, art := range projects[0].Artifacts {
 		if filepath.Base(art.Path) == "x.json" {
-			completed[art.Path] = art
+			completed[art.Path] = localArtifactRepair{Before: art, After: art}
 		}
 	}
 	why, err := a.finishLocalProjectRepair(root, completed, "ready", "", nil)
@@ -368,7 +424,7 @@ func TestLocalRepairPreservesConcurrentSamePathInstallation(t *testing.T) {
 	old := current
 	old.Hash = strings.Repeat("b", 64)
 	old.Version = "older"
-	why, err := a.finishLocalProjectRepair(root, map[string]localArtifact{path: old}, "ready", "", nil)
+	why, err := a.finishLocalProjectRepair(root, map[string]localArtifactRepair{path: {Before: old, After: old}}, "ready", "", nil)
 	if err != nil || why == "" {
 		t.Fatalf("%q %v", why, err)
 	}
@@ -413,5 +469,107 @@ func TestLocalStartupDefersFileIntegrityToPeriodicRepair(t *testing.T) {
 	a.localStartup([]string{"peers"})
 	if starts != 1 {
 		t.Fatal("periodic integrity work was not scheduled")
+	}
+}
+
+// Exercise the complete caller, including publication of the helper's new
+// artifact generation into the project registry.
+func TestLocalRepairPublishesLauncherReplacement(t *testing.T) {
+	_, a, root, before, _ := launcherRepairFixture(t, false)
+	if err := a.repairLocalProjectsAfterRuntime(nil); err != nil {
+		t.Fatal(err)
+	}
+	projects, err := a.localProjects()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, project := range projects {
+		if project.Root != root {
+			continue
+		}
+		if project.Status != "ready" || project.AppliedVersion != localSoftwareVersion() || project.AppliedDigest == "" {
+			t.Fatalf("project did not converge: %#v", project)
+		}
+		for _, artifact := range project.Artifacts {
+			if artifact.Path != before.Path {
+				continue
+			}
+			if artifact.Hash == before.Hash || artifact.Hash != launcherHash(launcherTestRead(t, artifact.Path)) || artifact.Version != localSoftwareVersion() {
+				t.Fatalf("replacement not published: %#v", artifact)
+			}
+			if err := a.repairLocalProjectsAfterRuntime(nil); err != nil {
+				t.Fatalf("repeat repair: %v", err)
+			}
+			return
+		}
+	}
+	t.Fatal("launcher registration disappeared")
+}
+
+func TestLocalRepairCompletionRequiresInspectedGeneration(t *testing.T) {
+	for _, field := range []string{"hash", "version", "kind", "installed-at", "removed", "error"} {
+		t.Run(field, func(t *testing.T) {
+			a, root, _ := localRegistryFixture(t)
+			path := filepath.Join(root, "managed.json")
+			if err := os.WriteFile(path, []byte("old"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := a.registerLocalArtifact(path, "launcher-profile", "old", time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			projects, err := a.localProjects()
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := projects[0].Artifacts[0]
+			after := before
+			after.Hash, after.Version = strings.Repeat("a", 64), "new"
+			current := before
+			switch field {
+			case "hash":
+				current.Hash = strings.Repeat("b", 64)
+			case "version":
+				current.Version = "concurrent"
+			case "kind":
+				current.Kind = "codex-hooks"
+			case "installed-at":
+				current.InstalledAt = current.InstalledAt.Add(time.Second)
+			}
+			if err := a.updateLocalProject(root, func(p *localProject) error {
+				if field == "removed" {
+					p.Artifacts = []localArtifact{}
+				} else {
+					p.Artifacts[0] = current
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			status, why := "ready", ""
+			if field == "error" {
+				status, why = "pending", "helper failure"
+			}
+			why, err = a.finishLocalProjectRepair(root, map[string]localArtifactRepair{path: {Before: before, After: after}}, status, why, nil)
+			if err != nil || why == "" {
+				t.Fatalf("concurrent generation/error accepted: %q %v", why, err)
+			}
+			projects, err = a.localProjects()
+			if err != nil {
+				t.Fatal(err)
+			}
+			project := projects[0]
+			if project.Status != "pending" || project.AppliedDigest != "" {
+				t.Fatalf("incorrect completion: %#v", project)
+			}
+			if field == "removed" {
+				if len(project.Artifacts) != 0 {
+					t.Fatal("resurrected removed artifact")
+				}
+				return
+			}
+			if len(project.Artifacts) != 1 || !sameLocalArtifact(project.Artifacts[0], current) {
+				t.Fatalf("overwrote concurrent evidence: %#v", project.Artifacts)
+			}
+		})
 	}
 }

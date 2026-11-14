@@ -1099,7 +1099,7 @@ func (a *app) installCodexHooksExpected(path, bin string, o opts, expected strin
 		}
 		if !changed {
 			fmt.Fprintf(a.stderr, "unchanged %s\n", path)
-			if o.has("write") {
+			if o.has("write") && expected == "" {
 				a.recordLocalCodexHooks(target)
 			}
 			return nil
@@ -1155,7 +1155,11 @@ func (a *app) installCodexHooksExpected(path, bin string, o opts, expected strin
 		fmt.Fprintf(a.stderr, "restored %s\n", path)
 	} else {
 		fmt.Fprintf(a.stderr, "wrote %s (SessionStart, UserPromptSubmit, PostToolUse)\n", path)
-		a.recordLocalCodexHooks(target)
+		// An unattended repair owns registry publication through its inspected
+		// preimage CAS; explicit installation/adoption registers immediately.
+		if expected == "" {
+			a.recordLocalCodexHooks(target)
+		}
 	}
 	return nil
 }

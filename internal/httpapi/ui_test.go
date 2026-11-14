@@ -46,7 +46,10 @@ import (
 // to 672 KiB on 2026-11-10 for the UI review's phone layout, draft keeping,
 // light theme and feedback fixes, measured at 667,480 bytes before them with
 // 4,264 bytes of headroom left (one 16 KiB step).
-const uiMaxBytes = 672 << 10
+// Raised to 704 KiB for the native/ACP launcher forms and scoped request
+// recovery on 2026-11-15, measured at 708,152 bytes with all newer UI work.
+// The all-files size assertion remains; this is the next 16 KiB boundary.
+const uiMaxBytes = 704 << 10
 
 var (
 	scriptTag   = regexp.MustCompile(`(?is)<script\b([^>]*)>(.*?)</script>`)

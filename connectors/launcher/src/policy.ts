@@ -50,9 +50,12 @@ export function gateLaunch(a: { sender: string; req: LaunchRequest; dir: Directo
   if (!backend.health.ok) return {ok:false,error:'backend_unhealthy',reason:'backend unavailable'};
   if (!backend.caps.presets.some(p => p.id === input.preset)) return deny('preset');
   if (!ceiling.permission_modes.includes(input.permission_mode) || !backend.caps.permissionModes.includes(input.permission_mode)) return deny('permission_mode');
+  const workspaceMode = input.workspace_mode ?? 'worktree';
+  if (!(backend.caps.workspaceModes ?? ['worktree']).includes(workspaceMode)) return deny('workspace_mode');
   const project = Object.hasOwn(a.cfg.projects,input.project) ? a.cfg.projects[input.project] : undefined;
   if (!project || (!ceiling.projects.includes('*') && !ceiling.projects.includes(input.project)) ||
       (project.backends !== undefined && !project.backends.includes(input.backend))) return deny('project');
+  if ((workspaceMode === 'temp') !== (project.scratch === true)) return deny('workspace_project');
   const wrapup = input.idle?.wrapup_after;
   const customSettle = typeof wrapup === 'string' ? parseDuration(wrapup) : wrapup;
   if (customSettle !== undefined && customSettle > a.cfg.limits.max_idle_wrapup_ms) return deny('idle');
@@ -73,7 +76,7 @@ export function gateLaunch(a: { sender: string; req: LaunchRequest; dir: Directo
   ] as const) {
     if (used >= max) return {ok:false,error:'cap_reached',details:{limit,running:counts.unparked,open:counts.open}};
   }
-  return {ok:true,key,account,ceiling,project:{alias:input.project,repoRoot:project.repo_root,baseRef:input.base_ref ?? project.base_ref},deadlineAt,settleMs};
+  return {ok:true,key,account,ceiling,project:{alias:input.project,repoRoot:project.repo_root,baseRef:input.base_ref ?? project.base_ref,...(project.scratch === undefined ? {} : {scratch:project.scratch})},deadlineAt,settleMs};
 }
 
 export type ApprovalRoute = { to: 'requester' | 'operator' | 'relay'; escalateOption: boolean; escalateToOperator: boolean;

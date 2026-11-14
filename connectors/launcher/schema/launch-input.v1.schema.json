@@ -3,6 +3,7 @@
   "$id": "launch-input.v1.schema.json",
   "type": "object",
   "properties": {
+    "workspace_mode": { "enum": ["worktree", "project-root", "temp"] },
     "backend": {
       "type": "string",
       "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",

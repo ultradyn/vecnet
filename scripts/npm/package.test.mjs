@@ -28,7 +28,9 @@ test('release contains only runtime files and complete native binaries', async t
     'package.json', 'README.md', 'BUILD_INFO.json', 'THIRD_PARTY_NOTICES.txt',
     'bin/run.cjs', 'bin/vecnet.cjs', 'bin/vecnet-hub.cjs', ...binaries,
   ].map(file => `package/${file}`).sort();
-  assert.deepEqual(packed, expected);
+  const runtime = packed.filter(file => file.startsWith('package/connectors/'));
+  for (const file of runtime) assert.match(file, /^package\/connectors\/(launcher|hub-client)\/(package\.json|src\/[A-Za-z0-9_./-]+\.ts|schema\/launch-(input|permission|question|answers|approval-closed)\.v1\.schema\.json|systemd\/vecnet-launcher-profile\.service\.in)$/);
+  assert.deepEqual(packed.filter(file => !file.startsWith('package/connectors/')), expected);
   const extracted = await mkdtemp(path.join(os.tmpdir(), 'vecnet-npm-inspect-'));
   t.after(() => rm(extracted, { recursive: true, force: true }));
   execFileSync('tar', ['-xzf', tarball, '-C', extracted]);
@@ -56,7 +58,8 @@ test('release contains only runtime files and complete native binaries', async t
 });
 
 test('packed npm installation runs both commands and exchanges messages through its hub', { timeout: 90_000 }, async t => {
-  const temporary = await mkdtemp(path.join(os.tmpdir(), 'vecnet-npm-'));
+  // The installer intentionally rejects group-writable build-lane ancestors.
+  const temporary = await mkdtemp(path.join(await realpath('/tmp'), 'vecnet-npm-'));
   let stopHub;
   t.after(async () => {
     try { if (stopHub) await stopHub(); }
@@ -158,6 +161,54 @@ test('packed npm installation runs both commands and exchanges messages through 
   const project = projects.find(entry => entry.root === projectRoot);
   assert.ok(project, 'packed CLI ordinary use registers the disposable project');
   assert.equal(project.observed_version, manifest.version, 'installed native CLI records the npm release version');
+
+  // Bootstrap using only the actually npm-installed CLI and its assets, outside
+  // the source checkout. Only systemctl is faked: Node must load real modules.
+  const added = JSON.parse(mustRun(cli, ['--net','op','--json','peer','add','--kind','launcher','--name','packed-launcher'], {env:{...env,VECNET_CONFIG:operatorConfig}}));
+  const launcherEnv = {...env,VECNET_CONFIG:path.join(temporary,'launcher.toml')};
+  const managerDir = path.join(temporary,'fake-manager'), managerLog = path.join(temporary,'manager.log');
+  await mkdir(managerDir,{mode:0o700});
+  await writeFile(path.join(managerDir,'systemctl'),'#!/bin/sh\nprintf \'%s\\n\' "$*" >> "$LAUNCHER_MANAGER_LOG"\n',{mode:0o700});
+  launcherEnv.PATH = managerDir + path.delimiter + path.dirname(process.execPath) + path.delimiter + env.PATH;
+  launcherEnv.LAUNCHER_MANAGER_LOG = managerLog;
+  const repo = path.join(temporary,'launcher-repo');
+  execFileSync('git',['init','-q',repo],{cwd:temporary,env:launcherEnv});
+  execFileSync('git',['-C',repo,'-c','user.name=Package test','-c','user.email=package@example.invalid','commit','--allow-empty','-qm','initial'],{cwd:temporary,env:launcherEnv});
+  mustRun(cli,['enrol','--hub',base,'--token','-','--profile','packed-launcher'],{env:launcherEnv,input:added.enrol_token+'\n'});
+  mustRun(cli,['--net','packed-launcher','launcher','setup','--project','packed','--repo',repo,'--base-ref','HEAD','--write'],{env:launcherEnv});
+  const installArgs = ['--net','packed-launcher','launcher','install','--node',process.execPath];
+  const plan = JSON.parse(mustRun(cli,installArgs,{env:launcherEnv}));
+  const installedRoot = path.join(prefix,'lib','node_modules','vecnet');
+  assert.equal(plan.runtime.source,installedRoot,'installed executable discovers its own package outside the checkout');
+  await assert.rejects(readFile(managerLog),{code:'ENOENT'},'preview must not touch the manager');
+  const installed = JSON.parse(mustRun(cli,[...installArgs,'--write','--enable','--start'],{env:launcherEnv}));
+  assert.ok(installed.runtime.entry.startsWith(launcherEnv.XDG_DATA_HOME+path.sep));
+  assert.match(await readFile(managerLog,'utf8'),/--user daemon-reload\n--user enable vecnet-launcher-.*\.service\n--user restart vecnet-launcher-.*\.service\n/);
+  const unit = await readFile(installed.unit_path,'utf8');
+  assert.ok(unit.includes(installed.runtime.entry),'service executes the private installed snapshot');
+  assert.ok(!unit.includes(root),'service must not reference the source checkout');
+  const builtins = JSON.parse(await readFile(path.join(installedRoot,'BUILD_INFO.json'),'utf8')).launcher.backends;
+  for (const id of ['t3','paseo','codex-app-server']) assert.ok(builtins.includes(id));
+  const graph = execFileSync(process.execPath,['--disable-warning=ExperimentalWarning','--input-type=module','-e',
+    'import {pathToFileURL} from "node:url"; import path from "node:path"; const ids=JSON.parse(process.argv[2]); for (const id of ids) { const m=await import(pathToFileURL(path.join(process.argv[1],"connectors/launcher/src/backends",id,"index.ts"))); const plugin=m.default ?? Object.values(m).find(p=>p?.id===id); if(plugin?.id!==id) throw new Error("wrong backend"); } console.log(JSON.stringify(ids));',
+    installed.runtime.snapshot,JSON.stringify(builtins)],{cwd:temporary,env:launcherEnv,encoding:'utf8',timeout:10000});
+  assert.deepEqual(JSON.parse(graph),builtins);
+  const checked = run(cli,['--net','packed-launcher','launcher','check'],{env:launcherEnv});
+  assert.equal(checked.status,1,'missing private Codex socket is an unhealthy backend, not a module/config failure');
+  const report = JSON.parse(checked.stdout);
+  assert.equal(report.backends.length,1);
+  assert.equal(report.backends[0].id,'codex-app-server');
+  assert.equal(report.backends[0].ok,false);
+  assert.deepEqual(report.backends[0].presets,['default']);
+  assert.deepEqual(report.backends[0].permission_modes,['read-only','ask','auto','full-access']);
+  const managerBefore = await readFile(managerLog,'utf8'), unitBefore = await readFile(installed.unit_path,'utf8');
+  const changedModule = path.join(installedRoot,'connectors/launcher/src/backends/codex-app-server/index.ts');
+  await writeFile(changedModule,(await readFile(changedModule,'utf8'))+'\n// changed after packaging\n');
+  const refused = run(cli,[...installArgs,'--write','--enable','--start'],{env:launcherEnv});
+  assert.notEqual(refused.status,0,'changed packaged source must not become an installed runtime');
+  assert.match(refused.stderr,/packaged launcher asset digest mismatch/);
+  assert.equal(await readFile(managerLog,'utf8'),managerBefore,'digest refusal must not invoke the manager');
+  assert.equal(await readFile(installed.unit_path,'utf8'),unitBefore,'digest refusal must not publish a unit');
 });
 
 test('wrapper preserves failure when a native process is killed by SIGPIPE', async t => {
@@ -170,4 +221,25 @@ test('wrapper preserves failure when a native process is killed by SIGPIPE', asy
     encoding: 'utf8', timeout: 5000,
   });
   assert.ok(result.signal === 'SIGPIPE' || result.status === 141, `unexpected wrapper exit ${result.status}/${result.signal}: ${result.stderr}`);
+});
+
+
+test('npm package includes complete launcher runtime and dynamic builtins', async t => {
+  const extracted = await mkdtemp(path.join(os.tmpdir(),'vecnet-npm-launcher-assets-'));
+  t.after(()=>rm(extracted,{recursive:true,force:true}));
+  execFileSync('tar',['-xzf',tarball,'-C',extracted]);
+  const contents = path.join(extracted,'package');
+  const metadata = JSON.parse(await readFile(path.join(contents,'BUILD_INFO.json'),'utf8'));
+  assert.equal(metadata.launcher?.entry,'connectors/launcher/src/main.ts');
+  for (const file of ['src/main.ts','src/daemon.ts','src/plugins.ts','src/backends/t3/index.ts','src/backends/paseo/index.ts','src/backends/codex-app-server/index.ts','src/backends/acp/index.ts','systemd/vecnet-launcher-profile.service.in']) {
+    const key='connectors/launcher/'+file;
+    assert.ok(metadata.launcher.assets[key],'missing launcher asset '+key);
+    assert.deepEqual(await readFile(path.join(contents,key)),await readFile(path.join(root,key)),'exact shipped source '+key);
+  }
+  for (const [file,digest] of Object.entries(metadata.launcher.assets)) {
+    assert.equal(createHash('sha256').update(await readFile(path.join(contents,file))).digest('hex'),digest,file);
+  }
+  const packed = execFileSync('tar',['-tzf',tarball],{encoding:'utf8'}).trim().split('\n');
+  const runtime = packed.filter(file=>file.startsWith('package/connectors/')).map(file=>file.slice('package/'.length)).sort();
+  assert.deepEqual(runtime,[...new Set([...Object.keys(metadata.launcher.assets)])].sort(),'every runtime artifact has recorded provenance');
 });

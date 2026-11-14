@@ -55,3 +55,15 @@ dialog.inv::backdrop{background:#05070dcc}
   .inv-row{flex-direction:column}
   dialog.inv{padding:16px}
 }
+
+/* Launcher host setup and peer job composer. */
+.launch-form{max-width:850px;display:flex;flex-direction:column;gap:10px}
+.launch-form fieldset{border:0;margin:0;padding:0;min-width:0}
+.launch-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px 16px}
+.launch-field{display:flex;flex-direction:column;gap:5px;margin:8px 0}
+.launch-field label{font-size:12px;color:var(--dim)}
+.launch-field input,.launch-field select,.launch-field textarea{width:100%;box-sizing:border-box;min-width:0;background:var(--bg);color:var(--text);border:1px solid var(--line2);border-radius:7px;padding:9px;font:inherit}
+.launch-field textarea{resize:vertical;line-height:1.5}
+.launch-form>.btn{align-self:flex-end}
+.launch-form fieldset:disabled{opacity:.65}
+@media(max-width:560px){.launch-grid{grid-template-columns:1fr}}

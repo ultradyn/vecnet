@@ -1239,6 +1239,7 @@ Normative for peers of kind `launcher` (§18.1) and for requesters that talk to 
 | `project` | yes | A launcher-side alias for a repo root; never a path from the requester |
 | `preset` | yes | A backend preset (model, effort, provider) the launcher advertises |
 | `permission_mode` | yes | `read-only`, `ask`, `auto` or `full-access`, within the requester's ceiling |
+| `workspace_mode` | no | `worktree` (default), `project-root`, or `temp`, restricted to the selected backend's advertised modes. Project aliases remain host-owned; temporary jobs use an explicit scratch alias. |
 | `base_ref` | no | Branch or commit the workspace starts from; default: the project's |
 | `title` | no | Session title, at most 200 characters; the launcher prefixes `vl-<job_id>` |
 | `idle.wrapup_after` | no | Settle timer for this session (a duration such as `"45m"`), at most the launcher's maximum |
@@ -1842,3 +1843,7 @@ public directory. Unarchive never revives credentials: it leaves the peer
 disabled and it must receive a new invite before use. The operator/bootstrap
 peer cannot be disabled or archived. Actions audit as `peer_disable`,
 `peer_enable`, `peer_archive`, and `peer_unarchive`.
+
+### Launcher capability discovery
+
+Launcher presence advertises `project:<alias>` and `scratch:<alias>` for host-owned project choices, `launch:<backend>`, `preset:<backend>/<preset>`, `mode:<backend>/<mode>` and `workspace:<backend>/<mode>`. Global `mode:<mode>` tags remain a legacy fallback only when scoped mode tags are absent; a backend must never inherit another backend's permissions. A requester uses healthy backend quota entries and advertised presets, modes and workspace choices. Request bytes and idempotency identity survive ambiguous send/reload recovery; changing credentials or origin cannot replay a different request under the saved key.

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { fakeClock, memoryLog } from '../../hub-client/testing/fixtures.ts';
 import type { PresenceBody } from '../../hub-client/src/wire.ts';
 import type { PermissionMode } from '../src/backend.ts';
-import { createPresence } from '../src/presence.ts';
+import { createPresence, presenceBody } from '../src/presence.ts';
 
 const tick = async () => { for (let i = 0; i < 10; i++) await new Promise<void>(resolve => setImmediate(resolve)); };
 type Snapshot = { running: number; open: number; max: number; perRequester: number; backends: Record<string, 'ok' | 'degraded' | 'down'>; modes: PermissionMode[]; presets: string[] };
@@ -66,4 +66,34 @@ test('presence: a failed post is logged without a body and retried on the next c
   presence.changed(); await tick();
   assert.equal(posts.length, 1);
   await presence.stop();
+});
+
+test('presence advertises configured project aliases without repository paths', () => {
+  const body = presenceBody({ running: 0, open: 0, max: 2, perRequester: 1,
+    backends: { 'codex-app-server': 'ok' }, modes: ['ask'], presets: ['codex-app-server/default'], projects: ['vecnet', 'app'] }, 'host');
+  assert.ok(body.capabilities?.includes('project:vecnet'));
+  assert.ok(body.capabilities?.includes('project:app'));
+  assert.ok(body.capabilities?.includes('preset:codex-app-server/default'));
+  assert.deepEqual(body.quota?.backends, { 'codex-app-server': 'ok' });
+});
+
+test('presence scopes native and T3 permission modes while preserving legacy global tags', () => {
+  const body = presenceBody({ running: 0, open: 0, max: 2, perRequester: 1,
+    backends: { 'codex-app-server': 'ok', t3: 'ok' },
+    modes: ['read-only', 'ask', 'auto', 'full-access'], presets: ['codex-app-server/default', 't3/sol'],
+    backendModes: { 'codex-app-server': ['read-only', 'ask', 'auto', 'full-access'], t3: ['ask', 'auto', 'full-access'] } }, 'host');
+  const scoped = body.capabilities!.filter(c => c.startsWith('mode:') && c.includes('/'));
+  assert.deepEqual(scoped, ['mode:codex-app-server/read-only', 'mode:codex-app-server/ask', 'mode:codex-app-server/auto',
+    'mode:codex-app-server/full-access', 'mode:t3/ask', 'mode:t3/auto', 'mode:t3/full-access']);
+  assert.ok(body.capabilities!.includes('mode:read-only'));
+  assert.ok(!body.capabilities!.includes('mode:t3/read-only'));
+});
+
+
+test('scratch discovery advertises only explicitly configured project aliases', () => {
+  const body = presenceBody({running:0,open:0,max:2,perRequester:1,backends:{'codex-app-server':'ok'},modes:['ask'],presets:[],projects:['temporary','scratch'],scratchProjects:['scratch','not-configured']},'host');
+  assert.ok(body.capabilities?.includes('project:temporary'));
+  assert.ok(body.capabilities?.includes('scratch:scratch'));
+  assert.ok(!body.capabilities?.includes('scratch:temporary'));
+  assert.ok(!body.capabilities?.includes('scratch:not-configured'));
 });
