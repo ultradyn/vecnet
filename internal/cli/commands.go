@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"sort"
@@ -80,9 +81,12 @@ messaging:
        existing --net profile; defaults to CODEX_THREAD_ID, never a recent thread; dry-run does not bind
   codex status [--thread UUID] [--codex-home DIR] [--json]
        read-only: ready requires fresh (30s), matching-owner, ready/live connector status; unresolved legacy bindings block readiness
-       preferred standalone: stage with scripts/install-codex-delivery.py (Node >=22.18, same HOME; no launcher config)
-       activate explicitly: systemctl --user daemon-reload && systemctl --user enable --now vecnet-codex-delivery.service
-       setup: docs/connectors/codex-appserver.md; an existing configured launcher also runs the same connector
+       enrollment automatically stages/activates supported standalone delivery; retry pending setup with vecnet repair
+       requires Node >=22.18, Linux user systemd and a supported app-server host; docs/connectors/codex-appserver.md
+  projects list [--json] | projects forget PATH
+       private local installation inventory; forgetting leaves hooks and ownership intact
+  repair [--status] [--json]
+       reconcile all registered managed files/runtime and retry pending enrollment; --status reads the last result
   hook rebind [--profile P]
        bind the profile's hook to this Claude Code session (run from its Bash tool)
   codex bind [--thread UUID] [--codex-home DIR] [--ttl DUR] [--idle-dormant DUR] [--attended] [--renew]
@@ -198,6 +202,7 @@ func RunContext(ctx context.Context, args []string, stdin io.Reader, stdout, std
 		fmt.Fprint(stderr, usageText)
 		return exitUsage
 	}
+	a.localStartup(rest)
 	return a.exit(a.dispatch(rest[0], rest[1:]))
 }
 
@@ -216,7 +221,10 @@ type app struct {
 	// retainedRequestID is the agent-add id for this process, generated or
 	// explicit, so a verified hub follow redispatches the same submission.
 	retainedRequestID string
-	prefsCmd          bool // preferences exit codes and JSON errors
+	prefsCmd          bool                        // preferences exit codes and JSON errors
+	localRuntime      func(context.Context) error // runtime port for disposable setup fixtures
+	localRepairStart  func(*exec.Cmd) error       // process port for isolated maintenance tests
+	localProjectRoot  string                      // saved enrollment target during repair; never ownership
 }
 
 // exit prints err and maps it to an exit code. Preferences commands use the
@@ -527,6 +535,10 @@ func hasRequestIDFlag(args []string) bool {
 
 func (a *app) dispatchOnce(cmd string, args []string) error {
 	switch cmd {
+	case "projects":
+		return a.cmdProjects(args)
+	case "repair":
+		return a.cmdLocalRepair(args)
 	case "enrol", "enroll":
 		return a.cmdEnrol(args)
 	case "notice":
@@ -646,20 +658,44 @@ func (a *app) cmdEnrol(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	path, err = canonicalLocalSetupPath(path)
+	if err != nil {
+		return err
+	}
+	if err := makeConfigDirectoryDurable(filepath.Dir(path)); err != nil {
 		return err
 	}
 	unlock, err := lockPath(a.ctx, path+".lock")
 	if err != nil {
 		return err
 	}
-	defer unlock()
+	defer func() {
+		if unlock != nil {
+			unlock()
+		}
+	}()
 	cfg, err := loadConfig(path)
 	if err != nil {
 		return err
 	}
 	if _, taken := cfg.Profiles[name]; taken && defaulted {
 		return usageErr(fmt.Sprintf("enrol: profile %q already exists in %s; pass --profile to choose another", name, path))
+	}
+	// Persist the exact target before consuming a one-use invitation. A missing
+	// host identity is a capability limitation; persistence failures on a
+	// supported host must stop before redemption.
+	intent, prepareErr := a.prepareLocalEnrollment(name)
+	setup := localSetupResult{State: "not_required"}
+	if errors.Is(prepareErr, errLocalEnrollmentHost) {
+		setup = localSetupResult{State: "unsupported", Reason: prepareErr.Error()}
+	} else if prepareErr != nil {
+		return fmt.Errorf("enrol: setup intent was not saved; invitation was not redeemed: %w", prepareErr)
+	}
+	if intent != nil {
+		intent.Hub = normalizeHub(hubURL)
+		if err := a.saveLocalEnrollment(*intent); err != nil {
+			return fmt.Errorf("enrol: setup intent was not saved; invitation was not redeemed: %w", err)
+		}
 	}
 	var out struct {
 		PeerID    string `json:"peer_id"`
@@ -672,6 +708,14 @@ func (a *app) cmdEnrol(args []string) error {
 		req["name"] = display
 	}
 	if err := newClient(hubURL, "").do(a.ctx, http.MethodPost, "/v1/enrol", nil, req, &out); err != nil {
+		if intent != nil {
+			intent.State = "canceled"
+			intent.Reason = "enrollment request did not commit credentials; use a fresh or still-valid invitation"
+			intent.UpdatedAt = time.Now().UTC()
+			if e := a.saveLocalEnrollment(*intent); e != nil {
+				fmt.Fprintf(a.stderr, "vecnet: could not record canceled setup: %v\n", e)
+			}
+		}
 		// "unauthenticated" alone reads as a revoked invite; say what else
 		// it covers and how to get a fresh one.
 		var he *hubError
@@ -695,17 +739,43 @@ func (a *app) cmdEnrol(args []string) error {
 	if _, e := hubid.DecodePubkey(pin); e != nil {
 		pin = ""
 	}
-	cfg.Profiles[name] = Profile{Hub: strings.TrimRight(hubURL, "/"), HubPubkey: pin, Secret: out.Secret, PeerID: out.PeerID, AllowInsecureHTTP: insecure}
-	if err := saveConfig(path, cfg); err != nil {
+	enrolled := Profile{Hub: strings.TrimRight(hubURL, "/"), HubPubkey: pin, Secret: out.Secret, PeerID: out.PeerID, AllowInsecureHTTP: insecure}
+	if intent != nil {
+		// Commit the redeemed identity and matching ID with credentials in one save.
+		intent.Caller = out.PeerID
+		intent.State = "pending"
+		enrolled.EnrollmentIntent = intent.IntentID
+		enrolled.EnrollmentCredential = hookDigest([]byte(out.Secret))
+		enrolled.EnrollmentHub = intent.Hub
+		enrolled.EnrollmentCaller = out.PeerID
+	}
+	cfg.Profiles[name] = enrolled
+	if err := saveConfigDurable(path, cfg); err != nil {
 		// The secret was issued once and is never printed (PROTOCOL §12, §14
 		// inv. 6): name the peer and how to get a fresh credential instead.
-		fmt.Fprintf(a.stderr, "vecnet: could not write %s; %s is enrolled but its secret was not saved and is not shown. Fix the config path, then ask the operator to rotate the secret (vecnet peer rotate %s) and save the new one with --profile %s\n", path, out.PeerID, out.PeerID, name)
+		fmt.Fprintf(a.stderr, "vecnet: could not durably save %s; %s is enrolled but its secret is not shown. Check the config path; if credentials are unavailable, ask the operator to rotate the secret (vecnet peer rotate %s) and save the new one with --profile %s\n", path, out.PeerID, out.PeerID, name)
 		return err
 	}
+	// The one-use invitation is safely persisted. Setup may authenticate/read
+	// this config, so release its lock before reconciliation.
+	unlock()
+	unlock = nil
+	if intent != nil {
+		setup = a.reconcileLocalEnrollment(*intent)
+	}
 	if a.json {
-		return a.emitValue(map[string]string{"profile": name, "peer_id": out.PeerID, "name": out.Name, "config": path})
+		return a.emitValue(map[string]any{"profile": name, "peer_id": out.PeerID, "name": out.Name, "config": path, "setup": setup})
 	}
 	fmt.Fprintf(a.stdout, "enrolled %s as profile %s (%s)\n", out.PeerID, name, path)
+	if setup.State == "pending" {
+		fmt.Fprintf(a.stdout, "credentials saved; session setup pending: %s (retry: vecnet repair)\n", setup.Reason)
+	} else if setup.State == "superseded" || setup.State == "canceled" {
+		fmt.Fprintf(a.stdout, "credentials saved; automatic setup %s: %s\n", setup.State, setup.Reason)
+	} else if setup.State == "unsupported" {
+		fmt.Fprintf(a.stdout, "credentials saved; automatic setup unsupported: %s\n", setup.Reason)
+	} else if setup.State == "ready" {
+		fmt.Fprintln(a.stdout, "session delivery ready")
+	}
 	if display != "" {
 		fmt.Fprintf(a.stdout, "display name %s; use --net %s on every vecnet command\n", out.Name, name)
 	}

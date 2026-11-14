@@ -250,7 +250,7 @@ func (a *app) reportCodexSetup(profile, thread, home, config string, now time.Ti
 		r.Reason = "legacy connector activity is unknown; enrollment does not establish completed migration"
 	}
 	if r.Delivery != "ready" {
-		r.NextStep = "Preferred: stage the standalone vecnet-codex-delivery.service using scripts/install-codex-delivery.py as documented in docs/connectors/codex-appserver.md (Node >=22.18, same HOME), then activate explicitly: systemctl --user daemon-reload && systemctl --user enable --now vecnet-codex-delivery.service. No launcher config or credential is needed. An existing configured launcher can also run the same connector; see docs/connectors/launcher.md. Then rerun codex status."
+		r.NextStep = "Enrollment automatically configures supported standalone delivery. Run vecnet repair to retry saved setup and upgrade managed software (Node >=22.18, Linux user systemd, same HOME). A supported app-server host must expose the exact live root; inspect the reason above and docs/connectors/codex-appserver.md, then rerun codex status. Review new or changed hooks in Codex /hooks when required by the host."
 		if len(legacy) > 0 {
 			r.NextStep = "Stop/replace all old connectors and preserve/review every legacy source before starting the standalone delivery service or current launcher; see the legacy_bindings paths and docs/connectors/codex-appserver.md."
 		}

@@ -1021,6 +1021,11 @@ func hookDigest(raw []byte) string { return fmt.Sprintf("%x", sha256.Sum256(raw)
 // The backup carries the exact preimage and the expected postimage hash. A
 // rollback never overwrites changes made since installation, including modes.
 func (a *app) installCodexHooks(path, bin string, o opts) error {
+	return a.installCodexHooksExpected(path, bin, o, "")
+}
+
+// An unattended repair carries the inspected preimage through lock acquisition.
+func (a *app) installCodexHooksExpected(path, bin string, o opts, expected string) error {
 	target, err := filepath.Abs(path)
 	if err != nil {
 		return err
@@ -1052,6 +1057,9 @@ func (a *app) installCodexHooks(path, bin string, o opts) error {
 	existed := err == nil
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
+	}
+	if expected != "" && (!existed || hookDigest(before) != expected) {
+		return errors.New("hook repair deferred: settings changed before migration acquired its lock")
 	}
 	mode := os.FileMode(0644)
 	if existed {
@@ -1091,6 +1099,9 @@ func (a *app) installCodexHooks(path, bin string, o opts) error {
 		}
 		if !changed {
 			fmt.Fprintf(a.stderr, "unchanged %s\n", path)
+			if o.has("write") {
+				a.recordLocalCodexHooks(target)
+			}
 			return nil
 		}
 	}
@@ -1144,6 +1155,7 @@ func (a *app) installCodexHooks(path, bin string, o opts) error {
 		fmt.Fprintf(a.stderr, "restored %s\n", path)
 	} else {
 		fmt.Fprintf(a.stderr, "wrote %s (SessionStart, UserPromptSubmit, PostToolUse)\n", path)
+		a.recordLocalCodexHooks(target)
 	}
 	return nil
 }

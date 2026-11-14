@@ -39,7 +39,7 @@ for (const [platform, goos, goarch] of [
   console.log(`Building vecnet ${manifest.version} for ${platform}`);
   execFileSync('go', [
     'build', '-mod=readonly', '-p', '2', '-trimpath', '-buildvcs=false',
-    '-ldflags', `-s -w -X github.com/XertroV/vecnet/internal/mcpserver.Version=${manifest.version}`,
+    '-ldflags', `-s -w -X github.com/XertroV/vecnet/internal/mcpserver.Version=${manifest.version} -X github.com/XertroV/vecnet/internal/buildinfo.Version=${manifest.version}`,
     '-o', `${directory}${path.sep}`, './cmd/vecnet', './cmd/vecnet-hub',
   ], {
     cwd: root,

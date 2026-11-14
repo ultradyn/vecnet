@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -236,7 +237,7 @@ func TestReferenceGuardAckScopes(t *testing.T) {
 		seq          int64
 	}{{guardPrn, "*", 4}, {guardPrn, guardB, 8}, {guardB, "*", 2}} {
 		got, ok, err := env.Hub.Log.Acked(context.Background(), tc.owner, tc.scope)
-		guardBytes(t, "ack-"+tc.owner+"-"+tc.scope+".txt", []byte(got.String()))
+		guardBytes(t, "ack-"+tc.owner+"-"+strings.ReplaceAll(tc.scope, "*", "all")+".txt", []byte(got.String()))
 		if err != nil || !ok || got != (eventlog.Cursor{Epoch: 1, Seq: tc.seq}) {
 			t.Fatal("ack scope changed")
 		}

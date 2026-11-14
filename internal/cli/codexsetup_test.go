@@ -392,7 +392,7 @@ func TestCodexSetupMissingConnectorActionable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"enrollment:", "Preferred:", "scripts/install-codex-delivery.py", "systemctl --user enable --now vecnet-codex-delivery.service", "docs/connectors/codex-appserver.md", "No launcher config or credential is needed", "same HOME"} {
+	for _, want := range []string{"enrollment:", "Enrollment automatically", "vecnet repair", "Node >=22.18", "Linux user systemd", "docs/connectors/codex-appserver.md", "same HOME", "/hooks"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q: %s", want, out)
 		}

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -64,7 +64,18 @@ test('packed npm installation runs both commands and exchanges messages through 
   });
   const prefix = path.join(temporary, 'prefix');
   const env = { ...process.env };
-  for (const key of Object.keys(env)) if (key.startsWith('VECNET_')) delete env[key];
+  for (const key of Object.keys(env)) {
+    if (key.startsWith('VECNET_') || key.startsWith('CODEX_')) delete env[key];
+  }
+  env.HOME = path.join(temporary, 'home');
+  await mkdir(env.HOME, { mode: 0o700 });
+  await chmod(env.HOME, 0o700);
+  env.CODEX_HOME = path.join(env.HOME, '.codex');
+  await mkdir(env.CODEX_HOME, { mode: 0o700 });
+  env.XDG_CONFIG_HOME = path.join(env.HOME, '.config');
+  env.XDG_DATA_HOME = path.join(env.HOME, '.local', 'share');
+  env.XDG_RUNTIME_DIR = path.join(temporary, 'runtime');
+  await mkdir(env.XDG_RUNTIME_DIR, { mode: 0o700 });
   env.XDG_CACHE_HOME = path.join(temporary, 'cache');
   env.VECNET_CONFIG = path.join(temporary, 'unused-config.toml');
   execFileSync('npm', [
@@ -142,6 +153,11 @@ test('packed npm installation runs both commands and exchanges messages through 
   const sent = JSON.parse(mustRun(cli, ['--net', sender.name, '--json', 'send', receiver.id, 'hello from npm', '--hold'], { env: sender.env }));
   const inbox = JSON.parse(mustRun(cli, ['--net', receiver.name, '--json', 'inbox'], { env: receiver.env }));
   assert.ok(inbox.events.some(event => event.data?.message?.message_id === sent.message_id && event.data.message.content.text === 'hello from npm'));
+  const projects = JSON.parse(mustRun(cli, ['projects', 'list', '--json']));
+  const projectRoot = await realpath(temporary);
+  const project = projects.find(entry => entry.root === projectRoot);
+  assert.ok(project, 'packed CLI ordinary use registers the disposable project');
+  assert.equal(project.observed_version, manifest.version, 'installed native CLI records the npm release version');
 });
 
 test('wrapper preserves failure when a native process is killed by SIGPIPE', async t => {

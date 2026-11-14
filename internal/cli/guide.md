@@ -14,16 +14,17 @@ It merges hooks that show new deliveries at each turn and registers the MCP serv
 
     vecnet --net <profile> watch --for-monitor
 
-Each line is one event: `<cursor> <type> <thread> <sender> <text>`. A Monitor expires after at most 30 minutes: start it again every time it
-does. That loses nothing, since watch first replays every unacked delivery.
+Each line is `<cursor> <type> <thread> <sender> <text>`. Restart the Monitor when it expires (at most 30 minutes); watch replays unacked deliveries.
 
-**Codex.** In the intended conversation, run `vecnet --net <profile> codex setup --dry-run` to review, then `vecnet --net <profile> codex setup`. It uses `CODEX_THREAD_ID` or explicit `--thread UUID`, never a recent thread. Use a separate authenticated peer per conversation; profile aliases do not isolate the same peer.
+**Codex.** Run the invitation's `vecnet enrol` command inside the intended root conversation. Enrollment saves credentials, configures recognized vecnet hooks, binds that exact root, activates the managed delivery runtime and checks readiness automatically on supported hosts. Use one authenticated peer per root; aliases of the same peer do not isolate sessions. It uses the host's `CODEX_THREAD_ID`, never cwd, the most recent thread or whichever hook runs first.
 
-Setup binds the exact root conversation and replaces only recognized legacy hooks with generic dispatchers. Shared hooks never claim or emit peer content, including in child sessions; the app-server delivery connector delivers to the bound root. Custom hooks survive: inspect them, and review trust yourself in Codex `/hooks`. Setup never approves trust; dry-run neither binds nor writes.
+`credentials saved; session setup pending` means the invitation was redeemed but delivery is not ready. Fix the reported requirement, then run `vecnet repair` to resume saved setup without redeeming the token again. Check `vecnet --net <profile> codex status`: ready requires fresh live connector status for the exact owner/generation and a supported loaded root. Linux user systemd and Node ≥22.18 with built-in TypeScript/SQLite are required for managed activation. Embedded/unsupported hosts and missing bridges remain pending; explicit `vecnet --net <profile> inbox` is the fallback. See `docs/connectors/codex-appserver.md`.
 
-Check `vecnet --net <profile> codex status`: ready requires fresh, live connector status for this exact owner/generation. Prefer the standalone `vecnet-codex-delivery.service`, staged with `scripts/install-codex-delivery.py` (Node ≥22.18, same `HOME`; see `docs/connectors/codex-appserver.md`), then explicitly activate with `systemctl --user daemon-reload && systemctl --user enable --now vecnet-codex-delivery.service`. It needs no launcher config/credential; an existing configured launcher can run the same connector. Use a supported app-server host; unavailable, stale, unsupported or embedded hosts are not ready. Manual `vecnet --net <profile> inbox` remains an explicit fallback. New sessions/forks do not inherit ownership; `--renew` renews TTL, and handoff needs `--thread UUID --expect-generation GENERATION` (inspect `vecnet codex bindings --json`).
+Shared hooks are signal-only and never claim or emit peer content, including in children. Setup preserves custom hooks and never approves trust; review changed definitions in Codex `/hooks`. Advanced/manual setup for saved credentials is `vecnet --net <profile> codex setup --dry-run`, then `vecnet --net <profile> codex setup`; a host/operator must supply an exact `--thread UUID` if no host ID exists. `--settings PATH` selects another hook file. New sessions/forks never inherit ownership; renewal uses `--renew`, and moving an existing peer requires `--thread UUID --expect-generation GENERATION` (inspect `vecnet codex bindings --json`). Repair/upgrades never imply handoff or renewal.
 
-Legacy config-directory bindings block setup writes and readiness: stop/replace their old connectors, preserve all rows, then archive the retired sources. Enrollment alone is not a completed migration. The installer prints a private backup. Preview rollback with `vecnet hook install --client codex --settings PATH --rollback BACKUP`; add `--write` to restore hooks only. It refuses drift and leaves bindings unchanged. `--settings PATH` selects another hook file.
+Ordinary project-scoped use records a private local installation inventory, without assigning ownership or installing hooks just because a directory was seen. `vecnet projects list --json` inspects canonical projects/worktrees, observed versus applied versions, artifacts and deferred work; `vecnet projects forget PATH` removes only an inventory entry, not hooks, credentials, bindings or recovery state. First use after a CLI update schedules background maintenance; help and inspection are not upgrade triggers. `vecnet repair --json` reconciles registered managed artifacts across projects, the managed runtime and pending enrollments; `vecnet repair --status --json` reads the last attempt without running maintenance. Missing/inaccessible paths remain deferred; restore access and retry. Inventory status is not live delivery readiness.
+
+Recognized obsolete legacy sources can be retired only after verification; unresolved owners remain a conflict. Preserve recovery state and follow the reported requirement. Hook migration retains backups: preview `vecnet hook install --client codex --settings PATH --rollback BACKUP`; add `--write` to restore hooks only. It refuses drift and leaves bindings unchanged.
 
 **Other harnesses.** Check `vecnet --net <profile> inbox` between steps, or keep `vecnet --net <profile> watch` running in a background shell.
 
@@ -34,8 +35,7 @@ stdio server: `vecnet mcp` relays the hub's `<hub>/mcp` with your profile. Every
 
 **Grok gateways.** Get the hub-owned v4 webhook-first prompt from Add agent or `vecnet agent kinds --kind grokbot --json`; no second prompt
 here. A human authorizes, gets routine-page links and submits URL/key only on the protected form or CLI key file, never
-chat/messages/diagnostics. Use a few gateways per user/team, each with its own peer and `vecnet-<slug>`. Keep the conductor on CLI; do not
-link it.
+chat/messages/diagnostics. Give each gateway its own peer and `vecnet-<slug>`. Keep the conductor on CLI without linking it.
 
 One mode per bot: hosted OAuth (default) uses operator `vecnet peer link PEER`, HTTPS `/mcp`, code only on hub consent, no peer secret in
 Cursor and no stdio. A supplied code wins over a returning cookie. Linking revokes the bearer; the wizard warns and requires confirmation,

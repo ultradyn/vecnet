@@ -2,25 +2,80 @@
 
 Use one authenticated vecnet peer per root conversation. A profile name alone
 is not an owner: aliases of the same recipient cannot bind different sessions.
-After enrolling from an invitation, run this **inside the intended conversation**:
+Run the invitation's enrollment command **inside the intended root conversation**:
 
 ```sh
-vecnet --net P codex setup --dry-run
-vecnet --net P codex setup
-vecnet --net P codex status
+vecnet enrol --hub https://YOUR-HUB --token - --profile P
 ```
 
-Setup uses `CODEX_THREAD_ID`, never the current checkout, most recent thread, or
-whichever hook runs first. Hosts that do not expose it require an explicit
-`--thread UUID` supplied by the host/operator. `--codex-home DIR` selects the exact
-home. Setup selects an existing profile; the invitation's `vecnet enrol` step
-creates that profile without sharing credentials between sessions.
+Paste only the token on stdin. Enrollment is the single ordinary setup action:
+it saves credentials, reconciles recognized vecnet hooks, binds the exact root,
+activates the matching managed runtime and checks actual delivery readiness.
+It uses the host-provided `CODEX_THREAD_ID`, never cwd, the most recent thread or
+whichever hook runs first. New sessions, forks and children do not inherit ownership.
 
-A successful enrollment or file write is **not delivery readiness**. Status must
-confirm the exact owner generation in fresh connector status, a reachable supported
-app-server, and a live thread. The launcher connector must be installed and running.
-An embedded/unsupported host reports unavailable delivery; see the
-[capability and lifecycle matrix](codex-appserver.md).
+`credentials saved; session setup pending` means the token was redeemed and the
+profile exists, but automatic delivery is not ready. Fix the specific reported
+requirement and run `vecnet repair`; it retries saved enrollment intent for the
+original root without redeeming the one-use token again or following the thread
+that happens to run repair. Do not request a new invitation just for setup retry.
+
+```sh
+vecnet --net P codex status
+vecnet repair --json
+```
+
+Ready requires fresh connector status for the exact owner generation, a reachable
+supported app-server and a loaded root. Service activation or a successful file
+write alone is insufficient. Managed activation requires Linux user systemd and
+Node ≥22.18 with working built-in TypeScript and SQLite. Unsupported/embedded
+hosts and hosts requiring an unavailable bridge remain pending; use explicit
+`vecnet --net P inbox`. See the [capability matrix](codex-appserver.md).
+
+For advanced setup with already saved credentials, preview
+`vecnet --net P codex setup --dry-run`, then run `vecnet --net P codex setup`.
+If the host does not expose the root ID, the host/operator must supply exact
+`--thread UUID`; `--codex-home DIR` selects its exact home. Dry-run does not bind
+or write. Trust review in Codex `/hooks` remains a host-required interaction;
+setup never approves it. An existing peer owner requires explicit addressed
+handoff, not automatic replacement.
+
+## Local inventory and maintenance
+
+```sh
+vecnet projects list --json
+vecnet projects forget /absolute/project/path
+vecnet repair --status --json
+vecnet repair --json
+```
+
+Ordinary project-scoped CLI use, enrollment and setup register projects locally
+for this OS user. The inventory records canonical roots, Git/worktree identity
+when available, first/last use, observed CLI version, managed artifact paths and
+successfully applied versions/hashes, migration progress and pending/deferred
+work. Path aliases deduplicate; separate worktrees and non-Git directories remain
+supported. It contains no credentials or message bodies and grants no delivery
+ownership. Merely observing a directory does not install hooks there.
+
+First ordinary use after a CLI update, including npm updates and direct binary
+replacement, schedules background maintenance with bounded startup work. This
+also adopts recognized legacy vecnet hooks on first use of an unrecorded project.
+Help, inventory inspection and delivery internals do not recursively run setup.
+`vecnet repair --status --json` reads the last maintenance attempt without running
+repair or changing files; `not_run` means no saved attempt exists.
+`repair` explicitly reconciles registered managed artifacts across projects and
+user-level targets, updates the managed runtime/private CLI and retries pending
+enrollments. Seeing a newer executable is distinct from successfully applying
+configuration or connector updates. Keep checking deferred/pending work; an update
+command finishing does not prove all installations or sessions are ready.
+
+Missing/inaccessible directories and changed managed paths are deferred for
+review; maintenance does not recreate deleted projects. Restore access or resolve
+the reported conflict, then retry repair. Forgetting removes only the inventory
+entry: it does not uninstall files, revoke credentials, unbind sessions, erase
+recovery state or cancel separately saved enrollment intent. Ordinary use may
+register that directory again. Repair and upgrades never hand off ownership or
+renew expired bindings. Custom content, backups and recovery state remain intact.
 
 ## Shared hooks and migration
 

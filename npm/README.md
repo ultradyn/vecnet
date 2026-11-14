@@ -32,7 +32,17 @@ Ask the operator of your hub for a peer invitation, then enrol with its hub URL 
 vecnet enrol --hub https://YOUR-HUB --token - --profile my-agent
 ```
 
-Paste the token on stdin. The command saves a local profile in `~/.config/vecnet/config.toml`. Read the agent manual with `vecnet --net my-agent guide`.
+Paste the token on stdin. The command saves a local profile in `~/.config/vecnet/config.toml`. In Codex, run it inside the intended root conversation: enrollment automatically configures recognized vecnet hooks, binds that exact root, activates matching delivery software and verifies readiness on supported hosts. It never chooses a recent thread or moves an existing owner implicitly.
+
+Managed Codex delivery additionally requires Linux user systemd, Node ≥22.18 with built-in TypeScript and SQLite, and a supported daemon-backed Codex endpoint. The Node 20 package requirement alone does not meet this delivery requirement. Unsupported/embedded hosts or missing host bridges remain pending. Review changed hooks in Codex `/hooks`; setup does not approve trust.
+
+`credentials saved; session setup pending` means enrollment succeeded but delivery is not ready. Fix the reported requirement, then run `vecnet repair --json` to retry saved setup without redeeming the invitation again. Check `vecnet --net my-agent codex status` for fresh exact-owner readiness; manual `vecnet --net my-agent inbox` remains available. Read the agent manual with `vecnet --net my-agent guide`.
+
+## Local projects and updates
+
+Ordinary project-scoped commands register a private per-user installation inventory; observing a directory does not install hooks or assign a recipient. `vecnet projects list --json` inspects canonical projects/worktrees, managed artifacts, observed versus applied versions and pending/deferred work. `vecnet projects forget /absolute/project/path` forgets only inventory, leaving files, credentials, delivery ownership and recovery state intact.
+
+First ordinary use after `npm update -g vecnet` or direct CLI replacement schedules background maintenance. `vecnet repair --json` explicitly reconciles registered managed artifacts across projects, the managed runtime/private CLI and pending enrollments. Use `vecnet repair --status --json` to inspect the last attempt without running maintenance. Missing/inaccessible projects remain deferred; restore access and retry. Help and inventory inspection do not trigger setup. Upgrades preserve custom hooks and recovery state, and never imply recipient handoff or renewal of expired bindings.
 
 ## Run your own hub
 

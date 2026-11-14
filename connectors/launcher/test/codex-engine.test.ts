@@ -40,6 +40,30 @@ function checkRequests(requests: typeof allRequests) {
     if (r.method === 'thread/resume') assert.deepEqual(r.params, { threadId: threadId, excludeTurns: true });
   }
 }
+type TraceRecord = { argv: string[]; env: Record<string, string>; ack?: boolean; watchRevision?: number; hookClaimed?: string; guardReady?: string; guardFinished?: string };
+function parseTraceRecords(text: string): TraceRecord[] {
+  // A concurrent append may expose an incomplete suffix. Retry that suffix on
+  // the next full-file read; malformed newline-terminated records must throw.
+  return text.slice(0, text.lastIndexOf('\n') + 1).split('\n').filter(Boolean).map(s => JSON.parse(s) as TraceRecord);
+}
+test('trace records wait for a split record to be newline-terminated', () => {
+  const first = '{"argv":["watch"],"env":{}}\n';
+  const second = '{"argv":["hook"],"env":{},"hookClaimed":"claim-1"}';
+  const watch = { argv: ['watch'], env: {} };
+  const hook = { argv: ['hook'], env: {}, hookClaimed: 'claim-1' };
+  assert.deepEqual(parseTraceRecords(''), []);
+  // Poll the complete file after every possible partial append, including a
+  // complete JSON value whose final newline has not been appended yet.
+  for (let end = 0; end <= second.length; end++) {
+    assert.deepEqual(parseTraceRecords(first + second.slice(0, end)), [watch], `partial append at ${end}`);
+  }
+  assert.deepEqual(parseTraceRecords(first + second + '\n'), [watch, hook]);
+  assert.deepEqual(parseTraceRecords(second), [], 'newline is the record commit boundary');
+});
+test('trace records reject malformed complete records even before an incomplete suffix', () => {
+  assert.throws(() => parseTraceRecords('{"argv":[}\n'), SyntaxError);
+  assert.throws(() => parseTraceRecords('{"argv":[}\n{"argv":['), SyntaxError);
+});
 type Item = { id: string; priority: string; value?: string };
 async function harness(t: TestContext, options: { binding?: Partial<Binding>; status?: unknown; wrap?: (rpc: CodexRpc) => CodexRpc; seed?: InflightRow; claiming?: string; unreachable?: boolean; refusedVersion?: boolean; releaseFailure?: boolean; history?: number; coldResumeIdleDelayMs?: number; source?: unknown; authority?: Partial<Owner>; legacySeed?: boolean; verifyFailure?: boolean; parentThreadId?: string | null; homeAlias?: boolean } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'vn-e-')), clock = fakeClock(), log = memoryLog();
@@ -111,7 +135,7 @@ async function harness(t: TestContext, options: { binding?: Partial<Binding>; st
     return e;
   };
   let engine = makeEngine();
-  const records = () => readFileSync(trace, 'utf8').trim().split('\n').filter(Boolean).map(s => JSON.parse(s) as { argv: string[]; env: Record<string, string>; ack?: boolean; watchRevision?: number; hookClaimed?: string; guardReady?: string; guardFinished?: string });
+  const records = () => parseTraceRecords(readFileSync(trace, 'utf8'));
   const hooks = () => records().filter(r => !r.ack && r.argv.includes('hook'));
   const releases = () => hooks().filter(r => r.argv.includes('--release'));
   const sends = () => fake.requests.filter(r => r.method.startsWith('turn/'));
