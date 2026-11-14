@@ -11,6 +11,15 @@ import (
 	"github.com/XertroV/vecnet/internal/testhub"
 )
 
+func archiveCLIState(t *testing.T, env *testhub.Env, id string) int {
+	t.Helper()
+	var n int
+	if err := env.Hub.DB.QueryRow(`SELECT archived_at IS NOT NULL FROM threads WHERE thr_id=?`, id).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
 // TestOperatorDeadEndUsage: the new admin subcommands reject a bad invocation
 // before any hub call, and vecnet help names each of them.
 func TestOperatorDeadEndUsage(t *testing.T) {
@@ -23,6 +32,9 @@ func TestOperatorDeadEndUsage(t *testing.T) {
 		{[]string{"peer", "enable", "peer_x", "extra"}, "peer enable"},
 		{[]string{"groups", "unarchive"}, "groups unarchive"},
 		{[]string{"groups", "unarchive", "grp_x", "grp_y"}, "groups unarchive"},
+		{[]string{"thread", "archive"}, "thread archive"},
+		{[]string{"thread", "unarchive", "thr_x", "extra"}, "thread unarchive"},
+		{[]string{"thread", "archive", "thr_x", "--limit", "2"}, "thread archive"},
 		{[]string{"thread", "budget", "thr_x"}, "thread budget"},
 		{[]string{"thread", "budget", "thr_x", "-1"}, "thread budget"},
 		{[]string{"thread", "budget", "thr_x", "nope"}, "thread budget"},
@@ -42,6 +54,8 @@ func TestOperatorDeadEndUsage(t *testing.T) {
 		"peer disable <id>",
 		"peer enable <id>",
 		"groups unarchive",
+		"thread archive <id>",
+		"thread unarchive <id>",
 		"thread budget <id> <n>",
 		"team list",
 		"team members <id> --add",
@@ -82,6 +96,19 @@ func TestOperatorDeadEndCommands(t *testing.T) {
 	var budget sql.NullInt64
 	if err := env.Hub.DB.QueryRow(`SELECT budget_remaining FROM threads WHERE thr_id = ?`, sent.ThreadID).Scan(&budget); err != nil || !budget.Valid || budget.Int64 != 7 {
 		t.Fatalf("budget_remaining = %v, %v; want 7", budget, err)
+	}
+	if got := op.mustRun("thread", "archive", sent.ThreadID); got != "archived "+sent.ThreadID+"\n" {
+		t.Fatalf("thread archive=%q", got)
+	}
+	if n := archiveCLIState(t, env, sent.ThreadID); n != 1 {
+		t.Fatal("CLI did not archive thread")
+	}
+	op.mustRun("thread", "archive", sent.ThreadID)
+	if got := op.mustRun("--json", "thread", "unarchive", sent.ThreadID); strings.TrimSpace(got) != `{"ok":true}` {
+		t.Fatalf("thread unarchive=%q", got)
+	}
+	if n := archiveCLIState(t, env, sent.ThreadID); n != 0 {
+		t.Fatal("CLI did not unarchive thread")
 	}
 	if out := sender.mustRun("thread", sent.ThreadID); !strings.Contains(out, "hello budget") {
 		t.Fatalf("thread read = %q, want the message", out)

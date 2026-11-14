@@ -128,6 +128,12 @@ func (h *Hub) Tick(ctx context.Context, slow bool) {
 	if _, err := h.DB.ExecContext(ctx, `DELETE FROM reaction_ops WHERE at < ?`, envelope.FormatTime(now.Add(-time.Hour))); err != nil && ctx.Err() == nil {
 		slog.Error("hub: tick prune reaction ops", "err", err)
 	}
+	if _, err := h.ArchiveIdlePeers(ctx, now); err != nil && ctx.Err() == nil {
+		slog.Error("hub: tick archive peers", "err", err)
+	}
+	if _, err := h.ArchiveAbandonedThreads(ctx, now); err != nil && ctx.Err() == nil {
+		slog.Error("hub: tick archive threads", "err", err)
+	}
 	if _, err := h.ArchiveIdleGroups(ctx, now); err != nil && ctx.Err() == nil {
 		slog.Error("hub: tick archive groups", "err", err)
 	}

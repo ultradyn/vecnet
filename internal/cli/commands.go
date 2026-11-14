@@ -100,6 +100,8 @@ messaging:
   threads [--limit N]
   thread <id> [--after MESSAGE_ID] [--limit N]
   thread budget <id> <n>                          set budget_remaining
+  thread archive <id>                             archive in the operator view
+  thread unarchive <id>                           unarchive in the operator view
   peers
   groups create <peer…> | groups add <grp> <peer…> | groups list | groups unarchive <grp>
   presence set <idle|working|blocked|offline> [--note T]
@@ -1478,11 +1480,21 @@ func (a *app) cmdThread(args []string) error {
 	if err != nil {
 		return err
 	}
+	if len(o.pos) > 0 && (o.pos[0] == "archive" || o.pos[0] == "unarchive") {
+		action := o.pos[0]
+		if len(o.pos) != 2 || o.has("after") || o.has("limit") {
+			return usageErr("usage: vecnet thread " + action + " <id>")
+		}
+		if err := a.call(http.MethodPost, "/v1/admin/threads/"+pathEscape(o.pos[1])+"/"+action, nil, nil); err != nil {
+			return err
+		}
+		return a.ok(action + "d " + o.pos[1])
+	}
 	if len(o.pos) > 0 && o.pos[0] == "budget" {
 		return a.threadBudget(o)
 	}
 	if len(o.pos) != 1 {
-		return usageErr("usage: vecnet thread <id> [--after MESSAGE_ID] [--limit N] | thread budget <id> <n>")
+		return usageErr("usage: vecnet thread <id> [--after MESSAGE_ID] [--limit N] | thread budget <id> <n> | thread archive|unarchive <id>")
 	}
 	q := url.Values{}
 	if err := limitQuery(o, q); err != nil {

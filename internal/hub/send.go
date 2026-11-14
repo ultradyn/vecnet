@@ -583,6 +583,7 @@ func (h *Hub) sendTx(ctx context.Context, tx *sql.Tx, act actor, req *envelope.S
 	if err != nil {
 		return nil, false, nil, err
 	}
+	notify = append(notify, thr.archiveNotify...)
 	resp := &SendResponse{MessageID: msg.MessageID, ThreadID: thr.ID, Deliveries: refs, Spilled: msg.Content.Truncated}
 	if effect.jobRequest {
 		resp.JobID = effect.jobID
@@ -646,7 +647,8 @@ func (h *Hub) insertMessage(ctx context.Context, tx *sql.Tx, thr *threadRow, msg
 			return err
 		}
 		if changed > 0 {
-			if _, err := h.noteOperatorView(ctx, tx, "archive", thr.ID); err != nil {
+			thr.archiveNotify, err = h.noteOperatorView(ctx, tx, "archive", thr.ID)
+			if err != nil {
 				return err
 			}
 		}

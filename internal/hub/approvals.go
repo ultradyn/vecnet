@@ -280,5 +280,5 @@ func (h *Hub) expireApproval(ctx context.Context, tx *sql.Tx, apr, thrID, reqMsg
 		return nil, nil, err
 	}
 	ev := messageActivity(thrID, msg.MessageID, msg.Sender, msg.Kind, msg.CreatedAt)
-	return append([]string{}, thr.participants...), &ev, nil
+	return append(append([]string{}, thr.participants...), thr.archiveNotify...), &ev, nil
 }
