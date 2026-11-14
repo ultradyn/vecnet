@@ -95,7 +95,10 @@ func TestPreferencesHTTPMetadataAndConditionalRead(t *testing.T) {
 	if err := json.Unmarshal(raw, &wire); err != nil {
 		t.Fatal(err)
 	}
-	if wire.Revision != 0 || len(wire.Preferences) != 22 {
+	if n := len(prefs.Definitions()); n != 25 {
+		t.Fatalf("registry has %d keys; update this guard deliberately when keys change", n)
+	}
+	if wire.Revision != 0 || len(wire.Preferences) != len(prefs.Definitions()) {
 		t.Fatal("incomplete initial metadata")
 	}
 	const fixture = `{"key":"events.refresh_interval","type":"duration","default":1800,"min":60,"max":86400,"unit":"seconds","label":"Events refresh interval","description":"Refresh cadence for MCP Events subscriptions.","group":"notifications_presence","settable_by":"operator","editable":true,"runtime":"live","danger":[],"value":1800,"source":"flag","origin":"VECNET_EVENTS_REFRESH_INTERVAL"}`
