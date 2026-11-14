@@ -14,9 +14,58 @@ function chip(att) {
     h('span', { class: 'sz', text: bytes(att.size) }));
 }
 
+// An SVG blob URL inherits this UI's origin. It must NEVER enter the DOM:
+// opening it as a document could execute same-origin scripts. Decode only in
+// a detached Image (SVG image mode disables scripts/external resources), then
+// hand the cache a freshly encoded PNG. No SVG markup is inserted anywhere.
+export async function rasterizeSVG(blob, timeoutMs = 5000) {
+  const img = new Image();
+  let url = URL.createObjectURL(new Blob([blob], { type: 'image/svg+xml' }));
+  let timer, active = true;
+  const revoke = () => { if (url) { URL.revokeObjectURL(url); url = null; } };
+  const work = async () => {
+    img.src = url;
+    await img.decode();
+    if (!active) throw new Error('SVG timeout');
+    let w = img.naturalWidth, h = img.naturalHeight;
+    if (!(w > 0 && h > 0)) {
+      // XML parsing is inert. Read root dimensions only, never attach nodes.
+      const root = new DOMParser().parseFromString(await blob.text(), 'image/svg+xml').documentElement;
+      if (!active) throw new Error('SVG timeout');
+      const length = name => {
+        const value = (root.getAttribute(name) || '').trim();
+        return /^\d+(?:\.\d+)?(?:px)?$/.test(value) ? parseFloat(value) : 0;
+      };
+      const vb = (root.getAttribute('viewBox') || '').trim().split(/[\s,]+/).map(Number);
+      w = length('width'); h = length('height');
+      if (!(w > 0 && h > 0) && vb.length === 4 && vb.every(Number.isFinite) && vb[2] > 0 && vb[3] > 0) { w = vb[2]; h = vb[3]; }
+    }
+    if (!(Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0)) { w = 512; h = 512; }
+    const longest = Math.max(w, h), scale = Math.max(480, Math.min(2048, longest)) / longest;
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(w * scale));
+    canvas.height = Math.max(1, Math.round(h * scale));
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('no canvas');
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    revoke(); // SVG bytes are no longer needed, even while PNG encoding waits.
+    return new Promise((resolve, reject) => {
+      canvas.toBlob(png => png ? resolve(png) : reject(new Error('no PNG')), 'image/png');
+    });
+  };
+  try {
+    return await Promise.race([work(), new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('SVG timeout')), timeoutMs); })]);
+  } finally {
+    active = false;
+    clearTimeout(timer);
+    revoke();
+    img.removeAttribute('src');
+  }
+}
+
 export function createThumbs({ api, onReady = () => {} }) {
   let dead = false, viewer = null;
-  const cache = createThumbCache({ api, URL: globalThis.URL, onReady: () => { if (!dead) onReady(); } });
+  const cache = createThumbCache({ api, URL: globalThis.URL, rasterize: rasterizeSVG, onReady: () => { if (!dead) onReady(); } });
 
   // A decode error is the last check: bytes typed as an image that are not one.
   function broken(sha) {
