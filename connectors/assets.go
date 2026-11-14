@@ -9,7 +9,7 @@ import (
 // Embed launcher sources within the distributable root Go module. The obsolete
 // empty launcher module fence prevented embedding and was removed for go install.
 //
-//go:embed launcher/src launcher/schema launcher/package.json
+//go:embed launcher/src launcher/schema launcher/package.json launcher/systemd/vecnet-launcher-profile.service.in
 var embeddedLauncher embed.FS
 
 // Launcher is rooted at the launcher's package, preserving the existing API.

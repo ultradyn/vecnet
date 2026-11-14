@@ -2,7 +2,7 @@
 // Node >=22.18; provide only a minimal CODEX_ISOLATION_CONFIG and the three bins.
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { chmod, copyFile, mkdir, mkdtemp, open, readFile, readdir, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, lstat, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -130,6 +130,142 @@ export async function fixtureSystemctl({ root, home }, args) {
     child.unref();
   } finally { await log.close(); }
   return '';
+}
+
+
+// Separate opt-in profile adapter. The default factory still delegates to the
+// original standalone fixture; neither mode ever invokes a real manager.
+export function parseLauncherUnit(text, { root, home }) {
+  check(home === join(root, 'home') && resolve(root) === root, 'not a private fixture HOME');
+  check(text.startsWith('# Managed by vecnet launcher install. Rendered with absolute runtime paths.\n'), 'unexpected launcher fixture unit');
+  const env = {}; let command;
+  const fixed = new Set(['[Unit]', '[Service]', '[Install]', 'Description=vecnet launcher daemon (coding-agent launch jobs)',
+    'After=network-online.target', 'Type=simple', 'Restart=on-failure', 'RestartSec=10', 'RestartPreventExitStatus=3',
+    'UMask=0077', 'MemoryMax=1G', 'WantedBy=default.target']);
+  for (const line of text.split('\n')) {
+    if (!line || line.startsWith('#')) continue;
+    if (line.startsWith('Environment=')) {
+      const words = unitWords(line.slice(12)); check(words.length === 1, 'unsupported fixture environment');
+      const at = words[0].indexOf('='), key = words[0].slice(0, at);
+      check(at > 0 && ['HOME', 'PATH', 'VECNET_BIN', 'VECNET_CONFIG'].includes(key) && !(key in env), 'unexpected fixture environment');
+      env[key] = words[0].slice(at + 1);
+    } else if (line.startsWith('ExecStart=')) {
+      check(!command, 'unexpected duplicate fixture command'); command = unitWords(line.slice(10), true);
+    } else check(fixed.has(line), 'unsupported fixture directive');
+  }
+  check(env.HOME === home && env.PATH?.startsWith(join(root, 'bin') + ':'), 'unit escaped private fixture environment');
+  check(inside(root, env.VECNET_BIN) && inside(root, env.VECNET_CONFIG), 'CLI/config outside private fixture');
+  check(command?.length === 6 && command[0] === process.execPath && command[1] === '--disable-warning=ExperimentalWarning' && command[3] === 'run' && command[4] === '--config', 'unexpected fixture runtime command');
+  check(inside(join(home, '.local/share/vecnet-launcher/snapshots'), command[2]) && command[2].endsWith('/connectors/launcher/src/main.ts') && inside(root, command[5]), 'runtime/config outside fixture');
+  return { executable: command[0], args: command.slice(1), env };
+}
+
+async function privateFixturePath(root, path, directory = false) {
+  check(path === root || inside(root, path), 'path outside private fixture');
+  let current = root;
+  const parts = path === root ? [] : path.slice(root.length + 1).split(sep);
+  for (let i = -1; i < parts.length; i++) {
+    if (i >= 0) current = join(current, parts[i]);
+    const st = await lstat(current);
+    check(st.uid === process.geteuid() && !st.isSymbolicLink() && !(st.mode & 0o022), 'unsafe private fixture path or symlink');
+    check(i < parts.length - 1 || directory ? st.isDirectory() : st.isFile() && st.nlink === 1, 'fixture path must be regular/private');
+  }
+}
+async function fixtureGroupAlive(pid) {
+  for (const name of await readdir('/proc')) {
+    if (!/^\d+$/.test(name)) continue;
+    try {
+      const raw = await readFile(`/proc/${name}/stat`, 'utf8'), fields = raw.slice(raw.lastIndexOf(')') + 2).split(' ');
+      if (fields[0] !== 'Z' && Number(fields[2]) === pid) return true;
+    } catch (e) { if (e.code !== 'ENOENT' && e.code !== 'ESRCH') throw e; }
+  }
+  return false;
+}
+export function createFixtureSystemctl({ root, home, kind = 'standalone' }) {
+  if (kind === 'standalone') return args => fixtureSystemctl({ root, home }, args);
+  check(kind === 'launcher', 'unsupported fixture kind');
+  return async args => {
+    check(home === join(root, 'home'), 'not a private fixture');
+    await privateFixturePath(root, root, true);
+    await privateFixturePath(root, join(root, '.automatic-session-fixture'));
+    check(await readFile(join(root, '.automatic-session-fixture'), 'utf8') === 'fixture-v1', 'not a private fixture');
+    check(args[0] === '--user', 'adapter only accepts private user-unit operations');
+    const op = args[1];
+    if (['daemon-reload', 'show-environment', 'list-units'].includes(op)) {
+      check(args.length === 2, 'unsupported fixture arguments'); return '';
+    }
+    const rest = args.slice(2).filter(x => x !== '--'), unit = rest[0];
+    check(/^vecnet-launcher-p-[0-9a-f]{16}\.service$/.test(unit), 'foreign unit refused');
+    check(['show', 'restart', 'stop', 'is-active', 'enable', 'disable', 'is-enabled'].includes(op), 'unsupported fixture operation');
+    check(op === 'show' ? rest.slice(1).every((x, i) => i % 2 === 0 ? x === '-p' : ['ActiveState', 'MainPID'].includes(x)) && rest.length % 2 === 1 : rest.length === 1, 'unsupported fixture arguments');
+    const started = join(root, unit + '.started');
+    const lock = join(root, unit + '.lock'), record = join(root, unit + '.pid.json'), unitPath = join(home, '.config/systemd/user', unit);
+    try { await mkdir(lock, { mode: 0o700 }); } catch (e) { if (e.code === 'EEXIST') throw new Error('unresolved fixture operation lock'); throw e; }
+    try {
+      let state;
+      try { await privateFixturePath(root, record); state = JSON.parse(await readFile(record, 'utf8')); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+      if (!state) {
+        try { await lstat(started); throw new Error('unresolved missing fixture process projection'); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+      }
+      check(!state || state.unit === unit && ['running', 'stopped'].includes(state.phase), 'unresolved fixture spawn intent');
+      async function save(value) {
+        const temp = record + '.' + randomBytes(8).toString('hex');
+        const fd = await open(temp, 'wx', 0o600);
+        try { await fd.writeFile(JSON.stringify(value)); await fd.sync(); } finally { await fd.close(); }
+        await rename(temp, record);
+        const dir = await open(root, 'r'); try { await dir.sync(); } finally { await dir.close(); }
+        state = value;
+      }
+      async function active() {
+        if (!state || state.phase === 'stopped') return false;
+        check(Number.isInteger(state.pid) && state.pid > 1 && typeof state.stamp === 'string' && Array.isArray(state.argv), 'foreign fixture process identity');
+        const stamp = await processStamp(state.pid);
+        if (!stamp) { check(!await fixtureGroupAlive(state.pid), 'unproved fixture descendants'); return false; }
+        check(stamp === state.stamp, 'foreign fixture process identity');
+        const argv = (await readFile(`/proc/${state.pid}/cmdline`, 'utf8')).split('\0').filter(Boolean);
+        const env = (await readFile(`/proc/${state.pid}/environ`, 'utf8')).split('\0');
+        check(JSON.stringify(argv) === JSON.stringify(state.argv) && await realpath(`/proc/${state.pid}/exe`) === await realpath(process.execPath) && env.includes('HOME=' + home) && (await stat(`/proc/${state.pid}`)).uid === process.geteuid(), 'foreign fixture process identity');
+        return true;
+      }
+      async function stop() {
+        if (await active()) {
+          // Signal the verified leader only. Descendants must exit with it;
+          // an orphaned group is ambiguity, never permission for a broad kill.
+          process.kill(state.pid, 'SIGTERM');
+          for (let i = 0; i < 100 && await processStamp(state.pid) === state.stamp; i++) await sleep(20);
+          check(await processStamp(state.pid) !== state.stamp && !await fixtureGroupAlive(state.pid), 'unproved fixture teardown');
+        }
+        await save({ phase: 'stopped', unit });
+      }
+      if (op === 'stop') { await stop(); return ''; }
+      if (op === 'show') return `ActiveState=${await active() ? 'active' : 'inactive'}\nMainPID=${await active() ? state.pid : 0}\n`;
+      if (op === 'is-active') return await active() ? 'active\n' : 'inactive\n';
+      if (['enable', 'disable', 'is-enabled'].includes(op)) {
+        await privateFixturePath(root, unitPath);
+        const flag = join(root, unit + '.enabled');
+        if (op === 'enable') await writeFile(flag, '', { mode: 0o600, flag: 'wx' }).catch(e => { if (e.code !== 'EEXIST') throw e; });
+        if (op === 'disable') await rm(flag, { force: true });
+        if (op === 'is-enabled') { try { await privateFixturePath(root, flag); return 'enabled\n'; } catch (e) { if (e.code !== 'ENOENT') throw e; return 'disabled\n'; } }
+        return '';
+      }
+      await privateFixturePath(root, unitPath);
+      const parsed = parseLauncherUnit(await readFile(unitPath, 'utf8'), { root, home });
+      for (const path of [parsed.args[1], parsed.args[4], parsed.env.VECNET_BIN, parsed.env.VECNET_CONFIG]) await privateFixturePath(root, path);
+      await stop();
+      const marker = await open(started, 'a', 0o600); try { await marker.sync(); } finally { await marker.close(); }
+      await save({ phase: 'starting', unit }); // Durable before spawn; never infer nonexecution after a crash.
+      const logPath = join(root, unit + '.log');
+      const log = await open(logPath, 'ax', 0o600).catch(async e => { if (e.code !== 'EEXIST') throw e; await privateFixturePath(root, logPath); return open(logPath, 'a'); });
+      try {
+        const child = spawn(parsed.executable, parsed.args, { cwd: root, env: parsed.env, detached: true, stdio: ['ignore', log.fd, log.fd] });
+        await new Promise((yes, no) => { child.once('spawn', yes); child.once('error', no); });
+        child.unref();
+        const stamp = await processStamp(child.pid); check(stamp, 'unproved fixture spawn');
+        await save({ phase: 'running', unit, pid: child.pid, stamp, argv: [parsed.executable, ...parsed.args] });
+      } finally { await log.close(); }
+      return '';
+    } finally { await rm(lock, { recursive: true }); }
+  };
 }
 
 async function until(what, fn, ms = 90000) {

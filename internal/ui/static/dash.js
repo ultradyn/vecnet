@@ -164,7 +164,7 @@ export function mount(root, ctx) {
   root.replaceChildren(
     h('div', { class: 'dash' },
       h('h1', { text: 'Dashboard' }),
-      h('p', { class: 'lede', text: 'A view of the hub; Add agent, under Peers, is its one write. Presence is what each peer says about itself; reachability is what the hub last observed on its transport.' }),
+      h('p', { class: 'lede', text: 'Add agents under Peers, or open a launcher to run a job. Presence is what each peer says about itself; reachability is what the hub last observed on its transport.' }),
       activityPanel,
       counterLine,
       section('peers', 'd-peers', 'Peers'),
@@ -237,7 +237,7 @@ export function mount(root, ctx) {
       const row = peerRows.get(p.id) || h('tr');
       row.className = p.disabled || p.archivedAt ? 'off' : '';
       const cells = h('tr', null,
-        h('td', null, peerLink(p.id, p.name, { cls: 'pn' }), mark ? [' ', mark] : null, idCell(p.id, 'peer id')),
+        h('td', null, peerLink(p.id, p.name, { cls: 'pn' }), mark ? [' ', mark] : null, idCell(p.id, 'peer id'), p.kind === 'launcher' && !p.disabled && !p.archivedAt ? h('a', { class: 'sub', href: '#peer/' + p.id, text: 'Launch job →' }) : null),
         h('td', null, h('span', { class: 'pill', title: kindTitle(p.kind) }, h('i', { class: 'kd k-' + p.kind }), kindShort(p.kind))),
         h('td', null, h('span', { class: 'pill' }, h('i', { class: 'pd ' + p.presence.replace('/', '') }), p.presence),
           h('span', { class: 'sub mono', text: presenceAge })),

@@ -73,3 +73,13 @@ test('ConfigError keeps ordinary bad-field pointer diagnostics intact',()=>{
   assert.equal(new ConfigError('').message,'/: invalid field');
   assert.equal(new ConfigError('').pointer,'/');
 });
+
+
+test('scratch is explicit boolean metadata and legacy project aliases retain repository semantics', () => {
+  const raw = {...minimal(), projects:{temporary:{repo_root:'/fake/repo',base_ref:'master'},scratch:{repo_root:'/fake/cache',base_ref:'HEAD',scratch:true}}};
+  const parsed = parseConfig(raw);
+  assert.equal(parsed.projects.temporary.scratch, undefined);
+  assert.equal(parsed.projects.scratch.scratch, true);
+  assert.equal(parseConfig({...raw,projects:{temporary:{...raw.projects.temporary,scratch:false}}}).projects.temporary.scratch,false);
+  for (const scratch of [null,'true',0]) assert.throws(()=>parseConfig({...raw,projects:{scratch:{...raw.projects.scratch,scratch}}}),ConfigError);
+});

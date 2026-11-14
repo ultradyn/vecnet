@@ -229,7 +229,7 @@ func (a *app) repairLocalProjectsAfterRuntime(runtimeErr error) error {
 	var failures []error
 	for _, p := range projects {
 		status, why := "ready", ""
-		completed := map[string]localArtifact{}
+		completed := map[string]localArtifactRepair{}
 		if st, e := os.Stat(p.Root); e != nil || !st.IsDir() {
 			status = "deferred"
 			why = "project is missing or inaccessible"
@@ -240,6 +240,18 @@ func (a *app) repairLocalProjectsAfterRuntime(runtimeErr error) error {
 			for _, art := range p.Artifacts {
 				if a.ctx.Err() != nil {
 					return a.ctx.Err()
+				}
+				if art.Kind == "launcher-profile" {
+					worker := *a
+					worker.localProjectRoot = p.Root
+					worker.stdout, worker.stderr = io.Discard, io.Discard
+					done, e := worker.repairLauncherArtifact(p.Root, art)
+					if e != nil {
+						status, why = "pending", e.Error()
+					} else {
+						completed[art.Path] = localArtifactRepair{Before: art, After: done}
+					}
+					continue
 				}
 				if art.Kind != "codex-hooks" {
 					status = "deferred"
@@ -283,7 +295,7 @@ func (a *app) repairLocalProjectsAfterRuntime(runtimeErr error) error {
 				done := art
 				done.Version = localSoftwareVersion()
 				done.Hash = hookDigest(after)
-				completed[art.Path] = done
+				completed[art.Path] = localArtifactRepair{Before: art, After: done}
 
 			}
 		}
@@ -372,12 +384,16 @@ func (a *app) cmdLocalRepair(args []string) error {
 		if runtimeErr != nil {
 			failures = append(failures, runtimeErr)
 		}
-	} else if localLauncherPresent(a.getenv("HOME")) {
+	} else if localLegacyLauncherPresent(a.getenv("HOME")) {
 		// The legacy launcher installer has no verified upgrade manifest. Never
 		// replace its custom configuration/unit with the standalone service or
 		// claim that repairing hooks updated its private connector and CLI.
 		runtimeErr = usageErr("vecnet-launcher.service installation needs a launcher installer upgrade and service restart; run just ln-install from the updated source checkout, then systemctl --user restart vecnet-launcher; its software has not been upgraded by repair")
 		failures = append(failures, runtimeErr)
+	}
+	if err := a.unregisteredLocalLaunchers(); err != nil {
+		failures = append(failures, err)
+		runtimeErr = errors.Join(runtimeErr, err)
 	}
 	if err := a.repairLocalProjectsAfterRuntime(runtimeErr); err != nil {
 		failures = append(failures, err)
@@ -462,8 +478,66 @@ func localRuntimePresent(home string) bool {
 	return err == nil
 }
 func localLauncherPresent(home string) bool {
+	if localLegacyLauncherPresent(home) {
+		return true
+	}
+	units, err := localProfileLauncherUnits(home)
+	return err != nil || len(units) > 0
+}
+func localProfileLauncherUnits(home string) ([]string, error) {
+	dir := filepath.Join(home, ".config/systemd/user")
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("cannot inspect launcher unit directory: %w", err)
+	}
+	var units []string
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "vecnet-launcher-p-") && strings.HasSuffix(entry.Name(), ".service") {
+			units = append(units, filepath.Join(dir, entry.Name()))
+		}
+	}
+	return units, nil
+}
+func localLegacyLauncherPresent(home string) bool {
 	_, err := os.Lstat(filepath.Join(home, ".config/systemd/user/vecnet-launcher.service"))
 	return err == nil
+}
+
+// File presence schedules inspection, but never authorizes adopting an existing
+// launcher. Only installer metadata registered to a project permits repair.
+func (a *app) unregisteredLocalLaunchers() error {
+	units, err := localProfileLauncherUnits(a.getenv("HOME"))
+	if err != nil || len(units) == 0 {
+		return err
+	}
+	projects, err := a.localProjects()
+	if err != nil {
+		return err
+	}
+	registered := map[string]bool{}
+	for _, project := range projects {
+		for _, artifact := range project.Artifacts {
+			if artifact.Kind != "launcher-profile" {
+				continue
+			}
+			var metadata struct {
+				Unit string `json:"unit_path"`
+			}
+			raw, e := readLocalHooks(artifact.Path)
+			if e == nil && json.Unmarshal(raw, &metadata) == nil {
+				registered[metadata.Unit] = true
+			}
+		}
+	}
+	for _, unit := range units {
+		if !registered[unit] {
+			return usageErr("profile launcher installation is not registered for verified upgrades; run vecnet --net PROFILE launcher install --write from the updated CLI, preserving the intended service state; automatic repair has not upgraded it")
+		}
+	}
+	return nil
 }
 func (a *app) recordLocalCodexHooks(path string) {
 	if err := a.registerLocalArtifact(path, "codex-hooks", localSoftwareVersion(), time.Now()); err != nil {
@@ -495,14 +569,26 @@ type localRepairReport struct {
 	Runtime      *localRepairRuntime `json:"runtime,omitempty"`
 }
 
+type localArtifactRepair struct {
+	Before localArtifact
+	After  localArtifact
+}
+
+func sameLocalArtifact(a, b localArtifact) bool {
+	return a.Path == b.Path && a.Kind == b.Kind && a.Schema == b.Schema && a.Version == b.Version && a.Hash == b.Hash && a.InstalledAt.Equal(b.InstalledAt)
+}
+
 // Commit completion only for the artifacts verified by this repair snapshot.
 // A concurrent installation/adoption leaves the project pending for another pass.
-func (a *app) finishLocalProjectRepair(root string, completed map[string]localArtifact, status, why string, runtimeErr error) (string, error) {
+func (a *app) finishLocalProjectRepair(root string, completed map[string]localArtifactRepair, status, why string, runtimeErr error) (string, error) {
 	err := a.updateLocalProject(root, func(current *localProject) error {
 		if status == "ready" {
+			if len(current.Artifacts) != len(completed) {
+				status, why = "pending", "managed artifacts changed during repair; retry maintenance"
+			}
 			for _, artifact := range current.Artifacts {
 				done, ok := completed[artifact.Path]
-				if !ok || done.Kind != artifact.Kind || done.Schema != artifact.Schema || done.Version != artifact.Version || done.Hash != artifact.Hash {
+				if !ok || !sameLocalArtifact(done.Before, artifact) || done.After.Path != artifact.Path || done.After.Kind != artifact.Kind || done.After.Schema != artifact.Schema {
 					status = "pending"
 					why = "managed artifacts changed during repair; retry maintenance"
 					break
@@ -511,6 +597,11 @@ func (a *app) finishLocalProjectRepair(root string, completed map[string]localAr
 			if runtimeErr != nil && len(current.Artifacts) > 0 {
 				status = "pending"
 				why = "managed runtime upgrade pending: " + runtimeErr.Error()
+			}
+		}
+		if status == "ready" {
+			for i, artifact := range current.Artifacts {
+				current.Artifacts[i] = completed[artifact.Path].After
 			}
 		}
 		current.Status = status

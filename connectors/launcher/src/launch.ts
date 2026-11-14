@@ -117,8 +117,12 @@ export async function recoverFailedLaunch(job: JobRow, backend: Backend, deps: L
         sessionRef:ref,branch:typeof ref.extra?.branch === 'string' ? ref.extra.branch : fence.branch ?? null,
         workspace:typeof ref.extra?.workspace === 'string' ? ref.extra.workspace : null,
       });
-      const result = await backend.reattach(ref,deps.hooks(deps.ledger.job(job.jobId)!));
-      if (result.found !== 'none') { await result.handle.settle('lost'); settled = true; }
+      if (backend.settleOwned) {
+        await backend.settleOwned(ref,'lost'); settled = true;
+      } else {
+        const result = await backend.reattach(ref,deps.hooks(deps.ledger.job(job.jobId)!));
+        if (result.found !== 'none') { await result.handle.settle('lost'); settled = true; }
+      }
     }
     deps.ledger.tx(() => {
       clearPending(job.jobId,deps);
