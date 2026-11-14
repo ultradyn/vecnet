@@ -1,12 +1,31 @@
 import { assert, cleanBuild, withDemo } from './lib.mjs';
 try {
- await withDemo({ many: true }, async ({ page, shot, demo, countRequests }) => {
+ await withDemo({ many: true }, async ({ page, shot, demo, countRequests, asPeer }) => {
   await page.goto(demo.url + '/ui/#threads');
   const rows = page.locator('.thread-results tbody tr');
   await page.waitForFunction(() => document.querySelectorAll('.thread-results tbody tr').length === 50);
   await page.getByRole('button', { name: 'Load more', exact: true }).click();
   await page.waitForFunction(() => document.querySelectorAll('.thread-results tbody tr').length === 100);
+  await page.getByRole('checkbox', { name: 'Select all loaded threads' }).check();
+  const originalIDs = await rows.evaluateAll(xs => xs.map(x => x.dataset.threadId));
+  const reload = page.waitForResponse(r => { const u = new URL(r.url()); return u.pathname === '/v1/admin/threads' && u.searchParams.get('limit') === '100'; });
+  const archived = await asPeer('operator', 'POST', `/v1/admin/threads/${originalIDs[0]}/archive`);
+  assert(archived.ok, 'external archive failed'); await reload;
+  await page.waitForFunction(id => !document.querySelector(`[data-thread-id="${id}"]`), originalIDs[0]);
+  assert(await rows.count() === 100, 'live refresh collapsed loaded depth');
+  assert(await rows.locator('input:checked').count() === 99, 'selection retained an absent thread');
+  assert(await page.getByRole('checkbox', { name: 'Select all loaded threads' }).evaluate(el => !el.checked && el.indeterminate), 'master selection did not reflect visible rows');
+  await page.getByRole('checkbox', { name: 'Select all loaded threads' }).check();
+  await page.getByRole('checkbox', { name: 'Select all loaded threads' }).uncheck();
   const search = page.getByRole('searchbox', { name: 'Search thread titles' });
+  await page.getByRole('combobox', { name: 'Thread state' }).selectOption('all');
+  await page.getByRole('combobox', { name: 'Participant', exact: true }).fill(demo.peers['browse-10'].id);
+  await page.getByRole('combobox', { name: 'Participant', exact: true }).press('Tab');
+  await page.waitForFunction(() => document.querySelectorAll('.thread-results tbody tr').length === 5);
+  assert((await page.locator(`option[value="${demo.peers['browse-10'].id}"]`).getAttribute('label')).includes('archived'), 'archived participant is not labelled');
+  await page.getByRole('combobox', { name: 'Participant', exact: true }).fill('');
+  await page.getByRole('combobox', { name: 'Participant', exact: true }).press('Tab');
+  await page.getByRole('combobox', { name: 'Thread state' }).selectOption('open');
   await search.fill('Browse project 030');
   await page.waitForFunction(() => document.querySelectorAll('.thread-results tbody tr').length === 1 && document.querySelector('.thread-results').textContent.includes('Browse project 030'));
   const reads = countRequests(req => new URL(req.url()).pathname === '/v1/admin/threads');

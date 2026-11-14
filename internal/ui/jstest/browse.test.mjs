@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { filterPeers, readPeerFilters, savePeerFilters } from '../static/peers-model.js';
-import { threadQuery, createThreadList, bulkArchive, participantID } from '../static/threads-model.js';
+import { threadQuery, createThreadList, bulkArchive, participantID, visibleSelection } from '../static/threads-model.js';
 const row = (id, extra = {}) => ({ peer: { peer_id: id, name: id, kind: 'session', presence: 'idle', last_seen: null }, ...extra });
 test('peer browse hides disabled and archived independently, searches IDs and sorts with a stable bound', () => {
  const rows = [row('peer_z'), row('peer_disabled', { disabled: true }), row('peer_old', { disabled: true, archived_at: 'now' }), row('peer_a')];
@@ -56,11 +56,27 @@ test('thread screen loads once on mount and refreshes exactly once on the thread
  const { createStore } = await import('../static/store.js');
  const { mount } = await import('../static/threads.js');
  const restore = installDom(); let calls = 0;
- const api = { threads: async () => { calls++; return { threads: [], next: null }; } };
+ const api = { adminPeers: async () => ({ peers: [] }), threads: async () => { calls++; return { threads: [], next: null }; } };
  const store = createStore({ api }); const root = new El('div');
  const off = mount(root, { api, store, me: 'peer_me', nameOf: id => id, replaceRoute() {} });
  try {
   await store.settled(); assert.equal(calls, 1);
   store.invalidate('threads'); await store.settled(); assert.equal(calls, 2);
  } finally { off(); restore(); }
+});
+
+test('background thread refresh keeps loaded depth and selection contains only rendered rows', async () => {
+ const calls = [];
+ const rows = n => Array.from({ length: n }, (_, i) => ({ thread: { thread_id: 't' + i } }));
+ const api = { threads: async q => { calls.push(q); return { threads: q.cursor ? rows(100).slice(50) : rows(q.limit), next: q.cursor ? null : 'more' }; } };
+ const list = createThreadList(api, 'me'); await list.load({}); await list.more();
+ assert.equal(list.state().rows.length, 100);
+ await list.refresh(); assert.equal(calls.at(-1).limit, 100); assert.equal(list.state().rows.length, 100);
+ const selected = visibleSelection(new Set(['t0', 't1', 'hidden']), rows(2));
+ assert.deepEqual([...selected.ids], ['t0', 't1']); assert.equal(selected.checked, true); assert.equal(selected.indeterminate, false);
+ assert.equal(visibleSelection(new Set(['t0']), rows(2)).indeterminate, true);
+ list.close();
+});
+test('archived admin peers remain valid participants', () => {
+ assert.equal(participantID('peer_retired', [{ peer: { peer_id: 'peer_retired', name: 'retired' }, disabled: true, archived_at: 'now' }]), 'peer_retired');
 });
