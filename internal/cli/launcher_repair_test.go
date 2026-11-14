@@ -457,7 +457,7 @@ func TestLauncherManagedRepairPendingDriftPreserved(t *testing.T) {
 }
 
 func TestLauncherManagedRepairUnsafePathsPreserved(t *testing.T) {
-	for _, kind := range []string{"unit-mode", "config-mode", "metadata-mode", "snapshot-mode", "unit-symlink", "manifest-symlink", "metadata-symlink", "snapshot-symlink", "config-symlink"} {
+	for _, kind := range []string{"unit-mode", "config-mode", "metadata-mode", "snapshot-mode", "unit-symlink", "manifest-symlink", "metadata-symlink", "snapshot-symlink", "config-symlink", "node-symlink", "node-mode"} {
 		t.Run(kind, func(t *testing.T) {
 			f, a, project, art, _ := launcherRepairFixture(t, false)
 			target := f.paths.Unit
@@ -468,6 +468,10 @@ func TestLauncherManagedRepairUnsafePathsPreserved(t *testing.T) {
 				target = art.Path
 			case "manifest":
 				target = f.paths.Manifest
+			case "node":
+				var m launcherInstall
+				json.Unmarshal(launcherTestRead(t, f.paths.Manifest), &m)
+				target = m.Node
 			case "snapshot":
 				var m launcherInstall
 				json.Unmarshal(launcherTestRead(t, f.paths.Manifest), &m)

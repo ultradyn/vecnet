@@ -166,7 +166,41 @@ func launcherReadPath(path string, private bool) ([]byte, error) {
 	}
 	return launcherReadOwned(root, filepath.Base(path), false)
 }
+func launcherValidateNode(path string) error {
+	parent, err := launcherOpenDir(filepath.Dir(path), "", false)
+	if err != nil {
+		return err
+	}
+	defer parent.Close()
+	info, err := parent.Lstat(filepath.Base(path))
+	if err != nil {
+		return err
+	}
+	if err = launcherSafeInfo(info, false, false); err != nil {
+		return fmt.Errorf("unsafe launcher Node executable: %w", err)
+	}
+	if info.Mode().Perm()&0o111 == 0 {
+		return errors.New("launcher Node path is no longer executable")
+	}
+	file, err := parent.Open(filepath.Base(path))
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	pinned, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(info, pinned) {
+		return errors.New("launcher Node executable changed during validation")
+	}
+	return nil
+}
+
 func launcherValidateSoftware(meta launcherManaged) error {
+	if err := launcherValidateNode(meta.Node); err != nil {
+		return err
+	}
 	hashes, err := launcherSnapshotInventory(meta.Runtime.Snapshot)
 	if err != nil {
 		return err
