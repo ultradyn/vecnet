@@ -61,3 +61,13 @@ All build/test commands below ran through `just bb` on x-tuf with `BB_JOBS=2`; t
 | Protocol/schema/blob examples | Passed, including expected negative fixtures. |
 
 The independent whole-branch standards/spec review found no remaining material issues. Scoped follow-ups approved the live-driven readiness correction, fixture-helper cleanup, evidence receipt and test-only JSONL framing repair. The trace regression demonstrated a red partial-record read, then green parsing of complete records while malformed completed records still fail. It changes no production connector code or test timeouts.
+
+## PR72 integration review corrections
+
+The merge review tightened startup maintenance to an explicit set of project/network commands. Local guide, profile, diagnostic and audit inspection, preference reads/previews, unknown commands and internal delivery children do not observe projects or schedule saved enrollment work. Preference previews use the same flag grammar as the preference command, including flag termination and invalid boolean values.
+
+A legacy `vecnet-launcher.service` without managed standalone delivery now schedules maintenance and reports an actionable pending installer upgrade rather than reporting a completed software upgrade after only repairing hooks. Its existing unit/configuration is preserved. When standalone delivery is installed alongside a leftover launcher unit, repair upgrades the standalone runtime; that runtime's live service-conflict checks still govern activation. Legacy launcher-only upgrades require the launcher installer and service restart described in the pending result.
+
+Regression coverage exercises saved pending enrollment during each inspection, launcher-only pending state and preserved unit bytes/applied version, and standalone repair with a leftover launcher unit. Both preview and standalone-priority regressions were observed failing before the correction. The integration gate uses x-boss because x-tuf was unreachable, with its temporary directory canonicalized to avoid the build host's `/home` to `/work` alias in filesystem fixtures.
+
+Final merge correction gate: on the quieter x-tall host with private tmpfs temporary storage, both state-persistence failures from loaded x-boss passed three consecutive runs (0.345s total); the full CLI suite passed (103.964s), managed runtime passed (1.250s), and the focused maintenance/inspection/launcher/startup race suite passed (1.436s). Production timeout bounds are unchanged. The scoped independent review approved both corrections. The earlier x-boss full attempt failed only the two two-second registry/persistence operations under filesystem load; its managed runtime suite passed (38.199s).
