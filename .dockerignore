@@ -20,7 +20,10 @@ backups/
 **/*.db
 **/*.db-wal
 **/*.db-shm
-connectors/
+# The CLI embeds the connector runtime sources. Keep these in the build context.
+connectors/launcher/test/
+connectors/hub-client/test/
+**/node_modules/
 
 # Operator-only spike inputs must never enter git or a remote build context.
 **/r2-test.env
