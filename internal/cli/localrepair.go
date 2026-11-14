@@ -40,12 +40,20 @@ func localMaintenanceCommand(args []string) bool {
 		return false
 	}
 	switch args[0] {
-	case "help", "projects", "repair", "hook", "watch", "mcp":
-		return false
-	case "codex":
-		return false
+	// Opt in project/network work. Local inspection, delivery children and
+	// unknown commands must not start saved setup or change installation state.
+	case "enrol", "enroll", "notice", "blob", "send", "reply", "react", "inbox", "ack", "threads", "thread", "peers", "groups", "presence", "avatar", "receipt", "principal", "peer", "agent", "invite", "route", "source", "subscriptions", "team", "dead-letters", "notify", "tui":
+		return true
+	case "prefs":
+		if len(args) < 2 || args[1] != "set" {
+			return false
+		}
+		o, err := parseFlags("prefs set", args[2:], map[string]flagKind{
+			"reset": boolFlag, "preview": boolFlag, "apply-existing": boolFlag, "confirm-risk": multiFlag,
+		})
+		return err == nil && !o.has("preview")
 	}
-	return true
+	return false
 }
 func localBinary() string {
 	exe, err := os.Executable()
@@ -126,7 +134,7 @@ func (a *app) localStartup(args []string) {
 	// A new executable must refresh the service's private copy as well. It is
 	// safe to start repair without an owner; it cannot create one absent pending
 	// enrollment intent.
-	if ctx.Err() == nil && localRuntimePresent(a.getenv("HOME")) {
+	if ctx.Err() == nil && (localRuntimePresent(a.getenv("HOME")) || localLauncherPresent(a.getenv("HOME"))) {
 		managed = true
 	}
 	// The foreground reads bounded local metadata only. Complete file integrity
@@ -350,6 +358,8 @@ func (a *app) cmdLocalRepair(args []string) error {
 	a = &worker
 	var failures []error
 	var runtimeErr error
+	// A stopped legacy launcher may coexist with an installed standalone runtime.
+	// Ensure checks live service conflicts before upgrading the actual managed runtime.
 	if localRuntimePresent(a.getenv("HOME")) {
 		runtimeErr = a.ensureLocalRuntime(a.ctx)
 		if runtimeErr == nil {
@@ -362,6 +372,12 @@ func (a *app) cmdLocalRepair(args []string) error {
 		if runtimeErr != nil {
 			failures = append(failures, runtimeErr)
 		}
+	} else if localLauncherPresent(a.getenv("HOME")) {
+		// The legacy launcher installer has no verified upgrade manifest. Never
+		// replace its custom configuration/unit with the standalone service or
+		// claim that repairing hooks updated its private connector and CLI.
+		runtimeErr = usageErr("vecnet-launcher.service installation needs a launcher installer upgrade and service restart; run just ln-install from the updated source checkout, then systemctl --user restart vecnet-launcher; its software has not been upgraded by repair")
+		failures = append(failures, runtimeErr)
 	}
 	if err := a.repairLocalProjectsAfterRuntime(runtimeErr); err != nil {
 		failures = append(failures, err)
@@ -443,6 +459,10 @@ func localRuntimePresent(home string) bool {
 		return true
 	}
 	_, err := os.Lstat(filepath.Join(home, ".config/systemd/user/vecnet-codex-delivery.service"))
+	return err == nil
+}
+func localLauncherPresent(home string) bool {
+	_, err := os.Lstat(filepath.Join(home, ".config/systemd/user/vecnet-launcher.service"))
 	return err == nil
 }
 func (a *app) recordLocalCodexHooks(path string) {
