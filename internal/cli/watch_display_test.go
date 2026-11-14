@@ -223,7 +223,11 @@ func newDisplayFixture(t *testing.T) *displayFixture {
 	}
 	f.hub = c.base
 	seedHook(t, f.path, "e1.0")
-	if err := (stateFile{f.path}).update(t.Context(), func(s *hookState) error { s.AppCursor = "e1.0"; return nil }); err != nil {
+	if err := (stateFile{f.path}).update(t.Context(), func(s *hookState) error {
+		s.bind(hookIdentity{Hub: f.hub, Caller: "peer_test", Cred: hookCredential("vn_peer_test")})
+		s.AppCursor = "e1.0"
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
 	return f
@@ -562,8 +566,10 @@ func TestWatchFreshDisplaySurvivesReservationEviction(t *testing.T) {
 	if got, errs := runHook(t, f.env, "--event", "user-prompt", "--auto-ack"); got != "" {
 		t.Fatalf("hook duplicated fresh monitor display after reservation eviction: %q; stderr=%q", got, errs)
 	}
-	if cur := f.ack(t); cur != ev.Cursor {
-		t.Fatalf("hook did not acknowledge verified prior display: %s", cur)
+	select {
+	case cur := <-f.acks:
+		t.Fatalf("hook acknowledged %s across other unproved legacy reservations", cur)
+	default:
 	}
 }
 

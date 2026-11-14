@@ -106,7 +106,11 @@ func runDedupeWatchPages(t *testing.T, pages [][]envelope.Event) (string, chan<-
 	}
 	// Replay must ignore a claim made by the hook before the watch starts.
 	if len(pages) > 0 {
-		if err := (stateFile{path: path}).update(context.Background(), func(s *hookState) error { s.claim("dly_A"); return nil }); err != nil {
+		if err := (stateFile{path: path}).update(context.Background(), func(s *hookState) error {
+			s.bind(hookIdentity{Hub: srv.URL, Caller: "peer_test", Cred: hookCredential("vn_peer_test")})
+			s.claim("dly_A")
+			return nil
+		}); err != nil {
 			t.Fatal(err)
 		}
 	}

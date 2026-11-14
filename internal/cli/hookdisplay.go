@@ -33,11 +33,16 @@ func (f stateFile) displayState(s *hookState, id *hookIdentity, fresh bool) erro
 	if err != nil || json.Unmarshal(raw, &stored) != nil || stored == nil {
 		return errDisplayDeferred
 	}
-	if s.Hub != "" && (s.Hub != id.Hub || s.As != id.As ||
-		(s.Caller != "" && s.Caller != id.Caller) || (s.Cred != "" && s.Cred != id.Cred)) {
+	hasEvidence := len(s.Shown) != 0 || len(s.Displayed) != 0 || len(s.Claims) != 0 || len(s.Replay) != 0 || s.AppCursor != "" || s.PollCursor != ""
+	if hasEvidence && (s.Hub == "" || s.Caller == "") {
 		return errDisplayDeferred
 	}
-	s.bind(*id) // a valid legacy unbound state may adopt this verified identity
+	hasScope := s.Hub != "" || s.Caller != "" || s.As != "" || s.Cred != ""
+	if (s.Hub != "" && s.Hub != id.Hub) || (s.Caller != "" && s.Caller != id.Caller) ||
+		(hasScope && s.As != id.As) || (s.Cred != "" && s.Cred != id.Cred) {
+		return errDisplayDeferred
+	}
+	s.bind(*id) // only empty legacy state may bootstrap without complete identity
 	return nil
 }
 

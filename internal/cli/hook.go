@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf16"
@@ -526,21 +527,26 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 	var claimed []envelope.Event
 	var processed string
 	ackSafe := false
+	displayVerified := false
 	// Publish the complete output before the transaction commits. An error
 	// (including expiry) aborts the commit, so the next run shows it again.
 	finish := func(s *hookState) error {
-		if output == "" {
-			return ctx.Err()
-		}
-		if err := publish(hookOutput(event, output)); err != nil {
-			return err
-		}
-		if s.Caller != "" {
-			for _, ev := range claimed {
-				s.recordDisplay(eventFieldsOf(ev).deliveryID)
+		if output != "" {
+			if err := publish(hookOutput(event, output)); err != nil {
+				return err
+			}
+			if displayVerified {
+				for _, ev := range claimed {
+					s.recordDisplay(eventFieldsOf(ev).deliveryID)
+				}
 			}
 		}
-		return nil
+		// Evaluate after successful first output has published its proof. Legacy
+		// reservations, including those outside this page, never authorize ack.
+		ackSafe = displayVerified && len(s.Claims) == 0 && !slices.ContainsFunc(s.Shown, func(id string) bool {
+			return !slices.Contains(s.Displayed, id)
+		})
+		return ctx.Err()
 	}
 	poll := func(after string) (pollBody, error) {
 		body, e := a.poll(c, after, 0)
@@ -559,8 +565,19 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 			return errHookForeign
 		}
 		// Never read one identity's stream with another's cursor or shown ids.
-		if s.bind(a.resolveIdentity(c, s)) {
+		if len(s.Displayed) != 0 && (s.Hub == "" || s.Caller == "") {
+			return errDisplayDeferred
+		}
+		id := a.resolveIdentity(c, s)
+		displayVerified = id.Hub != "" && id.Caller != ""
+		if s.bind(id) {
 			fmt.Fprintf(a.stderr, "vecnet: hook: state belonged to another hub or peer; starting afresh\n")
+		}
+		// Do not advance the poll cursor or age an unproved reservation out of
+		// the bounded window by printing later pages. Only positive proof may
+		// unblock this cumulative-ack predecessor.
+		if slices.ContainsFunc(s.Shown, func(id string) bool { return !slices.Contains(s.Displayed, id) }) {
+			return errDisplayDeferred
 		}
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -623,6 +640,10 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 				return e
 			}
 			if s.has(item.Delivery) {
+				inOutput := slices.ContainsFunc(claimed, func(ev envelope.Event) bool { return eventFieldsOf(ev).deliveryID == item.Delivery })
+				if !inOutput && (!displayVerified || !slices.Contains(s.Displayed, item.Delivery)) {
+					return errDisplayDeferred // preserve the cursor before unproved output
+				}
 				processed = ev.Cursor
 				continue
 			}
@@ -668,9 +689,6 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 		if len(claimed) > 0 {
 			a.rememberEvents(ch, claimed)
 		}
-		// Cursors are opaque. Without exact proof for every outstanding claim,
-		// no cumulative acknowledgment is safe, even for later printed events.
-		ackSafe = len(s.Claims) == 0
 		return finish(s)
 	})
 	if e != nil {

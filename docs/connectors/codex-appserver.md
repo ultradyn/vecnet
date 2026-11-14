@@ -97,6 +97,11 @@ writers. A pending claim, busy/corrupt state or unverified identity closes the
 transport at that event and retains one bounded envelope. Local retries use
 1/2/4/8/15-second delays without releasing claims or passing the blocked cursor.
 Receipt proof completes silently; a safe unsent release permits one print.
+Stored evidence without both its hub and authenticated caller stays unchanged
+and deferred; only empty legacy state can bootstrap a monitor identity. Generic
+hooks retain their poll predecessor while any legacy reservation lacks positive
+proof, including reservations outside the next page. Fresh verified hook output
+records its proof before it can authorize cumulative acknowledgment.
 Explicit new `--since` replay remains deliberate. Failed/short output, or failure
 to persist proof after output, stops the watch before acknowledgment or retry.
 All watch modes acknowledge only completely handled events; plain/JSON watch

@@ -425,6 +425,17 @@ func TestHookFirstRunSummarisesBacklog(t *testing.T) {
 		}
 	})
 	seedHook(t, path, "", "dly_1")
+	cfg, err := loadConfig(env["VECNET_CONFIG"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := (stateFile{path}).update(t.Context(), func(s *hookState) error {
+		s.bind(hookIdentity{Hub: normalizeHub(cfg.Profiles["p"].Hub), Caller: "peer_test", Cred: hookCredential("vn_peer_test")})
+		s.recordDisplay("dly_1")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 	out, _ := runHook(t, env, "--event", "user-prompt")
 	if got := contextOf(t, out); got != hookSummary(newHookHint("p", "", env["VECNET_CONFIG"]), 2, false) {
 		t.Fatalf("summary=%q", got)
