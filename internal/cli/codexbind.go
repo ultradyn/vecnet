@@ -257,6 +257,13 @@ func (a *app) cmdCodex(args []string, nowTime func() time.Time) error {
 		return err
 	}
 	defer unlock()
+	optouts, err := readCodexOptOuts(path)
+	if err != nil {
+		return err
+	}
+	if args[0] == "bind" && a.localEnrollmentRetry && optouts.disabled(namespace, binding.Profile, binding.As) {
+		return errCodexOptOut
+	}
 	file := codexBindingsFile{Version: 1, Bindings: []codexBinding{}}
 	raw, err := readCodexBindings(path)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -319,12 +326,16 @@ func (a *app) cmdCodex(args []string, nowTime func() time.Time) error {
 				if err := a.codexTransferClaims(b); err != nil {
 					return err
 				}
+				optouts.disable(b.ConfigPath, b.Profile, b.As)
 			}
 			if !remove {
 				kept = append(kept, b)
 			}
 		}
 		file.Bindings = kept
+		if thread == "" && a.namedProfile() != "" {
+			optouts.disable(namespace, a.namedProfile(), a.as)
+		}
 	case "bind":
 		existing := -1
 		for i, b := range file.Bindings {
@@ -444,12 +455,25 @@ func (a *app) cmdCodex(args []string, nowTime func() time.Time) error {
 	if err != nil {
 		return err
 	}
+	// Persist refusal before removing authority. If the following write fails,
+	// repair remains conservatively disabled instead of reacquiring ownership.
+	if args[0] == "unbind" {
+		if err := optouts.write(path); err != nil {
+			return err
+		}
+	}
 	if err := writeCodexDurable(path, encoded); err != nil {
 		return err
 	}
 	if args[0] == "unbind" {
 		fmt.Fprintln(a.stdout, "unbound Codex binding")
 		return nil
+	}
+	if !a.localEnrollmentRetry && optouts.disabled(binding.ConfigPath, binding.Profile, binding.As) {
+		optouts.enable(binding.ConfigPath, binding.Profile, binding.As)
+		if err := optouts.write(path); err != nil {
+			return err
+		}
 	}
 	hint := ""
 	if !binding.Attended {

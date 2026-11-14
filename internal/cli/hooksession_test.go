@@ -702,6 +702,23 @@ func TestHookRebindSurvivesPreBindingWriter(t *testing.T) {
 	delete(env, "CLAUDE_CODE_SESSION_ID")
 	oldWriter(t, path)
 	out, errs := runHookAs(t, env, "S1", "p")
+	if out != "" || readHookState(t, path).Session != "S1" {
+		t.Fatal("legacy reservation bypassed proof or lost session binding")
+	}
+	// The old writer cannot attest output. Explicit verified proof unblocks
+	// delivery; it must not change the independently preserved session binding.
+	cfg, err := loadConfig(env["VECNET_CONFIG"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := (stateFile{path}).update(t.Context(), func(s *hookState) error {
+		s.bind(hookIdentity{Hub: normalizeHub(cfg.Profiles["p"].Hub), Caller: "peer_test", Cred: hookCredential("vn_peer_test")})
+		s.recordDisplay("dly_old_watch")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	out, errs = runHookAs(t, env, "S1", "p")
 	if !strings.Contains(contextOf(t, out), "secret text") {
 		t.Fatalf("rebind binding lost after an older writer: out=%q errs=%q", out, errs)
 	}
@@ -936,7 +953,7 @@ func TestHookSessionStartAdmission(t *testing.T) {
 					t.Fatalf("declared prompt failed to claim: %q polls=%d", prompt, polls.Load())
 				}
 				// Leave a new delivery for the already admitted SessionStart.
-				seedSession(t, path, func(s *hookState) { s.Shown = nil; s.PollCursor = "e1.0" })
+				seedSession(t, path, func(s *hookState) { s.Shown = nil; s.Displayed = nil; s.PollCursor = "e1.0" })
 			} else if tc.existing && (prompt != "" || polls.Load() != 0) {
 				t.Fatalf("automatic prompt claimed too early: %q polls=%d", prompt, polls.Load())
 			}

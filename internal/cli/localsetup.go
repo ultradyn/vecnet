@@ -220,11 +220,18 @@ func (a *app) reconcileLocalEnrollment(r localEnrollment) localSetupResult {
 	// The config commit carries the redeemed caller even if interruption preceded
 	// the first post-commit progress write. The registry never carries a secret.
 	r.Caller = p.EnrollmentCaller
+	if err := a.checkCodexEnrollmentOptOut(r.Config, r.Profile, r.As); err != nil {
+		if errors.Is(err, errCodexOptOut) {
+			return stop("disabled", err)
+		}
+		return fail(err)
+	}
 	if st, err := os.Stat(r.Directory); err != nil || !st.IsDir() {
 		return fail(usageErr("enrollment project is unavailable"))
 	}
 	worker := *a
 	worker.ctx = ctx
+	worker.localEnrollmentRetry = true
 	worker.localProjectRoot = r.Directory
 	worker.net = r.Profile
 	worker.as = r.As

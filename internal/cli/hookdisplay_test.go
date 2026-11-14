@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -25,6 +26,30 @@ func TestDisplayProofDoesNotReleaseClaims(t *testing.T) {
 	s.bind(hookIdentity{Hub: "http://new", Caller: "peer_A", Cred: "new"})
 	if len(s.Displayed) != 0 {
 		t.Fatal("foreign identity retained display proof")
+	}
+}
+
+func TestDisplayCommitFailureCannotRetryOutput(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	id := hookIdentity{Hub: "http://hub", Caller: "peer_A", Cred: "credential"}
+	f := stateFile{path}
+	if err := f.prepareDisplay(t.Context(), &id, true, nil); err != nil {
+		t.Fatal(err)
+	}
+	called := 0
+	err := f.displayFor(t.Context(), &id, "printed", false, func() error {
+		called++
+		if err := os.Remove(path); err != nil {
+			return err
+		}
+		return os.Mkdir(path, 0700) // fail the state rename after successful output
+	})
+	if !errors.Is(err, errWatchOutput) || called != 1 {
+		t.Fatalf("post-output failure was retryable: %v %d", err, called)
+	}
+	err = f.displayFor(t.Context(), &id, "printed", false, func() error { called++; return nil })
+	if !errors.Is(err, errDisplayDeferred) || called != 1 {
+		t.Fatalf("uncertain proof retried stdout: %v %d", err, called)
 	}
 }
 
