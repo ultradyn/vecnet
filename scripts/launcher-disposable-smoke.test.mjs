@@ -25,3 +25,59 @@ test('private child environment removes host routing without changing parent HOM
   for (const key of ['CODEX_THREAD_ID', 'VECNET_CONFIG', 'GIT_CONFIG_GLOBAL', 'BASH_ENV', 'ENV', 'NODE_OPTIONS', 'LD_PRELOAD']) assert.equal(env[key], undefined);
   assert.equal(env.PLAYWRIGHT_MODULE, '/cache/playwright/index.mjs');
 });
+
+
+test('ACP inherited log routing is rebound to the private run root', () => {
+ const root='/var/tmp/disposable-log-fixture';
+ const env=privateSmokeEnvironment({HOME:'/real/home',CLAUDE_AGENT_LOGS:'/real/home/logs',CLAUDE_CONFIG_DIR:'/real/home/claude'},root);
+ assert.equal(env.CLAUDE_AGENT_LOGS,root+'/logs/acp');
+ assert.equal(env.CLAUDE_CONFIG_DIR,undefined);
+});
+
+for (const failure of ['identity', 'journal']) test(`post-spawn ${failure} failure exits promptly and retains child, starting intent and root`, async t => {
+ const {mkdtemp,mkdir,writeFile,readFile,rm}=await import('node:fs/promises');
+ const {tmpdir}=await import('node:os');
+ const {join}=await import('node:path');
+ const {promisify}=await import('node:util');
+ const {execFile}=await import('node:child_process');
+ const root=await mkdtemp(join(tmpdir(),'disposable-child-failure-'));
+ await mkdir(join(root,'logs'),{mode:0o700});
+ await mkdir(join(root,'home'),{mode:0o700});
+ const file=new URL('./launcher-disposable-smoke.mjs',import.meta.url).href;
+ const support=new URL('./native-launcher-smoke-support.mjs',import.meta.url).href;
+ const timer=join(root,'timer.mjs');
+ await writeFile(timer,'setInterval(()=>{},1000);',{mode:0o600});
+ const controller=join(root,'controller.mjs');
+ await writeFile(controller,`
+ import {ownedChild} from ${JSON.stringify(file)};
+ import {createSmokeJournal} from ${JSON.stringify(support)};
+ import {readFile,writeFile} from 'node:fs/promises';
+ const root=${JSON.stringify(root)}, journal=createSmokeJournal(root,{test:true});
+ const wrapped={update(value){if(${JSON.stringify(failure)}==='journal'&&value.testchild?.phase==='running')throw Error('injected journal failure');journal.update(value);}};
+ try { await ownedChild(process.execPath,[${JSON.stringify(timer)}],{HOME:root+'/home'},root,'testchild',wrapped,{identify:async(pid,argv,home)=>{
+  const raw=await readFile('/proc/'+pid+'/stat','utf8');const start=raw.slice(raw.lastIndexOf(')')+2).split(' ')[19];
+  await writeFile(root+'/owner.json',JSON.stringify({pid,start,argv,home}),{mode:0o600});
+  if(${JSON.stringify(failure)}==='identity')throw Error('injected identity failure');
+  return {pid,start,argv,home};
+ }});process.exitCode=2;}catch{console.log('EXPECTED_RETAINED_FAILURE');}
+ `,{mode:0o600});
+ let owner;
+ t.after(async()=>{
+  // Test-only cleanup after retention proof; the tested controller sends no signals.
+  try {
+   owner ||= JSON.parse(await readFile(join(root,'owner.json'),'utf8'));
+   const raw=await readFile('/proc/'+owner.pid+'/stat','utf8');
+   const start=raw.slice(raw.lastIndexOf(')')+2).split(' ')[19];
+   const cmd=(await readFile('/proc/'+owner.pid+'/cmdline','utf8')).split('\0').filter(Boolean);
+   if(start===owner.start&&JSON.stringify(cmd)===JSON.stringify(owner.argv))process.kill(owner.pid,'SIGTERM');
+  }catch(e){if(e.code!=='ENOENT'&&e.code!=='ESRCH')throw e;}
+  await rm(root,{recursive:true,force:true});
+ });
+ const result=await promisify(execFile)(process.execPath,[controller],{timeout:2500});
+ assert.equal(result.stdout.trim(),'EXPECTED_RETAINED_FAILURE');
+ owner=JSON.parse(await readFile(join(root,'owner.json'),'utf8'));
+ const raw=await readFile('/proc/'+owner.pid+'/stat','utf8');
+ assert.equal(raw.slice(raw.lastIndexOf(')')+2).split(' ')[19],owner.start);
+ assert.deepEqual(JSON.parse(await readFile(join(root,'recovery.json'),'utf8')).testchild,{phase:'starting',argv:owner.argv,home:owner.home});
+ assert.equal(await readFile(timer,'utf8'),'setInterval(()=>{},1000);');
+});

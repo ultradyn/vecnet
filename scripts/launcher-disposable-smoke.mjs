@@ -10,11 +10,11 @@ const check = (ok, why) => { if (!ok) throw new Error(why); };
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const hash = async path => createHash('sha256').update(await readFile(path)).digest('hex');
 export function privateSmokeEnvironment(parent, root) {
-  const env = Object.fromEntries(Object.entries(parent).filter(([k]) => !/^(CODEX_|VECNET_|XDG_|GIT_|BASH_ENV$|ENV$|NODE_OPTIONS$|LD_PRELOAD$|LD_LIBRARY_PATH$)/.test(k)));
+  const env = Object.fromEntries(Object.entries(parent).filter(([k]) => !/^(CODEX_|VECNET_|XDG_|GIT_|CLAUDE_|BASH_ENV$|ENV$|NODE_OPTIONS$|LD_PRELOAD$|LD_LIBRARY_PATH$)/.test(k)));
   return Object.assign(env, { HOME: join(root, 'home'), CODEX_HOME: join(root, 'home/.codex'),
     XDG_CONFIG_HOME: join(root, 'home/.config'), XDG_DATA_HOME: join(root, 'home/.local/share'),
     XDG_STATE_HOME: join(root, 'home/.local/state'), XDG_CACHE_HOME: join(root, 'home/.cache'),
-    XDG_RUNTIME_DIR: join(root, 'runtime'), TMPDIR: join(root, 'tmp'),
+    XDG_RUNTIME_DIR: join(root, 'runtime'), TMPDIR: join(root, 'tmp'), CLAUDE_AGENT_LOGS: join(root, 'logs/acp'),
     PATH: join(root, 'bin') + ':' + (parent.PATH || '/usr/bin:/bin'), VECNET_LOCAL_MAINTENANCE: '0',
     PLAYWRIGHT_MODULE: parent.PLAYWRIGHT_MODULE || join(parent.HOME, '.llm-general/skills/headless-browser-screenshots/node_modules/playwright/index.mjs'),
     PLAYWRIGHT_BROWSERS_PATH: parent.PLAYWRIGHT_BROWSERS_PATH || join(parent.HOME, '.cache/ms-playwright') });
@@ -31,19 +31,27 @@ async function identity(pid, argv, home) {
     (await lstat(`/proc/${pid}`)).uid === process.geteuid() && await realpath(`/proc/${pid}/exe`) === await realpath(argv[0]), 'child ownership mismatch');
   return { pid, start, argv, home };
 }
-async function ownedChild(command, args, env, root, name, journal) {
+export async function ownedChild(command, args, env, root, name, journal, { identify = identity } = {}) {
   journal.update({ [name]: { phase: 'starting', argv: [command, ...args], home: env.HOME } });
   const log = await open(join(root, 'logs', name + '.log'), 'wx', 0o600);
+  let child;
   try {
-    const child = spawn(command, args, { cwd: root, env, detached: true, stdio: ['ignore', log.fd, log.fd] });
+   try {
+    child = spawn(command, args, { cwd: root, env, detached: true, stdio: ['ignore', log.fd, log.fd] });
     // Register completion before waiting for spawn: an immediate exit cannot be lost.
     const done = new Promise((yes, no) => { child.once('error', no); child.once('close', (code, signal) => yes({ code, signal })); });
     done.catch(() => {}); // Spawn failure is also consumed by the explicit spawn gate.
     await new Promise((yes, no) => { child.once('spawn', yes); child.once('error', no); });
-    const owner = await identity(child.pid, [command, ...args], env.HOME);
+    const owner = await identify(child.pid, [command, ...args], env.HOME);
     journal.update({ [name]: { phase: 'running', ...owner } });
     return { child, done, owner };
-  } finally { await log.close(); }
+   } finally { await log.close(); }
+  } catch (error) {
+    // A detached child still holds Node alive until unref. Retain the process
+    // and durable starting intent; failure supplies no authority to signal it.
+    child?.unref();
+    throw error;
+  }
 }
 async function stopOwned(handle, journal, name) {
   const current = await identity(handle.owner.pid, handle.owner.argv, handle.owner.home);
