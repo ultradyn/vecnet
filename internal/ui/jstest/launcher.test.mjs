@@ -585,10 +585,29 @@ test('launcher installation commands quote host paths and use the confirmed setu
   // A shell stub returns the arguments without executing any generated tool.
   const args = JSON.parse(execFileSync('bash', ['-c', "vecnet() { python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' \"$@\"; }; " + lines[1]], { encoding: 'utf8' }));
   assert.deepEqual(args, ['--net', 'launch-host', 'launcher', 'setup', '--project', 'vecnet', '--repo', setup.repo, '--base-ref', 'master', '--write']);
-  for (const patch of [{ repo: 'relative' }, { repo: '/tmp/a\nnext' }, { project: '../../tmp' }, { source: '' }, { baseRef: '' }]) {
+  for (const patch of [{ repo: 'relative' }, { repo: '/tmp/a\nnext' }, { project: '../../tmp' }, { source: 'relative' }, { source: '/tmp/a\nnext' }, { source: '/tmp/a\u0000next' }, { baseRef: '' }]) {
     assert.ok(launcherSetupIssue({ ...setup, ...patch }));
   }
   assert.throws(() => launcherSetupCommands('missing', setup), /enrolment/);
+});
+
+test('normal launcher setup accepts no custom source and installs managed runtime assets', () => {
+  const output = inviteBlock({ owner: 'Max', expires: 'tomorrow', token: 'fake-token', profile: 'launch-host', hubURL: 'https://hub.example' });
+  for (const source of ['', undefined]) {
+    const setup = { project: 'vecnet', repo: '/host/repo', baseRef: 'master', source };
+    assert.equal(launcherSetupIssue(setup), '');
+    const commands = launcherSetupCommands(output, setup);
+    assert.equal(commands.split('\n')[2], "vecnet --net 'launch-host' launcher install --write --enable --start");
+    assert.doesNotMatch(commands, /--source/);
+  }
+});
+
+test('optional custom launcher source remains an exact shell-quoted pin', () => {
+  const output = inviteBlock({ owner: 'Max', expires: 'tomorrow', token: 'fake-token', profile: 'launch-host', hubURL: 'https://hub.example' });
+  const setup = { project: 'vecnet', repo: '/host/repo', baseRef: 'master', source: "/host/it's a checkout $(false)" };
+  const install = launcherSetupCommands(output, setup).split('\n')[2];
+  const args = JSON.parse(execFileSync('bash', ['-c', "vecnet() { python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' \"$@\"; }; " + install], { encoding: 'utf8' }));
+  assert.deepEqual(args, ['--net', 'launch-host', 'launcher', 'install', '--source', setup.source, '--write', '--enable', '--start']);
 });
 
 test('host setup inputs never become onboarding API fields', () => {

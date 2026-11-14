@@ -338,7 +338,7 @@ func (a *app) launcherSetup(p launcherPaths, o opts) error {
 	if err = launcherJSON(p.Config, config); err != nil {
 		return err
 	}
-	return a.emitValue(map[string]any{"write": true, "profile": p.Name, "peer_id": me.PeerID, "config_path": p.Config, "credential_file": p.Credential, "next": "vecnet --net " + p.Name + " launcher install --source /absolute/vecnet-checkout --write"})
+	return a.emitValue(map[string]any{"write": true, "profile": p.Name, "peer_id": me.PeerID, "config_path": p.Config, "credential_file": p.Credential, "next": "vecnet --net " + p.Name + " launcher install --write"})
 }
 
 func (a *app) launcherRun(bin string, args ...string) error {

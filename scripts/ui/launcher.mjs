@@ -12,7 +12,6 @@ try {
     await dialog.locator('#inv-launch-project').fill('vecnet');
     await dialog.locator('#inv-launch-repo').fill('/home/operator/src/vecnet');
     await dialog.locator('#inv-launch-base').fill('master');
-    await dialog.locator('#inv-launch-source').fill('/home/operator/src/vecnet');
     await shot('launcher-1-host-setup');
     await dialog.locator('.inv-body').evaluate(el => { el.scrollTop = 0; });
     await shot('launcher-1a-setup-top');
@@ -27,7 +26,7 @@ try {
     const hostRecovery = await dialog.locator('[aria-label="Launcher host recovery commands"]').textContent();
     assert(hostRecovery.includes('codex app-server daemon start') && hostRecovery.includes('launcher check') && hostRecovery.includes('launcher status'), 'host recovery commands missing');
     assert(commands.includes("launcher setup --project 'vecnet' --repo '/home/operator/src/vecnet' --base-ref 'master' --write"), 'setup interface changed');
-    assert(commands.includes('launcher install --source') && commands.includes('--write --enable --start'), 'service install command missing');
+    assert(commands.includes('launcher install --write --enable --start') && !commands.includes('--source'), 'service install command missing');
     const token = commands.match(/printf %s '([^']+)'/)[1];
     const block = dialog.locator('[aria-label="Launcher installation commands"]');
     await block.evaluate((el, token) => { el.textContent = el.textContent.replace(token, '[one-time token hidden]'); }, token);

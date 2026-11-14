@@ -352,9 +352,10 @@ export function openInvite(ctx, onCreated, opener, prefill) {
     }
     if (spec.kind === 'launcher') {
       kids.push(h('p', { class: 'inv-note', text: 'Host-side setup: use absolute directories on the machine running the daemon. Requires vecnet, Node.js 22.18+, Git, a supported Codex CLI with an authenticated route and a running background app-server daemon, and a Linux systemd user service. Backend codex-app-server · preset default (inherits that route). ' + LAUNCHER_HOST_HELP }));
-      for (const [label, control] of [['Project alias', setupProject], ['Repository working directory on host', setupRepo], ['Base ref', setupBase], ['Vecnet source checkout on host', setupSource]]) {
+      for (const [label, control] of [['Project alias', setupProject], ['Repository working directory on host', setupRepo], ['Base ref', setupBase], ['Custom source checkout on host (optional pin)', setupSource]]) {
         kids.push(h('label', { for: control.id, text: label }), control);
       }
+      kids.push(h('p', { class: 'inv-note', text: 'Leave custom source empty for automatic managed runtime upgrades. A custom checkout pins the runtime source and may require manual repair.' }));
     }
     fieldsHost.replaceChildren(...kids.filter(c => c != null && c !== false));
   }

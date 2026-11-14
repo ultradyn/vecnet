@@ -75,7 +75,7 @@ const quote = s => "'" + String(s).replace(/'/g, "'\\''") + "'";
 export function launcherSetupIssue(v) {
   if (!ALIAS.test(v.project || '')) return 'Project alias must contain letters, digits, dots, underscores or hyphens, starting with a letter or digit.';
   if (!v.repo?.startsWith('/') || /[\x00-\x1f\x7f]/.test(v.repo)) return 'Enter an absolute repository directory on the launcher host.';
-  if (!v.source?.startsWith('/') || /[\x00-\x1f\x7f]/.test(v.source)) return 'Enter the absolute vecnet source checkout directory on the launcher host.';
+  if (v.source !== undefined && v.source !== '' && (typeof v.source !== 'string' || !v.source.startsWith('/') || /[\x00-\x1f\x7f]/.test(v.source))) return 'Enter an absolute custom vecnet source checkout directory, or leave it empty for managed upgrades.';
   if (!v.baseRef?.trim() || /[\x00-\x1f\x7f]/.test(v.baseRef)) return 'Enter the host project base ref.';
   return '';
 }
@@ -87,7 +87,7 @@ export function launcherSetupCommands(output, v) {
   if (!enrol) throw new Error('The hub did not return a launcher enrolment command.');
   const prefix = 'vecnet --net ' + quote(enrol[2]) + ' launcher ';
   return [enrol[1], prefix + 'setup --project ' + quote(v.project) + ' --repo ' + quote(v.repo) + ' --base-ref ' + quote(v.baseRef) + ' --write',
-    prefix + 'install --source ' + quote(v.source) + ' --write --enable --start'].join('\n');
+    prefix + 'install' + (v.source ? ' --source ' + quote(v.source) : '') + ' --write --enable --start'].join('\n');
 }
 
 // Only submitted requests, public identity pins and safe result ids live in

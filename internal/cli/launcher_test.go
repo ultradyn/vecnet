@@ -156,6 +156,23 @@ func TestLauncherSetupPreviewAndWrite(t *testing.T) {
 	}
 }
 
+func TestLauncherSetupNextUsesManagedRuntimeByDefault(t *testing.T) {
+	f := newLauncherFixture(t, "launcher")
+	code, out, errs := f.run(t, append(f.setup, "--write")...)
+	if code != 0 {
+		t.Fatalf("setup %d %s", code, errs)
+	}
+	var plan struct {
+		Next string `json:"next"`
+	}
+	if err := json.Unmarshal([]byte(out), &plan); err != nil {
+		t.Fatal(err)
+	}
+	if want := "vecnet --net launcher/test launcher install --write"; plan.Next != want {
+		t.Fatalf("next command pins a custom source: %q; want %q", plan.Next, want)
+	}
+}
+
 func TestLauncherSetupRefusesConversationalPeer(t *testing.T) {
 	f := newLauncherFixture(t, "codex")
 	code, _, errs := f.run(t, append(f.setup, "--write")...)
