@@ -6,6 +6,7 @@
 // with the peer, or New message to it (compose.js prefill). A peer that has
 // not enrolled gets the Invite card: its invite state, New invite (the same
 // paste block as Add agent, shown once) and Revoke invite.
+import { launcherSection } from './launcher.js';
 import { prefill } from './compose.js';
 import { chip, confirmButton, copyButton, h, idCopy, idText, peerLink, toast } from './dom.js';
 import { ago, fullWhen, kindShort, kindTitle, plural, title as threadTitle, when } from './format.js';
@@ -266,6 +267,7 @@ export function mount(root, ctx) {
   const row = () => findPeer(res.peers.get(), id);
   const facts = () => { const r = row(); return r ? peerFacts(r) : null; };
 
+  const launcher = launcherSection(ctx);
   const sections = {};
   function section(key, heading) {
     const count = h('span', { class: 'n' });
@@ -314,6 +316,7 @@ export function mount(root, ctx) {
       h('p', { class: 'crumb' }, h('a', { href: '#dash', text: 'Dashboard' }), ' / peer'),
       head,
       invite.el,
+      launcher.el,
       h('div', { class: 'pv-grid' }, section('identity', 'Identity'), section('presence', 'Presence'), section('access', 'Scopes and limits')),
       section('principal', 'Principal'),
       section('routes', 'Routes'),
@@ -556,6 +559,7 @@ export function mount(root, ctx) {
   }
 
   function render() {
+    launcher.draw(row());
     renderHead();
     renderInvite();
     fill('identity', [res.peers], 'Identity', drawIdentity);
@@ -578,5 +582,6 @@ export function mount(root, ctx) {
     for (const off of offs) off();
     if (inviteOff) inviteOff();
     invite.unmount();
+    launcher.unmount();
   };
 }

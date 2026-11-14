@@ -93,6 +93,10 @@ messaging:
        [--expect-generation GENERATION]; thread defaults to CODEX_THREAD_ID; handoff requires expected generation
        opt in to app-server delivery; ttl defaults to 24h (1h–168h); unattended needs -a never or auto reviewer
   codex unbind [--thread UUID] | codex bindings [--json]
+  launcher setup --project ALIAS --repo PATH --base-ref REF [--backend codex-app-server|acp] [--write] [--force]
+       native: [--codex-home DIR] [--model M] [--effort E]; ACP: --acp-command PATH [--acp-arg ARG]… [--acp-provider claude] [--acp-mode default]
+  launcher install [--source CHECKOUT] [--node PATH] [--vecnet-bin PATH] [--write] [--enable] [--start]
+  launcher status | launcher check                 selected --net profile; setup/install preview unless --write
   threads [--limit N]
   thread <id> [--after MESSAGE_ID] [--limit N]
   thread budget <id> <n>                          set budget_remaining
@@ -275,6 +279,11 @@ func (a *app) exit(err error) int {
 func (a *app) parseGlobal(args []string) (rest []string, help bool, err error) {
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
+		if arg == "--acp-arg" && len(rest) >= 2 && rest[0] == "launcher" && rest[1] == "setup" && i+1 < len(args) {
+			rest = append(rest, arg, args[i+1])
+			i++
+			continue
+		}
 		if arg == "--" {
 			rest = append(rest, args[i:]...)
 			break
@@ -547,6 +556,8 @@ func (a *app) dispatchOnce(cmd string, args []string) error {
 		return a.cmdProfile(args)
 	case "guide":
 		return a.cmdGuide(args)
+	case "launcher":
+		return a.cmdLauncher(args)
 	case "blob":
 		return a.cmdBlob(args)
 	case "send":

@@ -5,6 +5,7 @@
 // console. Copy puts the invite, the link code or the authorization prompt
 // on the clipboard, and nothing else. PROTOCOL §§2.12, 4.5–4.6, 12, 13.3 and 20.1.
 import { copyText, h, toast } from './dom.js';
+import { LAUNCHER_HOST_HELP, launcherHostRecovery, launcherSetupCommands, launcherSetupIssue } from './launcher-model.js';
 import { kindLabel, when } from './format.js';
 import {
   BEARER_CONFIRM, BEARER_WARN, DEFAULT_TTL, GATEWAY_NOTE, QUOTA_NOTE,
@@ -127,6 +128,13 @@ export function openInvite(ctx, onCreated, opener, prefill) {
   const key = h('input', { id: 'inv-key', type: 'password', 'data-field': 'webhook_key', 'data-secret': 'true', spellcheck: 'false', autocomplete: 'off', autocapitalize: 'off', maxlength: '4096' });
   const connector = h('input', { id: 'inv-connector', 'data-field': 'connector_name', spellcheck: 'false', autocomplete: 'off', autocapitalize: 'off', placeholder: 'vecnet-…' });
   const skip = h('input', { id: 'inv-skip', type: 'checkbox', 'data-field': 'skip_mcp' });
+  // These are commands for the daemon host, kept in this dialog only. They
+  // never become onboarding inputs or requester launch authority.
+  const setupProject = h('input', { id: 'inv-launch-project', value: 'app', spellcheck: 'false' });
+  const setupRepo = h('input', { id: 'inv-launch-repo', placeholder: '/home/you/src/app', spellcheck: 'false' });
+  const setupBase = h('input', { id: 'inv-launch-base', value: 'master', spellcheck: 'false' });
+  const setupSource = h('input', { id: 'inv-launch-source', placeholder: '/home/you/src/vecnet', spellcheck: 'false' });
+  const readSetup = () => ({ project: setupProject.value.trim(), repo: setupRepo.value.trim(), baseRef: setupBase.value.trim(), source: setupSource.value.trim() });
   const err = h('p', { class: 'err', role: 'alert' });
   const kindSlot = h('div', { class: 'inv-kind', hidden: '' }, h('label', { for: 'inv-kind', text: 'Kind' }), kind);
   const fieldsHost = h('div', { class: 'inv-fields' });
@@ -146,7 +154,7 @@ export function openInvite(ctx, onCreated, opener, prefill) {
     const action = currentSpec() && currentSpec().submit_action;
     if (action === 'oauth_link') return 'Create and link';
     if (action === 'grokbot_setup') return 'Create Grok bot';
-    return 'Create invite';
+    return currentSpec()?.kind === 'launcher' ? 'Create launcher setup' : 'Create invite';
   }
   function hubOrigin() {
     return (hubURL || location.origin).replace(/\/+$/, '');
@@ -287,7 +295,7 @@ export function openInvite(ctx, onCreated, opener, prefill) {
     const issue = spec && specIssue(spec);
     const action = spec ? spec.submit_action : '';
     if (action !== 'invite' && openName.checked) openName.checked = false;
-    lede.textContent = action === 'oauth_link' ? DOT_LEDE : action === 'grokbot_setup' ? GROK_LEDE : LEDE;
+    lede.textContent = spec?.kind === 'launcher' ? 'Install a launcher daemon on a host you control. Create its identity, then run the generated setup commands on that host.' : action === 'oauth_link' ? DOT_LEDE : action === 'grokbot_setup' ? GROK_LEDE : LEDE;
     create.textContent = gate.busy ? 'Creating…' : createLabel();
     create.disabled = recovering || !!gate.busy || registry.phase === 'loading';
     if (!spec || issue) {
@@ -341,6 +349,12 @@ export function openInvite(ctx, onCreated, opener, prefill) {
     for (const f of spec.fields || []) {
       if (LEGACY_FIELDS.has(f.name)) continue;
       kids.push(...renderExtra(f));
+    }
+    if (spec.kind === 'launcher') {
+      kids.push(h('p', { class: 'inv-note', text: 'Host-side setup: use absolute directories on the machine running the daemon. Requires vecnet, Node.js 22.18+, Git, a supported Codex CLI with an authenticated route and a running background app-server daemon, and a Linux systemd user service. Backend codex-app-server · preset default (inherits that route). ' + LAUNCHER_HOST_HELP }));
+      for (const [label, control] of [['Project alias', setupProject], ['Repository working directory on host', setupRepo], ['Base ref', setupBase], ['Vecnet source checkout on host', setupSource]]) {
+        kids.push(h('label', { for: control.id, text: label }), control);
+      }
     }
     fieldsHost.replaceChildren(...kids.filter(c => c != null && c !== false));
   }
@@ -508,6 +522,11 @@ export function openInvite(ctx, onCreated, opener, prefill) {
     let vals = pending ? pending.values : readValues();
     let bodyReq = pending ? pending.body : null;
     if (!pending) {
+      if (spec.kind === 'launcher') {
+        vals.launcher_setup = readSetup();
+        const issue = launcherSetupIssue(vals.launcher_setup);
+        if (issue) { gate = { busy: false }; err.textContent = issue; return; }
+      }
       const issues = clientIssues(spec, vals);
       const first = Object.keys(issues)[0];
       if (first) {
@@ -614,6 +633,7 @@ export function openInvite(ctx, onCreated, opener, prefill) {
   function showInvite(res, vals) {
     const output = humanOutput(res);
     if (!output) { showSafe(statusSafe(res), 'This request already completed. The one-time invite is not shown again.'); return; }
+    if (vals.launcher_setup) { showLauncher(res, output, vals.launcher_setup); return; }
     holdHuman();
     const text = h('pre', { class: 'inv-block mono', tabindex: '0', 'aria-label': 'Invite text' });
     text.textContent = output;
@@ -631,6 +651,28 @@ export function openInvite(ctx, onCreated, opener, prefill) {
         exp ? [' · expires ', h('time', { text: exp })] : null),
       h('div', { class: 'inv-acts' }, h('button', { type: 'button', class: 'btn', text: 'Done', onclick: () => close() }), copy));
     copy.focus();
+  }
+
+  function showLauncher(res, output, setup) {
+    holdHuman();
+    lede.textContent = 'Run these commands in a terminal on the launcher host.';
+    const block = h('pre', { class: 'inv-block mono', tabindex: '0', 'aria-label': 'Launcher installation commands' });
+    try { block.textContent = launcherSetupCommands(output, setup); }
+    catch (x) { block.textContent = output; err.textContent = x.message; }
+    const profile = (output.match(/--profile ([A-Za-z0-9._-]+)/) || [])[1] || 'PROFILE';
+    const recovery = h('pre', { class: 'inv-block mono', tabindex: '0', 'aria-label': 'Launcher host recovery commands' });
+    recovery.textContent = launcherHostRecovery(profile);
+    body.replaceChildren(
+      h('p', { class: 'inv-warn', role: 'note', text: 'Shown once — the enrolment command grants this launcher identity. Copy only to the host you control.' }),
+      h('p', { class: 'inv-note', text: 'First ensure the supported Codex background app-server daemon is running with the same configured CODEX_HOME and authenticated route. Then: 1. Enrol the launcher identity. 2. Write its private project configuration. 3. Install and start the launcher service.' }),
+      block,
+      h('p', { class: 'inv-note', text: LAUNCHER_HOST_HELP }),
+      recovery,
+      h('p', { class: 'inv-note', text: 'After launcher check passes and the launcher reports healthy presence, open its peer page to launch a job using its advertised project alias. Creating this identity alone does not start either daemon.' }),
+      h('div', { class: 'inv-acts' },
+        h('button', { type: 'button', class: 'btn', text: 'Done', onclick: () => close() }),
+        h('a', { class: 'btn', href: '#peer/' + res.peer_id, text: 'Open launcher', onclick: () => close() }),
+        copier('Copy setup commands', () => block.textContent, 'pri')));
   }
 
   function showDot(res, vals, submitted) {

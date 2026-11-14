@@ -1,0 +1,260 @@
+import { createServer } from 'node:net';
+import type { Socket } from 'node:net';
+import { createHash } from 'node:crypto';
+import { chmod, mkdir, symlink } from 'node:fs/promises';
+import { join } from 'node:path';
+
+type Params = Record<string, any>;
+export interface NativeTurn {
+  id: string;
+  status: 'inProgress' | 'completed' | 'interrupted' | 'failed';
+  items: Params[];
+  completedAt?: number;
+}
+export interface NativeThread {
+  id: string;
+  cwd: string;
+  status: { type: string; activeFlags?: string[] };
+  archived: boolean;
+  name?: string;
+  turns: NativeTurn[];
+  /** Effective settings survive resume independently of subsequent requests. */
+  effective?: Params;
+  threadSource?: string;
+}
+type Peer = { socket: Socket; connection: number; send(value: unknown): void };
+type Failure = 'drop' | 'accept-drop' | { code: number; message: string };
+
+// Only the client frames used by this native-backend fixture are needed here.
+function frame(op: number, payload: Buffer): Buffer {
+  const size = payload.length < 126 ? 2 : payload.length < 65536 ? 4 : 10;
+  const header = Buffer.alloc(size);
+  header[0] = 0x80 | op;
+  header[1] = size === 2 ? payload.length : size === 4 ? 126 : 127;
+  if (size === 4) header.writeUInt16BE(payload.length, 2);
+  if (size === 10) header.writeBigUInt64BE(BigInt(payload.length), 2);
+  return Buffer.concat([header, payload]);
+}
+
+/** A real Unix WebSocket daemon with native launcher methods, isolated from the
+ * frozen connector fixture. No daemon processes or real Codex homes are used. */
+export async function startFakeNativeCodex(dir: string) {
+  const privateDir = join(dir, 'd'), home = join(dir, 'home');
+  await mkdir(privateDir, { recursive: true, mode: 0o700 });
+  await chmod(privateDir, 0o700);
+  await mkdir(join(home, 'app-server-control'), { recursive: true, mode: 0o700 });
+  const target = join(privateDir, 'native.sock');
+  const socketPath = join(home, 'app-server-control', 'app-server-control.sock');
+  const peers = new Set<Peer>();
+  const threads = new Map<string, NativeThread>();
+  const requests: { method: string; params: Params; connection: number }[] = [];
+  const serverRequests: { id: number | string; method: string; params: Params }[] = [];
+  const replies: { id: number | string; result?: Params; error?: unknown }[] = [];
+  const paths: string[] = [];
+  const failures = new Map<string, Failure[]>();
+  const unavailable = new Map<string, { code: number; message: string }>();
+  const responses = new Map<string, ((result: Params) => Params)[]>();
+  const responseHolds = new Map<string, { reached(): void; ready: Promise<void> }[]>();
+  const noRolloutResumeFailures: string[] = [], acceptedResumes: string[] = [];
+  let startPolicy: ((policy: Params) => void) | undefined;
+  let rejectZeroInputResumes = false;
+  let connection = 0, threadId = 0, turnId = 0, requestId = 10000;
+  let listVisible = true, pageSize = 100;
+  let threadPages: Params[] | undefined;
+  const snapshot = (t: NativeThread, turns = true) => {
+    const { effective: _, ...thread } = t;
+    return { cliVersion: '0.166.0', createdAt: 1794096000, updatedAt: 1794096000,
+      ephemeral: false, modelProvider: 'native-default-provider', preview: '', projectId: null,
+      sessionId: t.id, source: 'appServer', ...thread, turns: turns ? t.turns : [] };
+  };
+  const effective = (t: NativeThread) => ({ ...t.effective, thread: snapshot(t, false) });
+  function notice(method: string, params: Params) {
+    for (const peer of peers) peer.send({ method, params });
+  }
+  function rpc(peer: Peer, message: Params) {
+    if (typeof message.method !== 'string') {
+      replies.push(message as typeof replies[number]);
+      return;
+    }
+    const method = message.method, params = message.params ?? {};
+    requests.push({ method, params, connection: peer.connection });
+    const fail = failures.get(method)?.shift() ?? unavailable.get(method);
+    const respond = (result: Params) => {
+      if (fail === 'accept-drop') peer.socket.destroy();
+      else {
+        const reply = { id: message.id, result: responses.get(method)?.shift()?.(structuredClone(result)) ?? structuredClone(result) };
+        const hold = responseHolds.get(method)?.shift();
+        if (hold) { hold.reached(); void hold.ready.then(() => peer.send(reply)); }
+        else peer.send(reply);
+      }
+    };
+    const error = (code: number, text: string) => peer.send({ id: message.id, error: { code, message: text } });
+    if (fail === 'drop') { peer.socket.destroy(); return; }
+    if (typeof fail === 'object') { error(fail.code, fail.message); return; }
+    if (method === 'initialize') { respond({ userAgent: 'codex-tui/0.166.0 (native fake)' }); return; }
+    if (method === 'initialized') return;
+    if (method === 'thread/start') {
+      const t: NativeThread = { id: `native-${++threadId}`, cwd: params.cwd,
+        status: { type: 'idle' }, archived: false, turns: [], threadSource: params.threadSource };
+      t.effective = { cwd: t.cwd, model: params.model ?? 'native-default-model', modelProvider: 'native-default-provider',
+        reasoningEffort: params.config?.model_reasoning_effort ?? 'medium',
+        approvalPolicy: params.approvalPolicy, approvalsReviewer: params.approvalsReviewer,
+        runtimeWorkspaceRoots: params.runtimeWorkspaceRoots ?? [t.cwd],
+        sandbox: params.sandbox === 'danger-full-access' ? { type: 'dangerFullAccess' } :
+          params.sandbox === 'read-only' ? { type: 'readOnly', networkAccess: false } :
+            { type: 'workspaceWrite', writableRoots: [t.cwd], networkAccess: false, excludeSlashTmp: true, excludeTmpdirEnvVar: true } };
+      // Unlike nextResponse(), this mutates the durable fake thread settings:
+      // later resumes must keep reporting the same policy until changed.
+      startPolicy?.(t.effective);
+      threads.set(t.id, t);
+      respond(effective(t)); return;
+    }
+    if (method === 'thread/list') {
+      if (threadPages) {
+        const offset = params.cursor === undefined ? 0 : Number(String(params.cursor).replace('native-threads:', ''));
+        if (!Number.isSafeInteger(offset) || offset < 0 || offset >= threadPages.length) { error(-32602, 'bad thread cursor'); return; }
+        respond({ nextCursor: offset + 1 < threadPages.length ? `native-threads:${offset + 1}` : null, ...threadPages[offset] }); return;
+      }
+      const data = listVisible ? [...threads.values()].filter(t => !t.archived && (!params.cwd || params.cwd === t.cwd)) : [];
+      respond({ data: data.map(t => snapshot(t, false)), nextCursor: null }); return;
+    }
+    const t = threads.get(params.threadId);
+    if (!t) { error(-32602, 'unknown thread'); return; }
+    if (method === 'thread/name/set') { t.name = params.name; respond({}); return; }
+    if (method === 'thread/read' || method === 'thread/resume') {
+      if (method === 'thread/resume' && rejectZeroInputResumes && t.turns.length === 0) {
+        noRolloutResumeFailures.push(t.id);
+        error(-32600, `no rollout found for thread id ${t.id}`); return;
+      }
+      if (method === 'thread/resume') acceptedResumes.push(t.id);
+      if (method === 'thread/resume' && t.status.type === 'notLoaded') t.status = { type: 'idle' };
+      respond({ ...(method === 'thread/resume' ? effective(t) : {}),
+        thread: snapshot(t, method === 'thread/read' ? params.includeTurns === true : params.excludeTurns !== true) }); return;
+    }
+    if (method === 'thread/turns/list') {
+      const offset = params.cursor ? Number(String(params.cursor).replace('native-page:', '')) : 0;
+      if (!Number.isSafeInteger(offset) || offset < 0) { error(-32602, 'bad cursor'); return; }
+      const all = [...t.turns].reverse(), limit = Math.min(params.limit ?? 100, pageSize);
+      respond({ data: all.slice(offset, offset + limit), nextCursor: offset + limit < all.length ? `native-page:${offset + limit}` : null }); return;
+    }
+    if (method === 'turn/start' || method === 'turn/steer') {
+      // clientUserMessageId identifies a receipt; the real server does NOT
+      // deduplicate it. Every accepted start must remain visible as a new turn.
+      let turn = method === 'turn/steer' ? t.turns.find(turn => turn.id === params.expectedTurnId && turn.status === 'inProgress') : undefined;
+      if (method === 'turn/steer' && !turn) { error(-32602, 'no matching active turn'); return; }
+      if (!turn) {
+        turn = { id: `native-turn-${++turnId}`, status: 'inProgress', items: [] };
+        t.turns.push(turn);
+      }
+      turn.items.push({ id: `user-${turn.id}-${turn.items.length}`, type: 'userMessage',
+        clientId: params.clientUserMessageId, content: params.input });
+      t.status = { type: 'active', activeFlags: [] };
+      respond(method === 'turn/start' ? { turn } : { turnId: turn.id });
+      if (fail !== 'accept-drop') notice('turn/started', { threadId: t.id, turn });
+      return;
+    }
+    if (method === 'turn/interrupt') {
+      const turn = t.turns.find(turn => turn.id === params.turnId);
+      if (turn) turn.status = 'interrupted';
+      t.status = { type: 'idle' };
+      respond({});
+      if (turn) notice('turn/completed', { threadId: t.id, turn });
+      return;
+    }
+    if (method === 'thread/unsubscribe') { t.status = { type: 'notLoaded' }; respond({ status: 'unsubscribed' }); return; }
+    if (method === 'thread/archive') { t.archived = true; respond({}); return; }
+    error(-32601, `unsupported native method: ${method}`);
+  }
+  const server = createServer(socket => {
+    const peer: Peer = { socket, connection: ++connection,
+      send(value) { if (!socket.destroyed) socket.write(frame(1, Buffer.from(JSON.stringify(value)))); } };
+    peers.add(peer);
+    socket.on('error', () => {});
+    socket.once('close', () => peers.delete(peer));
+    let bytes: Buffer = Buffer.alloc(0), ready = false;
+    socket.on('data', chunk => {
+      bytes = Buffer.concat([bytes, chunk]);
+      if (!ready) {
+        const end = bytes.indexOf('\r\n\r\n');
+        if (end < 0) return;
+        const header = bytes.subarray(0, end).toString('ascii');
+        const path = /^GET (\S+) HTTP\/1\.1/.exec(header)?.[1];
+        const key = /\r\nSec-WebSocket-Key:\s*([^\r\n]+)/i.exec(header)?.[1].trim();
+        paths.push(path ?? '');
+        if (path !== '/' || !key) { socket.destroy(); return; }
+        const accept = createHash('sha1').update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');
+        socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
+        bytes = bytes.subarray(end + 4); ready = true;
+      }
+      while (!socket.destroyed && bytes.length >= 2) {
+        const op = bytes[0] & 15;
+        if (!(bytes[0] & 0x80) || !(bytes[1] & 0x80)) { socket.destroy(); return; }
+        let length = bytes[1] & 127, at = 2;
+        if (length === 126) { if (bytes.length < 4) return; length = bytes.readUInt16BE(2); at = 4; }
+        else if (length === 127) {
+          if (bytes.length < 10) return;
+          const big = bytes.readBigUInt64BE(2);
+          if (big > 4n * 1024n * 1024n) { socket.destroy(); return; }
+          length = Number(big); at = 10;
+        }
+        if (bytes.length < at + 4 + length) return;
+        const payload = Buffer.from(bytes.subarray(at + 4, at + 4 + length));
+        for (let i = 0; i < payload.length; i++) payload[i] ^= bytes[at + i % 4];
+        bytes = bytes.subarray(at + 4 + length);
+        if (op === 8) { socket.end(frame(8, payload)); return; }
+        if (op === 9) { socket.write(frame(10, payload)); continue; }
+        if (op !== 1) { socket.destroy(); return; }
+        rpc(peer, JSON.parse(payload.toString('utf8')));
+      }
+    });
+  });
+  await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(target, resolve); });
+  await symlink(target, socketPath);
+  return {
+    home, socketPath, target, requests, serverRequests, replies, paths, threads, noRolloutResumeFailures, acceptedResumes,
+    failNext(method: string, failure: Failure) { failures.set(method, [...(failures.get(method) ?? []), failure]); },
+    setMethodUnavailable(method: string, failure?: { code: number; message: string }) {
+      if (failure) unavailable.set(method, failure); else unavailable.delete(method);
+    },
+    retainStartPolicy(alter: (policy: Params) => void) { startPolicy = alter; },
+    rejectZeroInputResume(value: boolean) { rejectZeroInputResumes = value; },
+    setListVisible(value: boolean) { listVisible = value; },
+    setThreadListPages(pages: Params[] | undefined) { threadPages = pages; },
+    threadView(id: string) {
+      const thread = threads.get(id); if (!thread) throw new Error('unknown fake thread');
+      return snapshot(thread, false);
+    },
+    notify: notice,
+    nextResponse(method: string, transform: (result: Params) => Params) {
+      responses.set(method, [...(responses.get(method) ?? []), transform]);
+    },
+    holdNextResponse(method: string) {
+      let reached!: () => void, release!: () => void;
+      const received = new Promise<void>(resolve => { reached = resolve; });
+      const ready = new Promise<void>(resolve => { release = resolve; });
+      responseHolds.set(method, [...(responseHolds.get(method) ?? []), { reached, ready }]);
+      return { received, release };
+    },
+    setPageSize(value: number) { pageSize = value; },
+    disconnect() { for (const p of peers) p.socket.destroy(); },
+    serverRequest(method: string, params: Params, reusedId?: number | string) {
+      const id = reusedId ?? ++requestId;
+      serverRequests.push({ id, method, params: structuredClone(params) });
+      // Broadcast even foreign-thread requests, to exercise ownership filtering.
+      for (const peer of peers) peer.send({ id, method, params });
+      return id;
+    },
+    complete(id: string, items: Params[], status: NativeTurn['status'] = 'completed') {
+      const t = [...threads.values()].find(t => t.turns.some(turn => turn.id === id));
+      const turn = t?.turns.find(turn => turn.id === id);
+      if (!t || !turn) throw new Error(`unknown native turn: ${id}`);
+      turn.status = status; turn.items.push(...items); turn.completedAt = 1794096000;
+      t.status = { type: 'idle' };
+      notice('turn/completed', { threadId: t.id, turn });
+    },
+    async close() {
+      for (const peer of peers) peer.socket.destroy();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+    },
+  };
+}

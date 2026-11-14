@@ -10,7 +10,7 @@ export interface LauncherConfig {
   hub: { url: string; credential_file: string };
   state_dir: string;
   backends: Array<{ id: string; module: string; config: unknown }>;
-  projects: Record<string, { repo_root: string; base_ref: string; backends?: string[] }>;
+  projects: Record<string, { repo_root: string; base_ref: string; scratch?: boolean; backends?: string[] }>;
   limits: { max_sessions: number; max_open_sessions: number; max_idle_wrapup_ms: number; max_session_lifetime_ms: number; workspace_retention_ms: number };
   policies: Record<string, Partial<Ceiling>>;
   approvals: { route: 'requester'; parent_expires_ms: number; on_parent_expiry: 'deny' | 'escalate'; operator_expires_ms: number;
@@ -88,9 +88,9 @@ export function parseConfig(raw: unknown): LauncherConfig {
   });
   if (new Set(backends.map(b=>b.id)).size !== backends.length) throw new ConfigError('/backends','duplicate backend id');
   const projects = Object.fromEntries(Object.entries(object(r.projects,'/projects')).map(([k,v])=>{
-    const p = ptr('/projects',k), x = object(v,p,['repo_root','base_ref','backends']);
+    const p = ptr('/projects',k), x = object(v,p,['repo_root','base_ref','backends','scratch']);
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(k)) throw new ConfigError(p,'invalid project alias');
-    return [k,{ repo_root:path(x.repo_root,`${p}/repo_root`), base_ref:str(x.base_ref,`${p}/base_ref`), ...(x.backends === undefined ? {} : {backends:strings(x.backends,`${p}/backends`)}) }];
+    return [k,{ repo_root:path(x.repo_root,`${p}/repo_root`), base_ref:str(x.base_ref,`${p}/base_ref`), ...(x.scratch === undefined ? {} : {scratch:bool(x.scratch,`${p}/scratch`)}), ...(x.backends === undefined ? {} : {backends:strings(x.backends,`${p}/backends`)}) }];
   }));
   const l = object(fallback(r.limits,{}),'/limits',['max_sessions','max_open_sessions','max_idle_wrapup','max_idle_wrapup_ms','max_session_lifetime','max_session_lifetime_ms','workspace_retention','workspace_retention_ms']);
   const limits = { ...durations(l,'/limits',{max_idle_wrapup_ms:28800000,max_session_lifetime_ms:259200000,workspace_retention_ms:604800000},['max_sessions','max_open_sessions']), max_sessions:integer(fallback(l.max_sessions,6),'/limits/max_sessions'), max_open_sessions:integer(fallback(l.max_open_sessions,24),'/limits/max_open_sessions') } as LauncherConfig['limits'];
