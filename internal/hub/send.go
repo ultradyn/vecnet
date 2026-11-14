@@ -583,6 +583,7 @@ func (h *Hub) sendTx(ctx context.Context, tx *sql.Tx, act actor, req *envelope.S
 	if err != nil {
 		return nil, false, nil, err
 	}
+	notify = append(notify, thr.archiveNotify...)
 	resp := &SendResponse{MessageID: msg.MessageID, ThreadID: thr.ID, Deliveries: refs, Spilled: msg.Content.Truncated}
 	if effect.jobRequest {
 		resp.JobID = effect.jobID
@@ -635,6 +636,22 @@ func (h *Hub) insertMessage(ctx context.Context, tx *sql.Tx, thr *threadRow, msg
 		msg.MessageID, thr.ID, seq, msg.Sender, msg.Kind, msg.CreatedAt, string(msgJSON),
 		nullIfEmpty(jobID), nullIfEmpty(aprID)); err != nil {
 		return fmt.Errorf("hub: insert message: %w", err)
+	}
+	if msg.Kind != "reaction" {
+		result, err := tx.ExecContext(ctx, `UPDATE threads SET archived_at=NULL,archived_by=NULL,unarchived_at=? WHERE thr_id=? AND archived_at IS NOT NULL`, h.nowStr(), thr.ID)
+		if err != nil {
+			return err
+		}
+		changed, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if changed > 0 {
+			thr.archiveNotify, err = h.noteOperatorView(ctx, tx, "archive", thr.ID)
+			if err != nil {
+				return err
+			}
+		}
 	}
 	thr.MessageCount++
 	if countBudget && thr.Budget != nil && *thr.Budget > 0 {

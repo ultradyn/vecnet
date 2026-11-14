@@ -178,7 +178,7 @@ Each response delivery may additionally include `recipient_name`, the destinatio
 
 ### 2.3 `GET /v1/events`
 
-Implementation migration inventory: R2 blobs is `0025_r2_blobs.sql`, peer archive is the deployed `0026_peer_archive.sql`, and DB compaction follows as 0027-0034 (SQL unchanged by renumbering). Both fresh and master-0026 upgrades are supported; see [the plan inventory](plans/2026-11-05-db-compaction.md).
+Implementation migration inventory: R2 blobs is `0025_r2_blobs.sql`, peer archive is the deployed `0026_peer_archive.sql`, DB compaction follows as 0027-0034 (SQL unchanged by renumbering), route attempts is `0035_route_attempts.sql`, and operator thread archival with peer-unarchive grace is `0036_thread_archive.sql`. Both fresh and master-0026 upgrades are supported; see [the plan inventory](plans/2026-11-05-db-compaction.md).
 
 One URL, two pull styles chosen by `Accept` [T06, SSE]:
 
@@ -322,6 +322,8 @@ Admin endpoints require the operator credential [T17]. Each mirrors a CLI comman
 | `POST /v1/admin/groups/{id}/unarchive` | unarchive an ad hoc group | [R21] |
 | `GET /v1/admin/dead-letters`, `POST …/{dly}/retry`, `POST …/{dly}/discard` | `dead-letters list|retry|discard` | [T10, T17, R18] |
 | `PATCH /v1/admin/threads/{id}` | raise thread budget; rename | [T16, EX06] |
+| `POST /v1/admin/threads/{id}/archive`, `…/unarchive` | `thread archive <id>`, `thread unarchive <id>`: operator-view state only, no body, idempotent 204; unknown thread 404 `unknown_thread` | §2.13 |
+| `GET /v1/admin/thread-stats` | operator thread counts and activity windows | §2.13 |
 | `POST /v1/admin/blobs/{sha256}/purge` | purge bytes, keep tombstone | [T13] |
 | `POST /v1/admin/dot-links` | `peer link <peer>` → 12-character link code shown as `ABCD-EFGH-JKMN` (§20.1), valid 10 min, binding an OAuth principal to a pre-created enabled `dot` or `grokbot` peer; issuing one ends a link-code lockout | [T11, R15, AUD] |
 | `PUT /v1/admin/notify` | operator notification webhooks and filters; each route gets its own `whsec_` | [T15, R23] |
@@ -377,7 +379,9 @@ in section 2.12 is unchanged.
 |---|---|---|
 | `GET /v1/admin/inbox` | `limit`, `before=<dly_id>`, `unread=1` | `{now, me, approvals, dead_letters, attention, deliveries, unread, unread_by_thread, next_before}` |
 | `POST /v1/admin/threads/{id}/read` | none; no request body | `{marked}`: number of deliveries marked read for the operator |
-| `GET /v1/admin/threads` | `participant=<peer_id>`, `exclude_participant=<peer_id>`, `limit`, `cursor` | `{threads: [ThreadRow…], next}` |
+| `GET /v1/admin/threads` | `participant=<peer_id>`, `exclude_participant=<peer_id>`, `archived=true\|false`, `q`, `limit`, `cursor` | `{threads: [ThreadRow…], next}` |
+| `POST /v1/admin/threads/{id}/archive`, `…/unarchive` | none; no body | 204 (including repeated requests); unknown thread 404 `unknown_thread` |
+| `GET /v1/admin/thread-stats` | none | `{now, total, open, archived, active_24h, active_7d}` |
 | `GET /v1/admin/threads/{id}` | none | `{now, row: ThreadRow, files, open_approvals}` |
 | `GET /v1/admin/threads/{id}/deliveries` | `after=<msg_id>`, `limit` | `{recipients, rows, next_after}`: the per-message delivery matrix |
 | `GET /v1/admin/peers` | none | `{peers: [PeerRow…]}` |
@@ -396,6 +400,24 @@ are the delivery and message ids for the next page, respectively, or `null` at
 the end. `hours` is an integer from 1 through 168, default 24. Invalid `limit`,
 `before`, `participant`, `exclude_participant` or `hours` returns 422 `invalid_value` with
 `details.field` naming the parameter, before the view is read.
+
+`archived` is exactly `true` or `false`; absent includes both states, and any
+other value (including empty) is 422 `invalid_value`. `q` is a title substring,
+case-insensitive using SQLite `instr(lower(title), lower(q))`, at most 128 runes
+(422 beyond that). Untitled threads never match a non-empty query. Both filters
+apply before paging; existing cursor encoding and ordering are unchanged.
+Thread stats count all threads; `open` means not archived and `active_24h` /
+`active_7d` count only open threads whose `last_message_at` is at or after hub
+`now` minus the corresponding interval (inclusive).
+
+Thread archival changes only the operator view: peer `ThreadSummary`, reads,
+posting and delivery behaviour are unchanged. A manual archive sets
+`archived_at=now`, `archived_by="operator"`; manual unarchive clears both and
+sets `unarchived_at=now`. Real changes audit `thread_archive` / `thread_unarchive`
+with actor `operator`; repeats emit no audit or event. Each change emits
+`operator_view {reason:"archive",thread_id}`. A new non-reaction Message clears
+archive state and sets `unarchived_at` in its insertion transaction, also
+emitting that invalidation; reactions do not unarchive.
 
 Wire fields use snake_case. List fields are arrays even when empty, never
 `null`; nullable scalar and object fields are explicit `null`. `now` is the
@@ -423,7 +445,8 @@ countdowns. View types are defined in `internal/opapi`:
   `unread=1`. The web sidebar shows it per Your Threads row. It changes
   exactly when `unread` does, so the `inbox` tag keeps it fresh.
 - `ThreadRow` keeps the section 2.8 `ThreadSummary` under the named `thread`
-  field, alongside `created_by`, `created_at`, `last_message_at`, and nullable
+  field, alongside `created_by`, `created_at`, `last_message_at`, nullable
+  `archived_at` and `archived_by` (`"operator"`, `"hub"`, or null), and nullable
   `cut` (`reason`, `at`). A detail's files carry `sha256`, name, media type,
   message id, sender, creation time, size, and spilled/purged flags. Its open
   approvals carry approval/message ids, expiry, options, and `addressed_to_me`.
@@ -473,10 +496,12 @@ unknown event types or undecodable data invalidate nothing:
 
 `operator_view` is appended only to enabled operator peers, in the transaction
 that changes a view. Its data is `{reason, thread_id}`: `reason` is `sent`,
-`read`, `presence`, `dead_letter`, `subscription`, or `reaction` (§17.3); `thread_id` is a `thr_`
+`read`, `presence`, `dead_letter`, `subscription`, `archive`, or `reaction` (§17.3); `thread_id` is a `thr_`
 id or `null`. It fires for a new operator send (including approval responses),
 a newly read operator delivery, a changed effective operator presence, a
-dead-letter retry or discard, or a subscription pause or resume. Idempotent
+dead-letter retry or discard, a subscription pause or resume, or a thread archive
+state change. A thread-archive batch emits one `archive` invalidation per enabled
+operator with `thread_id:null`. Idempotent
 sends, repeated reads, unchanged presence heartbeats, and unchanged
 subscriptions emit none. For a changed reaction, it is sent to enabled operator peers that did not receive the `reaction` Event (§17.3). It is not pushed to agents or MCP Events. Data that
 is not an object, a non-string `reason`, or a `thread_id` that is neither a
@@ -1843,6 +1868,47 @@ public directory. Unarchive never revives credentials: it leaves the peer
 disabled and it must receive a new invite before use. The operator/bootstrap
 peer cannot be disabled or archived. Actions audit as `peer_disable`,
 `peer_enable`, `peer_archive`, and `peer_unarchive`.
+
+#### Automatic peer and thread archival (2026-11-15)
+
+These preferences are live, operator-editable, in group `agents_defaults`; they
+use the shared preferences API and validation/ETag contract. Registry version 3
+invalidates older preference ETags when this key set is installed.
+
+| Key | Type | Default | Bounds / disabled value | Label |
+|---|---|---|---|---|
+| `agents.auto_archive_after` | duration, seconds | 172800 (2 days) | 3600..31536000; 0 disables | Auto-archive idle agents after |
+| `agents.auto_archive_all_kinds` | bool | false | true or false | Auto-archive every agent kind |
+| `threads.auto_archive_share` | int, % | 51 | 1..100; 0 disables | Auto-archive threads when this % of agents are archived |
+
+The hourly slow tick runs the idle-peer sweep first (at most 200 changes), then
+the abandoned-thread sweep (at most 500). Preference-wake/fast ticks do neither.
+With the default scope only `session` peers qualify; widening includes every
+kind except `operator` and `source`. Disabled and already archived peers, and
+peers with an open in-memory stream, are skipped. Idle means the latest parsed
+hub-observed `last_seen`, `enrolled_at`, or `unarchived_at` is strictly older than
+`now - agents.auto_archive_after`. Missing times are ignored; no known time or
+a malformed time is conservatively left alone. Peer-supplied `presence_at` is
+not an observation and is deliberately excluded, so future reports cannot pin
+agents indefinitely. Stream/activity observation is serialized with eligibility.
+The exact manual archive effects (credential, OAuth token, enrol-token and
+link-code revocation, directory removal and notification) run in the same
+transaction. Each archival audits `peer_archive`, actor `hub`, detail
+`{auto:true,idle_seconds:N}`. Unarchive also records `peers.unarchived_at=now`,
+so fresh re-enrolment has an idle grace period; it still leaves the peer disabled.
+
+For each open thread, agents are participants whose kind is not `operator`.
+When there is at least one agent and
+`archived_agents * 100 >= threads.auto_archive_share * agents`, the hub archives
+it only if `unarchived_at` is absent or strictly earlier than the most recent
+archived participant's `archived_at`. Thus an operator unarchive survives until
+another participant archival; new-message unarchive has the same protection.
+Automatic archive sets `archived_by="hub"` and audits one `thread_archive` row
+per batch, actor `hub`, targets the thread ids, detail
+`{auto:true,reason:"participants_archived"}`. It emits one batch operator-view
+invalidation (§2.13). A changed manual peer archive runs this rule for that peer's
+threads immediately after commit; a follow-up error is logged, without undoing
+the already committed peer archival, and the hourly sweep retries it.
 
 ### Launcher capability discovery
 

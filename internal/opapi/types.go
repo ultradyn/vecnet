@@ -129,6 +129,8 @@ type ReadResult struct {
 }
 
 type ThreadQuery struct {
+	Archived    *bool  `json:"archived"`
+	Q           string `json:"q"`
 	Participant string `json:"participant"`
 	// ExcludeParticipant drops threads that peer is in (the web sidebar's
 	// Other Threads passes the operator's own peer id).
@@ -142,7 +144,18 @@ type CutInfo struct {
 	At     string `json:"at"`
 }
 
+type ThreadStats struct {
+	Now       string `json:"now"`
+	Total     int    `json:"total"`
+	Open      int    `json:"open"`
+	Archived  int    `json:"archived"`
+	Active24h int    `json:"active_24h"`
+	Active7d  int    `json:"active_7d"`
+}
+
 type ThreadRow struct {
+	ArchivedAt    *string                `json:"archived_at"`
+	ArchivedBy    *string                `json:"archived_by"`
 	Thread        envelope.ThreadSummary `json:"thread"`
 	CreatedBy     string                 `json:"created_by"`
 	CreatedAt     string                 `json:"created_at"`

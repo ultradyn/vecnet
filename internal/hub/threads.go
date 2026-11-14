@@ -27,6 +27,7 @@ type threadRow struct {
 	Locked        bool
 	participants  []string        // in join order
 	isParticipant map[string]bool // over participants
+	archiveNotify []string        // operator log owners to wake after message revival commits
 	isNew         bool            // created by this send
 }
 

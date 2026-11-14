@@ -206,7 +206,7 @@ func TestSnapshotWireDescriptorNames(t *testing.T) {
 	if err := json.Unmarshal(b, &wire); err != nil {
 		t.Fatal(err)
 	}
-	if wire.Revision != 3 || len(wire.Preferences) != 22 {
+	if wire.Revision != 3 || len(wire.Preferences) != 25 {
 		t.Fatal("incomplete snapshot")
 	}
 	for _, d := range wire.Preferences {

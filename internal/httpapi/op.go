@@ -13,6 +13,9 @@ import (
 func (s *server) opRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/admin/inbox", s.opInbox)
 	mux.HandleFunc("POST /v1/admin/threads/{id}/read", s.opMarkThreadRead)
+	mux.HandleFunc("GET /v1/admin/thread-stats", s.opThreadStats)
+	mux.HandleFunc("POST /v1/admin/threads/{id}/archive", s.opArchiveThread(true))
+	mux.HandleFunc("POST /v1/admin/threads/{id}/unarchive", s.opArchiveThread(false))
 	mux.HandleFunc("GET /v1/admin/threads", s.opThreads)
 	mux.HandleFunc("GET /v1/admin/threads/{id}", s.opThread)
 	mux.HandleFunc("GET /v1/admin/threads/{id}/deliveries", s.opMatrix)
@@ -79,7 +82,36 @@ func (s *server) opThreads(w http.ResponseWriter, r *http.Request) {
 		writeError(w, opInvalid("exclude_participant", "exclude_participant must be a peer_ id"))
 		return
 	}
-	value, err := s.op.Threads(r.Context(), opapi.ThreadQuery{Participant: participant, ExcludeParticipant: exclude, Cursor: q.Get("cursor"), Limit: limit})
+	var archived *bool
+	if q.Has("archived") {
+		v := q.Get("archived")
+		if v != "true" && v != "false" {
+			writeError(w, opInvalid("archived", "archived must be true or false"))
+			return
+		}
+		b := v == "true"
+		archived = &b
+	}
+	value, err := s.op.Threads(r.Context(), opapi.ThreadQuery{Participant: participant, ExcludeParticipant: exclude, Cursor: q.Get("cursor"), Limit: limit, Archived: archived, Q: q.Get("q")})
+	opResult(w, value, err)
+}
+
+func (s *server) opArchiveThread(archived bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if err := readNoBody(r); err != nil {
+			writeError(w, err)
+			return
+		}
+		if err := s.Hub.SetThreadArchived(r.Context(), r.PathValue("id"), archived); err != nil {
+			writeError(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+func (s *server) opThreadStats(w http.ResponseWriter, r *http.Request) {
+	value, err := s.op.ThreadStats(r.Context())
 	opResult(w, value, err)
 }
 
