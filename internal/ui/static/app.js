@@ -14,6 +14,7 @@ import { avatarHash, createAvatarCache } from './avatar-model.js';
 import * as compose from './compose.js';
 import { connectionState } from './connection-model.js';
 import * as dash from './dash.js';
+import * as threadsBrowse from './threads.js';
 import { h, peerLink, toast } from './dom.js';
 import { clean, short, title } from './format.js';
 import * as inbox from './inbox.js';
@@ -41,6 +42,8 @@ const SCREENS = {
   inbox: { screen: inbox, aside: inbox.mountAside },
   thread: { screen: thread, aside: threadAside.mountAside },
   dash: { screen: dash },
+  peers: { screen: { mount: (root, ctx) => dash.mount(root, { ...ctx, peerBrowse: true }) } },
+  threads: { screen: threadsBrowse },
   peer: { screen: peer },
   new: { screen: compose },
   settings: { screen: settings, aside: settings.mountAside },
@@ -61,6 +64,8 @@ function parseRoute(hash) {
   // prefill, not a credential (PROTOCOL §4.5, §20.1).
   const add = addAgentPrefill(hash);
   if (add) return { name: 'add-agent', view: 'inbox', prefill: add };
+  const browse = hash.match(/^#(threads|peers)(?:\?(.*))?$/);
+  if (browse) return { name: browse[1], view: browse[1], query: new URLSearchParams(browse[2] || '') };
   if (hash === '#dash') return { name: 'dash', view: 'dash' };
   if (hash === '#new') return { name: 'new', view: 'new' };
   if (hash === '#settings') return { name: 'settings', view: 'settings' };
@@ -113,10 +118,10 @@ function renderNav(s, route) {
   const named = ((s.peers.get() || {}).peers || []).find(p => p.peer_id === route.id);
   const label = route.view === 'thread' ? title((detail && detail.row && detail.row.thread) || threads.find(t => t.thread_id === id), s.me, s.nameOf) || 'Thread'
     : route.view === 'peer' ? (named && named.name) || 'Peer'
-    : ({ inbox: 'Inbox', new: 'New message', dash: 'Dashboard', settings: 'Settings' })[route.view];
+    : ({ inbox: 'Inbox', new: 'New message', dash: 'Dashboard', peers: 'Peers', threads: 'Threads', settings: 'Settings' })[route.view];
   const tabTitle = (unread > 0 ? '(' + unread + ') ' : '') + clean(label) + ' · vecnet';
   if (document.title !== tabTitle) document.title = tabTitle;
-  for (const n of ['inbox', 'new', 'dash', 'settings']) {
+  for (const n of ['inbox', 'new', 'dash', 'threads', 'peers', 'settings']) {
     const a = $('nav-' + n), on = route.name === n;
     a.className = on ? 'on' : '';
     if (on) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
@@ -146,6 +151,9 @@ function renderNav(s, route) {
     unread: head.unread_by_thread,
   });
   $('threads').replaceChildren(...(yours.rows.length ? yours.rows.map(r => threadLink(r, route, s.nameOf)) : [h('div', { class: 'none', text: yours.note })]));
+  if (mineRes?.get()?.next) $('threads').append(s.mineLimit < 200 ? h('button', { class: 'linkbtn more', text: 'Show more', onclick: () => { s.mineLimit = nextLimit(s.mineLimit); mineRes.reload(); } }) : h('a', { href: '#threads?mine=1', class: 'more', text: 'Browse your threads' }));
+  $('your-count').textContent = String(yours.rows.length) + (mineRes?.get()?.next ? '+' : '');
+  applyDisclosure('your');
   // The dot is drawn in CSS: its name says it too.
   const unreadMine = yours.rows.some(r => r.unread);
   $('side-tog').classList.toggle('unread', unreadMine);
@@ -190,7 +198,9 @@ function renderOthers(s, route, mine, now) {
   const rows = v.rows.map(r => threadLink(r, route, s.nameOf));
   const tail = v.more === 'show'
     ? h('button', { type: 'button', class: 'linkbtn more', text: 'Show more', onclick: () => { s.otherLimit = nextLimit(s.otherLimit); res.reload(); } })
-    : v.more === 'dash' ? h('a', { href: '#dash', class: 'more', text: 'All threads on the dashboard' }) : null;
+    : v.more === 'threads' ? h('a', { href: '#threads', class: 'more', text: 'Browse all threads' }) : null;
+  $('other-count').textContent = String(v.rows.length) + (v.more ? '+' : '');
+  applyDisclosure('other');
   $('others').replaceChildren(...(rows.length ? rows : [h('div', { class: 'none', text: v.note })]), ...(tail ? [tail] : []));
 }
 
@@ -210,7 +220,7 @@ function renderConn(store, activity, notices) {
   $('conn').lastElementChild.textContent = state;
 }
 
-const routeKey = route => route.view + (route.id ? '/' + route.id : '');
+const routeKey = route => route.view + (route.id ? '/' + route.id : '') + (route.query ? '?' + route.query.toString() : '');
 
 // renderRoute draws location.hash, whoever calls it: the hashchange listener
 // or a resource redraw that lands after a hash change but before its event.
@@ -242,7 +252,7 @@ function renderRoute(s) {
   const key = routeKey(route), changed = !!s.mounted && key !== s.mounted;
   if (key !== s.mounted) {
     s.unmount();
-    const entry = SCREENS[route.view], ctx = { ...s.ctx, threadId: route.view === 'thread' ? route.id : undefined, peerId: route.view === 'peer' ? route.id : undefined };
+    const entry = SCREENS[route.view], ctx = { ...s.ctx, query: route.query, threadId: route.view === 'thread' ? route.id : undefined, peerId: route.view === 'peer' ? route.id : undefined };
     $('view').replaceChildren();
     $('aside').replaceChildren();
     const offView = entry.screen.mount($('view'), ctx);
@@ -306,7 +316,7 @@ function start(secret) {
   const pruneAvatars = () => { const d = peers.get(); if (d) avatars.prune((d.peers || []).map(avatarHash).filter(Boolean)); };
 
   const s = {
-    threads, inboxHead, peers, nameOf, store, mine: null, others: null, otherLimit: OTHER_PAGE, search: null,
+    threads, inboxHead, peers, nameOf, store, mine: null, others: null, otherLimit: OTHER_PAGE, mineLimit: OTHER_PAGE, search: null,
     me: '', ctx: null, mounted: '', matrixHash: '', addAgentHash: '', unmount: () => {}, offs: [],
     // leaveGuard: a screen with unsaved work (Settings) names what leaving loses.
     leaveGuard: null, shownHash: '', hubError: '', titleId: '', titleThread: null, titleOff: () => {},
@@ -321,7 +331,9 @@ function start(secret) {
       $('aside').replaceChildren();
       $('me').replaceChildren();
       $('threads').replaceChildren();
-      $('others').replaceChildren();
+      $('other-count').textContent = String(v.rows.length) + (v.more ? '+' : '');
+  applyDisclosure('other');
+  $('others').replaceChildren();
       $('results').replaceChildren();
       $('results').hidden = true;
       $('lists').hidden = false;
@@ -346,11 +358,11 @@ function start(secret) {
     // Tagged threads: the operator's own sends and reads re-sort it at once.
     // The activity feed keeps it live otherwise; Your Threads' own threads
     // are left to its delivery Events.
-    s.others = store.resource('threads', () => api.threads({ excludeParticipant: s.me, limit: s.otherLimit }));
+    s.others = store.resource('threads', () => api.threads({ excludeParticipant: s.me, archived: false, limit: s.otherLimit }));
     s.offs.push(s.others.subscribe(() => { if (session === s) renderRoute(s); }));
     // Your Threads as ThreadRows, for their last activity; the shell's own
     // list (GET /v1/threads) carries no times and stands in until this loads.
-    s.mine = store.resource('threads', () => api.threads({ participant: s.me, limit: 200 }));
+    s.mine = store.resource('threads', () => api.threads({ participant: s.me, archived: false, limit: s.mineLimit }));
     s.offs.push(s.mine.subscribe(() => { if (session === s) renderRoute(s); }));
     s.offs.push(activity.subscribe(ev => {
       const mine = new Set(((threads.get() || {}).threads || []).map(t => t.thread_id));
@@ -435,6 +447,19 @@ $('signout').addEventListener('click', () => { if (leaving(session)) signOut('')
 // disclosure (base.css), so every page starts on the first screen.
 const showThreads = open => $('side-tog').setAttribute('aria-expanded', String(open));
 $('side-tog').addEventListener('click', e => showThreads(e.currentTarget.getAttribute('aria-expanded') !== 'true'));
+const disclosureIds = { your: 'threads', other: 'others' };
+function applyDisclosure(key) {
+  const open = readLocal('vecnet.ui.sidebar.' + key) !== 'closed';
+  $(key + '-toggle').setAttribute('aria-expanded', String(open));
+  $(disclosureIds[key]).hidden = !open;
+}
+for (const key of ['your', 'other']) {
+  applyDisclosure(key);
+  $(key + '-toggle').addEventListener('click', () => {
+    const open = $(key + '-toggle').getAttribute('aria-expanded') === 'true';
+    writeLocal('vecnet.ui.sidebar.' + key, open ? 'closed' : 'open'); applyDisclosure(key);
+  });
+}
 // Add agent from any view: the invite dialog opens over the current screen,
 // which stays mounted. A created peer reloads the shared directory; the
 // dashboard follows the hub's directory_updated event.

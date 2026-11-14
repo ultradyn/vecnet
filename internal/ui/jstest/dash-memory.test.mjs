@@ -226,7 +226,8 @@ test('CONTROL same peer keeps focused SVG and exact keyboard minute through erro
       assert.equal(svg.querySelector('.spark-cursor'), cursor);
       assert.equal(document.activeElement, svg);
       assert.equal(readout.hidden, false);
-      assert.equal(readout.textContent, `${count} messages · [2026-11-09T11:00:30.000Z, 2026-11-09T11:01:30.000Z) UTC — messages in this minute`);
+      assert.match(readout.textContent, new RegExp(`${count} messages.*59 min ago`));
+      assert.match(readout.getAttribute('aria-label'), /11:00:30.000Z/);
       assert.equal(cursor.hidden, false);
       assert.equal(cursor.getAttribute('visibility'), 'visible');
       assert.equal(cursor.getAttribute('x1'), '4');
@@ -257,7 +258,7 @@ test('CONTROL same peer keeps focused SVG and exact keyboard minute through erro
     assert.ok(h.chartWrites(cell) > before, 'instrumentation observes real active chart updates');
     assert.ok(h.chartWrites(cell) > beforeRecovery, 'recovery mutates the surviving SVG');
     svg.on.keydown({ key: 'ArrowRight', preventDefault() {} });
-    assert.equal(readout.textContent, '4 messages · [2026-11-09T11:01:30.000Z, 2026-11-09T11:02:30.000Z) UTC — messages in this minute');
+    assert.match(readout.textContent, /4 messages.*58 min ago/);
     svg.on.keydown({ key: 'Home', preventDefault() {} }); inspectHome(9);
   });
 });
@@ -286,7 +287,8 @@ test('CONTROL archived toggle preserves disabled peers, restores archived peers 
   const live = peer('peer_a'), disabled = { ...peer('peer_disabled'), disabled: true };
   const archived = { ...peer('peer_archived'), archived_at: snapshot().now };
   await dashboard(async h => {
-    const peers = h.root.querySelector('#d-peers'), toggle = peers.querySelector('input');
+    const peers = h.root.querySelector('#d-peers'), toggle = peers.querySelector('.show-archived').querySelector('input');
+    peers.querySelector('.show-disabled').querySelector('input').on.change({ target: { checked: true } });
     assert.equal(peers.querySelectorAll('.peer-activity').length, 2);
     assert.match(peers.textContent, /peer_disabled/); assert.doesNotMatch(peers.textContent, /peer_archived/);
     toggle.on.change({ target: { checked: true } });
@@ -304,7 +306,7 @@ test('CONTROL archived toggle preserves disabled peers, restores archived peers 
 test('REGRESSION charts hidden by archived toggle receive no subsequent activity updates', async () => {
   const archived = { ...peer('peer_archived'), archived_at: snapshot().now };
   await dashboard(async h => {
-    const peers = h.root.querySelector('#d-peers'), toggle = peers.querySelector('input');
+    const peers = h.root.querySelector('#d-peers'), toggle = peers.querySelector('.show-archived').querySelector('input');
     toggle.on.change({ target: { checked: true } });
     const retired = peers.querySelectorAll('.peer-activity')[1];
     toggle.on.change({ target: { checked: false } });

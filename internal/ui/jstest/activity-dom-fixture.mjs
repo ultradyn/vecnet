@@ -12,6 +12,7 @@ export class El {
   append(...xs) { for (const x of xs.flat()) { if (x == null || x === false) continue; if (x.parentNode) x.remove(); if (x instanceof El) x.parentNode = this; this.kids.push(x); } }
   replaceChildren(...xs) { for (const k of this.children) k.parentNode = null; this.kids = []; this.append(...xs); }
   insertBefore(node, ref) { if (node === ref) return; node.remove(); const i = this.kids.indexOf(ref); this.kids.splice(i < 0 ? this.kids.length : i, 0, node); node.parentNode = this; }
+  before(node) { this.parentNode?.insertBefore(node, this); }
   remove() { if (this.parentNode) { const a = this.parentNode.kids; a.splice(a.indexOf(this), 1); this.parentNode = null; } }
   focus() { document.activeElement = this; }
   getBoundingClientRect() { return { left: 0, width: 240 }; }

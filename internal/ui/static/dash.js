@@ -4,7 +4,8 @@
 // Each section loads and fails on its own. The page reloads on the `peers` tag
 // and every 30 s while mounted. Ages use the hub clock, never the client's.
 import { activityAction } from './activity-model.js';
-import { allThreads, blockedLine, cutSummary, visiblePeers } from './dash-model.js';
+import { blockedLine, cutSummary } from './dash-model.js';
+import { filterPeers, readPeerFilters, savePeerFilters } from './peers-model.js';
 import { principalRows } from './principals-model.js';
 import { chip, h, idCopy, idText, peerLink } from './dom.js';
 import { closeInvite, inviteButton } from './invite.js';
@@ -15,7 +16,7 @@ import { createSparkline } from './sparkline.js';
 
 const RELOAD_MS = 30000;
 const AUDIT_PAGE = 50;
-const THREAD_PAGE = 200;
+const THREAD_PAGE = 10;
 const COUNTERS = ['loop_cut', 'rate_limited', 'dead_letters', 'push_conflicts', 'push_auth_failed'];
 // The hub's counters are running totals kept in its database, not the current
 // state: dead_letters counts deliveries ever dead-lettered, while the Dead
@@ -59,6 +60,9 @@ function none(text) { return h('p', { class: 'none', text }); }
 
 export function mount(root, ctx) {
   const { api, store } = ctx;
+  const browse = !!ctx.peerBrowse;
+  let storage; try { storage = globalThis.localStorage; } catch {}
+  const filters = { ...readPeerFilters(storage), q: ctx.query?.get('q') || '', kind: '', presence: '', sort: 'recent', limit: browse ? 50 : 10 };
   const nowMs = () => store.hubNow();
   const age = iso => ago(iso, nowMs());
   const time = iso => h('time', { text: when(iso, nowMs()), title: iso || '' });
@@ -73,7 +77,8 @@ export function mount(root, ctx) {
     peers: store.resource('peers', () => api.adminPeers()),
     // Created peers emit directory_updated, so the peers tag refreshes this.
     principals: store.resource('peers', () => api.principals()),
-    threads: store.resource('threads', () => allThreads(api, THREAD_PAGE)),
+    threads: store.resource('threads', () => api.threads({ archived: false, limit: THREAD_PAGE })),
+    stats: store.resource('threads', () => api.threadStats ? api.threadStats() : Promise.resolve(null)),
     health: store.resource('peers', () => api.deliveryHealth()),
     dead: store.resource('peers', () => api.deadLetters()),
     cuts: store.resource('peers', () => api.loopCuts(24)),
@@ -106,7 +111,7 @@ export function mount(root, ctx) {
   // Archived peers stay out of the operator list until this is on. It is
   // local to the page: a #peer/<id> link still loads that peer from the
   // unfiltered admin directory.
-  let showArchived = false;
+
 
   const sections = {};
   function section(key, id, heading) {
@@ -163,13 +168,13 @@ export function mount(root, ctx) {
   const subsSlot = h('section', { class: 'dash-sec dash-subs subs', id: 'd-subs' });
   root.replaceChildren(
     h('div', { class: 'dash' },
-      h('h1', { text: 'Dashboard' }),
-      h('p', { class: 'lede', text: 'Add agents under Peers, or open a launcher to run a job. Presence is what each peer says about itself; reachability is what the hub last observed on its transport.' }),
+      h('h1', { text: browse ? 'Peers' : 'Dashboard' }),
+      h('p', { class: 'lede', text: browse ? 'Find every agent, launcher and source. Presence is self-reported; reachability is observed by the hub.' : 'Hub activity, recent conversations and the agents behind them.' }),
       activityPanel,
       counterLine,
       section('peers', 'd-peers', 'Peers'),
       section('principals', 'd-principals', 'Principals'),
-      section('threads', 'd-threads', 'Threads'),
+      section('threads', 'd-threads', 'Recent threads'),
       section('health', 'd-health', 'Delivery health'),
       section('dead', 'd-dead', 'Dead letters'),
       section('loop', 'd-loop', 'Loop control'),
@@ -177,6 +182,34 @@ export function mount(root, ctx) {
       section('audit', 'd-audit', 'Audit tail')));
   const stopSubs = subs.renderSection(subsSlot, ctx);
   sections.peers.el.querySelector('h2').append(inviteButton(ctx, () => res.peers.reload()));
+
+  const kpis = h('div', { class: 'dash-kpis', 'aria-label': 'Hub overview' });
+  activityPanel.before(kpis);
+  let auditOpen = false;
+  try { auditOpen = storage?.getItem('vecnet.ui.audit-open') === 'true'; } catch {}
+  const auditDetails = h('details', { class: 'dash-audit-fold', open: auditOpen, ontoggle: e => { try { storage?.setItem('vecnet.ui.audit-open', String(e.target.open)); } catch {} } }, h('summary', { text: 'Audit tail' }));
+  sections.audit.el.before(auditDetails); auditDetails.append(sections.audit.el);
+  const clearLine = h('p', { class: 'dash-clear', text: 'All clear · No blocked deliveries, dead letters or loop cuts.' });
+  sections.health.el.before(clearLine);
+  if (browse) {
+    for (const el of [activityPanel, kpis, counterLine, clearLine, auditDetails, subsSlot, ...Object.values(sections).filter(s => s !== sections.peers).map(s => s.el)]) el.hidden = true;
+  }
+  function renderOverview() {
+    if (browse) return;
+    const peers = filterPeers(res.peers.get()?.peers).total;
+    const activity = res.activity.get(), stats = res.stats.get(), health = res.health.get(), dead = res.dead.get(), cuts = res.cuts.get();
+    const attention = (health?.blocked?.length || 0) + (health?.failed?.length || 0) + (dead?.dead_letters?.length || 0);
+    const presence = {};
+    for (const p of res.peers.get()?.peers || []) if (!p.disabled && !p.archived_at) presence[p.peer.presence || 'unknown'] = (presence[p.peer.presence || 'unknown'] || 0) + 1;
+    const tile = (href, label, value, detail) => h('a', { class: 'dash-kpi', href }, h('span', { text: label }), h('strong', { text: value }), h('span', { text: detail }));
+    kpis.replaceChildren(
+      tile('#peers', 'Peers', `${activity?.active_peers ?? '—'} / ${peers || '—'}`, 'active last hour / total · ' + Object.entries(presence).map(([k, v]) => `${v} ${k}`).join(', ')),
+      tile('#threads', 'Threads', stats ? String(stats.active_24h) : '—', stats ? `active in 24 h · ${stats.open} open · ${stats.archived} archived` : 'Loading thread totals…'),
+      tile('#inbox', 'Needs attention', String(attention), `${cuts?.total ?? '—'} loop cuts in 24 h`));
+    const clear = health && dead && cuts && !attention && !cuts.total && !res.health.error() && !res.dead.error() && !res.cuts.error();
+    clearLine.hidden = !clear;
+    for (const key of ['health', 'dead', 'loop']) sections[key].el.hidden = !!clear;
+  }
 
   // fill renders one section from its resource: its own error, then whatever
   // it last loaded, or a loading line before the first answer.
@@ -205,23 +238,36 @@ export function mount(root, ctx) {
   const peerTable = table(['Peer', 'Kind', 'Presence', 'Reachability', 'Credential', 'Routes', 'Quota', 'Location', 'Activity · last hour'], []);
   const peerTableWrap = h('div', { class: 'peer-table-scroll', role: 'region', 'aria-label': 'Peers; activity charts share a common scale' }, peerTable);
   const peerRows = new Map();
-  let lastPeers, lastArchived;
-  const archivedLabel = h('span');
-  const archivedToggle = h('label', { class: 'show-archived' }, h('input', {
-    type: 'checkbox', 'aria-label': 'Show archived',
-    onchange: e => { showArchived = !!e.target.checked; render(); },
-  }), archivedLabel);
+  const archivedLabel = h('span'), disabledLabel = h('span');
+  const changeFilters = () => { savePeerFilters(storage, filters); render(); };
+  const archivedInput = h('input', { type: 'checkbox', 'aria-label': 'Show archived', onchange: e => { filters.showArchived = !!e.target.checked; changeFilters(); } });
+  const disabledInput = h('input', { type: 'checkbox', 'aria-label': 'Show disabled', onchange: e => { filters.showDisabled = !!e.target.checked; changeFilters(); } });
+  const searchInput = h('input', { type: 'search', placeholder: 'Find peers', 'aria-label': 'Find peers', value: filters.q, oninput: e => { filters.q = e.target.value; render(); } });
+  const peerToolbar = h('div', { class: 'browse-toolbar' }, searchInput,
+    h('label', { class: 'show-disabled' }, disabledInput, disabledLabel),
+    h('label', { class: 'show-archived' }, archivedInput, archivedLabel));
+  function selectFilter(label, key, values) {
+    return h('select', { 'aria-label': label, onchange: e => { filters[key] = e.target.value; render(); } }, values.map(([value, text]) => h('option', { value, text })));
+  }
+  if (browse) peerToolbar.append(
+    selectFilter('Kind', 'kind', [['', 'All kinds'], ...['session', 'launcher', 'operator', 'dot', 'source', 'grokbot', 'openclaw', 'pagchat-bot'].map(v => [v, v])]),
+    selectFilter('Presence', 'presence', [['', 'All presence'], ...['idle', 'working', 'blocked', 'offline', 'unknown', 'n/a'].map(v => [v, v])]),
+    selectFilter('Sort peers', 'sort', [['recent', 'Recent activity'], ['name', 'Name']]));
+  const peerMore = h('button', { class: 'btn', text: 'Show more', onclick: () => { filters.limit += 50; render(); } });
+  const peerFooter = h('a', { class: 'browse-footer', href: '#peers' });
   const peerEmpty = none('');
   function drawPeers(value, s) {
-    const list = visiblePeers(value.peers, showArchived);
+    const list = filterPeers(value.peers, filters);
     const rows = list.shown;
-    s.count.textContent = String(rows.length);
-    archivedLabel.textContent = list.archived ? 'Show archived (' + list.archived + ')' : 'Show archived';
-    if (showArchived) archivedToggle.querySelector('input').setAttribute('checked', '');
-    else archivedToggle.querySelector('input').removeAttribute('checked');
-    peerEmpty.textContent = list.archived ? 'Archived peers are hidden.' : 'No peers enrolled.';
-    if (lastPeers === value && lastArchived === showArchived) return [archivedToggle, rows.length ? peerTableWrap : peerEmpty];
-    lastPeers = value; lastArchived = showArchived;
+    s.count.textContent = String(rows.length) + (browse ? ' / ' + list.matched : '');
+    archivedLabel.textContent = 'Show archived (' + list.archived + ')';
+    disabledLabel.textContent = 'Show disabled (' + list.disabled + ')';
+    for (const [input, on] of [[archivedInput, filters.showArchived], [disabledInput, filters.showDisabled]]) {
+      if (on) input.setAttribute('checked', ''); else input.removeAttribute('checked');
+    }
+    peerEmpty.textContent = list.archived || list.disabled ? 'Disabled or archived peers are hidden. Adjust the filters to show them.' : 'No peers match.';
+    peerFooter.textContent = 'All ' + list.total + ' peers →';
+    peerMore.hidden = list.shown.length >= list.matched;
     // Hidden/removed peers release both owners; surviving views keep their identity.
     const shownIDs = new Set(rows.map(p => p.id));
     for (const id of peerRows.keys()) {
@@ -257,7 +303,7 @@ export function mount(root, ctx) {
     const body = peerTable.querySelector('tbody');
     for (const old of [...body.children]) if (!nextRows.includes(old)) old.remove();
     nextRows.forEach((row, i) => { if (body.children[i] !== row) body.insertBefore(row, body.children[i] || null); });
-    return [archivedToggle, rows.length ? peerTableWrap : peerEmpty];
+    return [peerToolbar, rows.length ? peerTableWrap : peerEmpty, browse ? peerMore : peerFooter];
   }
 
   // Principals with limits or created peers (§18.4); absent when there are none.
@@ -280,7 +326,8 @@ export function mount(root, ctx) {
   function drawThreads(value, s) {
     const rows = value.threads || [];
     s.count.textContent = String(rows.length);
-    if (!rows.length) return [none('No threads yet.')];
+    const footer = h('a', { class: 'browse-footer', href: '#threads', text: 'Browse all threads →' });
+    if (!rows.length) return [none('No open threads yet.'), footer];
     return [table(['Thread', 'Participants', 'Messages', 'Budget left', 'Last activity', 'Cut'], rows.map(r => {
       const t = r.thread || {}, parts = t.participants || [];
       return h('tr', null,
@@ -290,7 +337,7 @@ export function mount(root, ctx) {
         h('td', { text: t.budget_remaining === null || t.budget_remaining === undefined ? 'unlimited' : String(t.budget_remaining), class: t.budget_remaining === 0 ? 'bad' : null }),
         h('td', { text: age(r.last_message_at), title: r.last_message_at || '' }),
         h('td', null, r.cut ? h('span', { class: 'bad', text: r.cut.reason, title: r.cut.at }) : ''));
-    }))];
+    })), footer];
   }
 
   function drawHealth(value, s) {
@@ -415,10 +462,11 @@ export function mount(root, ctx) {
   function render() {
     if (!audit.alive) return;
     renderCounters();
+    renderOverview();
     fill('peers', res.peers, 'Peers', drawPeers);
     renderActivity();
     const pv = res.principals.get();
-    sections.principals.el.hidden = !res.principals.error() && !principalRows(pv && pv.principals).length;
+    sections.principals.el.hidden = browse || !res.principals.error() && !principalRows(pv && pv.principals).length;
     if (!sections.principals.el.hidden) fill('principals', res.principals, 'Principals', drawPrincipals);
     fill('threads', res.threads, 'Threads', drawThreads);
     fill('health', res.health, 'Delivery health', drawHealth);

@@ -157,7 +157,7 @@ test('otherThreads bounds the list and says how to see the rest', () => {
   assert.equal(view({ threads: many, next: null }).more, 'show');
   assert.equal(view({ threads: many.slice(0, 10), next: null }).more, '');
   // At the hub's page cap the rest are on the dashboard.
-  assert.equal(view({ threads: many.slice(0, 10), next: 'tok' }, { limit: OTHER_MAX }).more, 'dash');
+  assert.equal(view({ threads: many.slice(0, 10), next: 'tok' }, { limit: OTHER_MAX }).more, 'threads');
 });
 
 test('nextLimit grows a page at a time up to the cap', () => {

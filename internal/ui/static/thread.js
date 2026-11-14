@@ -5,7 +5,7 @@
 import { answerBody, countdown } from './approvals.js';
 import { createAttachments } from './attach.js';
 import { blobView, nextExpiry, sendRefusal } from './attach-model.js';
-import { avatar, h, idText, peerLink } from './dom.js';
+import { avatar, confirmButton, h, idText, peerLink } from './dom.js';
 import { ago, bytes, clean, deltaLabel, deltaTitle, fullWhen, kindShort, kindTitle, plural, short, title, when } from './format.js';
 import { markdown } from './md.js';
 import { markPriority, prioritySeg } from './prio.js';
@@ -610,6 +610,14 @@ export function mount(root, ctx) {
     comp.hidden = !!dead;
     head.replaceChildren(t ? h('h1', { class: t.title ? null : 'un', text: title(t, me, nameOf) }) : h('h1', null, idText(threadId)),
       h('div', { class: 'ids', text: threadId + (t ? ' · ' + plural(t.message_count, 'message') : '') }));
+    if (d?.row && api.archiveThread) {
+      const archived = !!d.row.archived_at;
+      head.append(confirmButton(archived ? 'Unarchive' : 'Archive', archived ? 'Confirm unarchive' : 'Confirm archive', async () => {
+        try { await (archived ? api.unarchiveThread(threadId) : api.archiveThread(threadId)); store.invalidate('threads', tag); }
+        catch (e) { toast(e.message || String(e), true); }
+      }));
+      if (archived) head.append(h('p', { class: 'note archived-note', text: `Archived${d.row.archived_by === 'hub' ? ' automatically' : ''}. Peers can still read and post. A new message reopens this thread.` }));
+    }
     ticks = [];
     agos = [];
     // Unread needs my deliveries (the matrix); if it fails, history shows

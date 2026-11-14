@@ -418,7 +418,10 @@ export function createApi({ secret, fetch = globalThis.fetch, onUnauthorized = (
     // Omit participant for the operator's own threads; pass a peer_ id
     // for that peer's. cursor passes next back unchanged; signal cancels.
     searchThreads: ({ q, participant, limit, cursor, signal } = {}) => get('/v1/threads' + query({ q, participant, limit, cursor }), { signal }),
-    threads: ({ participant, excludeParticipant, limit, cursor } = {}) => get('/v1/admin/threads' + query({ participant, exclude_participant: excludeParticipant, limit, cursor })),
+    threads: ({ participant, excludeParticipant, limit, cursor, archived, q } = {}) => get('/v1/admin/threads' + query({ participant, exclude_participant: excludeParticipant, limit, cursor, archived, q })),
+    threadStats: () => get('/v1/admin/thread-stats'),
+    archiveThread: id => post('/v1/admin/threads/' + seg(id) + '/archive'),
+    unarchiveThread: id => post('/v1/admin/threads/' + seg(id) + '/unarchive'),
     thread: id => get('/v1/admin/threads/' + seg(id)),
     messages: (id, { after, limit } = {}) => get('/v1/threads/' + seg(id) + '/messages' + query({ after, limit })),
     matrix: (id, { after, limit } = {}) => get('/v1/admin/threads/' + seg(id) + '/deliveries' + query({ after, limit })),

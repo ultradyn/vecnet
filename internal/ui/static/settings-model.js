@@ -93,6 +93,7 @@ export function durationText(sec) {
 
 const ENUM_LABEL = { '1h': '1 hour', '6h': '6 hours', '12h': '12 hours', '1d': '1 day', '7d': '7 days', '30d': '30 days', off: 'Off (keep files)' };
 const INT_UNIT = {
+  'threads.auto_archive_share': '%',
   'agents.default_max_depth': 'hops', 'agents.thread_budget': 'messages', 'agents.text_cap': 'bytes',
   'rates.sends_per_minute': 'per minute', 'rates.threads_per_hour': 'per hour', 'rates.avatar_changes_per_hour': 'per hour',
   'rates.anonymous_burst': 'requests', 'provisioning.creates_per_hour': 'per hour', 'provisioning.max_peers': 'peers',

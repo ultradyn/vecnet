@@ -58,7 +58,7 @@ test('dashboard hides archived peers until Show archived is on', async () => {
     peer('peer_off', 'paused-bot', 'session', { disabled: true, credential: 'revoked' }),
     peer('peer_old', 'retired-bot', 'session', { disabled: true, credential: 'revoked', archived_at: '2026-11-07T01:00:00.000Z' }),
   ], peers => {
-    const toggle = () => peers.querySelector('input');
+    const toggle = () => peers.querySelector('.show-archived').querySelector('input');
     const text = () => peers.textContent;
     assert.equal(toggle().attrs.type, 'checkbox');
     assert.equal(toggle().attrs['aria-label'], 'Show archived');
@@ -66,18 +66,18 @@ test('dashboard hides archived peers until Show archived is on', async () => {
     assert.match(text(), /Show archived \(1\)/);
     const chips = () => peers.querySelectorAll('.chip').map(el => el.textContent);
     assert.match(text(), /live-bot/);
-    assert.match(text(), /paused-bot/);
-    assert.deepEqual(chips(), ['disabled']);
+    assert.doesNotMatch(text(), /paused-bot/);
+    assert.deepEqual(chips(), []);
     assert.doesNotMatch(text(), /retired-bot/);
-    assert.match(peers.querySelector('h2').textContent, /Peers 3/);
+    assert.match(peers.querySelector('h2').textContent, /Peers 2/);
 
     toggle().on.change({ target: { checked: true } });
     assert.equal(toggle().attrs.checked, '');
     assert.match(text(), /retired-bot/);
-    assert.deepEqual(chips(), ['disabled', 'archived']);
+    assert.deepEqual(chips(), ['archived']);
     assert.match(text(), /live-bot/);
-    assert.match(text(), /paused-bot/);
-    assert.match(peers.querySelector('h2').textContent, /Peers 4/);
+    assert.doesNotMatch(text(), /paused-bot/);
+    assert.match(peers.querySelector('h2').textContent, /Peers 3/);
 
     toggle().on.change({ target: { checked: false } });
     assert.doesNotMatch(text(), /retired-bot/);
@@ -89,11 +89,11 @@ test('an operator list that is only archived peers says they are hidden', async 
   await withPeers([
     peer('peer_old', 'retired-bot', 'session', { disabled: true, archived_at: '2026-11-07T01:00:00.000Z' }),
   ], peers => {
-    assert.match(peers.textContent, /Archived peers are hidden/);
+    assert.match(peers.textContent, /archived peers are hidden/);
     assert.match(peers.textContent, /Show archived \(1\)/);
     assert.doesNotMatch(peers.textContent, /retired-bot/);
     assert.doesNotMatch(peers.textContent, /No peers enrolled/);
-    peers.querySelector('input').on.change({ target: { checked: true } });
+    peers.querySelector('.show-archived').querySelector('input').on.change({ target: { checked: true } });
     assert.match(peers.textContent, /retired-bot/);
     assert.deepEqual(peers.querySelectorAll('.chip').map(el => el.textContent), ['archived']);
   });
