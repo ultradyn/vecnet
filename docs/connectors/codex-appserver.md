@@ -1,9 +1,13 @@
 # Codex app-server delivery
 
-The launcher connector delivers to the exact root thread in a private
-[Codex ownership binding](codex.md). Use `vecnet --net P codex setup`, then
-`vecnet --net P codex status`. A fresh status for the matching generation must say
-ready before treating a session as automatically reachable.
+The delivery connector delivers to the exact root thread in a private
+[Codex ownership binding](codex.md). Run the invitation's `vecnet enrol` command
+inside that root: supported hosts automatically configure hooks, bind the owner,
+activate the managed runtime and verify readiness. Check `vecnet --net P codex status`.
+A fresh status for the matching generation must say ready before treating a
+session as automatically reachable. Credentials saved with setup pending is a
+partial result; fix the reported requirement and run `vecnet repair` to resume
+without redeeming the invitation again.
 
 ## Delivery behavior
 
@@ -87,8 +91,26 @@ peer, credential, configuration and service setup. Use the same OS user/HOME as
 the enrolled sessions and set `VECNET_BIN` to the matching CLI. A second connector
 cannot take the readiness lock or start another delivery engine.
 
-For delivery without a launcher, install the standalone user service with a
-build-box-produced CLI binary and an absolute Node >=22.18 executable:
+For delivery without a launcher, enrollment automatically stages and activates
+`vecnet-codex-delivery.service` using embedded connector assets and a private copy
+of the matching CLI. It requires Linux, working user systemd and Node ≥22.18 in
+the same OS user/HOME as the session. `VECNET_NODE` can select the Node executable.
+Node must include working built-in TypeScript and SQLite: capabilities are probed,
+not inferred from the version number. Missing capabilities, custom/conflicting
+services and unavailable host bridges leave setup pending with a specific reason.
+Routine enrollment does not require a source checkout or a separate installer. Managed activation currently requires `XDG_CONFIG_HOME` unset or equal to `$HOME/.config`; another user systemd configuration directory is reported unsupported before installation.
+
+First ordinary use after an npm update or direct binary replacement schedules
+background maintenance. Ordinary commands check local version metadata; complete integrity checks run in the background, with another check due after ten minutes of managed use. `vecnet repair --json` explicitly reconciles all
+registered managed artifacts, the managed runtime/private CLI and pending
+enrollments. `vecnet repair --status --json` reads the last maintenance result without changing files. `vecnet projects list --json` shows installation inventory and
+pending/deferred project work; it is not a live owner-health check. Inspect
+`vecnet --net P codex status` for that. Updates preserve ownership, expiry,
+recovery and custom content; they cannot implicitly move a recipient.
+
+The source-tree `scripts/install-codex-delivery.py` remains an advanced manual
+staging tool. Unlike automatic enrollment, it does not start services or change
+hooks, bindings or trust:
 
 ```sh
 python3 scripts/install-codex-delivery.py --binary /path/to/vecnet --node /path/to/node --install-cli
@@ -98,16 +120,13 @@ vecnet --net P codex setup
 vecnet --net P codex status
 ```
 
-Node must include its built-in TypeScript and SQLite support. Some distribution
-builds omit TypeScript; the installer probes both capabilities before writing
-anything, rather than accepting the version number alone.
-
-The installer stages content-addressed assets, backs up replaced CLI/unit files,
-and does not start services or modify hooks, bindings, trust, or recovery state.
-Review and stop older delivery services before activation. In particular, an
-older `vecnet-delivery@` runner uses a separate registry: preserve that registry
-and its ledger, and review each exact owner before explicit enrollment. Expired
-registrations must not be renewed merely because software was upgraded.
+It stages content-addressed assets and backs up replaced CLI/unit files. Review
+and stop older delivery services before manual activation. An older
+`vecnet-delivery@` runner uses a separate registry: preserve it and its ledger and
+review each exact owner. Verified obsolete sources, including empty legacy binding
+files, can be retired automatically only when their old writers are proven stopped;
+unresolved active ownership remains a conflict. Never delete state to bypass it.
+Expired registrations must not be renewed merely because software was upgraded.
 The standalone service and launcher use the same singleton lock and recovery
 ledger, beside the authority at `~/.local/state/vecnet/codex/delivery.sqlite`.
 The connector validates private ownership, modes and paths for this database and

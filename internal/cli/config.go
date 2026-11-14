@@ -20,10 +20,16 @@ import (
 // Profile is one [profiles.<name>] table of the config file: a hub origin
 // and the long-lived credential (peer, principal or operator) used there.
 type Profile struct {
-	Hub       string `toml:"hub"`
-	HubPubkey string `toml:"hub_pubkey,omitempty"`
-	Secret    string `toml:"secret"`
-	PeerID    string `toml:"peer_id,omitempty"`
+	// Enrollment metadata commits one exact local setup intent with its credential.
+	// The credential digest stays in the private config, never in inventory.
+	EnrollmentIntent     string `toml:"enrollment_intent,omitempty"`
+	EnrollmentCredential string `toml:"enrollment_credential,omitempty"`
+	EnrollmentHub        string `toml:"enrollment_hub,omitempty"`
+	EnrollmentCaller     string `toml:"enrollment_caller,omitempty"`
+	Hub                  string `toml:"hub"`
+	HubPubkey            string `toml:"hub_pubkey,omitempty"`
+	Secret               string `toml:"secret"`
+	PeerID               string `toml:"peer_id,omitempty"`
 	// AllowInsecureHTTP lets Hub be a plain http:// URL on a host that is
 	// not loopback or LAN (checkHubURL); set by enrol --allow-insecure-http.
 	AllowInsecureHTTP bool `toml:"allow_insecure_http,omitempty"`
@@ -318,4 +324,71 @@ func tomlErrorLine(err error) int {
 		return pe.Position.Line
 	}
 	return pe.Line
+}
+
+// saveConfigDurable is the enrollment commit boundary. Other config and cache
+// writers retain their existing semantics.
+func saveConfigDurable(path string, c Config) error {
+	var b bytes.Buffer
+	if err := toml.NewEncoder(&b).Encode(c); err != nil {
+		return fmt.Errorf("encode config: %w", err)
+	}
+	if err := makeConfigDirectoryDurable(filepath.Dir(path)); err != nil {
+		return err
+	}
+	dir, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer os.Remove(tmp)
+	if _, err = f.Write(b.Bytes()); err == nil {
+		err = f.Sync()
+	}
+	closeErr := f.Close()
+	if err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	if err = os.Rename(tmp, path); err != nil {
+		return err
+	}
+	return dir.Sync()
+}
+
+// Sync each newly created directory's parent before relying on the new name.
+func makeConfigDirectoryDurable(path string) error {
+	st, err := os.Stat(path)
+	if err == nil {
+		if !st.IsDir() {
+			return fmt.Errorf("config parent is not a directory")
+		}
+		return nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	parent := filepath.Dir(path)
+	if parent == path {
+		return err
+	}
+	if err := makeConfigDirectoryDurable(parent); err != nil {
+		return err
+	}
+	if err := os.Mkdir(path, 0700); err != nil && !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	dir, err := os.Open(parent)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }
