@@ -62,7 +62,7 @@ func hasLauncherManagerKey(values map[string]string, key string) bool {
 	return ok
 }
 
-func (a *app) launcherManagerInspect(meta launcherManaged) (launcherManagerState, error) {
+func (a *app) launcherManagerInspect(meta launcherManaged, recoveringActive bool) (launcherManagerState, error) {
 	raw, err := a.launcherManager("show", filepath.Base(meta.UnitPath), "--property=LoadState,ActiveState,SubState,UnitFileState,FragmentPath,DropInPaths,ExecStart")
 	if err != nil {
 		return launcherManagerState{}, err
@@ -84,7 +84,11 @@ func (a *app) launcherManagerInspect(meta launcherManaged) (launcherManagerState
 	if values["LoadState"] != "loaded" || state.Fragment != meta.UnitPath || state.Dropins != "" {
 		return state, errors.New("service fragment changed or has drop-ins; review launcher unit")
 	}
-	if (state.Active != "active" || values["SubState"] != "running") && (state.Active != "inactive" || values["SubState"] != "dead") {
+	// A failed start may have stopped the old process. Only the caller's
+	// validated durable previously-active intent authorizes retrying that state;
+	// initial inspection and final readiness never enable this exception.
+	recoveringFailed := recoveringActive && state.Active == "failed" && values["SubState"] == "failed"
+	if (state.Active != "active" || values["SubState"] != "running") && (state.Active != "inactive" || values["SubState"] != "dead") && !recoveringFailed {
 		return state, errors.New("launcher service state is uncertain; require active/running or inactive/dead")
 	}
 	if state.Enabled != "enabled" && state.Enabled != "disabled" {
@@ -721,7 +725,7 @@ func (a *app) repairLauncherArtifact(projectRoot string, artifact localArtifact)
 		if err = launcherValidateSoftware(target.Meta); err != nil {
 			return done, err
 		}
-		state, e := a.launcherManagerInspect(target.Meta)
+		state, e := a.launcherManagerInspect(target.Meta, false)
 		if e != nil {
 			return done, e
 		}
@@ -754,7 +758,10 @@ func (a *app) repairLauncherArtifact(projectRoot string, artifact localArtifact)
 			return done, err
 		}
 	}
-	state, err := a.launcherManagerInspect(meta)
+	// Identity, intent checksum, exact old/new publications and original
+	// software have been validated above. Enablement and command checks below
+	// remain mandatory before resuming even a formerly-active failed service.
+	state, err := a.launcherManagerInspect(meta, intent != nil && intent.WasActive)
 	if err != nil {
 		return done, err
 	}
@@ -766,7 +773,7 @@ func (a *app) repairLauncherArtifact(projectRoot string, artifact localArtifact)
 			return done, err
 		}
 		// Staging may take time; do not capture stale service intent.
-		again, e := a.launcherManagerInspect(meta)
+		again, e := a.launcherManagerInspect(meta, false)
 		if e != nil {
 			return done, e
 		}
@@ -833,7 +840,7 @@ func (a *app) repairLauncherArtifact(projectRoot string, artifact localArtifact)
 			return done, err
 		}
 	}
-	final, err := a.launcherManagerInspect(target.Meta)
+	final, err := a.launcherManagerInspect(target.Meta, false)
 	if err != nil {
 		return done, err
 	}

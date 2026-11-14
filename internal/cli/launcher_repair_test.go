@@ -77,14 +77,14 @@ case "$2" in
   if [ -f "$state/uncertain" ]; then exit 1; fi
   active=$(/bin/cat "$state/active")
   printf 'LoadState=loaded\nActiveState=%%s\n' "$active"
-  if [ "$active" = active ]; then echo SubState=running; else echo SubState=dead; fi
+  if [ "$active" = active ]; then echo SubState=running; elif [ "$active" = failed ]; then echo SubState=failed; else echo SubState=dead; fi
   printf 'UnitFileState=%%s\nFragmentPath=%%s\nDropInPaths=%%s\n' "$(/bin/cat "$state/enabled")" "$(/bin/cat "$state/fragment")" "$(/bin/cat "$state/dropins")"
   command=$(/bin/sed -n 's/^ExecStart=//p' "$unit" | /bin/sed 's/"//g')
   node=${command%%%% *}
   printf 'ExecStart={ path=%%s ; argv[]=%%s ; ignore_errors=no ; }\n' "$node" "$command"
   ;;
  daemon-reload) if [ -f "$state/fail-reload" ]; then exit 1; fi ;;
- restart) if [ -f "$state/fail-restart" ]; then exit 1; fi; printf active > "$state/active" ;;
+ restart) if [ -f "$state/fail-restart" ]; then printf failed > "$state/active"; exit 1; fi; printf active > "$state/active" ;;
  *) exit 1 ;;
 esac
 `, shellLauncherTestQuote(state), shellLauncherTestQuote(f.paths.Unit), shellLauncherTestQuote(f.paths.Manifest), shellLauncherTestQuote(log))
@@ -660,5 +660,82 @@ func TestLauncherManagedRepairExplicitBundledSource(t *testing.T) {
 	}
 	if _, err := a.repairLauncherArtifact(project, art); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A real restart can stop the old process and leave failed/failed. Retrying
+// must use the validated original active intent, without an external reset.
+func TestLauncherManagedRepairResumesFailedRestart(t *testing.T) {
+	_, a, project, art, state := launcherRepairFixture(t, true)
+	before := launcherTestRead(t, art.Path)
+	if err := os.WriteFile(filepath.Join(state, "fail-restart"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.repairLauncherArtifact(project, art); err == nil {
+		t.Fatal("failed restart advanced repair")
+	}
+	if got := string(launcherTestRead(t, filepath.Join(state, "active"))); got != "failed" {
+		t.Fatalf("restart fixture did not enter failed state: %s", got)
+	}
+	if !bytes.Equal(before, launcherTestRead(t, art.Path)) {
+		t.Fatal("failed restart advanced metadata")
+	}
+	if err := os.Remove(filepath.Join(state, "fail-restart")); err != nil {
+		t.Fatal(err)
+	}
+	done, err := a.repairLauncherArtifact(project, art)
+	if err != nil {
+		t.Fatalf("validated failed/failed restart could not resume: %v", err)
+	}
+	if done.Hash == art.Hash || string(launcherTestRead(t, filepath.Join(state, "active"))) != "active" {
+		t.Fatal("failed restart did not recover original active intent")
+	}
+}
+
+func TestLauncherManagedRepairRefusesUnrelatedFailedState(t *testing.T) {
+	for _, scenario := range []string{"no-intent", "originally-stopped", "changed-enable", "dropins", "fragment", "publication"} {
+		t.Run(scenario, func(t *testing.T) {
+			f, a, project, art, state := launcherRepairFixture(t, scenario != "originally-stopped")
+			if scenario != "no-intent" {
+				if err := os.WriteFile(filepath.Join(state, "fail-reload"), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := a.repairLauncherArtifact(project, art); err == nil {
+					t.Fatal("fixture did not leave pending repair")
+				}
+				if err := os.Remove(filepath.Join(state, "fail-reload")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(filepath.Join(state, "active"), []byte("failed"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			switch scenario {
+			case "changed-enable":
+				os.WriteFile(filepath.Join(state, "enabled"), []byte("enabled"), 0o600)
+			case "dropins":
+				os.WriteFile(filepath.Join(state, "dropins"), []byte("/custom.conf"), 0o600)
+			case "fragment":
+				os.WriteFile(filepath.Join(state, "fragment"), []byte("/custom.service"), 0o600)
+			case "publication":
+				os.WriteFile(f.paths.Unit, []byte("custom unit after failed startup\n"), 0o600)
+			}
+			unit := launcherTestRead(t, f.paths.Unit)
+			manifest := launcherTestRead(t, f.paths.Manifest)
+			meta := launcherTestRead(t, art.Path)
+			if err := os.WriteFile(filepath.Join(state, "commands"), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := a.repairLauncherArtifact(project, art); err == nil {
+				t.Fatal("accepted unrelated or drifted failed state")
+			}
+			if !bytes.Equal(unit, launcherTestRead(t, f.paths.Unit)) || !bytes.Equal(manifest, launcherTestRead(t, f.paths.Manifest)) || !bytes.Equal(meta, launcherTestRead(t, art.Path)) {
+				t.Fatal("failed-state refusal changed publications")
+			}
+			log := string(launcherTestRead(t, filepath.Join(state, "commands")))
+			if strings.Contains(log, "restart") || strings.Contains(log, "daemon-reload") {
+				t.Fatalf("unrelated failed state triggered manager changes: %s", log)
+			}
+		})
 	}
 }
