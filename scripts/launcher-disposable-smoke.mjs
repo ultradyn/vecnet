@@ -24,6 +24,14 @@ export async function nativeListenerReady(path) {
   check(socket.isSocket() && socket.uid === process.geteuid() && parent.isDirectory() && parent.uid === process.geteuid() && (parent.mode & 0o7777) === 0o700, 'native listener requires an owned private socket');
   return true;
 }
+export async function prepareNativeRendezvous(root, home) {
+  const directory = join(home, '.codex/app-server-control');
+  check(home === join(root, 'home'), 'private native rendezvous HOME mismatch');
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const info = await lstat(directory);
+  check(info.isDirectory() && info.uid === process.geteuid() && (info.mode & 0o7777) === 0o700 && await realpath(directory) === directory, 'private native rendezvous directory required');
+  await symlink(join(root, 'runtime/native.sock'), join(directory, 'app-server-control.sock'));
+}
 async function stamp(pid) {
   try { const raw = await readFile(`/proc/${pid}/stat`, 'utf8'), f = raw.slice(raw.lastIndexOf(')') + 2).split(' '); return f[0] === 'Z' ? null : f[19]; }
   catch (e) { if (['ENOENT', 'ESRCH'].includes(e.code)) return null; throw e; }
@@ -100,10 +108,9 @@ export async function runDisposableScenario({ source, cli, demo, backend = 'code
       await privateSeed(nativeSeed, join(env.CODEX_HOME, 'config.toml'));
       const executable = '/home/xertrov/.codex/packages/app-server-daemon/releases/0.166.0-x86_64-unknown-linux-musl/bin/codex';
       approved.native = { executable, executable_sha256: await hash(executable), version: '0.166.0' };
+      await prepareNativeRendezvous(root, env.HOME);
       listener = await ownedChild(executable, ['app-server', '--listen', 'unix://' + join(root, 'runtime/native.sock')], env, root, 'native', journal);
       listener.child.unref(); // Failure retains the detached listener without trapping this controller.
-      await mkdir(join(env.CODEX_HOME, 'app-server-control'), { mode: 0o700 });
-      await symlink(join(root, 'runtime/native.sock'), join(env.CODEX_HOME, 'app-server-control/app-server-control.sock'));
       let ready = false;
       for (let i = 0; i < 200; i++) { try { ready = await nativeListenerReady(join(root, 'runtime/native.sock')); } catch (e) { if (e.code !== 'ENOENT') throw e; } if (ready) break; check(await stamp(listener.owner.pid) === listener.owner.start, 'native listener exited'); await sleep(50); }
       check(ready, 'native listener socket unavailable');

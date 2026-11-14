@@ -99,3 +99,19 @@ test('native listener readiness accepts Codex owned private symlink publication 
  await chmod(join(root,'socket'),0o755);
  await assert.rejects(nativeListenerReady(link),/private.*socket/);
 });
+
+
+test('native rendezvous preparation accepts an already initialized private directory and refuses a public one', async t => {
+ const {prepareNativeRendezvous}=await import('./launcher-disposable-smoke.mjs');
+ const {mkdtemp,mkdir,chmod,readlink,rm}=await import('node:fs/promises');
+ const {tmpdir}=await import('node:os');const {join}=await import('node:path');
+ const root=await mkdtemp(join(tmpdir(),'native-rendezvous-')),home=join(root,'home');
+ t.after(()=>rm(root,{recursive:true,force:true}));
+ const dir=join(home,'.codex/app-server-control');
+ await mkdir(dir,{recursive:true,mode:0o700});
+ await prepareNativeRendezvous(root,home);
+ assert.equal(await readlink(join(dir,'app-server-control.sock')),join(root,'runtime/native.sock'));
+ await rm(join(dir,'app-server-control.sock'));
+ await chmod(dir,0o755);
+ await assert.rejects(prepareNativeRendezvous(root,home),/private.*rendezvous/);
+});
