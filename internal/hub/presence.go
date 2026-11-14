@@ -85,7 +85,7 @@ func (h *Hub) SetPresence(ctx context.Context, c auth.Caller, asPeer string, p P
 		if err != nil {
 			return err
 		}
-		snd, err := resolveSender(ctx, tx, c, asPeer)
+		snd, err := h.resolveSender(ctx, tx, c, asPeer)
 		if err != nil {
 			return err
 		}

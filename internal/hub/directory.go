@@ -258,6 +258,14 @@ func (h *Hub) TouchReachability(ctx context.Context, peerID, value string) {
 		slog.Error("hub: bad reachability observation", "peer", peerID, "value", value)
 		return
 	}
+	// Persist activity before waiting on reachMu. The idle sweep holds that
+	// mutex while waiting for its writer transaction, so a committed request
+	// observation must not be stranded behind the display-state lock.
+	if value == "reachable" || value == "connected" {
+		if _, err := h.DB.ExecContext(ctx, `UPDATE peers SET last_seen=? WHERE peer_id=?`, h.nowStr(), peerID); err != nil {
+			slog.Error("hub: observe inbound activity", "peer", peerID, "err", err)
+		}
+	}
 	via := "call"
 	switch value {
 	case "unreachable":

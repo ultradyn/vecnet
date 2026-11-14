@@ -260,7 +260,7 @@ func (h *Hub) sendTx(ctx context.Context, tx *sql.Tx, act actor, req *envelope.S
 	} else {
 		c = *act.caller
 		var err error
-		if snd, err = resolveSender(ctx, tx, c, req.As); err != nil {
+		if snd, err = h.resolveSender(ctx, tx, c, req.As); err != nil {
 			return nil, false, nil, err
 		}
 
@@ -780,6 +780,20 @@ func (h *Hub) fanOut(ctx context.Context, tx *sql.Tx, thr *threadRow, msg *envel
 		}
 	}
 	return refs, notify, nil
+}
+
+// resolveSender records authenticated peer activity under the action's writer
+// transaction. It never takes reachMu: a later idle sweep must see committed
+// activity even if the post-commit reachability display update is delayed.
+func (h *Hub) resolveSender(ctx context.Context, tx *sql.Tx, c auth.Caller, as string) (sender, error) {
+	snd, err := resolveSender(ctx, tx, c, as)
+	if err != nil {
+		return sender{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE peers SET last_seen=? WHERE peer_id=?`, h.nowStr(), snd.peer); err != nil {
+		return sender{}, fmt.Errorf("hub: observe peer action: %w", err)
+	}
+	return snd, nil
 }
 
 // resolveSender derives the sending peer from the credential and `as`

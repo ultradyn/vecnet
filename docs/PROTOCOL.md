@@ -1890,7 +1890,17 @@ hub-observed `last_seen`, `enrolled_at`, or `unarchived_at` is strictly older th
 `now - agents.auto_archive_after`. Missing times are ignored; no known time or
 a malformed time is conservatively left alone. Peer-supplied `presence_at` is
 not an observation and is deliberately excluded, so future reports cannot pin
-agents indefinitely. Stream/activity observation is serialized with eligibility.
+agents indefinitely. `enrolled_at` remains the peer-add/provisioning time, not
+invite redemption time. Successful enrol-token and OAuth link redemption record
+hub `last_seen` in the redemption transaction without changing reachability.
+Authorized peer actions (including principal-as-peer sends, presence, reactions,
+groups and avatars) likewise record hub `last_seen` inside their writer
+transaction, and accepted delivery pushes record it with their result. Request
+middleware records activity before waiting on the reachability display lock.
+The idle sweep rechecks persisted activity in its own IMMEDIATE transaction:
+an observation/action committed before that transaction protects the peer;
+a sweep committed first wins. No action takes the stream mutex while holding
+the writer transaction; stream membership remains serialized with eligibility.
 The exact manual archive effects (credential, OAuth token, enrol-token and
 link-code revocation, directory removal and notification) run in the same
 transaction. Each archival audits `peer_archive`, actor `hub`, detail

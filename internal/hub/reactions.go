@@ -93,7 +93,7 @@ func (h *Hub) reactTx(ctx context.Context, tx *sql.Tx, c auth.Caller, req envelo
 	if err != nil {
 		return nil, nil, err
 	}
-	snd, err := resolveSender(ctx, tx, c, req.As)
+	snd, err := h.resolveSender(ctx, tx, c, req.As)
 	if err != nil {
 		return nil, nil, err
 	}

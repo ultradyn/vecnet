@@ -297,6 +297,11 @@ func (r *Resolver) EnrolTx(ctx context.Context, tx *sql.Tx, token string, claim 
 	if secret, err = insertCredential(ctx, tx, "peer", peerID, now); err != nil {
 		return "", "", err
 	}
+	// enrolled_at is invitation/provisioning time, not redemption time. Preserve
+	// it for provisioning limits while recording successful hub-observed use.
+	if _, err := tx.ExecContext(ctx, `UPDATE peers SET last_seen=? WHERE peer_id=?`, now, peerID); err != nil {
+		return "", "", fmt.Errorf("auth: observe enrolment: %w", err)
+	}
 	if err := audit.Record(ctx, tx, peerID, "enrol", []string{peerID}, detail); err != nil {
 		return "", "", err
 	}
