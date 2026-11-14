@@ -66,7 +66,9 @@ func TestLocalRegistryRejectsUnsafeStorage(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			a.ctx, _ = context.WithTimeout(context.Background(), 250*time.Millisecond)
+			var cancel context.CancelFunc
+			a.ctx, cancel = context.WithTimeout(context.Background(), 250*time.Millisecond)
+			t.Cleanup(cancel)
 			// Read-only inspection never opens the lock; mutations must reject unsafe locks.
 			if damage != "lock-link" && damage != "lock-mode" {
 				if _, err := a.localProjects(); err == nil {
