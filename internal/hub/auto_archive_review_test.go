@@ -158,7 +158,7 @@ func TestReviewPrincipalPresenceRacesIdleSweep(t *testing.T) {
 		close(release)
 		t.Fatal("sweep never queued")
 	}
-	close(release) // sweep owns reachMu; it takes the DB writer before the postcommit touch.
+	close(release) // the sweep is queued for the DB writer; presence recorded last_seen in its own tx.
 	if err := <-presenceDone; err != nil {
 		t.Fatal(err)
 	}

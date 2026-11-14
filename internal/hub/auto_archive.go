@@ -11,10 +11,21 @@ import (
 
 // ArchiveIdlePeers revokes at most 200 idle peers per run. Only hub-observed
 // times count: presence_at is peer supplied and may lie arbitrarily in the future.
-// reachMu precedes the writer transaction, matching touchLocked/StreamOpened, so
-// no open stream or new observed activity can race the eligibility check.
+// Open streams are snapshotted under reachMu, which is then released before the
+// writer transaction: authenticated requests never wait on reachMu for the whole
+// sweep, and a reachability touch (last_seen) committed before the sweep's
+// IMMEDIATE transaction is seen by its eligibility read. Authorized actions record
+// last_seen inside their own writer transaction (resolveSender, enrolment, link
+// redemption, accepted pushes), so they are ordered with the sweep by SQLite.
 func (h *Hub) ArchiveIdlePeers(ctx context.Context, now time.Time) (int, error) {
 	h.reachMu.Lock()
+	streaming := make(map[string]bool, len(h.streams))
+	for id, n := range h.streams {
+		if n > 0 {
+			streaming[id] = true
+		}
+	}
+	h.reachMu.Unlock()
 	var archived []string
 	err := h.DB.Tx(ctx, func(tx *sql.Tx) error {
 		snapshot, err := h.Preferences.LoadSnapshot(ctx, tx)
@@ -46,7 +57,7 @@ func (h *Hub) ArchiveIdlePeers(ctx context.Context, now time.Time) (int, error) 
 				rows.Close()
 				return err
 			}
-			if h.streams[id] > 0 {
+			if streaming[id] {
 				continue
 			}
 			var last time.Time
@@ -88,7 +99,6 @@ func (h *Hub) ArchiveIdlePeers(ctx context.Context, now time.Time) (int, error) 
 		}
 		return nil
 	})
-	h.reachMu.Unlock()
 	if err != nil {
 		return 0, err
 	}
