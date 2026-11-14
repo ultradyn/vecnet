@@ -243,7 +243,7 @@ func assertPrefsLastRow(t *testing.T, banner bool) {
 	f.prefs = prefsRegistrySnapshot(t)
 	m, p := prefsOpen(t, f)
 	rows := prefRows(m.Data.Prefs)
-	if len(rows) != 22 {
+	if len(rows) != len(prefs.Definitions()) {
 		t.Fatalf("registry rows = %d", len(rows))
 	}
 	for i := 0; i < len(rows); i++ {
