@@ -33,6 +33,7 @@ func readCodexOptOuts(authority string) (codexOptOuts, error) {
 	if err := validateCodexStateJSON(raw); err != nil {
 		return file, err
 	}
+	file = codexOptOuts{} // existing files must supply both version and disabled
 	decoder := json.NewDecoder(strings.NewReader(string(raw)))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&file); err != nil {

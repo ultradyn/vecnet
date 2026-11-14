@@ -104,7 +104,7 @@ func TestCodexOptOutCorruptionRefusesReacquisition(t *testing.T) {
 	f := newBindFixture(t)
 	f.ok("--net", "p", "unbind")
 	before := f.raw()
-	for _, raw := range []string{`{"version":1,"disabled":null}`, `{"version":1,"disabled":[],"Disabled":[]}`, `{"version":1,"disabled":[],"future":true}`} {
+	for _, raw := range []string{`{}`, `{"version":1}`, `{"version":1,"disabled":null}`, `{"version":1,"disabled":[],"Disabled":[]}`, `{"version":1,"disabled":[],"future":true}`} {
 		if err := os.WriteFile(f.path+".optout", []byte(raw), 0600); err != nil {
 			t.Fatal(err)
 		}
