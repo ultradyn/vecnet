@@ -936,7 +936,7 @@ func TestHookSessionStartAdmission(t *testing.T) {
 					t.Fatalf("declared prompt failed to claim: %q polls=%d", prompt, polls.Load())
 				}
 				// Leave a new delivery for the already admitted SessionStart.
-				seedSession(t, path, func(s *hookState) { s.Shown = nil; s.PollCursor = "e1.0" })
+				seedSession(t, path, func(s *hookState) { s.Shown = nil; s.Displayed = nil; s.PollCursor = "e1.0" })
 			} else if tc.existing && (prompt != "" || polls.Load() != 0) {
 				t.Fatalf("automatic prompt claimed too early: %q polls=%d", prompt, polls.Load())
 			}

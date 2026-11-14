@@ -525,13 +525,22 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 	var output string
 	var claimed []envelope.Event
 	var processed string
+	ackSafe := false
 	// Publish the complete output before the transaction commits. An error
 	// (including expiry) aborts the commit, so the next run shows it again.
-	finish := func() error {
+	finish := func(s *hookState) error {
 		if output == "" {
 			return ctx.Err()
 		}
-		return publish(hookOutput(event, output))
+		if err := publish(hookOutput(event, output)); err != nil {
+			return err
+		}
+		if s.Caller != "" {
+			for _, ev := range claimed {
+				s.recordDisplay(eventFieldsOf(ev).deliveryID)
+			}
+		}
+		return nil
 	}
 	poll := func(after string) (pollBody, error) {
 		body, e := a.poll(c, after, 0)
@@ -578,7 +587,7 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 			}
 			s.PollCursor = head.NextCursor
 			// First-run backlog is never acknowledged, even with --auto-ack.
-			return finish()
+			return finish(s)
 		}
 		body, e := poll(s.PollCursor)
 		if hookPurged(e) {
@@ -659,12 +668,15 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 		if len(claimed) > 0 {
 			a.rememberEvents(ch, claimed)
 		}
-		return finish()
+		// Cursors are opaque. Without exact proof for every outstanding claim,
+		// no cumulative acknowledgment is safe, even for later printed events.
+		ackSafe = len(s.Claims) == 0
+		return finish(s)
 	})
 	if e != nil {
 		return hookResult{}
 	}
-	if o.has("auto-ack") {
+	if o.has("auto-ack") && ackSafe {
 		if processed != "" && ctx.Err() == nil {
 			_ = a.ack(c, processed)
 		}

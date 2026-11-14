@@ -76,6 +76,37 @@ alone. Re-run protocol and model-context canaries first.
 - Each context entry is capped at 1000 bytes, eight per batch. `hold` never rides
   with pushed messages. Claims, accepted sends and receipts do not auto-ack.
 
+### Opt-out and display proof
+
+`vecnet --net P codex unbind` records a durable opt-out for the canonical config,
+profile and `--as` identity, including when there is no current binding. Saved
+enrollment repair checks it before runtime activation and again under the binding
+lock before enrollment can commit. Explicit addressed `codex bind` or `codex setup`
+reenables only that target. Repair and ordinary use never clear opt-out, acquire
+an ordinary existing profile, transfer ownership or renew expiry implicitly.
+An unresolved send still blocks unbind until exact-owner recovery finishes.
+
+Shared state distinguishes reservations (`shown` and `claims`) from successful
+display (`displayed`). Complete hook/monitor output or an exact owner-bound
+receipt can publish display proof. RPC acceptance alone cannot. Receipt settlement
+validates the original client key and complete delivery batch, retires only its
+matching claims/replay, and commits proof before deleting recovery evidence.
+
+`watch --for-monitor` serializes complete output and proof with other shared-state
+writers. A pending claim, busy/corrupt state or unverified identity closes the
+transport at that event and retains one bounded envelope. Local retries use
+1/2/4/8/15-second delays without releasing claims or passing the blocked cursor.
+Receipt proof completes silently; a safe unsent release permits one print.
+Explicit new `--since` replay remains deliberate. Failed/short output, or failure
+to persist proof after output, stops the watch before acknowledgment or retry.
+All watch modes acknowledge only completely handled events; plain/JSON watch
+does not publish monitor proof. Output and filesystem writes cannot form one
+crash-atomic transaction, so a crash between them can still cause replay.
+
+The private opt-out sidecar shares the ownership lock and leaves the strict
+cross-language ownership schema unchanged. Codex lifecycle hooks remain
+signal-only; none of these guarantees reintroduces lifecycle peer content.
+
 ## Operations and validation
 
 The launcher environment locates the per-user authority and `VECNET_BIN` selects
