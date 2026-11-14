@@ -1278,7 +1278,7 @@ func (a *app) cmdInbox(args []string) error {
 			return usageErr("inbox: --limit must be a positive whole number")
 		}
 	}
-	c, _, ch, err := a.connect()
+	c, name, ch, err := a.connect()
 	if err != nil {
 		return err
 	}
@@ -1341,10 +1341,8 @@ func (a *app) cmdInbox(args []string) error {
 			fmt.Fprintln(&output, line)
 		}
 	}
-	if n, err := a.stdout.Write(output.Bytes()); err != nil {
+	if err := a.displayInbox(c, name, evs, output.Bytes()); err != nil {
 		return err
-	} else if n != output.Len() {
-		return io.ErrShortWrite
 	}
 	if o.has("ack") && len(evs) > 0 {
 		if err := a.ack(c, next); err != nil {
