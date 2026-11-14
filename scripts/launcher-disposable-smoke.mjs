@@ -2,22 +2,35 @@
 // real systemctl, daemon manager, user profile or inherited HOME mutation.
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmod, copyFile, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, symlink, writeFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { chmod, copyFile, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, stat, symlink, writeFile } from 'node:fs/promises';
+import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createSmokeJournal, runHost, smokeSnapshotDigest } from './native-launcher-smoke-support.mjs';
 const check = (ok, why) => { if (!ok) throw new Error(why); };
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const hash = async path => createHash('sha256').update(await readFile(path)).digest('hex');
 export function privateSmokeEnvironment(parent, root) {
-  const env = Object.fromEntries(Object.entries(parent).filter(([k]) => !/^(CODEX_|VECNET_|XDG_|GIT_|BASH_ENV$|ENV$|NODE_OPTIONS$|LD_PRELOAD$|LD_LIBRARY_PATH$)/.test(k)));
+  const env = Object.fromEntries(Object.entries(parent).filter(([k]) => !/^(CODEX_|VECNET_|XDG_|GIT_|CLAUDE_|BASH_ENV$|ENV$|NODE_OPTIONS$|LD_PRELOAD$|LD_LIBRARY_PATH$)/.test(k)));
   return Object.assign(env, { HOME: join(root, 'home'), CODEX_HOME: join(root, 'home/.codex'),
     XDG_CONFIG_HOME: join(root, 'home/.config'), XDG_DATA_HOME: join(root, 'home/.local/share'),
     XDG_STATE_HOME: join(root, 'home/.local/state'), XDG_CACHE_HOME: join(root, 'home/.cache'),
-    XDG_RUNTIME_DIR: join(root, 'runtime'), TMPDIR: join(root, 'tmp'),
+    XDG_RUNTIME_DIR: join(root, 'runtime'), TMPDIR: join(root, 'tmp'), CLAUDE_AGENT_LOGS: join(root, 'logs/acp'),
     PATH: join(root, 'bin') + ':' + (parent.PATH || '/usr/bin:/bin'), VECNET_LOCAL_MAINTENANCE: '0',
     PLAYWRIGHT_MODULE: parent.PLAYWRIGHT_MODULE || join(parent.HOME, '.llm-general/skills/headless-browser-screenshots/node_modules/playwright/index.mjs'),
     PLAYWRIGHT_BROWSERS_PATH: parent.PLAYWRIGHT_BROWSERS_PATH || join(parent.HOME, '.cache/ms-playwright') });
+}
+export async function nativeListenerReady(path) {
+  const target = await realpath(path), socket = await stat(target), parent = await stat(dirname(target));
+  check(socket.isSocket() && socket.uid === process.geteuid() && parent.isDirectory() && parent.uid === process.geteuid() && (parent.mode & 0o7777) === 0o700, 'native listener requires an owned private socket');
+  return true;
+}
+export async function prepareNativeRendezvous(root, home) {
+  const directory = join(home, '.codex/app-server-control');
+  check(home === join(root, 'home'), 'private native rendezvous HOME mismatch');
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const info = await lstat(directory);
+  check(info.isDirectory() && info.uid === process.geteuid() && (info.mode & 0o7777) === 0o700 && await realpath(directory) === directory, 'private native rendezvous directory required');
+  await symlink(join(root, 'runtime/native.sock'), join(directory, 'app-server-control.sock'));
 }
 async function stamp(pid) {
   try { const raw = await readFile(`/proc/${pid}/stat`, 'utf8'), f = raw.slice(raw.lastIndexOf(')') + 2).split(' '); return f[0] === 'Z' ? null : f[19]; }
@@ -31,19 +44,27 @@ async function identity(pid, argv, home) {
     (await lstat(`/proc/${pid}`)).uid === process.geteuid() && await realpath(`/proc/${pid}/exe`) === await realpath(argv[0]), 'child ownership mismatch');
   return { pid, start, argv, home };
 }
-async function ownedChild(command, args, env, root, name, journal) {
+export async function ownedChild(command, args, env, root, name, journal, { identify = identity } = {}) {
   journal.update({ [name]: { phase: 'starting', argv: [command, ...args], home: env.HOME } });
   const log = await open(join(root, 'logs', name + '.log'), 'wx', 0o600);
+  let child;
   try {
-    const child = spawn(command, args, { cwd: root, env, detached: true, stdio: ['ignore', log.fd, log.fd] });
+   try {
+    child = spawn(command, args, { cwd: root, env, detached: true, stdio: ['ignore', log.fd, log.fd] });
     // Register completion before waiting for spawn: an immediate exit cannot be lost.
     const done = new Promise((yes, no) => { child.once('error', no); child.once('close', (code, signal) => yes({ code, signal })); });
     done.catch(() => {}); // Spawn failure is also consumed by the explicit spawn gate.
     await new Promise((yes, no) => { child.once('spawn', yes); child.once('error', no); });
-    const owner = await identity(child.pid, [command, ...args], env.HOME);
+    const owner = await identify(child.pid, [command, ...args], env.HOME);
     journal.update({ [name]: { phase: 'running', ...owner } });
     return { child, done, owner };
-  } finally { await log.close(); }
+   } finally { await log.close(); }
+  } catch (error) {
+    // A detached child still holds Node alive until unref. Retain the process
+    // and durable starting intent; failure supplies no authority to signal it.
+    child?.unref();
+    throw error;
+  }
 }
 async function stopOwned(handle, journal, name) {
   const current = await identity(handle.owner.pid, handle.owner.argv, handle.owner.home);
@@ -87,12 +108,11 @@ export async function runDisposableScenario({ source, cli, demo, backend = 'code
       await privateSeed(nativeSeed, join(env.CODEX_HOME, 'config.toml'));
       const executable = '/home/xertrov/.codex/packages/app-server-daemon/releases/0.166.0-x86_64-unknown-linux-musl/bin/codex';
       approved.native = { executable, executable_sha256: await hash(executable), version: '0.166.0' };
+      await prepareNativeRendezvous(root, env.HOME);
       listener = await ownedChild(executable, ['app-server', '--listen', 'unix://' + join(root, 'runtime/native.sock')], env, root, 'native', journal);
       listener.child.unref(); // Failure retains the detached listener without trapping this controller.
-      await mkdir(join(env.CODEX_HOME, 'app-server-control'), { mode: 0o700 });
-      await symlink(join(root, 'runtime/native.sock'), join(env.CODEX_HOME, 'app-server-control/app-server-control.sock'));
       let ready = false;
-      for (let i = 0; i < 200; i++) { try { ready = (await lstat(join(root, 'runtime/native.sock'))).isSocket(); } catch (e) { if (e.code !== 'ENOENT') throw e; } if (ready) break; check(await stamp(listener.owner.pid) === listener.owner.start, 'native listener exited'); await sleep(50); }
+      for (let i = 0; i < 200; i++) { try { ready = await nativeListenerReady(join(root, 'runtime/native.sock')); } catch (e) { if (e.code !== 'ENOENT') throw e; } if (ready) break; check(await stamp(listener.owner.pid) === listener.owner.start, 'native listener exited'); await sleep(50); }
       check(ready, 'native listener socket unavailable');
     } else {
       const st = await lstat(acpSettings); check(st.isFile() && !st.isSymbolicLink() && st.uid === process.geteuid() && !(st.mode & 0o077), 'ACP settings not private');
