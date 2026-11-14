@@ -256,15 +256,20 @@ func (f stateFile) updateMode(ctx context.Context, fn func(*hookState) error, st
 		}
 		for _, key := range []string{"replay", "claims"} {
 			if value, ok := current[key]; ok {
-				value, err = preserveStateRefMetadata(prior[key], value, key == "claims")
+				value, err = preserveStateRefMetadata(stateField(prior, key), value, key == "claims")
 				if err != nil {
 					return err
 				}
 				current[key] = value
 			}
 		}
-		for _, key := range []string{"hub", "caller", "as", "cred", "app_cursor", "replay", "claims", "poll_cursor", "shown", "displayed", "last_post_tool_poll"} {
-			delete(prior, key)
+		for key := range prior {
+			for _, known := range []string{"hub", "caller", "as", "cred", "app_cursor", "replay", "claims", "poll_cursor", "shown", "displayed", "last_post_tool_poll"} {
+				if strings.EqualFold(key, known) {
+					delete(prior, key)
+					break
+				}
+			}
 		}
 		for key, value := range current {
 			prior[key] = value
@@ -275,6 +280,15 @@ func (f stateFile) updateMode(ctx context.Context, fn func(*hookState) error, st
 		}
 	}
 	return write(f.path, raw)
+}
+
+func stateField(row map[string]json.RawMessage, name string) json.RawMessage {
+	for key, value := range row {
+		if strings.EqualFold(key, name) {
+			return value
+		}
+	}
+	return nil
 }
 
 // Unknown reference metadata follows only the exact existing reference. A new
@@ -290,11 +304,14 @@ func preserveStateRefMetadata(before, after json.RawMessage, claims bool) (json.
 		return nil, err
 	}
 	identity := func(row map[string]json.RawMessage) string {
-		key := string(row["ID"])
+		var id, generation, claim string
+		_ = json.Unmarshal(stateField(row, "ID"), &id)
 		if claims {
-			key += "\n" + string(row["Generation"]) + "\n" + string(row["Claim"])
+			_ = json.Unmarshal(stateField(row, "Generation"), &generation)
+			_ = json.Unmarshal(stateField(row, "Claim"), &claim)
 		}
-		return key
+		key, _ := json.Marshal([3]string{id, generation, claim})
+		return string(key)
 	}
 	indexed := map[string]map[string]json.RawMessage{}
 	for _, row := range old {
@@ -303,13 +320,19 @@ func preserveStateRefMetadata(before, after json.RawMessage, claims bool) (json.
 	for _, row := range next {
 		prior := indexed[identity(row)]
 		for key, value := range prior {
-			switch key {
-			case "ID", "After", "Priority", "Order":
-				continue
-			case "Generation", "Claim", "Accepted":
-				if claims {
-					continue
+			known := false
+			fields := []string{"ID", "After", "Priority", "Order"}
+			if claims {
+				fields = append(fields, "Generation", "Claim", "Accepted")
+			}
+			for _, field := range fields {
+				if strings.EqualFold(key, field) {
+					known = true
+					break
 				}
+			}
+			if known {
+				continue
 			}
 			if _, exists := row[key]; !exists {
 				row[key] = value
