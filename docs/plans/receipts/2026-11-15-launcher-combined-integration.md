@@ -51,7 +51,16 @@ Concurrent additions/removal/adoption and helper failures retain current evidenc
 Full Go repository gate PASS: 40 packages with tests, no package/test failures;
 CLI136.912s, runtime1.180s, HTTP44.981s, hub109.476s. Build-box command exited0
 in277.3s. Exact production bytes equal candidate76cb3bf9; subsequent runner
-changes affect acceptance scripts only. Disposable execution results follow.
+changes affect acceptance scripts only. Actual native acceptance passed in all three workspace modes (worktree,
+project-root and temp), including model replies, exact retry, restart continuity,
+follow-up, cancellation, teardown and verified listener stop. ACP preflight found
+no self-contained provider credential and dispatched no model; live ACP execution
+remains unverified. The separate `2026-11-15-launcher-disposable-acceptance.md`
+records exact receipt hashes, source/binary identities and proof boundaries.
+The final private runner/adapter controls passed 21/21 after observed regressions;
+all source fixes were independently reviewed. Earlier pre-model failure listeners
+were stopped through explicit owner-directed exact-identity checks; their evidence
+and roots remain preserved. No real user services or backlog were modified.
 
 ## Recovery inventory and limits
 
