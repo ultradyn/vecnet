@@ -334,6 +334,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, out io.Writer) err
 	dir := fs.String("data-dir", "", "demo data directory (default: temporary)")
 	ui := fs.String("dev-ui-dir", "", "UI asset directory")
 	scale := fs.Bool("scale", false, "include large threads")
+	many := fs.Bool("many", false, "include 310 threads and 63 extra peers")
 	reset := fs.Bool("reset", false, "reset this demo's saved data")
 	exitOnEOF := fs.Bool("exit-on-stdin-eof", false, "shut down when stdin closes")
 	prefFlag := prefFlags{}
@@ -426,7 +427,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, out io.Writer) err
 		if err != nil {
 			return err
 		}
-		s, err := opseed.Seed(ctx, h, caller, opseed.Options{Scale: *scale})
+		s, err := opseed.Seed(ctx, h, caller, opseed.Options{Scale: *scale, Many: *many})
 		if err != nil {
 			return err
 		}

@@ -15,7 +15,7 @@ import (
 	"github.com/XertroV/vecnet/internal/ids"
 )
 
-type Options struct{ Scale bool }
+type Options struct{ Scale, Many bool }
 type Scenario struct {
 	OperatorPeer                          string
 	Peers                                 map[string]string
@@ -72,6 +72,11 @@ func Seed(ctx context.Context, h *hub.Hub, opCaller auth.Caller, o Options) (Sce
 	}
 	if o.Scale {
 		if err := b.scale(); err != nil {
+			return Scenario{}, err
+		}
+	}
+	if o.Many {
+		if err := b.many(); err != nil {
 			return Scenario{}, err
 		}
 	}
@@ -286,6 +291,40 @@ func (b *builder) scale() error {
 	}
 	for i := 0; i < 500; i++ {
 		if _, err := b.send("operator", "long", "500-message thread", fmt.Sprintf("History message %03d", i+1), nil); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// many exercises bounded operator lists without coupling this fixture to archive APIs.
+func (b *builder) many() error {
+	if _, err := b.h.DB.ExecContext(b.ctx, `UPDATE peers SET sends_per_min=2000,threads_per_hour=2000 WHERE peer_id=?`, b.s.OperatorPeer); err != nil {
+		return err
+	}
+	for i := 0; i < 63; i++ {
+		key := fmt.Sprintf("browse-%02d", i)
+		if err := b.peer(key, "session", key); err != nil {
+			return err
+		}
+	}
+	for i := 0; i < 310; i++ {
+		key := fmt.Sprintf("browse-thread-%03d", i)
+		if _, err := b.send("operator", key, fmt.Sprintf("Browse project %03d", i), "Fixture conversation for bounded browsing.", func(r *envelope.SendRequest) {
+			r.Recipients = []string{b.s.Peers[fmt.Sprintf("browse-%02d", i%63)]}
+		}); err != nil {
+			return err
+		}
+	}
+	for i := 0; i < 10; i++ {
+		id := b.s.Peers[fmt.Sprintf("browse-%02d", i)]
+		if _, err := b.h.DB.ExecContext(b.ctx, `UPDATE peers SET disabled=1 WHERE peer_id=?`, id); err != nil {
+			return err
+		}
+	}
+	for i := 10; i < 20; i++ {
+		id := b.s.Peers[fmt.Sprintf("browse-%02d", i)]
+		if err := b.h.SetPeerArchived(b.ctx, id, true); err != nil {
 			return err
 		}
 	}
