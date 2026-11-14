@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { activitySnapshot, peerActivity, sparklineGeometry, bucketLabel } from '../static/sparkline-model.js';
+import { activitySnapshot, peerActivity, sparklineGeometry, bucketLabel, bucketReadout } from '../static/sparkline-model.js';
 
 const zeros = () => Array(60).fill(0);
 function stats(entries = []) {
@@ -192,4 +192,14 @@ test('bucket labels use exact half-open UTC minute intervals from hub time, not 
   assert.equal(bucketLabel(snapshot, 59).end, snapshot.window_end);
   for (const index of [-1, 60, 0.5, '0', NaN]) assert.equal(bucketLabel(snapshot, index), null);
   assert.equal(bucketLabel(null, 0), null);
+});
+
+
+test('human readout uses local minute boundaries but age follows hub time and exact UTC is retained', () => {
+ const snapshot = activitySnapshot(fixture());
+ const first = bucketReadout(snapshot, 0), last = bucketReadout(snapshot, 59);
+ assert.match(first.text, /\d\d:\d\d–\d\d:\d\d \(59 min ago\)/);
+ assert.match(last.text, /just now/);
+ assert.equal(first.label, bucketLabel(snapshot, 0).label);
+ assert.equal(bucketReadout(snapshot, 60), null);
 });

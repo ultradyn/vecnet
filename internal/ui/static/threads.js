@@ -1,5 +1,5 @@
 // Full operator thread browser; requests stay server-filtered and cursor-bounded.
-import { h, chip, peerLink } from './dom.js';
+import { h, chip, peerLink, confirmButton } from './dom.js';
 import { ago, title } from './format.js';
 import { bulkArchive, createThreadList } from './threads-model.js';
 export function mount(root, ctx) {
@@ -16,15 +16,15 @@ export function mount(root, ctx) {
  const state = h('select', { 'aria-label': 'Thread state', onchange: e => { filters.state = e.target.value; selected.clear(); reload(); } }, ['open', 'archived', 'all'].map(v => h('option', { value: v, selected: filters.state === v, text: v[0].toUpperCase() + v.slice(1) })));
  const mine = h('label', null, h('input', { type: 'checkbox', checked: filters.mine, onchange: e => { filters.mine = e.target.checked; reload(); } }), ' Only mine');
  const body = h('div', { class: 'thread-results' }), status = h('p', { role: 'status', class: 'note' });
- const archive = h('button', { class: 'btn', text: 'Archive selected', onclick: () => act([...selected], true) });
- const unarchive = h('button', { class: 'btn', text: 'Unarchive selected', onclick: () => act([...selected], false) });
+ const archive = confirmButton('Archive selected', 'Confirm archive selected', () => act([...selected], true));
+ const unarchive = confirmButton('Unarchive selected', 'Confirm unarchive selected', () => act([...selected], false));
  const all = h('input', { type: 'checkbox', 'aria-label': 'Select all loaded threads', onchange: e => { selected = e.target.checked ? new Set(list.state().rows.map(r => r.thread.thread_id)) : new Set(); render(); } });
  const more = h('button', { class: 'btn', text: 'Load more', onclick: () => list.more() });
  root.replaceChildren(h('div', { class: 'dash thread-browser' }, h('h1', { text: 'Threads' }), h('p', { class: 'lede', text: 'Browse conversations across the hub. Archiving tidies the operator view; peers can still read and post.' }), h('div', { class: 'browse-toolbar' }, search, participant, options, state, mine), h('div', { class: 'bulk-toolbar' }, h('label', null, all, ' Select loaded'), archive, unarchive), status, body, more));
- function url() { const q = new URLSearchParams(); for (const [k, v] of Object.entries(filters)) if (v && v !== 'open') q.set(k, v === true ? '1' : v); history.replaceState(null, '', '#threads' + (q.size ? '?' + q : '')); }
+ function url() { const q = new URLSearchParams(); for (const [k, v] of Object.entries(filters)) if (v && v !== 'open') q.set(k, v === true ? '1' : v); ctx.replaceRoute('#threads' + (q.size ? '?' + q : '')); }
  function reload() { if (!alive) return; selected.clear(); all.checked = false; url(); return list.load(filters); }
  async function act(ids, archived) {
-  if (busy || !ids.length || !window.confirm(`${archived ? 'Archive' : 'Unarchive'} ${ids.length} thread${ids.length === 1 ? '' : 's'}? ${archived ? 'Peers can still read and post. A new message reopens an archived thread.' : 'They will return to the open thread lists.'}`)) return;
+  if (busy || !ids.length) return;
   busy = true; failures = []; render();
   failures = await bulkArchive(ctx.api, ids, archived);
   if (!alive) return;
@@ -40,10 +40,10 @@ export function mount(root, ctx) {
    const t = r.thread, id = t.thread_id;
    return h('tr', { 'data-thread-id': id }, h('td', null, h('input', { type: 'checkbox', checked: selected.has(id), 'aria-label': 'Select ' + (t.title || id), onchange: e => { if (e.target.checked) selected.add(id); else selected.delete(id); archive.disabled = unarchive.disabled = busy || !selected.size; } })),
     h('td', null, h('a', { href: '#thread/' + id, text: title(t, ctx.me, ctx.nameOf) }), r.archived_at ? [' ', chip(r.archived_by === 'hub' ? 'archived · auto' : 'archived')] : null),
-    h('td', null, (t.participants || []).flatMap((id, i) => [i ? ', ' : '', peerLink(id, ctx.nameOf(id))])), h('td', { text: String(t.message_count || 0) }), h('td', { text: ago(r.last_message_at, ctx.store.hubNow()), title: r.last_message_at || '' }), h('td', null, h('button', { class: 'btn', disabled: busy, text: r.archived_at ? 'Unarchive' : 'Archive', onclick: () => act([id], !r.archived_at) })));
+    h('td', null, (t.participants || []).flatMap((id, i) => [i ? ', ' : '', peerLink(id, ctx.nameOf(id))])), h('td', { text: String(t.message_count || 0) }), h('td', { text: ago(r.last_message_at, ctx.store.hubNow()), title: r.last_message_at || '' }), h('td', null, confirmButton(r.archived_at ? 'Unarchive' : 'Archive', r.archived_at ? 'Confirm unarchive' : 'Confirm archive', () => act([id], !r.archived_at))));
   }))) : h('p', { class: 'none', text: v.loading ? 'Loading…' : 'No threads match. Try another title, participant or state.' }));
  }
- const off = ctx.store.onTag ? ctx.store.onTag('threads', reload) : () => {};
- list.load(filters);
+ const updates = ctx.store.resource('threads', async () => { await list.load(filters); return true; });
+ const off = updates.subscribe(() => {});
  return () => { alive = false; clearTimeout(timer); list.close(); off(); selected.clear(); };
 }

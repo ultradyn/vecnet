@@ -235,3 +235,24 @@ func TestSeedRetryBlocksFollowingDelivery(t *testing.T) {
 		t.Fatalf("following delivery did not unblock: %+v", due)
 	}
 }
+
+func TestSeedMany(t *testing.T) {
+	e := testhub.Start(t)
+	c, err := e.Hub.Auth.Resolve(context.Background(), e.OperatorSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := opseed.Seed(context.Background(), e.Hub, c, opseed.Options{Many: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Peers) < 60 || len(s.Threads) < 300 {
+		t.Fatalf("many fixture: %d peers, %d threads", len(s.Peers), len(s.Threads))
+	}
+	if count(t, e, `SELECT count(*) FROM peers WHERE disabled=1 AND archived_at IS NULL`) < 10 {
+		t.Fatal("missing disabled peers")
+	}
+	if count(t, e, `SELECT count(*) FROM peers WHERE archived_at IS NOT NULL`) < 10 {
+		t.Fatal("missing archived peers")
+	}
+}

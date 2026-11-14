@@ -1,0 +1,42 @@
+import { assert, cleanBuild, withDemo } from './lib.mjs';
+try {
+ await withDemo({ many: true }, async ({ page, shot, demo }) => {
+  await page.goto(demo.url + '/ui/#threads');
+  const rows = page.locator('.thread-results tbody tr');
+  await page.waitForFunction(() => document.querySelectorAll('.thread-results tbody tr').length === 50);
+  await page.getByRole('button', { name: 'Load more', exact: true }).click();
+  await page.waitForFunction(() => document.querySelectorAll('.thread-results tbody tr').length === 100);
+  const search = page.getByRole('searchbox', { name: 'Search thread titles' });
+  await search.fill('Browse project 030');
+  await page.waitForFunction(() => document.querySelectorAll('.thread-results tbody tr').length === 1 && document.querySelector('.thread-results').textContent.includes('Browse project 030'));
+  await page.getByRole('searchbox', { name: 'Participant', exact: true }).fill(demo.peers['browse-30'].id);
+  await page.getByRole('searchbox', { name: 'Participant', exact: true }).press('Tab');
+  await page.waitForFunction(() => document.querySelectorAll('.thread-results tbody tr').length === 1);
+  await page.getByRole('searchbox', { name: 'Participant', exact: true }).fill(demo.peers['browse-31'].id);
+  await page.getByRole('searchbox', { name: 'Participant', exact: true }).press('Tab');
+  await page.getByText('No threads match.', { exact: false }).waitFor();
+  await page.getByRole('searchbox', { name: 'Participant', exact: true }).fill('');
+  await page.getByRole('searchbox', { name: 'Participant', exact: true }).press('Tab');
+  await search.fill('Browse project 03');
+  await page.waitForFunction(() => document.querySelectorAll('.thread-results tbody tr').length === 10);
+  const names = await rows.locator('td:nth-child(2) a').allTextContents();
+  await page.getByRole('checkbox', { name: 'Select all loaded threads' }).check();
+  await page.getByRole('button', { name: 'Archive selected', exact: true }).click();
+  await page.getByRole('button', { name: 'Confirm archive selected', exact: true }).click();
+  await page.getByText('No threads match.', { exact: false }).waitFor();
+  await page.getByRole('combobox', { name: 'Thread state' }).selectOption('archived');
+  await page.waitForFunction(() => document.querySelectorAll('.thread-results tbody tr').length === 10);
+  assert(JSON.stringify(await rows.locator('td:nth-child(2) a').allTextContents()) === JSON.stringify(names), 'bulk archived rows differ');
+  await shot('threads-archived');
+  await page.getByRole('checkbox', { name: 'Select all loaded threads' }).check();
+  await page.getByRole('button', { name: 'Unarchive selected', exact: true }).click();
+  await page.getByRole('button', { name: 'Confirm unarchive selected', exact: true }).click();
+  await page.getByText('No threads match.', { exact: false }).waitFor();
+  await page.getByRole('combobox', { name: 'Thread state' }).selectOption('open');
+  await page.waitForFunction(() => document.querySelectorAll('.thread-results tbody tr').length === 10);
+  await shot('threads-dark');
+  await page.evaluate(() => { document.documentElement.dataset.theme = 'light'; }); await shot('threads-light');
+  await page.setViewportSize({ width: 390, height: 844 }); await shot('threads-phone');
+ });
+ console.log('Threads passed: cursor pages, title search, participant filter, sequential bulk archive/unarchive and state tabs; dark/light/phone');
+} finally { await cleanBuild(); }

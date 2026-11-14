@@ -106,3 +106,11 @@ export function otherThreads({ page, error, mine, me, nameOf, now, limit = OTHER
   if (!rows.length) return { state: 'empty', note: 'No other threads', rows, more };
   return { state: 'ok', note: '', rows, more };
 }
+
+
+export function disclosureOpen(storage, section) {
+ try { return storage?.getItem('vecnet.ui.sidebar.' + section) !== 'closed'; } catch { return true; }
+}
+export function saveDisclosure(storage, section, open) {
+ try { storage?.setItem('vecnet.ui.sidebar.' + section, open ? 'open' : 'closed'); } catch {}
+}

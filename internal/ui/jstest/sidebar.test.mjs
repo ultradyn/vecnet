@@ -221,3 +221,13 @@ test('Other Threads show no unread count', () => {
   assert.equal(r.unread, 0);
   assert.equal(r.unreadText, '');
 });
+
+
+test('sidebar disclosure defaults open and persists each section independently', async () => {
+ const { disclosureOpen, saveDisclosure } = await import('../static/sidebar-model.js');
+ const data = new Map(); const storage = { getItem: k => data.get(k), setItem: (k, v) => data.set(k, v) };
+ assert.equal(disclosureOpen(storage, 'your'), true);
+ saveDisclosure(storage, 'your', false);
+ assert.equal(disclosureOpen(storage, 'your'), false); assert.equal(disclosureOpen(storage, 'other'), true);
+ assert.equal(disclosureOpen({ getItem() { throw Error('blocked'); } }, 'your'), true);
+});

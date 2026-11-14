@@ -42,11 +42,19 @@ try {
 
     // Order: nav, You, Your Threads, Other Threads, then connection.
     const groups = await page.locator('nav.side .grp').allTextContents();
-    assert(groups.join() === 'You,Your Threads,Other Threads', `sidebar groups ${groups}`);
+    assert(groups.length === 3 && groups[0] === 'You' && groups[1].includes('Your Threads') && groups[2].includes('Other Threads'), `sidebar groups ${groups}`);
     assert(await page.evaluate(() => {
       const me = document.getElementById('me'), mine = document.getElementById('threads'), oth = document.getElementById('others');
       return !!(me.compareDocumentPosition(mine) & Node.DOCUMENT_POSITION_FOLLOWING) && !!(mine.compareDocumentPosition(oth) & Node.DOCUMENT_POSITION_FOLLOWING);
     }), 'You, Your Threads, Other Threads out of order');
+
+    await page.locator('#your-toggle').click();
+    assert(await mineList.isHidden(), 'Your Threads did not collapse');
+    await page.reload({ waitUntil: 'load' });
+    await page.locator('#conn.live').waitFor();
+    assert(await page.locator('#your-toggle').getAttribute('aria-expanded') === 'false' && await mineList.isHidden(), 'collapse did not persist across reload');
+    await shot('sidebar-collapsed');
+    await page.locator('#your-toggle').click();
 
     // Empty: every seeded thread includes the operator.
     await others.locator('.none', { hasText: 'No other threads' }).waitFor();
@@ -177,7 +185,7 @@ try {
     await fresh;
     const more = others.locator('button.more', { hasText: 'Show more' });
     await more.waitFor();
-    const grown = page.waitForResponse(r => isOthers(r.url()) && new URL(r.url()).searchParams.get('limit') === '100');
+    const grown = page.waitForResponse(r => isOthers(r.url()) && new URL(r.url()).searchParams.get('limit') === '30');
     await more.click();
     await grown;
     await quiet();

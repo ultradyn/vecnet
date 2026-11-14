@@ -137,7 +137,7 @@ span,b,time,code,a{unicode-bidi:isolate}
 .va .av{width:28px;height:28px;border-radius:7px;display:grid;place-items:center;font:600 12.5px var(--sans);color:#0b0f19;background:#818cf8}
 .va .av.pic{overflow:hidden}.va .av.pic>img{display:block;width:100%;height:100%;object-fit:cover;border-radius:inherit}
 .va .av.k1{background:#fbbf24}.va .av.k2{background:#34d399}.va .av.k3{background:#38bdf8}.va .av.k4{background:#f472b6}.va .av.k5{background:#fb923c}.va .av.op{background:var(--grad);color:#fff}
-body[data-route=dash] aside,body[data-route=new] aside,body[data-route=peer] aside{display:none}
+body[data-route=threads] aside,body[data-route=peers] aside,body[data-route=dash] aside,body[data-route=new] aside,body[data-route=peer] aside{display:none}
 .chip{font:500 10.5px/1 var(--mono);padding:3px 6px;border-radius:4px;border:1px solid var(--line2);color:var(--muted);white-space:nowrap}
 .btn.armed{border-color:#fb718580;color:var(--bad)}
 
@@ -166,7 +166,7 @@ a.plink:hover,span.plink:hover{color:var(--violet);border-bottom-color:var(--vio
 .empty.error{border-color:#fb718580}
 .hub-down .btn{margin-top:10px}
 
-@media (min-width:1101px){body[data-route=dash] .va,body[data-route=new] .va,body[data-route=peer] .va{grid-template-columns:240px minmax(0,1fr)}}
+@media (min-width:1101px){body[data-route=threads] .va,body[data-route=peers] .va,body[data-route=dash] .va,body[data-route=new] .va,body[data-route=peer] .va{grid-template-columns:240px minmax(0,1fr)}}
 @media (max-width:1100px){.va{grid-template-columns:220px minmax(0,1fr)}.va aside{display:none}}
 /* One column at phone width. The document scrolls, not main, so main must not
    clip: the sticky composer and save bar then pin to the viewport, and

@@ -78,7 +78,7 @@ export function mount(root, ctx) {
     // Created peers emit directory_updated, so the peers tag refreshes this.
     principals: store.resource('peers', () => api.principals()),
     threads: store.resource('threads', () => api.threads({ archived: false, limit: THREAD_PAGE })),
-    stats: store.resource('threads', () => api.threadStats ? api.threadStats() : Promise.resolve(null)),
+    stats: store.resource('threads', () => !browse && api.threadStats ? api.threadStats() : Promise.resolve(null)),
     health: store.resource('peers', () => api.deliveryHealth()),
     dead: store.resource('peers', () => api.deadLetters()),
     cuts: store.resource('peers', () => api.loopCuts(24)),

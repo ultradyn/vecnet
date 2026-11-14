@@ -114,7 +114,7 @@ try {
     await page.locator('#conn.live').waitFor();
     // Nav: Settings sits between Dashboard and Add agent.
     const navIds = await page.locator('nav.side > .nav').first().locator(':scope > a, :scope > button').evaluateAll(els => els.map(e => e.id));
-    assert(navIds.join() === 'nav-inbox,nav-new,nav-dash,nav-settings,nav-add', `sidebar nav ${navIds}`);
+    assert(navIds.join() === 'nav-inbox,nav-new,nav-dash,nav-threads,nav-peers,nav-settings,nav-add', `sidebar nav ${navIds}`);
     // Appearance is set before first paint; dark here.
     assert(await page.evaluate(() => document.documentElement.dataset.theme) === 'dark', 'theme not set on <html>');
 

@@ -496,6 +496,7 @@ try {
     assert(prompt.includes('unsaved change') && await depth.inputValue() === draft, 'a search result bypassed the Settings leave guard');
     await box.press('Escape');
     await page.locator('.st-bar [data-fk=undo]').click();
+    await page.waitForFunction(() => !document.querySelector('.st-bar [data-fk=undo]'));
 
     // Signing out tears down the search and its shortcut with the session.
     await box.fill('release');

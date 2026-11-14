@@ -27,7 +27,7 @@ async function inspectPeerReadouts({ page, shot, refresh, ready, value, director
   assert(directory.peers.some(row => row.peer.peer_id === lastID), 'last rendered peer not in fixture');
   for (const scenario of ['last', 'one']) {
     if (scenario === 'one') { setSinglePeer(lastID); await refreshBoth(); }
-    assert(await rows.count() === (scenario === 'one' ? 1 : directory.peers.filter(row => !row.peer.archived_at).length), `${scenario}: unexpected peer row count`);
+    assert(await rows.count() === (scenario === 'one' ? 1 : Math.min(10, directory.peers.filter(row => !row.archived_at && !row.disabled).length)), `${scenario}: unexpected peer row count`);
     for (const theme of ['dark', 'light']) {
       await page.evaluate(theme => { document.activeElement?.blur(); document.documentElement.dataset.theme = theme; }, theme);
       for (const width of [320, 390, 1440]) {
@@ -49,7 +49,7 @@ async function inspectPeerReadouts({ page, shot, refresh, ready, value, director
           // region to its absolute-positioned overflow when already on screen.
           await readout.evaluate(el => { const r = el.getBoundingClientRect(); if (r.top < 0 || r.bottom > innerHeight) el.scrollIntoView({ block: 'nearest', inline: 'nearest' }); });
           await settle();
-          check(await readout.textContent() === expected(index), `${label}/${input}: incomplete or incorrect exact count/UTC interval`);
+          check(await readout.getAttribute('aria-label') === expected(index) && /min ago|just now/.test(await readout.textContent()), `${label}/${input}: incomplete or incorrect exact count/UTC interval`);
           const bounds = await readout.evaluate(el => {
             const rect = r => ({ left: r.left, top: r.top, right: r.right, bottom: r.bottom });
             const ancestors = [];
@@ -129,7 +129,7 @@ async function inspectPeerRemoval({ page, refresh, ready, value, directory, setD
     assert(await survivor.evaluate(el => el === window.__removalSurvivorRow && el.querySelector('svg') === window.__removalSurvivorSVG), `${scenario}: survivor replaced`);
     assert(await page.locator('.activity-count').textContent() === value.messages.toLocaleString('en-US'), `${scenario}: filtering dropped history`);
     await survivor.locator('svg').focus(); await page.keyboard.press('Home');
-    assert(await survivor.locator('.spark-readout').textContent() === `${value.peers[survivorID]?.buckets[0] || 0} messages · [2026-11-09T11:00:30.000Z, 2026-11-09T11:01:30.000Z) UTC — messages in this minute`, `${scenario}: surviving keyboard chart unusable`);
+    assert(await survivor.locator('.spark-readout').getAttribute('aria-label') === `${value.peers[survivorID]?.buckets[0] || 0} messages · [2026-11-09T11:00:30.000Z, 2026-11-09T11:01:30.000Z) UTC — messages in this minute`, `${scenario}: surviving keyboard chart unusable`);
     await refreshBoth();
     assert(await page.evaluate(() => document.activeElement === window.__removalSurvivorSVG), `${scenario}: survivor focus lost on refresh`);
     if (scenario === 'removed') { setDirectory(directory); await refreshBoth(); }
@@ -154,7 +154,7 @@ async function inspectPeerRemoval({ page, refresh, ready, value, directory, setD
       assert(await target.evaluate(el => el !== window.__removedRow && el.querySelector('svg') !== window.__removedSVG), 'repeated show reused hidden view');
       assert(!await target.locator('.spark-readout').isVisible() && await target.locator('.spark-readout').textContent() === '', 'repeated show reopened inspection');
       await survivor.locator('svg').focus(); await page.keyboard.press('End');
-      assert((await survivor.locator('.spark-readout').textContent()).includes('11:59:30.000Z'), 'survivor keyboard unusable after repeated show');
+      assert((await survivor.locator('.spark-readout').getAttribute('aria-label')).includes('11:59:30.000Z'), 'survivor keyboard unusable after repeated show');
       setDirectory(directory); await refreshBoth(); await toggle.uncheck();
     }
     assert(await survivor.evaluate(el => el === window.__removalSurvivorRow && el.querySelector('svg') === window.__removalSurvivorSVG), `${scenario}: survivor identity lost`);
@@ -262,16 +262,16 @@ try {
     await page.setViewportSize({ width: 1440, height: 900 });
 
     await plot.focus(); await page.keyboard.press('Home');
-    await page.locator('.activity-chart .spark-readout', { hasText: '11:00:30.000Z' }).waitFor();
+    await page.locator('.activity-chart .spark-readout', { hasText: '59 min ago' }).waitFor();
     await page.keyboard.press('ArrowRight');
-    await page.locator('.activity-chart .spark-readout', { hasText: '11:01:30.000Z' }).waitFor();
+    await page.locator('.activity-chart .spark-readout', { hasText: '58 min ago' }).waitFor();
     await page.keyboard.press('End'); await page.keyboard.press('ArrowRight');
-    await page.locator('.activity-chart .spark-readout', { hasText: '11:59:30.000Z' }).waitFor();
+    await page.locator('.activity-chart .spark-readout', { hasText: 'just now' }).waitFor();
     await shot('activity-keyboard-1440');
     await page.keyboard.press('Escape');
     assert(!await page.locator('.activity-chart .spark-readout').isVisible(), 'Escape dismisses readout');
     const box = await plot.boundingBox(); await page.mouse.move(box.x + 4, box.y + box.height / 2);
-    await page.locator('.activity-chart .spark-readout', { hasText: '11:00:30.000Z' }).waitFor();
+    await page.locator('.activity-chart .spark-readout', { hasText: '59 min ago' }).waitFor();
     assert((await page.locator('.activity-chart .spark-readout').textContent()).startsWith(`${value.buckets[0]} messages`), 'exact pointer count');
     await shot('activity-pointer-1440');
     await page.mouse.move(5, 5);
@@ -279,7 +279,7 @@ try {
     assert(await page.locator('.sparkline :is(details, summary, table)').count() === 0, 'raw minute disclosures must not exist, even hidden');
     assert((await page.locator('.activity-overview').textContent()).includes('Hourly average'), 'hourly average must not read as instantaneous rate');
     assert(!/Snapshot|\d{4}-\d\d-\d\dT/.test(await status.textContent()), 'routine metadata must not be an ISO timestamp wall');
-    assert((await page.locator('.activity-chart .spark-axis').textContent()) === '1 hour agoNow', 'shared hour labels');
+    assert(/−60 m.*−30 m.*peak.*now/.test(await page.locator('.activity-chart .spark-axis').textContent()), 'shared hour labels');
     await plot.focus(); await page.keyboard.press('Home');
     assert((await page.locator('.activity-chart .spark-readout').textContent()).startsWith(`${value.buckets[0]} messages`), 'exact keyboard count');
     await page.evaluate(() => { window.__chart = document.querySelector('.activity-chart'); window.__plot = document.activeElement; });

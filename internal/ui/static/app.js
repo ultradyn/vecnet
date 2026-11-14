@@ -27,7 +27,7 @@ import * as peer from './peer.js';
 import * as presence from './presence.js';
 import { createSearchBox, renderResults } from './search.js';
 import * as settings from './settings.js';
-import { OTHER_PAGE, nextLimit, otherThreads, yourThreads } from './sidebar-model.js';
+import { OTHER_PAGE, nextLimit, otherThreads, yourThreads, disclosureOpen, saveDisclosure } from './sidebar-model.js';
 import { createStore } from './store.js';
 import * as threadAside from './thread-aside.js';
 import * as thread from './thread.js';
@@ -331,9 +331,7 @@ function start(secret) {
       $('aside').replaceChildren();
       $('me').replaceChildren();
       $('threads').replaceChildren();
-      $('other-count').textContent = String(v.rows.length) + (v.more ? '+' : '');
-  applyDisclosure('other');
-  $('others').replaceChildren();
+      $('others').replaceChildren();
       $('results').replaceChildren();
       $('results').hidden = true;
       $('lists').hidden = false;
@@ -352,6 +350,7 @@ function start(secret) {
     s.ctx = {
       api, store, activity, me: s.me, nameOf, kindOf, avatars, avatarOf, peers, threads, inboxHead, toast, appearance,
       nav: hash => { location.hash = hash; },
+      replaceRoute: hash => { history.replaceState(null, '', hash); s.shownHash = hash; s.mounted = routeKey(parseRoute(hash)); },
       setLeaveGuard: fn => { s.leaveGuard = fn || null; },
     };
     s.offs.push(presence.renderNav($('me'), s.ctx), presence.startHeartbeat(s.ctx));
@@ -449,7 +448,7 @@ const showThreads = open => $('side-tog').setAttribute('aria-expanded', String(o
 $('side-tog').addEventListener('click', e => showThreads(e.currentTarget.getAttribute('aria-expanded') !== 'true'));
 const disclosureIds = { your: 'threads', other: 'others' };
 function applyDisclosure(key) {
-  const open = readLocal('vecnet.ui.sidebar.' + key) !== 'closed';
+  const open = disclosureOpen(localStore, key);
   $(key + '-toggle').setAttribute('aria-expanded', String(open));
   $(disclosureIds[key]).hidden = !open;
 }
@@ -457,7 +456,7 @@ for (const key of ['your', 'other']) {
   applyDisclosure(key);
   $(key + '-toggle').addEventListener('click', () => {
     const open = $(key + '-toggle').getAttribute('aria-expanded') === 'true';
-    writeLocal('vecnet.ui.sidebar.' + key, open ? 'closed' : 'open'); applyDisclosure(key);
+    saveDisclosure(localStore, key, !open); applyDisclosure(key);
   });
 }
 // Add agent from any view: the invite dialog opens over the current screen,
