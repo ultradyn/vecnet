@@ -111,7 +111,6 @@ try {
     await page.evaluate(() => { location.hash = '#dash'; });
     const peers = page.locator('.dash-peers');
     await peers.locator('tbody tr').first().waitFor();
-    const before = await peers.locator('tbody tr').count();
     const open = peers.getByRole('button', { name: 'Add agent' });
     await open.waitFor();
     await scrollIntoViewStable(page, '.dash-peers h2');
@@ -193,7 +192,10 @@ try {
     await dlg.getByRole('button', { name: 'Done' }).click();
     await page.locator('dialog.inv').waitFor({ state: 'detached' });
     assert(!(await page.content()).includes(shown.token), 'the token is still in the page');
-    await page.waitForFunction(n => document.querySelectorAll('.dash-peers tbody tr').length > n, before);
+    await peers.getByRole('searchbox', { name: 'Find peers' }).fill('web-repo Claude');
+    await peers.locator('tbody tr', { hasText: 'web-repo Claude' }).waitFor();
+    assert(await peers.locator('tbody tr').count() <= 10, 'invite bypassed dashboard row bound');
+    await peers.getByRole('searchbox', { name: 'Find peers' }).fill('');
 
     // The pasted token enrols, once.
     const enrol = () => fetch(demo.url + '/v1/enrol', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: shown.token }) });
@@ -229,7 +231,9 @@ try {
     await page.locator('dialog.inv').waitFor({ state: 'detached' });
     const named = await fetch(demo.url + '/v1/enrol', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: oshown.token, name: 'Helper Bot 2' }) });
     assert(named.status === 200 && (await named.json()).name === 'Helper Bot 2', `enrol with a chosen name: ${named.status}`);
+    await peers.getByRole('searchbox', { name: 'Find peers' }).fill('Helper Bot 2');
     await peers.locator('tbody tr', { hasText: 'Helper Bot 2' }).waitFor();
+    await peers.getByRole('searchbox', { name: 'Find peers' }).fill('');
 
     // A ChatGPT dot: no open name and no token lifetime, since it links with
     // a code; it still needs a name.
@@ -335,6 +339,7 @@ try {
     assert(!html.includes(link.code) && !html.includes(link2.code), 'a link code is still in the page');
     // The directory row reads as prose: the human label, the raw kind kept
     // for the colour and the hover.
+    await peers.getByRole('searchbox', { name: 'Find peers' }).fill('scout');
     const dotPill = peers.locator('tbody tr', { hasText: 'scout' }).locator('span.pill', { has: page.locator('i.kd.k-dot') });
     await dotPill.waitFor();
     assert(await dotPill.textContent() === 'ChatGPT dot' && await dotPill.getAttribute('title') === 'ChatGPT dot · dot', 'the dot row does not show its kind label');
