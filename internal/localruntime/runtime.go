@@ -444,7 +444,7 @@ func capabilities(ctx context.Context, o Options) error {
 	return nil
 }
 func conflicts(ctx context.Context, o Options) error {
-	b, e := o.Run(ctx, "systemctl", "--user", "list-units", "--all", "--plain", "--no-legend", "--no-pager", "--", "vecnet-launcher.service", "vecnet-delivery@*.service")
+	b, e := o.Run(ctx, "systemctl", "--user", "list-units", "--all", "--plain", "--no-legend", "--no-pager", "--", "vecnet-launcher.service", "vecnet-launcher-p-*.service", "vecnet-delivery@*.service")
 	if e != nil {
 		return errors.New("cannot inspect launcher/legacy delivery services; setup pending")
 	}
@@ -453,7 +453,7 @@ func conflicts(ctx context.Context, o Options) error {
 		if len(f) < 3 {
 			continue
 		}
-		if f[0] != "vecnet-launcher.service" && !(strings.HasPrefix(f[0], "vecnet-delivery@") && strings.HasSuffix(f[0], ".service")) {
+		if f[0] != "vecnet-launcher.service" && !(strings.HasPrefix(f[0], "vecnet-launcher-p-") && strings.HasSuffix(f[0], ".service")) && !(strings.HasPrefix(f[0], "vecnet-delivery@") && strings.HasSuffix(f[0], ".service")) {
 			return errors.New("unexpected launcher/legacy service query response")
 		}
 		if f[2] != "inactive" && f[2] != "failed" {

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -131,6 +132,61 @@ func TestLocalRepairPrefersStandaloneWithLeftoverLauncherUnit(t *testing.T) {
 	a.localRuntime = func(context.Context) error { calls++; return nil }
 	if err := a.cmdLocalRepair(nil); err != nil || calls != 1 {
 		t.Fatalf("standalone repair was blocked by leftover launcher: calls=%d error=%v", calls, err)
+	}
+}
+
+func TestLocalRepairReportsUnregisteredProfileLauncher(t *testing.T) {
+	a, _, home := localRegistryFixture(t)
+	home = filepath.Join(filepath.Dir(home), "operator[1]")
+	a.getenv = func(k string) string {
+		if k == "HOME" {
+			return home
+		}
+		return ""
+	}
+	unit := filepath.Join(home, ".config/systemd/user/vecnet-launcher-p-0123456789abcdef.service")
+	if err := os.MkdirAll(filepath.Dir(unit), 0700); err != nil {
+		t.Fatal(err)
+	}
+	before := []byte("[Service]\nExecStart=/private/old-launcher\n")
+	if err := os.WriteFile(unit, before, 0600); err != nil {
+		t.Fatal(err)
+	}
+	started := 0
+	a.localRepairStart = func(*exec.Cmd) error { started++; return nil }
+	a.localStartup([]string{"peers"})
+	if started != 1 {
+		t.Fatalf("profile launcher omitted from maintenance: %d", started)
+	}
+	if err := a.cmdLocalRepair(nil); err == nil || !strings.Contains(err.Error(), "not registered") {
+		t.Fatalf("unregistered profile launcher falsely upgraded: %v", err)
+	}
+	if got, err := os.ReadFile(unit); err != nil || !bytes.Equal(got, before) {
+		t.Fatalf("unregistered unit changed: %s %v", got, err)
+	}
+}
+
+func TestLocalLauncherInspectionFailureRemainsPending(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("root can read directories despite permission denial")
+	}
+	a, _, home := localRegistryFixture(t)
+	dir := filepath.Join(home, ".config/systemd/user")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0700) })
+	if !localLauncherPresent(home) {
+		t.Fatal("uncertain launcher discovery did not schedule inspection")
+	}
+	if err := a.unregisteredLocalLaunchers(); err == nil {
+		t.Fatal("unreadable launcher directory was reported absent")
+	}
+	if err := a.cmdLocalRepair(nil); err == nil {
+		t.Fatal("unreadable launcher directory falsely repaired")
 	}
 }
 
