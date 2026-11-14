@@ -242,7 +242,8 @@ export function mount(root, ctx) {
   const changeFilters = () => { filters.limit = browse ? 50 : 10; savePeerFilters(storage, filters); render(); };
   const archivedInput = h('input', { type: 'checkbox', 'aria-label': 'Show archived', onchange: e => { filters.showArchived = !!e.target.checked; changeFilters(); } });
   const disabledInput = h('input', { type: 'checkbox', 'aria-label': 'Show disabled', onchange: e => { filters.showDisabled = !!e.target.checked; changeFilters(); } });
-  const searchInput = h('input', { type: 'search', placeholder: 'Find peers', 'aria-label': 'Find peers', value: filters.q, oninput: e => { filters.q = e.target.value; filters.limit = browse ? 50 : 10; render(); } });
+  let queryTimer;
+  const searchInput = h('input', { type: 'search', placeholder: 'Find peers', 'aria-label': 'Find peers', value: filters.q, oninput: e => { filters.q = e.target.value; filters.limit = browse ? 50 : 10; if (browse) { clearTimeout(queryTimer); queryTimer = setTimeout(() => { const q = new URLSearchParams(); if (filters.q) q.set('q', filters.q); ctx.replaceRoute('#peers' + (q.size ? '?' + q : '')); }, 200); } render(); } });
   const peerToolbar = h('div', { class: 'browse-toolbar' }, searchInput,
     h('label', { class: 'show-disabled' }, disabledInput, disabledLabel),
     h('label', { class: 'show-archived' }, archivedInput, archivedLabel));
@@ -495,6 +496,7 @@ export function mount(root, ctx) {
     }));
   }
   return () => {
+    clearTimeout(queryTimer);
     audit.alive = false;
     ++audit.generation;
     closeInvite();

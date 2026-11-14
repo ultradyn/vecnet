@@ -15,6 +15,14 @@ try {
   assert(await rows.count() === 0, 'archived peer visible by default');
   await page.getByRole('checkbox', { name: 'Show archived', exact: true }).check();
   assert(await rows.count() === 1, 'archived peer filter did not show match');
+  await page.getByRole('searchbox', { name: 'Find peers' }).fill('browse-30');
+  await page.waitForFunction(() => location.hash.includes('q=browse-30'));
+  await rows.locator('a.pn').first().click();
+  await page.waitForFunction(() => document.body.dataset.route === 'peer');
+  await page.goBack();
+  await page.locator('#d-peers tbody tr').first().waitFor();
+  assert(await page.getByRole('searchbox', { name: 'Find peers' }).inputValue() === 'browse-30', 'Back lost peer query');
+  assert(await rows.count() === 1, 'Back did not restore filtered rows');
   await page.getByRole('searchbox', { name: 'Find peers' }).fill('');
   await page.getByRole('combobox', { name: 'Kind', exact: true }).selectOption('source');
   assert(await rows.count() === 1 && (await rows.textContent()).includes('gh-ultradyn'), 'kind filter failed');
