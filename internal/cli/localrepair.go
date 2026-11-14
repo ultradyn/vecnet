@@ -229,7 +229,7 @@ func (a *app) repairLocalProjectsAfterRuntime(runtimeErr error) error {
 	var failures []error
 	for _, p := range projects {
 		status, why := "ready", ""
-		completed := map[string]localArtifact{}
+		completed := map[string]localArtifactRepair{}
 		if st, e := os.Stat(p.Root); e != nil || !st.IsDir() {
 			status = "deferred"
 			why = "project is missing or inaccessible"
@@ -249,7 +249,7 @@ func (a *app) repairLocalProjectsAfterRuntime(runtimeErr error) error {
 					if e != nil {
 						status, why = "pending", e.Error()
 					} else {
-						completed[art.Path] = done
+						completed[art.Path] = localArtifactRepair{Before: art, After: done}
 					}
 					continue
 				}
@@ -295,7 +295,7 @@ func (a *app) repairLocalProjectsAfterRuntime(runtimeErr error) error {
 				done := art
 				done.Version = localSoftwareVersion()
 				done.Hash = hookDigest(after)
-				completed[art.Path] = done
+				completed[art.Path] = localArtifactRepair{Before: art, After: done}
 
 			}
 		}
@@ -569,14 +569,26 @@ type localRepairReport struct {
 	Runtime      *localRepairRuntime `json:"runtime,omitempty"`
 }
 
+type localArtifactRepair struct {
+	Before localArtifact
+	After  localArtifact
+}
+
+func sameLocalArtifact(a, b localArtifact) bool {
+	return a.Path == b.Path && a.Kind == b.Kind && a.Schema == b.Schema && a.Version == b.Version && a.Hash == b.Hash && a.InstalledAt.Equal(b.InstalledAt)
+}
+
 // Commit completion only for the artifacts verified by this repair snapshot.
 // A concurrent installation/adoption leaves the project pending for another pass.
-func (a *app) finishLocalProjectRepair(root string, completed map[string]localArtifact, status, why string, runtimeErr error) (string, error) {
+func (a *app) finishLocalProjectRepair(root string, completed map[string]localArtifactRepair, status, why string, runtimeErr error) (string, error) {
 	err := a.updateLocalProject(root, func(current *localProject) error {
 		if status == "ready" {
+			if len(current.Artifacts) != len(completed) {
+				status, why = "pending", "managed artifacts changed during repair; retry maintenance"
+			}
 			for _, artifact := range current.Artifacts {
 				done, ok := completed[artifact.Path]
-				if !ok || done.Kind != artifact.Kind || done.Schema != artifact.Schema || done.Version != artifact.Version || done.Hash != artifact.Hash {
+				if !ok || !sameLocalArtifact(done.Before, artifact) || done.After.Path != artifact.Path || done.After.Kind != artifact.Kind || done.After.Schema != artifact.Schema {
 					status = "pending"
 					why = "managed artifacts changed during repair; retry maintenance"
 					break
@@ -585,6 +597,11 @@ func (a *app) finishLocalProjectRepair(root string, completed map[string]localAr
 			if runtimeErr != nil && len(current.Artifacts) > 0 {
 				status = "pending"
 				why = "managed runtime upgrade pending: " + runtimeErr.Error()
+			}
+		}
+		if status == "ready" {
+			for i, artifact := range current.Artifacts {
+				current.Artifacts[i] = completed[artifact.Path].After
 			}
 		}
 		current.Status = status

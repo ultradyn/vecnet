@@ -601,6 +601,32 @@ func TestLauncherManagedRepairConvergesMultipleRegisteredRoots(t *testing.T) {
 	if count != 2 {
 		t.Fatalf("expected two independently registered roots, got %d", count)
 	}
+	// The helper intentionally leaves the registry unchanged. The complete
+	// maintenance caller must adopt the verified new generation for both roots.
+	for attempt := 0; attempt < 2; attempt++ {
+		if err := a.repairLocalProjectsAfterRuntime(nil); err != nil {
+			t.Fatalf("caller attempt %d: %v", attempt, err)
+		}
+		projects, err := a.localProjects()
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := 0
+		for _, project := range projects {
+			for _, artifact := range project.Artifacts {
+				if artifact.Kind != "launcher-profile" {
+					continue
+				}
+				found++
+				if artifact.Hash != refreshed || project.Status != "ready" || project.AppliedDigest == "" {
+					t.Fatalf("shared project did not converge: %#v", project)
+				}
+			}
+		}
+		if found != 2 {
+			t.Fatalf("lost registered roots: %d", found)
+		}
+	}
 }
 
 func TestLauncherManagedRepairPreservesExplicitCustomSource(t *testing.T) {

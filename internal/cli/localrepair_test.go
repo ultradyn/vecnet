@@ -325,10 +325,10 @@ func TestLocalRepairConcurrentAdoptionRemainsPending(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	completed := map[string]localArtifact{}
+	completed := map[string]localArtifactRepair{}
 	for _, art := range projects[0].Artifacts {
 		if filepath.Base(art.Path) == "x.json" {
-			completed[art.Path] = art
+			completed[art.Path] = localArtifactRepair{Before: art, After: art}
 		}
 	}
 	why, err := a.finishLocalProjectRepair(root, completed, "ready", "", nil)
@@ -424,7 +424,7 @@ func TestLocalRepairPreservesConcurrentSamePathInstallation(t *testing.T) {
 	old := current
 	old.Hash = strings.Repeat("b", 64)
 	old.Version = "older"
-	why, err := a.finishLocalProjectRepair(root, map[string]localArtifact{path: old}, "ready", "", nil)
+	why, err := a.finishLocalProjectRepair(root, map[string]localArtifactRepair{path: {Before: old, After: old}}, "ready", "", nil)
 	if err != nil || why == "" {
 		t.Fatalf("%q %v", why, err)
 	}
@@ -469,5 +469,107 @@ func TestLocalStartupDefersFileIntegrityToPeriodicRepair(t *testing.T) {
 	a.localStartup([]string{"peers"})
 	if starts != 1 {
 		t.Fatal("periodic integrity work was not scheduled")
+	}
+}
+
+// Exercise the complete caller, including publication of the helper's new
+// artifact generation into the project registry.
+func TestLocalRepairPublishesLauncherReplacement(t *testing.T) {
+	_, a, root, before, _ := launcherRepairFixture(t, false)
+	if err := a.repairLocalProjectsAfterRuntime(nil); err != nil {
+		t.Fatal(err)
+	}
+	projects, err := a.localProjects()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, project := range projects {
+		if project.Root != root {
+			continue
+		}
+		if project.Status != "ready" || project.AppliedVersion != localSoftwareVersion() || project.AppliedDigest == "" {
+			t.Fatalf("project did not converge: %#v", project)
+		}
+		for _, artifact := range project.Artifacts {
+			if artifact.Path != before.Path {
+				continue
+			}
+			if artifact.Hash == before.Hash || artifact.Hash != launcherHash(launcherTestRead(t, artifact.Path)) || artifact.Version != localSoftwareVersion() {
+				t.Fatalf("replacement not published: %#v", artifact)
+			}
+			if err := a.repairLocalProjectsAfterRuntime(nil); err != nil {
+				t.Fatalf("repeat repair: %v", err)
+			}
+			return
+		}
+	}
+	t.Fatal("launcher registration disappeared")
+}
+
+func TestLocalRepairCompletionRequiresInspectedGeneration(t *testing.T) {
+	for _, field := range []string{"hash", "version", "kind", "installed-at", "removed", "error"} {
+		t.Run(field, func(t *testing.T) {
+			a, root, _ := localRegistryFixture(t)
+			path := filepath.Join(root, "managed.json")
+			if err := os.WriteFile(path, []byte("old"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := a.registerLocalArtifact(path, "launcher-profile", "old", time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			projects, err := a.localProjects()
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := projects[0].Artifacts[0]
+			after := before
+			after.Hash, after.Version = strings.Repeat("a", 64), "new"
+			current := before
+			switch field {
+			case "hash":
+				current.Hash = strings.Repeat("b", 64)
+			case "version":
+				current.Version = "concurrent"
+			case "kind":
+				current.Kind = "codex-hooks"
+			case "installed-at":
+				current.InstalledAt = current.InstalledAt.Add(time.Second)
+			}
+			if err := a.updateLocalProject(root, func(p *localProject) error {
+				if field == "removed" {
+					p.Artifacts = []localArtifact{}
+				} else {
+					p.Artifacts[0] = current
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			status, why := "ready", ""
+			if field == "error" {
+				status, why = "pending", "helper failure"
+			}
+			why, err = a.finishLocalProjectRepair(root, map[string]localArtifactRepair{path: {Before: before, After: after}}, status, why, nil)
+			if err != nil || why == "" {
+				t.Fatalf("concurrent generation/error accepted: %q %v", why, err)
+			}
+			projects, err = a.localProjects()
+			if err != nil {
+				t.Fatal(err)
+			}
+			project := projects[0]
+			if project.Status != "pending" || project.AppliedDigest != "" {
+				t.Fatalf("incorrect completion: %#v", project)
+			}
+			if field == "removed" {
+				if len(project.Artifacts) != 0 {
+					t.Fatal("resurrected removed artifact")
+				}
+				return
+			}
+			if len(project.Artifacts) != 1 || !sameLocalArtifact(project.Artifacts[0], current) {
+				t.Fatalf("overwrote concurrent evidence: %#v", project.Artifacts)
+			}
+		})
 	}
 }
