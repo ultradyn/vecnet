@@ -56,7 +56,7 @@
 
 - [x] Update normal onboarding to one enrollment action and maintenance status/repair, preserve explicit advanced setup and required host trust interactions.
 - [x] Run affected/full CLI, registry/runtime race, launcher/hub-client tests/typecheck, npm package verification, portable builds and protocol checks. Exercise automatic enrollment/maintenance through disposable services/hubs and supported exact-thread delivery canaries where available.
-- [ ] Independent whole-branch standards/spec review; resolve material findings, repeat affected checks, commit and publish a reviewable PR linked to #71.
+- [x] Independent whole-branch standards/spec review; resolve material findings, repeat affected checks, commit and publish a reviewable PR linked to #71.
 
 ## Review focus
 
@@ -69,3 +69,5 @@ Inventory, runtime, integration and user docs each have an owner. Only integrati
 ## Completion evidence
 
 [Acceptance receipt](../research/2026-11-15-automatic-session-setup-runtime.md) records the full Go/final CLI/race, launcher (1,887 tests), package, module distribution, portable builds and protocol gates, independent review, and successful disposable model/repair scenario with complete cleanup. Managed activation retains the documented Linux/default-config capability boundary; the live service adapter is explicitly distinguished from real user-systemd activation.
+
+Published implementation: [PR #72](https://github.com/ultradyn/vecnet/pull/72), closing [issue #71](https://github.com/ultradyn/vecnet/issues/71) on merge.
