@@ -57,6 +57,83 @@ func TestLocalMaintenanceConcurrentSchedulingAndChildEnvironment(t *testing.T) {
 		t.Fatalf("started %d duplicate workers", n)
 	}
 }
+
+func TestLocalInspectionDoesNotObserveOrSchedulePendingSetup(t *testing.T) {
+	for _, args := range [][]string{{"guide"}, {"profile", "show"}, {"profile", "list"}, {"diag"}, {"audit"}, {"prefs", "list"}, {"prefs", "get", "key"}, {"prefs", "set", "key", "value", "--preview"}, {"prefs", "set", "--preview", "--reset", "key"}, {"prefs", "set", "key", "value", "--preview=false"}, {"typo"}} {
+		t.Run(strings.Join(args, "-"), func(t *testing.T) {
+			a, root, home := localRegistryFixture(t)
+			if err := a.saveLocalEnrollment(localEnrollment{IntentID: "pending", Config: filepath.Join(home, "config.toml"), Profile: "p", Directory: root, ThreadID: bindT1, CodexHome: home, State: "pending", UpdatedAt: time.Now()}); err != nil {
+				t.Fatal(err)
+			}
+			started := 0
+			a.localRepairStart = func(*exec.Cmd) error { started++; return nil }
+			a.localStartup(args)
+			projects, err := a.localProjects()
+			if err != nil || len(projects) != 0 || started != 0 {
+				t.Fatalf("inspection changed installation state: projects=%v started=%d error=%v", projects, started, err)
+			}
+		})
+	}
+}
+
+func TestLocalRepairReportsLauncherUpgradePending(t *testing.T) {
+	a, root, home := localRegistryFixture(t)
+	unit := filepath.Join(home, ".config/systemd/user/vecnet-launcher.service")
+	if err := os.MkdirAll(filepath.Dir(unit), 0700); err != nil {
+		t.Fatal(err)
+	}
+	before := []byte("[Service]\nExecStart=/private/old-launcher\n")
+	if err := os.WriteFile(unit, before, 0600); err != nil {
+		t.Fatal(err)
+	}
+	started := 0
+	a.localRepairStart = func(*exec.Cmd) error { started++; return nil }
+	a.localStartup([]string{"peers"})
+	if started != 1 {
+		t.Fatalf("installed launcher was omitted from automatic maintenance: %d", started)
+	}
+	path := filepath.Join(root, "hooks.json")
+	if err := os.WriteFile(path, []byte(`{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"vecnet hook --profile p --event user-prompt","timeout":5}]}]}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.registerLocalArtifact(path, "codex-hooks", "old", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	a.stdout = &out
+	a.json = true
+	if err := a.cmdLocalRepair(nil); err == nil || !strings.Contains(err.Error(), "launcher") {
+		t.Fatalf("launcher upgrade falsely completed: error=%v output=%s", err, out.String())
+	}
+	if !strings.Contains(out.String(), `"state":"pending"`) || !strings.Contains(out.String(), "installer") {
+		t.Fatalf("missing actionable launcher upgrade result: %s", out.String())
+	}
+	if got, err := os.ReadFile(unit); err != nil || !bytes.Equal(before, got) {
+		t.Fatalf("replaced launcher without verified migration: %s %v", got, err)
+	}
+	projects, err := a.localProjects()
+	if err != nil || len(projects) != 1 || projects[0].Status != "pending" || projects[0].AppliedVersion != "" {
+		t.Fatalf("launcher software incorrectly marked upgraded: %#v %v", projects, err)
+	}
+}
+func TestLocalRepairPrefersStandaloneWithLeftoverLauncherUnit(t *testing.T) {
+	a, _, home := localRegistryFixture(t)
+	for _, name := range []string{"vecnet-launcher.service", "vecnet-codex-delivery.service"} {
+		path := filepath.Join(home, ".config/systemd/user", name)
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("[Service]\nExecStart=/private/old-runtime\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	calls := 0
+	a.localRuntime = func(context.Context) error { calls++; return nil }
+	if err := a.cmdLocalRepair(nil); err != nil || calls != 1 {
+		t.Fatalf("standalone repair was blocked by leftover launcher: calls=%d error=%v", calls, err)
+	}
+}
+
 func TestLocalMaintenanceFailedStartRemainsRetryable(t *testing.T) {
 	a, _, _ := localRegistryFixture(t)
 	a.localRepairStart = func(*exec.Cmd) error { return errors.New("failed") }
