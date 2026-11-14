@@ -165,7 +165,7 @@ func loadMessage(ctx context.Context, tx *sql.Tx, msgID string) (msg *envelope.M
 func (h *Hub) ReplyThread(ctx context.Context, c auth.Caller, as, msgID string) (string, error) {
 	var thr string
 	err := h.DB.Tx(ctx, func(tx *sql.Tx) error {
-		snd, err := resolveSender(ctx, tx, c, as)
+		snd, err := h.resolveSender(ctx, tx, c, as)
 		if err != nil {
 			return err
 		}

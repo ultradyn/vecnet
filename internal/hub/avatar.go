@@ -55,9 +55,9 @@ type avatarTarget struct {
 // sender is resolved (PROTOCOL §2.2 step 1): a peer credential is its own
 // peer, a principal names one of its peers with as, the operator credential
 // is the operator peer (or as, under the operator principal).
-func selfTarget(c auth.Caller, as string) func(ctx context.Context, tx *sql.Tx) (avatarTarget, error) {
+func (h *Hub) selfTarget(c auth.Caller, as string) func(ctx context.Context, tx *sql.Tx) (avatarTarget, error) {
 	return func(ctx context.Context, tx *sql.Tx) (avatarTarget, error) {
-		s, err := resolveSender(ctx, tx, c, as)
+		s, err := h.resolveSender(ctx, tx, c, as)
 		if err != nil {
 			return avatarTarget{}, err
 		}
@@ -80,7 +80,7 @@ func operatorTarget(peerID string) func(ctx context.Context, tx *sql.Tx) (avatar
 // and returns its sha256. as is the principal's acting peer, as on
 // POST /v1/presence.
 func (h *Hub) SetAvatar(ctx context.Context, c auth.Caller, as string, data []byte) (string, error) {
-	return h.setAvatar(ctx, selfTarget(c, as), func() ([]byte, error) { return data, nil })
+	return h.setAvatar(ctx, h.selfTarget(c, as), func() ([]byte, error) { return data, nil })
 }
 
 // SetAvatarURL is SetAvatar from an https URL the hub fetches through the
@@ -91,12 +91,12 @@ func (h *Hub) SetAvatarURL(ctx context.Context, c auth.Caller, as, rawURL string
 	if err != nil {
 		return "", invalidURL("url", err)
 	}
-	return h.setAvatar(ctx, selfTarget(c, as), func() ([]byte, error) { return h.fetchAvatar(ctx, u) })
+	return h.setAvatar(ctx, h.selfTarget(c, as), func() ([]byte, error) { return h.fetchAvatar(ctx, u) })
 }
 
 // ClearAvatar removes the caller's own avatar; clearing none is a no-op.
 func (h *Hub) ClearAvatar(ctx context.Context, c auth.Caller, as string) error {
-	return h.clearAvatar(ctx, selfTarget(c, as))
+	return h.clearAvatar(ctx, h.selfTarget(c, as))
 }
 
 // AdminSetAvatar sets peerID's avatar for the operator (no rate limit).

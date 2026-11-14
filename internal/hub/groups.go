@@ -109,8 +109,8 @@ func unknownRecipient(id string) *APIError {
 // peer's own id, the operator's peer, or for a principal the peer named by
 // as (422 as_required without it; 403 forbidden for a peer outside the
 // principal or a disabled one).
-func groupActor(ctx context.Context, tx *sql.Tx, c auth.Caller, as string) (string, error) {
-	snd, err := resolveSender(ctx, tx, c, as)
+func (h *Hub) groupActor(ctx context.Context, tx *sql.Tx, c auth.Caller, as string) (string, error) {
+	snd, err := h.resolveSender(ctx, tx, c, as)
 	if err != nil {
 		return "", err
 	}
@@ -159,7 +159,7 @@ func (h *Hub) checkMembers(ctx context.Context, tx *sql.Tx, actor string, member
 func (h *Hub) CreateGroup(ctx context.Context, c auth.Caller, as string, members []string) (string, error) {
 	grp := ids.New(ids.Grp)
 	err := h.DB.Tx(ctx, func(tx *sql.Tx) error {
-		creator, err := groupActor(ctx, tx, c, as)
+		creator, err := h.groupActor(ctx, tx, c, as)
 		if err != nil {
 			return err
 		}
@@ -192,7 +192,7 @@ func (h *Hub) CreateGroup(ctx context.Context, c auth.Caller, as string, members
 // for the idle auto-archive. Audited.
 func (h *Hub) AddGroupMembers(ctx context.Context, c auth.Caller, as, grpID string, members []string) error {
 	return h.DB.Tx(ctx, func(tx *sql.Tx) error {
-		actor, err := groupActor(ctx, tx, c, as)
+		actor, err := h.groupActor(ctx, tx, c, as)
 		if err != nil {
 			return err
 		}

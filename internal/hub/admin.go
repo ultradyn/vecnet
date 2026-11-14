@@ -311,6 +311,9 @@ func (h *Hub) ConsumeDotLinkTx(ctx context.Context, tx *sql.Tx, code string) (st
 	if n, _ := res.RowsAffected(); n != 1 {
 		return "", ErrDotLink
 	}
+	if _, err := tx.ExecContext(ctx, `UPDATE peers SET last_seen=? WHERE peer_id=?`, h.nowStr(), peerID); err != nil {
+		return "", fmt.Errorf("hub: observe link redemption: %w", err)
+	}
 	if err := audit.Record(ctx, tx, "hub", "dot_link_consume", []string{peerID}, nil); err != nil {
 		return "", err
 	}
