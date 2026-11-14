@@ -618,5 +618,8 @@ func (a *app) launcherInstall(p launcherPaths, o opts) error {
 			return err
 		}
 	}
+	if err = a.registerLauncherInstallation(p, m, []byte(unit), vecnetConfig, searchPath, !o.has("vecnet-bin") && a.getenv("VECNET_BIN") == "", !o.has("source")); err != nil {
+		return err
+	}
 	return a.emitValue(plan)
 }
