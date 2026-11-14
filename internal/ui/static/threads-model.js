@@ -28,3 +28,11 @@ export async function bulkArchive(api, ids, archive) {
  for (const id of ids) try { await (archive ? api.archiveThread(id) : api.unarchiveThread(id)); } catch (e) { failures.push({ id, error: e.message || String(e) }); }
  return failures;
 }
+
+
+export function participantID(value, directory) {
+ const text = value.trim();
+ if (!text) return '';
+ const peer = (directory || []).find(p => p.peer_id === text || p.name === text);
+ return peer?.peer_id || null;
+}

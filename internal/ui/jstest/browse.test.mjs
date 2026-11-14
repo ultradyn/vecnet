@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { filterPeers, readPeerFilters, savePeerFilters } from '../static/peers-model.js';
-import { threadQuery, createThreadList, bulkArchive } from '../static/threads-model.js';
+import { threadQuery, createThreadList, bulkArchive, participantID } from '../static/threads-model.js';
 const row = (id, extra = {}) => ({ peer: { peer_id: id, name: id, kind: 'session', presence: 'idle', last_seen: null }, ...extra });
 test('peer browse hides disabled and archived independently, searches IDs and sorts with a stable bound', () => {
  const rows = [row('peer_z'), row('peer_disabled', { disabled: true }), row('peer_old', { disabled: true, archived_at: 'now' }), row('peer_a')];
@@ -37,4 +37,16 @@ test('thread list drops stale responses and appends cursor pages without duplica
 test('bulk archive is sequential and reports failures per thread', async () => {
  const calls = []; const failures = await bulkArchive({ archiveThread: async id => { calls.push(id); if (id === 'bad') throw Error('denied'); } }, ['a', 'bad', 'b'], true);
  assert.deepEqual(calls, ['a', 'bad', 'b']); assert.deepEqual(failures, [{ id: 'bad', error: 'denied' }]);
+});
+
+test('participant resolution reads the latest directory and rejects unknown text', () => {
+ assert.equal(participantID('Alice', [{ peer_id: 'peer_a', name: 'Alice' }]), 'peer_a');
+ assert.equal(participantID('peer_a', [{ peer_id: 'peer_a', name: 'Alice' }]), 'peer_a');
+ assert.equal(participantID('nobody', []), null); assert.equal(participantID('', []), '');
+});
+test('recent peers compare timestamps numerically and ignore future self-reported presence', () => {
+ const rows = [row('a'), row('b'), row('future')];
+ rows[0].peer.last_seen = '2026-11-15T01:00:00Z'; rows[0].presence_at = '2099-01-01T00:00:00Z';
+ rows[1].peer.last_seen = '2026-11-15T01:30:00+00:00'; rows[2].presence_at = '2099-01-01T00:00:00Z';
+ assert.deepEqual(filterPeers(rows, { now: Date.parse('2026-11-15T02:00:00Z') }).shown.map(p => p.id), ['b', 'a', 'future']);
 });

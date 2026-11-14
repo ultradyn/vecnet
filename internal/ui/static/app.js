@@ -332,6 +332,8 @@ function start(secret) {
       $('me').replaceChildren();
       $('threads').replaceChildren();
       $('others').replaceChildren();
+      $('your-count').textContent = '';
+      $('other-count').textContent = '';
       $('results').replaceChildren();
       $('results').hidden = true;
       $('lists').hidden = false;

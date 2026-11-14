@@ -1,20 +1,26 @@
 // Full operator thread browser; requests stay server-filtered and cursor-bounded.
 import { h, chip, peerLink, confirmButton } from './dom.js';
 import { ago, title } from './format.js';
-import { bulkArchive, createThreadList } from './threads-model.js';
+import { bulkArchive, createThreadList, participantID } from './threads-model.js';
 export function mount(root, ctx) {
  const params = ctx.query || new URLSearchParams();
  const filters = { q: params.get('q') || '', peer: params.get('peer') || '', state: ['all', 'archived'].includes(params.get('state')) ? params.get('state') : 'open', mine: params.get('mine') === '1' };
- let alive = true, timer, busy = false, failures = [], selected = new Set();
+ let alive = true, timer, busy = false, participantError = '', failures = [], selected = new Set();
  const list = createThreadList(ctx.api, ctx.me, render);
  const search = h('input', { type: 'search', placeholder: 'Search thread titles', 'aria-label': 'Search thread titles', maxlength: 128, value: filters.q, oninput: e => { filters.q = e.target.value; clearTimeout(timer); timer = setTimeout(reload, 250); } });
- const directory = (ctx.peers?.get()?.peers || []);
+ const directory = () => ctx.peers?.get()?.peers || [];
+ if (filters.mine) filters.peer = '';
  const participant = h('input', { type: 'search', list: 'thread-participants', placeholder: 'Any participant', 'aria-label': 'Participant', value: filters.peer, onchange: e => {
-  const value = e.target.value.trim(); const peer = directory.find(p => p.peer_id === value || p.name === value); filters.peer = peer?.peer_id || value; reload();
+  const id = participantID(e.target.value, directory());
+  participantError = id === null ? 'No such participant' : '';
+  participant.setAttribute('aria-invalid', String(id === null));
+  if (id === null) { render(); return; }
+  filters.peer = id; if (id) { filters.mine = false; mineInput.checked = false; } reload();
  } });
- const options = h('datalist', { id: 'thread-participants' }, directory.map(p => h('option', { value: p.peer_id, label: p.name })));
+ const options = h('datalist', { id: 'thread-participants' }, directory().map(p => h('option', { value: p.peer_id, label: p.name })));
  const state = h('select', { 'aria-label': 'Thread state', onchange: e => { filters.state = e.target.value; selected.clear(); reload(); } }, ['open', 'archived', 'all'].map(v => h('option', { value: v, selected: filters.state === v, text: v[0].toUpperCase() + v.slice(1) })));
- const mine = h('label', null, h('input', { type: 'checkbox', checked: filters.mine, onchange: e => { filters.mine = e.target.checked; reload(); } }), ' Only mine');
+ const mineInput = h('input', { type: 'checkbox', checked: filters.mine, onchange: e => { filters.mine = e.target.checked; if (filters.mine) { filters.peer = ''; participant.value = ''; participantError = ''; participant.setAttribute('aria-invalid', 'false'); } reload(); } });
+ const mine = h('label', null, mineInput, ' Only mine');
  const body = h('div', { class: 'thread-results' }), status = h('p', { role: 'status', class: 'note' });
  const archive = confirmButton('Archive selected', 'Confirm archive selected', () => act([...selected], true));
  const unarchive = confirmButton('Unarchive selected', 'Confirm unarchive selected', () => act([...selected], false));
@@ -22,20 +28,20 @@ export function mount(root, ctx) {
  const more = h('button', { class: 'btn', text: 'Load more', onclick: () => list.more() });
  root.replaceChildren(h('div', { class: 'dash thread-browser' }, h('h1', { text: 'Threads' }), h('p', { class: 'lede', text: 'Browse conversations across the hub. Archiving tidies the operator view; peers can still read and post.' }), h('div', { class: 'browse-toolbar' }, search, participant, options, state, mine), h('div', { class: 'bulk-toolbar' }, h('label', null, all, ' Select loaded'), archive, unarchive), status, body, more));
  function url() { const q = new URLSearchParams(); for (const [k, v] of Object.entries(filters)) if (v && v !== 'open') q.set(k, v === true ? '1' : v); ctx.replaceRoute('#threads' + (q.size ? '?' + q : '')); }
- function reload() { if (!alive) return; selected.clear(); all.checked = false; url(); return list.load(filters); }
+ function reload() { if (!alive || participantError) return; selected.clear(); all.checked = false; url(); return list.load(filters); }
  async function act(ids, archived) {
   if (busy || !ids.length) return;
   busy = true; failures = []; render();
   failures = await bulkArchive(ctx.api, ids, archived);
   if (!alive) return;
-  busy = false; ctx.store.invalidate('threads'); await reload();
+  busy = false; selected.clear(); all.checked = false; ctx.store.invalidate('threads'); render();
  }
  function render() {
   if (!alive) return;
   const v = list.state();
   archive.disabled = unarchive.disabled = busy || !selected.size;
   more.hidden = !v.next; more.disabled = v.loading || busy;
-  status.textContent = [busy ? 'Updating threads…' : v.loading ? 'Loading threads…' : `${v.rows.length} threads loaded`, v.error, ...failures.map(f => `${f.id}: ${f.error}`)].filter(Boolean).join(' · ');
+  status.textContent = [participantError, busy ? 'Updating threads…' : v.loading ? 'Loading threads…' : `${v.rows.length} threads loaded`, v.error, ...failures.map(f => `${f.id}: ${f.error}`)].filter(Boolean).join(' · ');
   body.replaceChildren(v.rows.length ? h('table', null, h('thead', null, h('tr', null, ['Select', 'Thread', 'Participants', 'Messages', 'Last activity', 'Action'].map(text => h('th', { text })))), h('tbody', null, v.rows.map(r => {
    const t = r.thread, id = t.thread_id;
    return h('tr', { 'data-thread-id': id }, h('td', null, h('input', { type: 'checkbox', checked: selected.has(id), 'aria-label': 'Select ' + (t.title || id), onchange: e => { if (e.target.checked) selected.add(id); else selected.delete(id); archive.disabled = unarchive.disabled = busy || !selected.size; } })),
@@ -43,7 +49,8 @@ export function mount(root, ctx) {
     h('td', null, (t.participants || []).flatMap((id, i) => [i ? ', ' : '', peerLink(id, ctx.nameOf(id))])), h('td', { text: String(t.message_count || 0) }), h('td', { text: ago(r.last_message_at, ctx.store.hubNow()), title: r.last_message_at || '' }), h('td', null, confirmButton(r.archived_at ? 'Unarchive' : 'Archive', r.archived_at ? 'Confirm unarchive' : 'Confirm archive', () => act([id], !r.archived_at))));
   }))) : h('p', { class: 'none', text: v.loading ? 'Loading…' : 'No threads match. Try another title, participant or state.' }));
  }
- const updates = ctx.store.resource('threads', async () => { await list.load(filters); return true; });
+ const updates = ctx.store.resource('threads', async () => { if (!participantError) await list.load(filters); return true; });
  const off = updates.subscribe(() => {});
- return () => { alive = false; clearTimeout(timer); list.close(); off(); selected.clear(); };
+ const offPeers = ctx.peers?.subscribe(() => { options.replaceChildren(...directory().map(p => h('option', { value: p.peer_id, label: p.name }))); }) || (() => {});
+ return () => { alive = false; clearTimeout(timer); list.close(); off(); offPeers(); selected.clear(); };
 }

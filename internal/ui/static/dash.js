@@ -196,15 +196,15 @@ export function mount(root, ctx) {
   }
   function renderOverview() {
     if (browse) return;
-    const peers = filterPeers(res.peers.get()?.peers).total;
+    const peers = filterPeers(res.peers.get()?.peers).matched;
     const activity = res.activity.get(), stats = res.stats.get(), health = res.health.get(), dead = res.dead.get(), cuts = res.cuts.get();
     const attention = (health?.blocked?.length || 0) + (health?.failed?.length || 0) + (dead?.dead_letters?.length || 0);
     const presence = {};
     for (const p of res.peers.get()?.peers || []) if (!p.disabled && !p.archived_at) presence[p.peer.presence || 'unknown'] = (presence[p.peer.presence || 'unknown'] || 0) + 1;
     const tile = (href, label, value, detail) => h('a', { class: 'dash-kpi', href }, h('span', { text: label }), h('strong', { text: value }), h('span', { text: detail }));
     kpis.replaceChildren(
-      tile('#peers', 'Peers', `${activity?.active_peers ?? '—'} / ${peers || '—'}`, 'active last hour / total · ' + Object.entries(presence).map(([k, v]) => `${v} ${k}`).join(', ')),
-      tile('#threads', 'Threads', stats ? String(stats.active_24h) : '—', stats ? `active in 24 h · ${stats.open} open · ${stats.archived} archived` : 'Loading thread totals…'),
+      tile('#peers', 'Peers', `${activity?.active_peers ?? '—'} sent`, `in last hour · ${peers} enabled · ` + Object.entries(presence).map(([k, v]) => `${v} ${k}`).join(', ')),
+      tile('#threads', 'Threads', stats ? String(stats.active_24h) : '—', stats ? `active in 24 h · ${stats.open} open · ${stats.archived} archived` : res.stats.error() ? 'Thread totals unavailable' : 'Loading thread totals…'),
       tile('#inbox', 'Needs attention', String(attention), `${cuts?.total ?? '—'} loop cuts in 24 h`));
     const clear = health && dead && cuts && !attention && !cuts.total && !res.health.error() && !res.dead.error() && !res.cuts.error();
     clearLine.hidden = !clear;
@@ -239,15 +239,15 @@ export function mount(root, ctx) {
   const peerTableWrap = h('div', { class: 'peer-table-scroll', role: 'region', 'aria-label': 'Peers; activity charts share a common scale' }, peerTable);
   const peerRows = new Map();
   const archivedLabel = h('span'), disabledLabel = h('span');
-  const changeFilters = () => { savePeerFilters(storage, filters); render(); };
+  const changeFilters = () => { filters.limit = browse ? 50 : 10; savePeerFilters(storage, filters); render(); };
   const archivedInput = h('input', { type: 'checkbox', 'aria-label': 'Show archived', onchange: e => { filters.showArchived = !!e.target.checked; changeFilters(); } });
   const disabledInput = h('input', { type: 'checkbox', 'aria-label': 'Show disabled', onchange: e => { filters.showDisabled = !!e.target.checked; changeFilters(); } });
-  const searchInput = h('input', { type: 'search', placeholder: 'Find peers', 'aria-label': 'Find peers', value: filters.q, oninput: e => { filters.q = e.target.value; render(); } });
+  const searchInput = h('input', { type: 'search', placeholder: 'Find peers', 'aria-label': 'Find peers', value: filters.q, oninput: e => { filters.q = e.target.value; filters.limit = browse ? 50 : 10; render(); } });
   const peerToolbar = h('div', { class: 'browse-toolbar' }, searchInput,
     h('label', { class: 'show-disabled' }, disabledInput, disabledLabel),
     h('label', { class: 'show-archived' }, archivedInput, archivedLabel));
   function selectFilter(label, key, values) {
-    return h('select', { 'aria-label': label, onchange: e => { filters[key] = e.target.value; render(); } }, values.map(([value, text]) => h('option', { value, text })));
+    return h('select', { 'aria-label': label, onchange: e => { filters[key] = e.target.value; filters.limit = 50; render(); } }, values.map(([value, text]) => h('option', { value, text })));
   }
   if (browse) peerToolbar.append(
     selectFilter('Kind', 'kind', [['', 'All kinds'], ...['session', 'launcher', 'operator', 'dot', 'source', 'grokbot', 'openclaw', 'pagchat-bot'].map(v => [v, v])]),
@@ -257,9 +257,9 @@ export function mount(root, ctx) {
   const peerFooter = h('a', { class: 'browse-footer', href: '#peers' });
   const peerEmpty = none('');
   function drawPeers(value, s) {
-    const list = filterPeers(value.peers, filters);
+    const list = filterPeers(value.peers, { ...filters, now: nowMs() });
     const rows = list.shown;
-    s.count.textContent = String(rows.length) + (browse ? ' / ' + list.matched : '');
+    s.count.textContent = String(rows.length) + ' of ' + list.matched;
     archivedLabel.textContent = 'Show archived (' + list.archived + ')';
     disabledLabel.textContent = 'Show disabled (' + list.disabled + ')';
     for (const [input, on] of [[archivedInput, filters.showArchived], [disabledInput, filters.showDisabled]]) {
