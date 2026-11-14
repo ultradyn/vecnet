@@ -2,8 +2,8 @@
 // real systemctl, daemon manager, user profile or inherited HOME mutation.
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmod, copyFile, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, symlink, writeFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { chmod, copyFile, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, stat, symlink, writeFile } from 'node:fs/promises';
+import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createSmokeJournal, runHost, smokeSnapshotDigest } from './native-launcher-smoke-support.mjs';
 const check = (ok, why) => { if (!ok) throw new Error(why); };
@@ -18,6 +18,11 @@ export function privateSmokeEnvironment(parent, root) {
     PATH: join(root, 'bin') + ':' + (parent.PATH || '/usr/bin:/bin'), VECNET_LOCAL_MAINTENANCE: '0',
     PLAYWRIGHT_MODULE: parent.PLAYWRIGHT_MODULE || join(parent.HOME, '.llm-general/skills/headless-browser-screenshots/node_modules/playwright/index.mjs'),
     PLAYWRIGHT_BROWSERS_PATH: parent.PLAYWRIGHT_BROWSERS_PATH || join(parent.HOME, '.cache/ms-playwright') });
+}
+export async function nativeListenerReady(path) {
+  const target = await realpath(path), socket = await stat(target), parent = await stat(dirname(target));
+  check(socket.isSocket() && socket.uid === process.geteuid() && parent.isDirectory() && parent.uid === process.geteuid() && (parent.mode & 0o7777) === 0o700, 'native listener requires an owned private socket');
+  return true;
 }
 async function stamp(pid) {
   try { const raw = await readFile(`/proc/${pid}/stat`, 'utf8'), f = raw.slice(raw.lastIndexOf(')') + 2).split(' '); return f[0] === 'Z' ? null : f[19]; }
@@ -100,7 +105,7 @@ export async function runDisposableScenario({ source, cli, demo, backend = 'code
       await mkdir(join(env.CODEX_HOME, 'app-server-control'), { mode: 0o700 });
       await symlink(join(root, 'runtime/native.sock'), join(env.CODEX_HOME, 'app-server-control/app-server-control.sock'));
       let ready = false;
-      for (let i = 0; i < 200; i++) { try { ready = (await lstat(join(root, 'runtime/native.sock'))).isSocket(); } catch (e) { if (e.code !== 'ENOENT') throw e; } if (ready) break; check(await stamp(listener.owner.pid) === listener.owner.start, 'native listener exited'); await sleep(50); }
+      for (let i = 0; i < 200; i++) { try { ready = await nativeListenerReady(join(root, 'runtime/native.sock')); } catch (e) { if (e.code !== 'ENOENT') throw e; } if (ready) break; check(await stamp(listener.owner.pid) === listener.owner.start, 'native listener exited'); await sleep(50); }
       check(ready, 'native listener socket unavailable');
     } else {
       const st = await lstat(acpSettings); check(st.isFile() && !st.isSymbolicLink() && st.uid === process.geteuid() && !(st.mode & 0o077), 'ACP settings not private');

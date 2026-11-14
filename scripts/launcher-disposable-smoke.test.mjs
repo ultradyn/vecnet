@@ -81,3 +81,21 @@ for (const failure of ['identity', 'journal']) test(`post-spawn ${failure} failu
  assert.deepEqual(JSON.parse(await readFile(join(root,'recovery.json'),'utf8')).testchild,{phase:'starting',argv:owner.argv,home:owner.home});
  assert.equal(await readFile(timer,'utf8'),'setInterval(()=>{},1000);');
 });
+
+
+test('native listener readiness accepts Codex owned private symlink publication and refuses unsafe parents', async t => {
+ const {nativeListenerReady}=await import('./launcher-disposable-smoke.mjs');
+ const {mkdtemp,mkdir,chmod,symlink,rm}=await import('node:fs/promises');
+ const {createServer}=await import('node:net');
+ const {tmpdir}=await import('node:os');const {join}=await import('node:path');
+ const root=await mkdtemp(join(tmpdir(),'native-ready-'));
+ await mkdir(join(root,'socket'),{mode:0o700});
+ const target=join(root,'socket/actual.sock'), link=join(root,'requested.sock');
+ const server=createServer();
+ t.after(async()=>{await new Promise(r=>server.close(r));await rm(root,{recursive:true,force:true});});
+ await new Promise((yes,no)=>{server.once('error',no);server.listen(target,yes);});
+ await symlink(target,link);
+ assert.equal(await nativeListenerReady(link),true);
+ await chmod(join(root,'socket'),0o755);
+ await assert.rejects(nativeListenerReady(link),/private.*socket/);
+});
