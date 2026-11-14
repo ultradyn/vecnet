@@ -120,7 +120,8 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
   const write = (r: InflightRow) => kv.set('inflight:' + r.key, JSON.stringify(r));
   async function clear(r: InflightRow, outcome: 'accepted' | 'released' = 'accepted') {
     // Keep recovery evidence until durable outcome persistence succeeds.
-    if (outcome === 'accepted') await runHook(['settle', '--outcome', 'accepted', ...ownerArgs(owner), '--claim', r.claim, '--attempt', r.attempt!], true, 'codex');
+    if (outcome === 'accepted') await runHook(['settle', '--outcome', 'accepted', ...ownerArgs(owner), '--claim', r.claim, '--attempt', r.attempt!,
+      '--receipt-key', r.key, '--delivery-ids', r.deliveries.join(',')], true, 'codex');
     kv.delete('inflight:' + r.key); kv.delete('releasing:' + r.claim); kv.delete('diagnostic:unresolved:' + r.key);
     waitingRetry.delete(r.key); waitForIdle.delete(r.key); receipts.delete(r.key); unresolvedLogged.delete(r.key); pendingLogged.delete(r.key);
   }

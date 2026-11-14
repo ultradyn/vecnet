@@ -31,16 +31,18 @@ const shownWindow = 1024
 // the state, never in it: a vecnet from before binding rewrites the state
 // file with only the fields it knows, which would silently unbind it.
 type hookState struct {
-	Hub              string      `json:"hub,omitempty"`
-	Caller           string      `json:"caller,omitempty"`
-	As               string      `json:"as,omitempty"`
-	Cred             string      `json:"cred,omitempty"`
-	AppCursor        string      `json:"app_cursor,omitempty"`
-	Replay           []replayRef `json:"replay,omitempty"`
-	Claims           []claimRef  `json:"claims,omitempty"`
-	PollCursor       string      `json:"poll_cursor,omitempty"`
-	Shown            []string    `json:"shown"`
-	LastPostToolPoll time.Time   `json:"last_post_tool_poll,omitzero"`
+	Hub        string      `json:"hub,omitempty"`
+	Caller     string      `json:"caller,omitempty"`
+	As         string      `json:"as,omitempty"`
+	Cred       string      `json:"cred,omitempty"`
+	AppCursor  string      `json:"app_cursor,omitempty"`
+	Replay     []replayRef `json:"replay,omitempty"`
+	Claims     []claimRef  `json:"claims,omitempty"`
+	PollCursor string      `json:"poll_cursor,omitempty"`
+	Shown      []string    `json:"shown"`
+	// Displayed is positive output/receipt proof. Shown may be only a reservation.
+	Displayed        []string  `json:"displayed,omitempty"`
+	LastPostToolPoll time.Time `json:"last_post_tool_poll,omitzero"`
 	hookBinding      `json:"-"`
 }
 
@@ -71,7 +73,24 @@ func hookCredential(secret string) string {
 	return fmt.Sprintf("%x", sum[:8])
 }
 
-func (s *hookState) has(deliveryID string) bool { return slices.Contains(s.Shown, deliveryID) }
+func (s *hookState) has(deliveryID string) bool {
+	return slices.Contains(s.Shown, deliveryID) || slices.Contains(s.Displayed, deliveryID) ||
+		slices.ContainsFunc(s.Claims, func(r claimRef) bool { return r.ID == deliveryID })
+}
+
+// recordDisplay records positive proof only. Callers must verify identity and
+// complete output (or an exact receipt) under the shared lock first. It does
+// not release claims or retire replay: those require their own exact checks.
+func (s *hookState) recordDisplay(deliveryID string) {
+	if deliveryID == "" {
+		return
+	}
+	s.Displayed = slices.DeleteFunc(s.Displayed, func(id string) bool { return id == deliveryID })
+	s.Displayed = append(s.Displayed, deliveryID)
+	if len(s.Displayed) > shownWindow {
+		s.Displayed = s.Displayed[len(s.Displayed)-shownWindow:]
+	}
+}
 
 // claim retains delivery ids in arrival order; cursors are never compared.
 func (s *hookState) claim(deliveryID string) bool {
@@ -155,6 +174,7 @@ func (f stateFile) updateMode(ctx context.Context, fn func(*hookState) error, st
 	defer unlock()
 	var s hookState
 	raw, err := os.ReadFile(f.path)
+	original := raw
 	stateExisted := err == nil
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
@@ -224,7 +244,102 @@ func (f stateFile) updateMode(ctx context.Context, fn func(*hookState) error, st
 	if err != nil {
 		return err
 	}
+	if strict && stateExisted {
+		// Preserve future metadata while updating known fields, including removals
+		// encoded by omitempty. Never normalize or discard unread replay metadata.
+		var prior, current map[string]json.RawMessage
+		if err := json.Unmarshal(original, &prior); err != nil {
+			return err
+		}
+		if err := json.Unmarshal(raw, &current); err != nil {
+			return err
+		}
+		for _, key := range []string{"replay", "claims"} {
+			if value, ok := current[key]; ok {
+				value, err = preserveStateRefMetadata(stateField(prior, key), value, key == "claims")
+				if err != nil {
+					return err
+				}
+				current[key] = value
+			}
+		}
+		for key := range prior {
+			for _, known := range []string{"hub", "caller", "as", "cred", "app_cursor", "replay", "claims", "poll_cursor", "shown", "displayed", "last_post_tool_poll"} {
+				if strings.EqualFold(key, known) {
+					delete(prior, key)
+					break
+				}
+			}
+		}
+		for key, value := range current {
+			prior[key] = value
+		}
+		raw, err = json.Marshal(prior)
+		if err != nil {
+			return err
+		}
+	}
 	return write(f.path, raw)
+}
+
+func stateField(row map[string]json.RawMessage, name string) json.RawMessage {
+	for key, value := range row {
+		if strings.EqualFold(key, name) {
+			return value
+		}
+	}
+	return nil
+}
+
+// Unknown reference metadata follows only the exact existing reference. A new
+// claim generation/nonce must not inherit a previous owner's future evidence.
+func preserveStateRefMetadata(before, after json.RawMessage, claims bool) (json.RawMessage, error) {
+	var old, next []map[string]json.RawMessage
+	if len(before) > 0 {
+		if err := json.Unmarshal(before, &old); err != nil {
+			return nil, err
+		}
+	}
+	if err := json.Unmarshal(after, &next); err != nil {
+		return nil, err
+	}
+	identity := func(row map[string]json.RawMessage) string {
+		var id, generation, claim string
+		_ = json.Unmarshal(stateField(row, "ID"), &id)
+		if claims {
+			_ = json.Unmarshal(stateField(row, "Generation"), &generation)
+			_ = json.Unmarshal(stateField(row, "Claim"), &claim)
+		}
+		key, _ := json.Marshal([3]string{id, generation, claim})
+		return string(key)
+	}
+	indexed := map[string]map[string]json.RawMessage{}
+	for _, row := range old {
+		indexed[identity(row)] = row
+	}
+	for _, row := range next {
+		prior := indexed[identity(row)]
+		for key, value := range prior {
+			known := false
+			fields := []string{"ID", "After", "Priority", "Order"}
+			if claims {
+				fields = append(fields, "Generation", "Claim", "Accepted")
+			}
+			for _, field := range fields {
+				if strings.EqualFold(key, field) {
+					known = true
+					break
+				}
+			}
+			if known {
+				continue
+			}
+			if _, exists := row[key]; !exists {
+				row[key] = value
+			}
+		}
+	}
+	return json.Marshal(next)
 }
 
 // claimOne fails open: inability to persist a claim must not lose a delivery.
@@ -258,6 +373,7 @@ func (s *hookState) bind(id hookIdentity) bool {
 	reset := s.Hub != "" && (s.Hub != id.Hub || s.As != id.As || (s.Caller != "" && id.Caller != "" && s.Caller != id.Caller))
 	if reset {
 		s.PollCursor, s.Shown, s.Caller, s.Cred = "", nil, "", ""
+		s.Displayed = nil
 		s.AppCursor, s.Replay, s.Claims = "", nil, nil
 	}
 	s.Hub, s.As = id.Hub, id.As

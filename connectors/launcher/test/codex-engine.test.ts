@@ -1402,6 +1402,9 @@ test('receipt settlement failure retains original owner until durable acceptance
   const settles = h.records().filter(r => !r.ack && r.argv.includes('settle'));
   assert.ok(settles.length >= 2);
   assert.ok(settles.every(r => r.argv[r.argv.indexOf('--outcome') + 1] === 'accepted'));
+  assert.ok(settles.every(r => r.argv[r.argv.indexOf('--receipt-key') + 1] === pending.key), 'receipt retries retain the original client key');
+  assert.ok(settles.every(r => r.argv[r.argv.indexOf('--delivery-ids') + 1] === pending.deliveries.join(',')), 'only the complete original batch proves display');
+  assert.ok(h.records().filter(r => !r.ack && r.argv.includes('guard')).every(r => !r.argv.includes('--receipt-key')), 'RPC acceptance cannot publish display proof');
   assert.equal(JSON.parse(readFileSync(h.plan.claims + '.accepted', 'utf8'))[pending.claim], true);
 });
 
