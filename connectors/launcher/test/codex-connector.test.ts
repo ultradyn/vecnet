@@ -380,7 +380,7 @@ async function smokeFixture(t: TestContext, o: { codex?: boolean; tmux?: boolean
   return { dir, env, trap, bin };
 }
 
-test('smoke skips without opt-in, without codex, and without an allowlisted daemon', async t => {
+test('smoke skips without opt-in, without codex, and below the minimum daemon version', async t => {
   const f = await smokeFixture(t);
   const optOut = await smoke({ ...f.env, VECNET_CODEX_APPSERVER_SMOKE: undefined });
   assert.equal(optOut.status, 0, optOut.stderr);
@@ -393,13 +393,13 @@ test('smoke skips without opt-in, without codex, and without an allowlisted daem
   const r2 = await smoke(f.env);
   assert.equal(r2.status, 0, r2.stderr);
   assert.match(r2.stdout, /^skipped: no Codex app-server daemon/);
-  // A daemon whose version is not allowlisted.
+  // A daemon below the compatibility minimum.
   const fake = await startFakeCodexAppServer({ dir: join(f.dir, 'fake') });
   t.after(() => fake.close());
   fake.setVersion('0.0.1');
   const r3 = await smoke({ ...f.env, CODEX_HOME: join(f.dir, 'fake', 'home') });
   assert.equal(r3.status, 0, r3.stderr);
-  assert.match(r3.stdout, /^skipped: .*not allowlisted/);
+  assert.match(r3.stdout, /^skipped: .*below the minimum supported version \(0\.166\.0\)/);
   // Preflight never runs codex or tmux and never writes outside its checks.
   assert.equal(existsSync(f.trap), false);
   assert.equal(existsSync(noCodex.trap), false);

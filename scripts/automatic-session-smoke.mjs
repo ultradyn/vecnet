@@ -342,9 +342,9 @@ async function runSmoke() {
     check((await run('git', ['worktree', 'add', '-q', '-b', 'fixture-neighbor', neighbor])).code === 0, 'neighbor worktree failed');
     check((await run(codex, ['app-server', 'daemon', 'start'])).code === 0, 'private daemon start failed'); daemon = true;
     const { connectUnixWebSocket } = await import('../connectors/launcher/src/codex/ws.ts');
-    const { socketPathFor, verifySocket, CODEX_APPSERVER_VERSIONS } = await import('../connectors/launcher/src/codex/discover.ts');
+    const { socketPathFor, verifySocket, isCodexVersionSupported } = await import('../connectors/launcher/src/codex/discover.ts');
     const version = JSON.parse((await run(codex, ['app-server', 'daemon', 'version'])).stdout);
-    check(CODEX_APPSERVER_VERSIONS.includes(version.appServerVersion), 'unsupported private app-server version'); evidence.appServerVersion = version.appServerVersion;
+    check(isCodexVersionSupported(version.appServerVersion), 'unsupported private app-server version'); evidence.appServerVersion = version.appServerVersion;
     const socket = verifySocket(socketPathFor(codexHome), process.geteuid()); check(socket.ok, 'private daemon socket refused');
     const ws = await connectUnixWebSocket(socket.target, { maxMessageBytes: 16 * 1024 * 1024, timeoutMs: 10000 });
     let next = 0; const pending = new Map(), completedTurns = new Set();

@@ -1,6 +1,6 @@
 import type { Logger as Log } from '../../backend.ts';
 import { connectUnixWebSocket } from './ws.ts';
-import { socketPathFor, verifySocket, parseServerVersion, CODEX_APPSERVER_VERSIONS } from './discover.ts';
+import { socketPathFor, verifySocket, parseServerVersion, codexVersionCompatibility } from './discover.ts';
 type AllowedMethod = string;
 const CODEX_OPT_OUT_NOTIFICATIONS = ['item/agentMessage/delta','item/reasoning/textDelta','item/reasoning/summaryTextDelta','item/commandExecution/outputDelta','turn/tokenUsage/updated'];
 
@@ -113,10 +113,12 @@ export async function openCodexRpc(o: { codexHome: string; euid: number; log: Lo
     }, o.timeoutMs);
     const ua = initialized && typeof initialized === 'object' ? (initialized as Record<string, unknown>).userAgent : undefined;
     const version = typeof ua === 'string' ? parseServerVersion(ua) : null;
-    if (version === null || !CODEX_APPSERVER_VERSIONS.includes(version)) {
+    const compatibility = version === null ? 'unsupported' : codexVersionCompatibility(version);
+    if (version === null || compatibility === 'unsupported') {
       log.error('refused_version'); throw new CodexRpcError(-1, 'refused_version');
     }
     rpc.version = version;
+    if (compatibility === 'tentative') log.info('codex_version_tentative', { version });
     ws.send(JSON.stringify({ method: 'initialized' }));
     return rpc;
   } catch (error) { rpc.close(); throw error; }

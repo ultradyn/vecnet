@@ -39,8 +39,9 @@ and local row deletion, so retrying that cleanup is idempotent.
 
 | Surface | Automatic idle wake / busy steer | Current migration state |
 |---|---|---|
-| Daemon-backed TUI, supported version, loaded root thread | Supported through the private control socket | Requires live matching connector status |
-| Daemon-backed TUI, unknown version | Refused | Compatibility verification required |
+| Daemon-backed TUI, recorded verified version, loaded root thread | Supported through the private control socket | Requires live matching connector status; evidence remains scoped to exercised canaries |
+| Daemon-backed TUI, newer version at or above the compatibility minimum, loaded root thread | Tentatively compatible through the existing protocol | Requires the same runtime checks and live matching connector status; fresh canaries establish evidence |
+| Daemon-backed TUI, version below the minimum or malformed | Refused (`refused_version`) | Upgrade or correct version reporting |
 | Embedded TUI / `--no-daemon` | No shared daemon endpoint | Unavailable; an owned bridge is still required |
 | `codex exec` | No shared daemon endpoint | Unavailable; manual explicit inbox only |
 | Desktop app | No verified shared daemon endpoint | Unavailable; host bridge remains required |
@@ -49,9 +50,36 @@ and local row deletion, so retrying that cleanup is idempotent.
 
 No lifecycle hook supplies a safe-point content fallback: documented parent-ID
 sharing makes that unsafe. These unavailable surfaces are remaining rollout work
-under issue #68, not fully migrated sessions. The version allowlist remains in
-`connectors/launcher/src/codex/discover.ts`; do not add a version based on its name
-alone. Re-run protocol and model-context canaries first.
+under issue #68, not fully migrated sessions.
+
+### Version compatibility and evidence
+
+The shared policy in `connectors/launcher/src/backends/codex-app-server/compatibility.ts`, reexported
+through discovery, admits valid semver versions at or above
+`CODEX_MIN_APPSERVER_VERSION` (`0.166.0`). This includes future major versions and
+prereleases whose semver precedence is above the floor. Older or malformed
+versions return `refused_version`.
+
+New versions are admitted provisionally through the existing protocol. The
+`CODEX_VERIFIED_APPSERVER_VERSIONS` list (`0.166.0`, `0.167.0`, `0.167.2`) records
+verified stable versions; it is not an exact-version admission gate. Version
+admission does not bypass protocol, exact-root ownership, policy, receipt or
+private-socket checks, and does not establish readiness by itself.
+
+Verification evidence is bounded to each canary's runtime version, surface and
+behaviors exercised. Re-run protocol and model-context canaries for a new
+runtime, retaining exact-thread receipts and negative isolation evidence. Passing
+one canary does not verify every launcher or delivery path. In particular,
+`0.169.x` remains tentatively compatible; this change does not establish full
+verification for it.
+
+On 2026-11-15, read-only probes of Codex `0.169.0` passed initialization,
+exact-root reads and summary-history reads through both adapters. A disposable
+root also passed resume-policy validation, untrusted model-context delivery,
+turn completion and exact client-message receipt recovery. These checks do not
+cover every launcher mode or the full enrollment path. Full history remains
+bounded by the existing 4 MiB transport limit: one existing root's latest full
+turn exceeded 27 MB and could not be read through that limit.
 
 ## Lifecycle and limits
 
@@ -192,7 +220,8 @@ the previous service only after reviewing its ownership state. Never restore an
 old binding snapshot over newer ownership or delete a ledger to resolve a send.
 
 The existing `scripts/codex-appserver-smoke.mjs` documents earlier live evidence;
-it is not evidence for a newly changed ownership protocol until adapted and rerun.
+it is not evidence for a new runtime version or changed ownership protocol until
+adapted as needed and rerun.
 Use disposable owned threads, private hub/config/home state, exact thread/turn
 receipts and model-context canaries for new acceptance. Source tests alone cannot
 complete the installation and rollout checklist in issue #68.
