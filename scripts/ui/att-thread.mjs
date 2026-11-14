@@ -1,6 +1,6 @@
 // Attachments Task 4: reply attachments and inline images in the thread, in a
-// real browser. A peer's PNG shows inline; its SVG, an HTML file typed as PNG
-// and a bidi-named file stay chips. The operator pastes a screenshot, the
+// real browser. PNG and SVG (rasterized off-DOM) show inline; an HTML file
+// typed as PNG and a bidi-named file stay chips. The operator pastes a screenshot, the
 // reply is lost and retried under the same key, and opens the image full size.
 import { assert, cleanBuild, hex, png, withDemo } from './lib.mjs';
 
@@ -31,6 +31,7 @@ const chart = png(420, 260, (x, y) => {
 });
 
 const SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" onload="alert(1)"><script>alert(2)</script><rect width="64" height="64" fill="red"/></svg>';
+const VIEWBOX_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 120"><rect width="240" height="120" rx="16" fill="#1a2139"/><circle cx="60" cy="60" r="36" fill="#34d399"/><path d="M120 40h80M120 60h60M120 80h80" stroke="#a78bfa" stroke-width="8"/></svg>';
 const FAKE_PNG = '<html><body><script>alert(3)</script><img src=x onerror=alert(4)></body></html>';
 const HOSTILE_NAME = 'é'.repeat(75) + '\u202Egnp.exe' + 'é'.repeat(75);
 const ALLOWED = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
@@ -71,14 +72,27 @@ try {
     await page.evaluate(() => {
       const make = URL.createObjectURL.bind(URL), drop = URL.revokeObjectURL.bind(URL);
       window.__urls = { made: [], revoked: [] };
-      URL.createObjectURL = b => { const u = make(b); window.__urls.made.push({ url: u, type: b.type, size: b.size }); return u; };
+      window.__urlBlobs = new Map();
+      window.__domImageSources = [];
+      const record = el => { if (el.matches?.('img[src^="blob:"]')) window.__domImageSources.push(el.src); };
+      new MutationObserver(records => {
+        for (const r of records) {
+          if (r.type === 'attributes') record(r.target);
+          for (const node of r.addedNodes) {
+            record(node);
+            node.querySelectorAll?.('img[src^="blob:"]').forEach(record);
+          }
+        }
+      }).observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ['src'] });
+      URL.createObjectURL = b => { const u = make(b); window.__urlBlobs.set(u, b); window.__urls.made.push({ url: u, type: b.type, size: b.size }); return u; };
       URL.revokeObjectURL = u => { window.__urls.revoked.push(u); drop(u); };
       window.__noReload = true;
     });
 
-    // The peer's message: a real PNG and three hostile attachments.
+    // The peer's message: a PNG, two SVGs, and two chip fallbacks.
     const pngUp = await upload(terminal, 'image/png');
     const svgUp = await upload(SVG, 'image/svg+xml');
+    const viewboxUp = await upload(VIEWBOX_SVG, 'image/svg+xml');
     const fakeUp = await upload(FAKE_PNG, 'image/png');
     const nameUp = await upload('radio: received over\nradio: finalize skipped\n', 'text/plain');
     const peerText = 'Screenshot of the failing run, plus what the bot attached.';
@@ -87,6 +101,7 @@ try {
       attachments: [
         { sha256: pngUp.sha256, size: pngUp.size, media_type: 'image/png', name: 'run-failure.png' },
         { sha256: svgUp.sha256, size: svgUp.size, media_type: 'image/svg+xml', name: 'diagram.svg' },
+        { sha256: viewboxUp.sha256, size: viewboxUp.size, media_type: 'image/svg+xml', name: 'viewbox-only.svg' },
         { sha256: fakeUp.sha256, size: fakeUp.size, media_type: 'image/png', name: 'preview.png' },
         { sha256: nameUp.sha256, size: nameUp.size, media_type: 'text/plain', name: HOSTILE_NAME },
       ],
@@ -100,15 +115,34 @@ try {
     await thumb.waitFor();
     assert(await imgLoaded(thumb), 'the peer PNG did not decode inline');
     assert(await thumb.getAttribute('alt') === 'run-failure.png', 'the thumbnail alt is not the cleaned name');
-    // The SVG never fetches; the HTML typed as PNG fails to decode and falls back.
-    await peer.locator('.att', { hasText: 'diagram.svg' }).waitFor();
+    // Both SVGs show only a newly encoded PNG in the DOM, never an SVG URL.
+    // connect-src 'self' forbids fetching blob: URLs, so inspect the Blob
+    // captured at createObjectURL rather than provoking a CSP violation.
+    for (const up of [svgUp, viewboxUp]) {
+      const img = peer.locator(`button.thumb[data-sha="${up.sha256}"] img`);
+      await img.waitFor();
+      assert(await imgLoaded(img), 'SVG thumbnail did not decode');
+      const info = await img.evaluate(async el => ({ src: el.src, type: window.__urlBlobs.get(el.src)?.type, w: el.naturalWidth, h: el.naturalHeight }));
+      assert(info.src.startsWith('blob:') && info.type === 'image/png', 'SVG reached the DOM without rasterization: ' + JSON.stringify(info));
+      assert(info.w > 0 && info.h > 0 && Math.max(info.w, info.h) >= 480 && Math.max(info.w, info.h) <= 2048, 'SVG raster dimensions not bounded: ' + JSON.stringify(info));
+      assert(blobGets(up.sha256) === 1, 'SVG was not fetched exactly once');
+    }
+    const svgThumb = peer.locator(`button.thumb[data-sha="${svgUp.sha256}"]`);
+    await svgThumb.click();
+    const svgViewer = page.locator('dialog.viewer[open]');
+    await svgViewer.waitFor();
+    assert(await imgLoaded(svgViewer.locator('img')), 'SVG viewer did not decode');
+    assert(await svgViewer.locator('img').evaluate(async el => window.__urlBlobs.get(el.src)?.type) === 'image/png', 'viewer exposed SVG bytes');
+    await shot('att04-svg-viewer');
+    await page.keyboard.press('Escape');
+    await svgViewer.waitFor({ state: 'detached' });
+    // HTML typed as PNG still fails decoding and falls back.
     await peer.locator('.att', { hasText: 'preview.png' }).waitFor();
     await peer.locator(`button.thumb[data-sha="${fakeUp.sha256}"]`).waitFor({ state: 'detached' });
     const named = peer.locator('.att', { hasText: 'gnp.exe' });
     await named.waitFor();
-    assert(await peer.locator('button.thumb').count() === 1, 'a hostile attachment rendered as an image');
-    assert(await peer.locator('.att').count() === 3, 'the three hostile attachments are not three chips');
-    assert(blobGets(svgUp.sha256) === 0, 'the declared SVG was fetched');
+    assert(await peer.locator('button.thumb').count() === 3, 'PNG and both SVGs should be thumbnails');
+    assert(await peer.locator('.att').count() === 2, 'fake PNG and text should remain chips');
     assert(blobGets(nameUp.sha256) === 0, 'a text attachment was fetched for a thumbnail');
     // Read the live node in one go: every update rebuilds the message, and a
     // detached node has no computed style.
@@ -120,11 +154,15 @@ try {
     assert(!nm.text.includes('\u202E') && nm.text === HOSTILE_NAME.replace('\u202E', ''), 'the name was not cleaned of its bidi override');
     assert(nm.bidi === 'isolate', `the attachment name is not bidi-isolated: ${nm.bidi}`);
     assert(await page.locator('iframe, object, embed, a[href^="blob:"]').count() === 0, 'an attachment became a frame, an object or a blob link');
-    // Every object URL is an allowed raster type; the fake PNG's URL is revoked on its decode error.
-    await page.waitForFunction(n => window.__urls.revoked.length >= n, 1);
+    // Transient SVG URLs are private to detached Images and already revoked.
+    // All DOM image sources are raster URLs; fake PNG is revoked on decode error.
+    await page.waitForFunction(n => window.__urls.revoked.length >= n, 3);
     let u = await urls();
-    assert(u.made.every(m => ALLOWED.includes(m.type.split(';')[0].trim().toLowerCase())), `an object URL of a hostile type: ${u.made.map(m => m.type)}`);
-    assert(u.made.length === 2 && u.revoked.length === 1, `made ${u.made.length} object URLs and revoked ${u.revoked.length}`);
+    assert(u.made.filter(m => m.type === 'image/svg+xml').length === 2, 'expected two transient SVG URLs');
+    assert(u.made.filter(m => m.type === 'image/svg+xml').every(m => u.revoked.includes(m.url)), 'SVG URL survived rasterization');
+    const imageSources = await page.locator('img[src^="blob:"]').evaluateAll(els => els.map(el => el.src));
+    assert(imageSources.every(src => u.made.some(m => m.url === src && ALLOWED.includes(m.type))), 'a DOM image exposed an SVG URL');
+    assert(u.made.length === 6 && u.revoked.length === 3, `made ${u.made.length} object URLs and revoked ${u.revoked.length}`);
     assert(dialogs === 0, 'an attachment ran script');
     await shot('att04-thread-initial');
 
@@ -136,7 +174,7 @@ try {
     await page.locator('.msg .txt', { hasText: nudge }).waitFor();
     await thumb.waitFor();
     assert(blobGets(pngUp.sha256) === 1, 'a redraw fetched the thumbnail again');
-    assert((await urls()).made.length === 2, 'a redraw made a new object URL');
+    assert((await urls()).made.length === 6, 'a redraw made a new object URL');
 
     // A near miss: a file dropped just outside the composer neither navigates nor loses the draft.
     const ta = page.locator('.composer textarea');
@@ -353,7 +391,35 @@ try {
     assert(renamePosts[0].attachments[0].sha256 === renamePosts[1].attachments[0].sha256, 'the two names did not carry the same bytes');
     assert(renamePosts[1].idempotency_key !== renamePosts[0].idempotency_key, 'the same bytes under a new name kept the key');
     assert(renameReplies.join() === '202,202', `the hub answered ${renameReplies}, not two new messages`);
+    // Exercise the browser conversion's failure/timeout cleanup as well as
+    // the cache's unit-tested chip fallback. No raw SVG URL may survive.
+    const conversion = await page.evaluate(async svg => {
+      const { rasterizeSVG } = await import('/ui/thumbs.js');
+      const blob = new Blob([svg], { type: 'image/svg+xml' });
+      const toBlob = HTMLCanvasElement.prototype.toBlob, decode = Image.prototype.decode;
+      const failures = [];
+      try {
+        for (const mode of ['invalid', 'null', 'security', 'timeout']) {
+          HTMLCanvasElement.prototype.toBlob = mode === 'null' ? function (cb) { cb(null); }
+            : mode === 'security' ? function () { throw new DOMException('tainted canvas', 'SecurityError'); } : toBlob;
+          Image.prototype.decode = mode === 'timeout' ? () => new Promise(() => {}) : decode;
+          try {
+            await rasterizeSVG(mode === 'invalid' ? new Blob(['not SVG'], { type: 'image/svg+xml' }) : blob, 100);
+            failures.push(false);
+          } catch { failures.push(true); }
+        }
+      } finally { HTMLCanvasElement.prototype.toBlob = toBlob; Image.prototype.decode = decode; }
+      const large = await rasterizeSVG(new Blob(['<svg xmlns="http://www.w3.org/2000/svg" width="8192" height="4096"><rect width="8192" height="4096" fill="red"/></svg>'], { type: 'image/svg+xml' }));
+      const bitmap = await createImageBitmap(large);
+      const size = [bitmap.width, bitmap.height];
+      bitmap.close();
+      return { failures, size, leaked: window.__urls.made.filter(m => m.type === 'image/svg+xml' && !window.__urls.revoked.includes(m.url)).length };
+    }, SVG);
+    assert(conversion.failures.every(Boolean), 'a failing SVG conversion did not reject: ' + JSON.stringify(conversion));
+    assert(conversion.leaked === 0, 'failed/timed out SVG conversion leaked a private URL');
+    assert(conversion.size.join() === '2048,1024', 'large SVG was not bounded with aspect preserved');
     assert(dialogs === 0, 'an attachment ran script');
+    assert(await page.evaluate(() => window.__domImageSources.length > 0 && window.__domImageSources.every(src => window.__urlBlobs.get(src)?.type !== 'image/svg+xml')), 'an SVG object URL ever entered the DOM');
   });
-  console.log('Attachments thread passed: inline PNG, hostile SVG/fake PNG/bidi name as chips, no refetch on redraw, URLs revoked on leave, near-miss drop, pasted reply sent once under one key, viewer, quota error, hosted+origin_url inline and reference-only chip, files added during a held reply kept, same bytes renamed mint a new key');
+  console.log('Attachments thread passed: inline PNG and rasterized hostile/viewBox-only SVGs, SVG viewer is PNG, fake PNG/bidi name as chips, no refetch on redraw, URLs revoked on leave, near-miss drop, pasted reply sent once under one key, viewer, quota error, hosted+origin_url inline and reference-only chip, files added during a held reply kept, same bytes renamed mint a new key');
 } finally { await cleanBuild(); }

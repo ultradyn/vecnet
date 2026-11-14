@@ -32,22 +32,22 @@ function fakeURL() {
 
 const tick = () => new Promise(resolve => setTimeout(resolve, 0));
 
-function setup() {
+function setup(rasterize) {
   const api = fakeApi(), URL = fakeURL();
   let ready = 0;
-  const cache = createThumbCache({ api, URL, onReady: () => { ready++; } });
+  const cache = createThumbCache({ api, URL, rasterize, onReady: () => { ready++; } });
   return { api, URL, cache, ready: () => ready };
 }
 
-test('svg declared → not eligible, no fetch', async () => {
+test('unsupported declared types → not eligible, no fetch', async () => {
   const { api, URL, cache, ready } = setup();
-  for (const media_type of ['image/svg+xml', 'IMAGE/SVG+XML', 'image/svg+xml; charset=utf-8', 'text/html', 'image/bmp', 'application/octet-stream', '', undefined]) {
+  for (const media_type of ['text/html', 'image/bmp', 'application/octet-stream', '', undefined]) {
     const a = att('a', { media_type });
     assert.equal(cache.eligible(a), false, String(media_type));
     assert.deepEqual(cache.state(a), { state: 'none', url: null }, String(media_type));
   }
   // The allowlist matches the declared essence: lowercased, before any ';'.
-  for (const media_type of ['image/png', 'IMAGE/JPEG', 'image/gif; x=1', ' image/webp ']) assert.equal(cache.eligible(att('b', { media_type })), true, media_type);
+  for (const media_type of ['image/png', 'IMAGE/JPEG', 'image/gif; x=1', ' image/webp ', 'image/svg+xml', 'IMAGE/SVG+XML', 'image/svg+xml; charset=utf-8']) assert.equal(cache.eligible(att('b', { media_type })), true, media_type);
   // No sha256 to fetch by, or a malformed one: not eligible either.
   assert.equal(cache.eligible(att('c', { sha256: undefined })), false);
   assert.equal(cache.eligible(att('c', { sha256: '../../v1/admin' })), false);
@@ -125,7 +125,7 @@ test('hosted, from the operator history page: hosted bytes with an origin_url fe
   assert.equal(cache.eligible(att('d', origin), undefined), false);
   assert.equal(cache.eligible(att('e'), undefined), true);
   // The declared checks still apply to hosted bytes.
-  assert.equal(cache.eligible(att('f', { ...origin, media_type: 'image/svg+xml' }), true), false);
+  assert.equal(cache.eligible(att('f', { ...origin, media_type: 'text/html' }), true), false);
   await tick();
   assert.deepEqual(api.calls, [sha('a')]);
 });
@@ -200,4 +200,79 @@ test('release revokes every URL created', async () => {
   assert.equal(api.calls.length, 4);
   cache.release();
   assert.equal(URL.revoked.length, 3, 'a second release revoked again');
+});
+
+const svgAtt = (c, extra = {}) => att(c, { media_type: 'image/svg+xml', name: 'diagram.svg', ...extra });
+const svgBlob = () => new Blob(['<svg xmlns="http://www.w3.org/2000/svg"/>'], { type: 'image/svg+xml; charset=utf-8' });
+
+test('SVG declared → eligible and fetched, only rasterized PNG handed out and revoked', async () => {
+  const input = svgBlob(), png = new Blob(['png'], { type: 'image/png' });
+  const { api, URL, cache, ready } = setup(async blob => { assert.equal(blob, input); return png; });
+  const a = svgAtt('a');
+  assert.equal(cache.eligible(a), true);
+  assert.deepEqual(cache.state(a), { state: 'loading', url: null });
+  assert.deepEqual(api.calls, [sha('a')]);
+  api.settle(sha('a'), input);
+  await tick();
+  assert.deepEqual(cache.state(a), { state: 'ok', url: 'blob:fake/1' });
+  assert.deepEqual(URL.created, [{ url: 'blob:fake/1', type: 'image/png', size: 3 }]);
+  assert.equal(ready(), 1);
+  assert.equal(cache.stats.created, 1);
+  cache.release();
+  assert.deepEqual(URL.revoked, ['blob:fake/1']);
+  assert.equal(cache.stats.revoked, 1);
+});
+
+test('SVG over 2 MiB declared → no fetch; exactly the cap is eligible', () => {
+  const { api, cache } = setup();
+  assert.equal(cache.eligible(svgAtt('a', { size: 2 * MiB })), true);
+  assert.deepEqual(cache.state(svgAtt('b', { size: 2 * MiB + 1 })), { state: 'none', url: null });
+  assert.deepEqual(api.calls, []);
+});
+
+test('SVG served with a different type, untyped or over cap → chip without rasterizing', async () => {
+  const { api, URL, cache } = setup(() => { assert.fail('invalid SVG reached rasterizer'); });
+  for (const [c, blob] of [
+    ['a', new Blob(['png'], { type: 'image/png' })],
+    ['b', new Blob(['html'], { type: 'text/html' })],
+    ['c', { type: 'image/svg+xml', size: 2 * MiB + 1 }],
+    ['d', new Blob(['svg'])],
+  ]) {
+    assert.equal(cache.state(svgAtt(c)).state, 'loading');
+    api.settle(sha(c), blob);
+  }
+  await tick();
+  for (const c of ['a', 'b', 'c', 'd']) assert.deepEqual(cache.state(svgAtt(c)), { state: 'chip', url: null });
+  assert.deepEqual(URL.created, []);
+});
+
+test('rasterize failure, null or non-PNG result → chip with no URL leaked', async () => {
+  for (const rasterize of [
+    async () => { throw new Error('decode or tainted canvas'); },
+    async () => null,
+    async () => svgBlob(),
+    undefined,
+  ]) {
+    const { api, URL, cache, ready } = setup(rasterize);
+    assert.equal(cache.state(svgAtt('a')).state, 'loading');
+    api.settle(sha('a'), svgBlob());
+    await tick();
+    assert.deepEqual(cache.state(svgAtt('a')), { state: 'chip', url: null });
+    assert.deepEqual(URL.created, []);
+    assert.equal(ready(), 1);
+  }
+});
+
+test('release during SVG rasterization creates no PNG URL and wakes nobody', async () => {
+  let finish;
+  const { api, URL, cache, ready } = setup(() => new Promise(resolve => { finish = resolve; }));
+  assert.equal(cache.state(svgAtt('a')).state, 'loading');
+  api.settle(sha('a'), svgBlob());
+  await tick();
+  assert.equal(typeof finish, 'function');
+  cache.release();
+  finish(new Blob(['png'], { type: 'image/png' }));
+  await tick();
+  assert.deepEqual(URL.created, []);
+  assert.equal(ready(), 0);
 });
