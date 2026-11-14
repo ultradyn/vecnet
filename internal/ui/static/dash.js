@@ -301,8 +301,16 @@ export function mount(root, ctx) {
       return row;
     });
     const body = peerTable.querySelector('tbody');
+    const focused = globalThis.document.activeElement;
+    const focusedChart = [...peerCharts.values()].some(view => view.chart.el.querySelector('svg') === focused) ? focused : null;
     for (const old of [...body.children]) if (!nextRows.includes(old)) old.remove();
-    nextRows.forEach((row, i) => { if (body.children[i] !== row) body.insertBefore(row, body.children[i] || null); });
+    nextRows.forEach((row, i) => {
+      if (body.children[i] === row) return;
+      if (body.moveBefore && row.parentNode === body) body.moveBefore(row, body.children[i] || null);
+      else body.insertBefore(row, body.children[i] || null);
+    });
+    // Native insertBefore can blur a surviving focused plot when rows reorder.
+    if (focusedChart?.isConnected && document.activeElement !== focusedChart) focusedChart.focus({ preventScroll: true });
     return [peerToolbar, rows.length ? peerTableWrap : peerEmpty, browse ? peerMore : peerFooter];
   }
 

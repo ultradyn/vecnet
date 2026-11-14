@@ -50,3 +50,17 @@ test('recent peers compare timestamps numerically and ignore future self-reporte
  rows[1].peer.last_seen = '2026-11-15T01:30:00+00:00'; rows[2].presence_at = '2099-01-01T00:00:00Z';
  assert.deepEqual(filterPeers(rows, { now: Date.parse('2026-11-15T02:00:00Z') }).shown.map(p => p.id), ['b', 'a', 'future']);
 });
+
+test('thread screen loads once on mount and refreshes exactly once on the threads tag', async () => {
+ const { installDom, El } = await import('./activity-dom-fixture.mjs');
+ const { createStore } = await import('../static/store.js');
+ const { mount } = await import('../static/threads.js');
+ const restore = installDom(); let calls = 0;
+ const api = { threads: async () => { calls++; return { threads: [], next: null }; } };
+ const store = createStore({ api }); const root = new El('div');
+ const off = mount(root, { api, store, me: 'peer_me', nameOf: id => id, replaceRoute() {} });
+ try {
+  await store.settled(); assert.equal(calls, 1);
+  store.invalidate('threads'); await store.settled(); assert.equal(calls, 2);
+ } finally { off(); restore(); }
+});

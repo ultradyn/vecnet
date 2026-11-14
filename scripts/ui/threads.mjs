@@ -1,6 +1,6 @@
 import { assert, cleanBuild, withDemo } from './lib.mjs';
 try {
- await withDemo({ many: true }, async ({ page, shot, demo }) => {
+ await withDemo({ many: true }, async ({ page, shot, demo, countRequests }) => {
   await page.goto(demo.url + '/ui/#threads');
   const rows = page.locator('.thread-results tbody tr');
   await page.waitForFunction(() => document.querySelectorAll('.thread-results tbody tr').length === 50);
@@ -9,16 +9,24 @@ try {
   const search = page.getByRole('searchbox', { name: 'Search thread titles' });
   await search.fill('Browse project 030');
   await page.waitForFunction(() => document.querySelectorAll('.thread-results tbody tr').length === 1 && document.querySelector('.thread-results').textContent.includes('Browse project 030'));
-  await page.getByRole('searchbox', { name: 'Participant', exact: true }).fill(demo.peers['browse-30'].id);
-  await page.getByRole('searchbox', { name: 'Participant', exact: true }).press('Tab');
+  const reads = countRequests(req => new URL(req.url()).pathname === '/v1/admin/threads');
+  await page.getByRole('combobox', { name: 'Participant', exact: true }).fill('not-a-peer');
+  await page.getByRole('combobox', { name: 'Participant', exact: true }).press('Tab');
+  await page.getByRole('status').filter({ hasText: 'No such participant' }).waitFor();
+  assert(countRequests(req => new URL(req.url()).pathname === '/v1/admin/threads') === reads, 'unknown participant sent a request');
+  await page.getByRole('combobox', { name: 'Participant', exact: true }).fill(demo.peers['browse-30'].id);
+  await page.getByRole('combobox', { name: 'Participant', exact: true }).press('Tab');
   await page.waitForFunction(() => document.querySelectorAll('.thread-results tbody tr').length === 1);
-  await page.getByRole('searchbox', { name: 'Participant', exact: true }).fill(demo.peers['browse-31'].id);
-  await page.getByRole('searchbox', { name: 'Participant', exact: true }).press('Tab');
+  await page.getByRole('combobox', { name: 'Participant', exact: true }).fill(demo.peers['browse-31'].id);
+  await page.getByRole('combobox', { name: 'Participant', exact: true }).press('Tab');
   await page.getByText('No threads match.', { exact: false }).waitFor();
-  await page.getByRole('searchbox', { name: 'Participant', exact: true }).fill('');
-  await page.getByRole('searchbox', { name: 'Participant', exact: true }).press('Tab');
+  await page.getByRole('combobox', { name: 'Participant', exact: true }).fill('');
+  await page.getByRole('combobox', { name: 'Participant', exact: true }).press('Tab');
   await search.fill('Browse project 03');
   await page.waitForFunction(() => document.querySelectorAll('.thread-results tbody tr').length === 10);
+  await page.getByRole('checkbox', { name: 'Only mine' }).check();
+  assert(await page.getByRole('combobox', { name: 'Participant', exact: true }).inputValue() === '', 'mine did not clear participant');
+  await page.getByRole('checkbox', { name: 'Only mine' }).uncheck();
   const names = await rows.locator('td:nth-child(2) a').allTextContents();
   await page.getByRole('checkbox', { name: 'Select all loaded threads' }).check();
   await page.getByRole('button', { name: 'Archive selected', exact: true }).click();
