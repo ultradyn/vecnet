@@ -129,3 +129,21 @@ BB_HOST=x-boss BB_JOBS=2 BB_LANE=merge55 just bb bash -c \
 ```
 
 Initial RED: 7 existing tests passed, 5 new profile tests failed because the factory was absent (exit 1). GREEN includes exact generated command execution/restart/teardown, foreign-path/directive refusal, unresolved intent retention, same-PID/changed-argv refusal, missing projection and interrupted-lock refusal, and all original standalone cases. Individual logs: `.scratch/merge55/adapter-red.log` and `adapter-green.log`. Actual native/ACP acceptance remains pending the final combined binaries and source; these synthetic results do not establish model execution or real systemd activation.
+
+## Prepared controller invocation
+
+`scripts/launcher-disposable-smoke.mjs` automates the envelope above, reusing the existing live smoke rather than replacing its journal or assertions. It starts nothing without `--run`. MAIN must first confirm the final combined source and both build-box-produced binaries. Each invocation creates and retains a new private `/var/tmp` root; parent HOME is never modified. Failure preserves the listener and all authority rather than guessing teardown safety. The controller writes only evidence paths to stdout; command/provider output goes to private logs. No local compilation occurs.
+
+```bash
+# Set only after MAIN supplies the actual final source revision and binaries.
+export FINAL_SOURCE=/home/xertrov/.codex/worktrees/3013/vecnet
+export FINAL_CLI="$FINAL_SOURCE/.scratch/merge55/final-artifacts/vecnet"
+export FINAL_DEMO="$FINAL_SOURCE/.scratch/merge55/final-artifacts/demo"
+# Each command is a distinct run root, identities, repository and backlog.
+SMOKE_WORKSPACE=worktree node "$FINAL_SOURCE/scripts/launcher-disposable-smoke.mjs" --run
+SMOKE_WORKSPACE=project-root node "$FINAL_SOURCE/scripts/launcher-disposable-smoke.mjs" --run
+SMOKE_WORKSPACE=temp node "$FINAL_SOURCE/scripts/launcher-disposable-smoke.mjs" --run
+SMOKE_BACKEND=acp SMOKE_WORKSPACE=temp node "$FINAL_SOURCE/scripts/launcher-disposable-smoke.mjs" --run
+```
+
+Run sequentially and inspect each private `recovery.json` before proceeding. The native listener is stopped only after the existing smoke exits zero and produces a matching passing backend/workspace receipt with proven cancellation and teardown. PID/start-time/argv/executable/UID/private HOME must match again before its leader receives SIGTERM; remaining descendants fail the controller. There is no automatic SIGKILL, broad group kill or cleanup of an ambiguous failure. Interrupted spawn intent and the retained ownership journal are recovery authority, not permission to infer nonexecution.
