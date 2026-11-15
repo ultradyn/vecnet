@@ -148,6 +148,10 @@ func Normalize(req SubmitRequest) (Normalized, error) {
 		out.WebhookKey = key
 		out.ConnectorName = connector
 		out.SkipMCP = p.skip
+		out.GrokbotTransport = p.grokbotTransport
+		if out.GrokbotTransport == "" {
+			out.GrokbotTransport = "delivery_v1"
+		}
 	default:
 		return Normalized{}, fieldErr(CodeUnsupportedAction, "submit_action", "submit_action is not registered")
 	}
@@ -213,6 +217,7 @@ func ConnectorCollision(name string, taken []string) error {
 }
 
 type parsed struct {
+	grokbotTransport                                   string
 	name, principal, webhookURL, webhookKey, connector string
 	nameOpen, skip, ttlSet                             bool
 	ttl                                                int64
@@ -271,6 +276,12 @@ func (p *parsed) store(f FieldSpec, v any) error {
 		s, ok := v.(string)
 		if !ok || !containsStr(f.Enum, s) {
 			return fieldErr(CodeInvalidValue, f.Name, f.Name+" is not an allowed value")
+		}
+		switch f.Name {
+		case "grokbot_transport":
+			p.grokbotTransport = s
+		default:
+			return fieldErr(CodeInvalidValue, f.Name, "unsupported field")
 		}
 	default:
 		return fieldErr(CodeInvalidValue, f.Name, "unsupported field type")
@@ -432,6 +443,7 @@ func buildKinds() []KindSpec {
 				{Name: "name", Type: FieldString, Required: true, Help: "Peer name. Operator-set and free-form, required. The same string is the bot name. There is no separate display name, and the owner is not renamed."},
 				{Name: "webhook_url", Type: FieldString, Required: true, HumanOnly: true, Pattern: webhookURLRE.String(), Help: "Routine webhook URL. A person submits it on the protected form. It is never placed in a prompt, a setup message, or a receipt."},
 				{Name: "webhook_key", Type: FieldSecret, Required: true, HumanOnly: true, Help: "Routine key: a raw crsr_ value, or the same value with one leading Bearer prefix. Human-only. Errors never quote it."},
+				{Name: "grokbot_transport", Type: FieldEnum, Default: "delivery_v1", Enum: []string{"delivery_v1", "recipient_drain_v1"}, Help: "Optional explicit declaration that the routine supports recipient-drain-v1. Legacy delivery_v1 is the default; never infer support from a successful webhook."},
 				{Name: "connector_name", Type: FieldString, Pattern: connectorNameRE.String(), Help: "Optional connector descriptor. Default is vecnet- plus the bot-name slug. An override must match ^vecnet-[a-z0-9-]{1,48}$."},
 				{Name: "skip_mcp", Type: FieldBoolean, Default: boolPtr(false), Help: "false is hosted OAuth (the default). true is CLI bearer. Never both."},
 			},

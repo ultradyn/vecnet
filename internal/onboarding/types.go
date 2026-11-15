@@ -151,6 +151,8 @@ type SubmitResult struct {
 	SkipMCP            bool   `json:"skip_mcp,omitempty"`
 	EnrolTTLSeconds    int    `json:"enrol_ttl_seconds,omitempty"`
 	RequestPrincipalID string `json:"request_principal_id,omitempty"`
+	// GrokbotTransport is the saved request selection, independent of the live route.
+	GrokbotTransport string `json:"grokbot_transport,omitempty"`
 	// SafeComplete is true when the receipt stored every safe option, so a
 	// zero value is the request's value. Historical receipts leave it false.
 	// Absent fields on those receipts are not evidence the requests match.
@@ -167,17 +169,18 @@ func (r SubmitResult) MarshalSafe() ([]byte, error) {
 // crsr_ value. WebhookURL and WebhookKey must not be logged; String redacts
 // both.
 type Normalized struct {
-	Kind            string
-	SpecVersion     string
-	RequestID       string
-	Name            string
-	NameOpen        bool
-	EnrolTTLSeconds int
-	PrincipalID     string
-	WebhookURL      string
-	WebhookKey      string
-	ConnectorName   string
-	SkipMCP         bool
+	GrokbotTransport string
+	Kind             string
+	SpecVersion      string
+	RequestID        string
+	Name             string
+	NameOpen         bool
+	EnrolTTLSeconds  int
+	PrincipalID      string
+	WebhookURL       string
+	WebhookKey       string
+	ConnectorName    string
+	SkipMCP          bool
 }
 
 // String redacts the routine URL and key so a log or a test dump cannot

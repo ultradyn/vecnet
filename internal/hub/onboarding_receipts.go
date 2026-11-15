@@ -44,22 +44,24 @@ type onboardRecord struct {
 	ThreadID           string `json:"thread_id,omitempty"`
 	MessageID          string `json:"message_id,omitempty"`
 	DeliveryID         string `json:"delivery_id,omitempty"`
+	GrokbotTransport   string `json:"grokbot_transport,omitempty"`
 }
 
 // onboardCanonical is the byte string the keyed digest covers, including
 // secret inputs. It is never stored.
 type onboardCanonical struct {
-	ConnectorName   string `json:"connector_name"`
-	EnrolTTLSeconds int    `json:"enrol_ttl_seconds"`
-	Kind            string `json:"kind"`
-	Name            string `json:"name"`
-	NameOpen        bool   `json:"name_open"`
-	PrincipalID     string `json:"principal_id"`
-	RequestID       string `json:"request_id"`
-	SkipMCP         bool   `json:"skip_mcp"`
-	SpecVersion     string `json:"spec_version"`
-	WebhookKey      string `json:"webhook_key"`
-	WebhookURL      string `json:"webhook_url"`
+	ConnectorName    string `json:"connector_name"`
+	EnrolTTLSeconds  int    `json:"enrol_ttl_seconds"`
+	Kind             string `json:"kind"`
+	Name             string `json:"name"`
+	NameOpen         bool   `json:"name_open"`
+	PrincipalID      string `json:"principal_id"`
+	RequestID        string `json:"request_id"`
+	SkipMCP          bool   `json:"skip_mcp"`
+	SpecVersion      string `json:"spec_version"`
+	WebhookKey       string `json:"webhook_key"`
+	WebhookURL       string `json:"webhook_url"`
+	GrokbotTransport string `json:"grokbot_transport,omitempty"`
 }
 
 func onboardMetaKey(subject, requestID string) string {
@@ -74,6 +76,30 @@ func (h *Hub) onboardDigest(n onboarding.Normalized) (string, error) {
 	mac := hmac.New(sha256.New, key)
 	mac.Write([]byte(onboardDigestInfo))
 	derived := mac.Sum(nil)
+	canonical, err := onboardCanonicalBytes(n)
+	if err != nil {
+		return "", err
+	}
+	mac = hmac.New(sha256.New, derived)
+	mac.Write(canonical)
+	return hex.EncodeToString(mac.Sum(nil)), nil
+}
+
+// onboardCanonicalBytes is shared by the sole digest path and literal V1 tests.
+// The bytes contain credentials and must never be persisted or logged.
+func onboardCanonicalBytes(n onboarding.Normalized) ([]byte, error) {
+	// Normalized is exported for receipt comparison; reject invalid selections
+	// there too rather than folding them into historical legacy proof.
+	if n.Kind == "grokbot" {
+		if n.GrokbotTransport != "" {
+			if err := validateGrokbotTransport(n.GrokbotTransport); err != nil {
+				return nil, err
+			}
+		}
+	} else if n.GrokbotTransport != "" {
+		return nil, errors.New("hub: onboarding transport requires grokbot")
+	}
+
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
@@ -82,12 +108,16 @@ func (h *Hub) onboardDigest(n onboarding.Normalized) (string, error) {
 		Name: n.Name, NameOpen: n.NameOpen, PrincipalID: n.PrincipalID, RequestID: n.RequestID,
 		SkipMCP: n.SkipMCP, SpecVersion: n.SpecVersion, WebhookKey: n.WebhookKey, WebhookURL: n.WebhookURL,
 	}
-	if err := enc.Encode(body); err != nil {
-		return "", err
+
+	// V1 legacy and non-Grok requests keep the historical eleven-field bytes.
+	// Only an explicit opt-in adds the appended canonical property.
+	if n.Kind == "grokbot" && n.GrokbotTransport == GrokbotTransportRecipientDrainV1 {
+		body.GrokbotTransport = n.GrokbotTransport
 	}
-	mac = hmac.New(sha256.New, derived)
-	mac.Write(bytes.TrimRight(buf.Bytes(), "\n"))
-	return hex.EncodeToString(mac.Sum(nil)), nil
+	if err := enc.Encode(body); err != nil {
+		return nil, err
+	}
+	return bytes.TrimRight(buf.Bytes(), "\n"), nil
 }
 
 // receiptStringsHold reports whether any stored string contains the
@@ -96,7 +126,7 @@ func receiptStringsHold(rec onboardRecord, key, url string) bool {
 	fields := []string{
 		rec.Subject, rec.RequestID, rec.Kind, rec.SpecVersion, rec.Digest,
 		rec.PeerID, rec.PrincipalID, rec.Name, rec.ConnectorName, rec.RequestPrincipalID,
-		rec.RouteID, rec.ThreadID, rec.MessageID, rec.DeliveryID,
+		rec.RouteID, rec.ThreadID, rec.MessageID, rec.DeliveryID, rec.GrokbotTransport,
 	}
 	for _, field := range fields {
 		if secretInString(field, key) || secretInString(field, url) {
@@ -140,6 +170,24 @@ func (h *Hub) loadOnboardReceipt(ctx context.Context, tx *sql.Tx, subject, reque
 	if err := json.Unmarshal([]byte(raw), &rec); err != nil {
 		return onboardRecord{}, false, fmt.Errorf("hub: onboarding receipt: %w", err)
 	}
+
+	if rec.V != 1 {
+		return onboardRecord{}, false, errors.New("hub: unsupported onboarding receipt version")
+	}
+	// Presence is distinct from null: only absent V1 Grok transport is legacy.
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &fields); err != nil {
+		return onboardRecord{}, false, errors.New("hub: invalid onboarding receipt")
+	}
+	if value, present := fields["grokbot_transport"]; present {
+		if bytes.Equal(bytes.TrimSpace(value), []byte("null")) || rec.Kind != "grokbot" ||
+			(rec.GrokbotTransport != GrokbotTransportDeliveryV1 && rec.GrokbotTransport != GrokbotTransportRecipientDrainV1) {
+			return onboardRecord{}, false, errors.New("hub: invalid onboarding receipt transport")
+		}
+	}
+	if rec.Kind == "grokbot" && rec.GrokbotTransport == "" {
+		rec.GrokbotTransport = GrokbotTransportDeliveryV1
+	}
 	if rec.Subject != subject || rec.RequestID != requestID {
 		return onboardRecord{}, false, errors.New("hub: onboarding receipt subject mismatch")
 	}
@@ -151,7 +199,7 @@ func (h *Hub) saveOnboardReceipt(ctx context.Context, tx *sql.Tx, subject string
 		V: 1, Subject: subject, RequestID: n.RequestID, Kind: n.Kind, SpecVersion: n.SpecVersion,
 		Digest: digest, PeerID: res.PeerID, PrincipalID: res.PrincipalID, Name: n.Name, NameOpen: n.NameOpen,
 		EnrolTTLSeconds: n.EnrolTTLSeconds, ConnectorName: n.ConnectorName, SkipMCP: n.SkipMCP,
-		RequestPrincipalID: n.PrincipalID, SafeComplete: true, RouteID: res.RouteID,
+		RequestPrincipalID: n.PrincipalID, SafeComplete: true, RouteID: res.RouteID, GrokbotTransport: n.GrokbotTransport,
 	}
 	if res.Setup != nil {
 		rec.ThreadID = res.Setup.ThreadID
@@ -193,7 +241,7 @@ func (h *Hub) resultFromReceipt(ctx context.Context, tx *sql.Tx, rec onboardReco
 		SendDefaults: copyDefaults(spec), Status: status,
 		Name: rec.Name, SpecVersion: rec.SpecVersion, NameOpen: rec.NameOpen, SkipMCP: rec.SkipMCP,
 		EnrolTTLSeconds: rec.EnrolTTLSeconds, RequestPrincipalID: rec.RequestPrincipalID,
-		SafeComplete: rec.SafeComplete,
+		SafeComplete: rec.SafeComplete, GrokbotTransport: rec.GrokbotTransport,
 	}, nil
 }
 

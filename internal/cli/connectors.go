@@ -41,6 +41,16 @@ func (a *app) routeAddBody(o opts) (map[string]string, error) {
 	if kind != "" {
 		body["kind"] = kind
 	}
+	if o.has("grokbot-transport") {
+		if kind != grokbotKind {
+			return nil, usageErr("route add: --grokbot-transport needs --kind grokbot")
+		}
+		transport, err := routeTransport(o)
+		if err != nil {
+			return nil, err
+		}
+		body["grokbot_transport"] = transport
+	}
 	if kind != grokbotKind {
 		if o.has("key-file") {
 			return nil, usageErr("route add: --key-file needs --kind " + grokbotKind)
@@ -211,4 +221,13 @@ func (a *app) cmdSubscriptions(args []string) error {
 		return a.ok("resumed " + o.pos[1])
 	}
 	return usageErr("usage: vecnet subscriptions list | subscriptions pause <id> | subscriptions resume <id>")
+}
+
+// routeTransport validates the explicit capability without echoing supplied data.
+func routeTransport(o opts) (string, error) {
+	transport := o.str("grokbot-transport")
+	if transport != "delivery_v1" && transport != "recipient_drain_v1" {
+		return "", usageErr("--grokbot-transport must be delivery_v1 or recipient_drain_v1")
+	}
+	return transport, nil
 }

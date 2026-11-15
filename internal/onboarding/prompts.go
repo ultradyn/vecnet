@@ -53,12 +53,12 @@ var invitePlaceholders = map[string]bool{
 // Authorize is shown before submission. The peer does not exist yet, so
 // peer_id is not a placeholder; the setup message carries the binding.
 var authorizePlaceholders = map[string]bool{
-	"hub_url": true, "connector_name": true,
+	"hub_url": true, "connector_name": true, "grokbot_transport": true,
 }
 
 var setupPlaceholders = map[string]bool{
 	"hub_url": true, "peer_id": true, "connector_name": true,
-	"thread_id": true, "credential_mode": true, "profile": true,
+	"thread_id": true, "credential_mode": true, "profile": true, "grokbot_transport": true,
 }
 
 type inviteView struct {
@@ -66,6 +66,7 @@ type inviteView struct {
 }
 
 type grokView struct {
+	GrokbotTransport                                                 string
 	HubURL, PeerID, ConnectorName, ThreadID, Profile, CredentialMode string
 }
 
@@ -183,6 +184,13 @@ func renderSetup(values map[string]string) (string, error) {
 }
 
 func grokViewFrom(values map[string]string, needConnector, needPeer bool) (grokView, error) {
+	transport, selected := values["grokbot_transport"]
+	if !selected {
+		transport = "delivery_v1"
+	}
+	if transport != "delivery_v1" && transport != "recipient_drain_v1" {
+		return grokView{}, fieldErr(CodeInvalidValue, "grokbot_transport", "grokbot_transport is not an allowed value")
+	}
 	hub, err := safeHubOrigin(values["hub_url"])
 	if err != nil {
 		return grokView{}, err
@@ -205,7 +213,7 @@ func grokViewFrom(values map[string]string, needConnector, needPeer bool) (grokV
 	if thread != "" && !peerIDRE.MatchString(thread) {
 		return grokView{}, fieldErr(CodeInvalidValue, "thread_id", "thread_id must be 1 to 80 letters, digits or underscores")
 	}
-	return grokView{HubURL: hub, PeerID: peer, ConnectorName: connector, ThreadID: thread}, nil
+	return grokView{GrokbotTransport: transport, HubURL: hub, PeerID: peer, ConnectorName: connector, ThreadID: thread}, nil
 }
 
 func execute(tmpl *template.Template, data grokView) (string, error) {

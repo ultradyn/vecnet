@@ -22,7 +22,7 @@ import (
 )
 
 const agentUsage = "usage: vecnet agent kinds [--kind KIND] | " +
-	"agent add --kind KIND [--name N] [--open-name] [--ttl 24h] [--principal PRN] [--url URL] [--key-file PATH] [--connector-name NAME] [--skip-mcp] [--request-id ID] [--confirm-revoke] | " +
+	"agent add --kind KIND [--name N] [--open-name] [--ttl 24h] [--principal PRN] [--url URL] [--key-file PATH] [--connector-name NAME] [--skip-mcp] [--grokbot-transport delivery_v1|recipient_drain_v1] [--request-id ID] [--confirm-revoke] | " +
 	"agent link <peer> [--confirm-revoke] | agent status REQUEST_ID"
 
 const (
@@ -40,7 +40,7 @@ func (a *app) cmdAgent(args []string) error {
 	o, err := parseFlags("agent", args, map[string]flagKind{
 		"kind": strFlag, "name": strFlag, "open-name": boolFlag, "ttl": strFlag,
 		"principal": strFlag, "url": strFlag, "key-file": strFlag,
-		"connector-name": strFlag, "skip-mcp": boolFlag, "request-id": strFlag,
+		"connector-name": strFlag, "grokbot-transport": strFlag, "skip-mcp": boolFlag, "request-id": strFlag,
 		"confirm-revoke": boolFlag,
 	})
 	if err != nil {
@@ -102,7 +102,7 @@ func (a *app) agentKinds(o opts) error {
 }
 
 func (a *app) agentAdd(o opts) error {
-	if err := rejectAgentFlags(o, "kind", "name", "open-name", "ttl", "principal", "url", "key-file", "connector-name", "skip-mcp", "request-id", "confirm-revoke"); err != nil {
+	if err := rejectAgentFlags(o, "kind", "name", "open-name", "ttl", "principal", "url", "key-file", "connector-name", "skip-mcp", "grokbot-transport", "request-id", "confirm-revoke"); err != nil {
 		return err
 	}
 	if len(o.pos) != 0 || o.str("kind") == "" {
@@ -362,6 +362,19 @@ func (a *app) agentInputs(o opts, spec onboarding.KindSpec) (map[string]any, str
 		}
 		inputs[f.Name] = name
 	}
+	if f, ok := known["grokbot_transport"]; ok && o.has("grokbot-transport") {
+		value := o.str("grokbot-transport")
+		allowed := false
+		for _, choice := range f.Enum {
+			if value == choice {
+				allowed = true
+			}
+		}
+		if f.Type != onboarding.FieldEnum || !allowed {
+			return nil, "", "", usageErr("agent add: --grokbot-transport is not an allowed value")
+		}
+		inputs[f.Name] = value
+	}
 	routine := ""
 	if _, ok := known["webhook_url"]; ok {
 		routine = o.str("url")
@@ -523,22 +536,23 @@ func outcomeLine(res onboarding.SubmitResult) string {
 }
 
 type agentJSON struct {
-	RequestID      string                `json:"request_id,omitempty"`
-	Kind           string                `json:"kind,omitempty"`
-	PeerID         string                `json:"peer_id,omitempty"`
-	PrincipalID    string                `json:"principal_id,omitempty"`
-	RouteID        string                `json:"route_id,omitempty"`
-	ConnectorName  string                `json:"connector_name,omitempty"`
-	Setup          *onboarding.SetupInfo `json:"setup,omitempty"`
-	AuthState      string                `json:"auth_state,omitempty"`
-	SendDefaults   map[string]string     `json:"send_defaults,omitempty"`
-	Status         string                `json:"status,omitempty"`
-	WebPath        string                `json:"web_path,omitempty"`
-	HumanOutput    string                `json:"human_output,omitempty"`
-	Outcome        string                `json:"outcome,omitempty"`
-	CredentialMode string                `json:"credential_mode,omitempty"`
-	LinkCode       string                `json:"link_code,omitempty"`
-	LinkExpiresAt  string                `json:"link_expires_at,omitempty"`
+	GrokbotTransport string                `json:"grokbot_transport,omitempty"`
+	RequestID        string                `json:"request_id,omitempty"`
+	Kind             string                `json:"kind,omitempty"`
+	PeerID           string                `json:"peer_id,omitempty"`
+	PrincipalID      string                `json:"principal_id,omitempty"`
+	RouteID          string                `json:"route_id,omitempty"`
+	ConnectorName    string                `json:"connector_name,omitempty"`
+	Setup            *onboarding.SetupInfo `json:"setup,omitempty"`
+	AuthState        string                `json:"auth_state,omitempty"`
+	SendDefaults     map[string]string     `json:"send_defaults,omitempty"`
+	Status           string                `json:"status,omitempty"`
+	WebPath          string                `json:"web_path,omitempty"`
+	HumanOutput      string                `json:"human_output,omitempty"`
+	Outcome          string                `json:"outcome,omitempty"`
+	CredentialMode   string                `json:"credential_mode,omitempty"`
+	LinkCode         string                `json:"link_code,omitempty"`
+	LinkExpiresAt    string                `json:"link_expires_at,omitempty"`
 }
 
 func agentView(res onboarding.SubmitResult, mode string, keepHuman bool, link map[string]any) agentJSON {
@@ -546,7 +560,8 @@ func agentView(res onboarding.SubmitResult, mode string, keepHuman bool, link ma
 		res.HumanOutput = ""
 	}
 	view := agentJSON{
-		RequestID: res.RequestID, Kind: res.Kind, PeerID: res.PeerID, PrincipalID: res.PrincipalID,
+		GrokbotTransport: agentTransport(res),
+		RequestID:        res.RequestID, Kind: res.Kind, PeerID: res.PeerID, PrincipalID: res.PrincipalID,
 		RouteID: res.RouteID, ConnectorName: res.ConnectorName, Setup: res.Setup, AuthState: res.AuthState,
 		SendDefaults: res.SendDefaults, Status: res.Status, WebPath: res.WebPath, HumanOutput: res.HumanOutput,
 		Outcome: outcomeLine(res), CredentialMode: mode,
@@ -589,6 +604,9 @@ func (a *app) writeAgentLines(w io.Writer, res onboarding.SubmitResult, mode str
 	}
 	if res.ConnectorName != "" {
 		fmt.Fprintf(w, "connector_name %s\n", res.ConnectorName)
+	}
+	if transport := agentTransport(res); transport != "" {
+		fmt.Fprintf(w, "grokbot_transport %s\n", transport)
 	}
 	if res.AuthState != "" {
 		fmt.Fprintf(w, "auth_state %s\n", res.AuthState)
@@ -634,13 +652,13 @@ func supportedAgentType(t string) bool {
 var agentFieldFlag = map[string]string{
 	"name": "name", "name_open": "open-name", "enrol_ttl_seconds": "ttl",
 	"principal_id": "principal", "webhook_url": "url", "webhook_key": "key-file",
-	"connector_name": "connector-name", "skip_mcp": "skip-mcp",
+	"connector_name": "connector-name", "skip_mcp": "skip-mcp", "grokbot_transport": "grokbot-transport",
 }
 
 var agentFlagField = map[string]string{
 	"name": "name", "open-name": "name_open", "ttl": "enrol_ttl_seconds",
 	"principal": "principal_id", "url": "webhook_url", "key-file": "webhook_key",
-	"connector-name": "connector_name", "skip-mcp": "skip_mcp",
+	"connector-name": "connector_name", "skip-mcp": "skip_mcp", "grokbot-transport": "grokbot_transport",
 }
 
 func findAgentKind(specs []onboarding.KindSpec, kind string) (onboarding.KindSpec, bool) {
@@ -663,4 +681,12 @@ func rejectAgentFlags(o opts, allowed ...string) error {
 		}
 	}
 	return nil
+}
+
+// Historical Grok status responses omitted the selection and mean legacy.
+func agentTransport(res onboarding.SubmitResult) string {
+	if res.Kind == "grokbot" && res.GrokbotTransport == "" {
+		return "delivery_v1"
+	}
+	return res.GrokbotTransport
 }

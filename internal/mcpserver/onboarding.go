@@ -143,6 +143,7 @@ func agentToolSpecs() []toolSpec {
 			"enrol_ttl_seconds":    schema{"type": "integer"},
 			"request_principal_id": schema{"type": "string"},
 			"safe_complete":        schema{"type": "boolean"},
+			"grokbot_transport":    schema{"type": "string", "enum": []string{"delivery_v1", "recipient_drain_v1"}},
 		}),
 		annotations: readAnnotations(),
 		precheck:    precheckAgentStatus,
@@ -232,6 +233,7 @@ func requireOperator(c auth.Caller) error {
 
 type agentSafe struct {
 	kind, specVersion, requestID, name, connector, principalID string
+	grokbotTransport                                           string
 	nameOpen, skipMCP                                          bool
 	enrolTTL                                                   int
 }
@@ -241,6 +243,11 @@ type agentSafe struct {
 // parsed. Grokbot's required human fields are filled with placeholders for
 // that check only.
 func validateAgentAdd(req onboarding.SubmitRequest) (onboarding.Normalized, agentSafe, error) {
+	// The read-only human handoff cannot carry transport into the existing UI.
+	// Do not accept a value that agentWebPath would silently discard.
+	if _, present := req.Inputs["grokbot_transport"]; present {
+		return onboarding.Normalized{}, agentSafe{}, agentField(onboarding.CodeUnknownField, "grokbot_transport", "unknown field")
+	}
 	spec, ok := onboarding.Lookup(req.Kind)
 	if !ok {
 		return onboarding.Normalized{}, agentSafe{}, agentField(onboarding.CodeUnknownKind, "kind", "unknown peer kind")
@@ -274,7 +281,7 @@ func validateAgentAdd(req onboarding.SubmitRequest) (onboarding.Normalized, agen
 	return n, agentSafe{
 		kind: n.Kind, specVersion: n.SpecVersion, requestID: n.RequestID,
 		name: n.Name, connector: n.ConnectorName, principalID: n.PrincipalID,
-		nameOpen: n.NameOpen, skipMCP: n.SkipMCP, enrolTTL: n.EnrolTTLSeconds,
+		nameOpen: n.NameOpen, skipMCP: n.SkipMCP, enrolTTL: n.EnrolTTLSeconds, grokbotTransport: n.GrokbotTransport,
 	}, nil
 }
 
@@ -309,7 +316,11 @@ func grokHistoricalComplete(existing onboarding.SubmitResult) bool {
 // agentRequestChanged reports whether safe differs from a complete receipt.
 // It uses that receipt's original name and options, never the live directory.
 func agentRequestChanged(existing onboarding.SubmitResult, safe agentSafe) bool {
-	return existing.Kind != safe.kind ||
+	transport := existing.GrokbotTransport
+	if existing.Kind == "grokbot" && transport == "" {
+		transport = "delivery_v1"
+	}
+	return transport != safe.grokbotTransport || existing.Kind != safe.kind ||
 		existing.SpecVersion != safe.specVersion ||
 		existing.Name != safe.name ||
 		existing.ConnectorName != safe.connector ||

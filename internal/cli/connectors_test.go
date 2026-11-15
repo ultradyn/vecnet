@@ -281,14 +281,14 @@ func TestRouteAddGrokbotKeyFile(t *testing.T) {
 		t.Fatalf("routes = %d, want 2", n)
 	}
 
-	// --json prints the id alone.
+	// --json includes the id and the effective legacy capability, never a key.
 	out = op.mustRun(append([]string{"--json"}, append(grokbot, "--key-file", keyFile("j", key, 0o600))...)...)
 	var added map[string]any
 	if err := json.Unmarshal([]byte(out), &added); err != nil {
 		t.Fatalf("route add --json output %q: %v", out, err)
 	}
-	if len(added) != 1 || added["route_id"] == nil {
-		t.Fatalf("route add --json = %v, want route_id alone", added)
+	if len(added) != 2 || added["route_id"] == nil || added["grokbot_transport"] != "delivery_v1" {
+		t.Fatal("route add --json must contain only route_id and effective legacy transport")
 	}
 
 	// Bad invocations stop locally: nothing leaves, and file contents stay out

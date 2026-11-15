@@ -86,7 +86,7 @@ func grokbotOnboard(ctx context.Context, h *Hub, tx *sql.Tx, n onboarding.Normal
 	}
 	routeID, _, err := h.insertRoute(ctx, tx, newRoute{
 		ownerKind: "peer", ownerID: peerID, kind: RouteKindGrokbot, url: n.WebhookURL,
-		keyEnc: sealed, verified: true,
+		keyEnc: sealed, verified: true, grokbotTransport: n.GrokbotTransport,
 	})
 	if err != nil {
 		return onboarding.SubmitResult{}, nil, "", err
@@ -152,7 +152,8 @@ func grokbotOnboard(ctx context.Context, h *Hub, tx *sql.Tx, n onboarding.Normal
 		return onboarding.SubmitResult{}, nil, "", err
 	}
 	res := onboarding.SubmitResult{
-		PeerID: peerID, PrincipalID: prnID, RouteID: routeID, ConnectorName: n.ConnectorName,
+		GrokbotTransport: n.GrokbotTransport,
+		PeerID:           peerID, PrincipalID: prnID, RouteID: routeID, ConnectorName: n.ConnectorName,
 		AuthState: onboarding.AuthUnlinked,
 		Setup: &onboarding.SetupInfo{
 			ThreadID: thrID, MessageID: msgID, DeliveryID: refs[0].DeliveryID, State: onboarding.SetupQueued,
@@ -164,6 +165,7 @@ func grokbotOnboard(ctx context.Context, h *Hub, tx *sql.Tx, n onboarding.Normal
 func grokSetupText(n onboarding.Normalized, mode, hubURL, peerID, thrID string) (string, error) {
 	values := map[string]string{
 		"hub_url": hubURL, "peer_id": peerID, "thread_id": thrID, "credential_mode": mode,
+		"grokbot_transport": n.GrokbotTransport,
 	}
 	if mode == onboarding.CredentialHostedOAuth {
 		values["connector_name"] = n.ConnectorName

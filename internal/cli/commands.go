@@ -141,7 +141,7 @@ admin (operator credential):
        onboarding kinds and prompt templates from the hub
   agent add --kind KIND [--name N] [--open-name] [--ttl 24h] [--principal PRN]
        [--url URL] [--key-file PATH] [--connector-name NAME] [--skip-mcp]
-       [--request-id ID] [--confirm-revoke]
+       [--grokbot-transport delivery_v1|recipient_drain_v1] [--request-id ID] [--confirm-revoke]
        one hub submit; a routine key is read only from --key-file, never argv or the environment
        --skip-mcp selects CLI bearer and does not request a link
        the guided link revokes a live bearer and asks for --confirm-revoke first
@@ -156,9 +156,9 @@ admin (operator credential):
   peer rename <id> <name>
   peer disable <id> | peer enable <id> | peer archive <id> | peer unarchive <id>
   route add --owner ID --url URL | route verify <route_id>
-  route add --owner ID --kind grokbot --url URL --key-file PATH
+  route add --owner ID --kind grokbot --url URL --key-file PATH [--grokbot-transport delivery_v1|recipient_drain_v1]
   route list [--json] | route rotate <route_id> --key-file PATH | route remove <route_id>
-  route update <route_id> [--url URL] [--key-file PATH]
+  route update <route_id> [--url URL] [--key-file PATH] [--grokbot-transport delivery_v1|recipient_drain_v1]
   route stats <peer_id|route_id|sub_id> [--json]
        the crsr_ key is read only from a file, 0600, never from argv
   source add --kind github --name N --route ID [--events A,B] [--priority P]
@@ -1967,7 +1967,7 @@ func (a *app) cmdRoute(args []string) error {
 	if len(args) > 0 && args[0] == "stats" {
 		return a.cmdRouteStats(args[1:])
 	}
-	o, err := parseFlags("route", args, map[string]flagKind{"owner": strFlag, "url": strFlag, "kind": strFlag, "key-file": strFlag})
+	o, err := parseFlags("route", args, map[string]flagKind{"owner": strFlag, "url": strFlag, "kind": strFlag, "grokbot-transport": strFlag, "key-file": strFlag})
 	if err != nil {
 		return err
 	}
@@ -1992,13 +1992,14 @@ func (a *app) cmdRoute(args []string) error {
 		}
 		for _, item := range items {
 			var route struct {
-				RouteID     string  `json:"route_id"`
-				OwnerKind   string  `json:"owner_kind"`
-				OwnerID     string  `json:"owner_id"`
-				Kind        string  `json:"kind"`
-				Host        string  `json:"host"`
-				VerifiedAt  *string `json:"verified_at"`
-				RunsPerHour int     `json:"runs_per_hour"`
+				RouteID          string  `json:"route_id"`
+				OwnerKind        string  `json:"owner_kind"`
+				OwnerID          string  `json:"owner_id"`
+				Kind             string  `json:"kind"`
+				Host             string  `json:"host"`
+				VerifiedAt       *string `json:"verified_at"`
+				RunsPerHour      int     `json:"runs_per_hour"`
+				GrokbotTransport *string `json:"grokbot_transport"`
 			}
 			if err := json.Unmarshal(item, &route); err != nil {
 				return err
@@ -2009,6 +2010,9 @@ func (a *app) cmdRoute(args []string) error {
 			}
 			fmt.Fprintf(a.stdout, "%s owner=%s:%s kind=%s host=%s verified_at=%s runs_per_hour=%d\n",
 				route.RouteID, route.OwnerKind, route.OwnerID, route.Kind, flatten(route.Host), verified, route.RunsPerHour)
+			if route.GrokbotTransport != nil {
+				fmt.Fprintf(a.stdout, "  grokbot_transport=%s\n", flatten(*route.GrokbotTransport))
+			}
 		}
 		return nil
 	case len(o.pos) == 2 && o.pos[0] == "rotate" && o.str("key-file") != "":
@@ -2020,10 +2024,17 @@ func (a *app) cmdRoute(args []string) error {
 			return err
 		}
 		return a.ok("rotated " + o.pos[1])
-	case len(o.pos) == 2 && o.pos[0] == "update" && (o.str("url") != "" || o.str("key-file") != "") && !o.has("owner") && !o.has("kind"):
+	case len(o.pos) == 2 && o.pos[0] == "update" && (o.str("url") != "" || o.str("key-file") != "" || o.has("grokbot-transport")) && !o.has("owner") && !o.has("kind"):
 		// PATCH /v1/admin/routes/{id}: change a route in place. An http
 		// route's new URL needs route verify before it pushes again.
 		body := map[string]string{}
+		if o.has("grokbot-transport") {
+			transport, err := routeTransport(o)
+			if err != nil {
+				return err
+			}
+			body["grokbot_transport"] = transport
+		}
 		if u := o.str("url"); u != "" {
 			body["url"] = u
 		}
@@ -2050,8 +2061,8 @@ func (a *app) cmdRoute(args []string) error {
 		return a.ok("verified " + o.pos[1])
 	}
 	return usageErr("usage: vecnet route add --owner ID --url URL | " +
-		"route add --owner ID --kind grokbot --url URL --key-file PATH | route verify <route_id> | route list [--json] | route rotate <route_id> --key-file PATH | " +
-		"route update <route_id> [--url URL] [--key-file PATH] | route remove <route_id> | route stats <peer_id|route_id|sub_id> [--json]")
+		"route add --owner ID --kind grokbot --url URL --key-file PATH [--grokbot-transport delivery_v1|recipient_drain_v1] | route verify <route_id> | route list [--json] | route rotate <route_id> --key-file PATH | " +
+		"route update <route_id> [--url URL] [--key-file PATH] [--grokbot-transport delivery_v1|recipient_drain_v1] | route remove <route_id> | route stats <peer_id|route_id|sub_id> [--json]")
 }
 
 func (a *app) cmdTeam(args []string) error {

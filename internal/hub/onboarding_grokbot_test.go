@@ -1,11 +1,14 @@
 package hub_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
 	"strings"
 	"sync"
 	"testing"
@@ -774,5 +777,215 @@ func assertHubSetup(t *testing.T, env *testhub.Env, operator string, res onboard
 	}
 	if state == "accepted" || state == "processed" {
 		t.Fatal("queued setup was recorded as processed")
+	}
+}
+
+func TestOnboardingDrainV1RequestReadbackInstructions(t *testing.T) {
+	env := testhub.Start(t)
+	ctx := context.Background()
+	op := operatorCaller(t, env)
+	req := grokReq("transport-drain", "Transport Drain", fakeRoutineURL(t), fakeRoutineKey(t), "", true)
+	req.Inputs["grokbot_transport"] = "recipient_drain_v1"
+	res := mustOnboard(t, env, op, req)
+	if res.GrokbotTransport != "recipient_drain_v1" {
+		t.Errorf("result transport %q", res.GrokbotTransport)
+	}
+	var selected, text string
+	if err := env.Hub.DB.QueryRow(`SELECT grokbot_transport FROM routes WHERE route_id=?`, res.RouteID).Scan(&selected); err != nil || selected != "recipient_drain_v1" {
+		t.Fatalf("persisted %q %v", selected, err)
+	}
+	if err := env.Hub.DB.QueryRow(`SELECT json_extract(body,'$.content.text') FROM messages WHERE msg_id=?`, res.Setup.MessageID).Scan(&text); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text, "This routine supports recipient-drain-v1") {
+		t.Error("setup lacks explicit drain support")
+	}
+	legacy := "delivery_v1"
+	if err := env.Hub.UpdateRoute(ctx, res.RouteID, hub.RouteUpdate{GrokbotTransport: &legacy}); err != nil {
+		t.Fatal(err)
+	}
+	for _, replay := range []bool{false, true} {
+		var got onboarding.SubmitResult
+		var err error
+		if replay {
+			got, err = env.Hub.OnboardAgent(ctx, op, req)
+		} else {
+			got, err = env.Hub.OnboardingStatus(ctx, op, req.RequestID)
+		}
+		if err != nil || got.GrokbotTransport != "recipient_drain_v1" {
+			t.Fatalf("saved selection changed with route: %q %v", got.GrokbotTransport, err)
+		}
+		safe, err := got.MarshalSafe()
+		if err != nil || strings.Contains(string(safe), req.Inputs["webhook_key"].(string)) || strings.Contains(string(safe), "human_output") {
+			t.Fatal("unsafe replay/status")
+		}
+	}
+}
+
+func TestTransportChangedSameRequestIDConflicts(t *testing.T) {
+	for _, original := range []string{"delivery_v1", "recipient_drain_v1"} {
+		t.Run(original, func(t *testing.T) {
+			env := testhub.Start(t)
+			op := operatorCaller(t, env)
+			req := grokReq("transport-conflict", "Conflict", fakeRoutineURL(t), fakeRoutineKey(t), "", false)
+			req.Inputs["grokbot_transport"] = original
+			res := mustOnboard(t, env, op, req)
+			changed := "delivery_v1"
+			if original == changed {
+				changed = "recipient_drain_v1"
+			}
+			req.Inputs["grokbot_transport"] = changed
+			if _, err := env.Hub.OnboardAgent(context.Background(), op, req); !onboardStatus(t, err, 409, "idempotency_conflict") {
+				t.Fatalf("changed transport did not conflict: %v", err)
+			}
+			n, err := onboarding.Normalize(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			match, err := env.Hub.OnboardingDigestMatches(context.Background(), op, n)
+			if err != nil || match {
+				t.Fatal("digest matching ignored changed transport")
+			}
+			if countRows(t, env, `SELECT count(*) FROM routes WHERE route_id=?`, res.RouteID) != 1 {
+				t.Fatal("conflict altered route")
+			}
+		})
+	}
+}
+
+func TestTransportLegacyV1ReceiptReplay(t *testing.T) {
+	env := testhub.Start(t)
+	ctx := context.Background()
+	op := operatorCaller(t, env)
+	req := grokReq("transport-history", "Historical", fakeRoutineURL(t), fakeRoutineKey(t), "", false)
+	res := mustOnboard(t, env, op, req)
+	// Synthesize the actual pre-extension receipt shape; preserve its historical MAC.
+	key := "onboarding.v1/" + op.PrincipalID + "/" + req.RequestID
+	var raw string
+	if err := env.Hub.DB.QueryRow(`SELECT value FROM meta WHERE key=?`, key).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	var rec map[string]any
+	json.Unmarshal([]byte(raw), &rec)
+	delete(rec, "grokbot_transport")
+	delete(rec, "safe_complete")
+	put := func() {
+		b, _ := json.Marshal(rec)
+		if _, err := env.Hub.DB.Exec(`UPDATE meta SET value=? WHERE key=?`, string(b), key); err != nil {
+			t.Fatal(err)
+		}
+	}
+	put()
+	drain := "recipient_drain_v1"
+	if err := env.Hub.UpdateRoute(ctx, res.RouteID, hub.RouteUpdate{GrokbotTransport: &drain}); err != nil {
+		t.Fatal(err)
+	}
+	req.Inputs["grokbot_transport"] = "delivery_v1"
+	got := mustOnboard(t, env, op, req)
+	if got.PeerID != res.PeerID || got.GrokbotTransport != "delivery_v1" || got.SafeComplete {
+		t.Errorf("historical projection transport=%q complete=%t", got.GrokbotTransport, got.SafeComplete)
+	}
+	n, err := onboarding.Normalize(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	match, err := env.Hub.OnboardingDigestMatches(ctx, op, n)
+	if err != nil || !match {
+		t.Fatal("legacy explicit selection MAC mismatch")
+	}
+	for _, invalid := range []any{nil, "bad-secret-canary", 42} {
+		rec["grokbot_transport"] = invalid
+		put()
+		if _, err := env.Hub.OnboardingStatus(ctx, op, req.RequestID); err == nil || strings.Contains(err.Error(), "bad-secret-canary") {
+			t.Error("invalid receipt transport accepted or echoed")
+		}
+	}
+	delete(rec, "grokbot_transport")
+	rec["v"] = 2
+	put()
+	if _, err := env.Hub.OnboardingStatus(ctx, op, req.RequestID); err == nil {
+		t.Error("unknown receipt version treated as legacy")
+	}
+	if match, err := env.Hub.OnboardingDigestMatches(ctx, op, n); err == nil || match {
+		t.Error("unknown receipt version treated as digest proof")
+	}
+}
+
+// Real client and receiver observe the opted-in POST and resumed legacy bytes.
+// This is an inherited T1/T2 control, not a new T3 lifecycle feature RED.
+func TestTransportRevocationReturnsLegacyAfterLease(t *testing.T) {
+	f := t2Setup(t)
+	var bodies [][]byte
+	var bodyMu sync.Mutex
+	f.client.base = t2RoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		b, err := io.ReadAll(r.Body)
+		if err != nil {
+			return nil, err
+		}
+		r.Body = io.NopCloser(bytes.NewReader(b))
+		bodyMu.Lock()
+		bodies = append(bodies, append([]byte(nil), b...))
+		bodyMu.Unlock()
+		return http.DefaultTransport.RoundTrip(r)
+	})
+	f.send("wake")
+	f.send("wake")
+	d := f.claim()
+	deadline := f.env.Now.Now().Add(hub.PushLease)
+	unblock := f.block(d)
+	f.requests(1)
+	resp, raw := f.env.Do(f.env.OperatorSecret, http.MethodPatch, "/v1/admin/routes/"+f.route, map[string]any{"grokbot_transport": "delivery_v1"})
+	if resp.StatusCode != 204 || len(raw) != 0 {
+		t.Fatal("revocation did not preserve PATCH204")
+	}
+	resp, raw = f.env.Do(f.env.OperatorSecret, http.MethodGet, "/v1/admin/routes", nil)
+	var list struct {
+		Routes []hub.RouteInfo `json:"routes"`
+	}
+	if resp.StatusCode != 200 || json.Unmarshal(raw, &list) != nil {
+		t.Fatal("separate list failed")
+	}
+	found := false
+	for _, r := range list.Routes {
+		if r.RouteID == f.route && r.GrokbotTransport != nil {
+			found = *r.GrokbotTransport == "delivery_v1"
+		}
+	}
+	if !found {
+		t.Fatal("separate list lost effective legacy")
+	}
+	f.step()
+	f.requests(1)
+	unblock()
+	f.respond = nil
+	f.env.Now.Advance(deadline.Sub(f.env.Now.Now()) - time.Millisecond)
+	f.step()
+	f.requests(1)
+	f.env.Now.Advance(2 * time.Millisecond)
+	due, err := f.env.Hub.ClaimDue(f.ctx, f.env.Now.Now(), 16)
+	if err != nil || len(due) != 1 || due[0].GrokWake != nil {
+		t.Fatalf("post-lease legacy claim len=%d err=%v", len(due), err)
+	}
+	f.w.Push(f.ctx, due[0])
+	f.requests(2)
+	bodyMu.Lock()
+	defer bodyMu.Unlock()
+	if len(bodies) != 2 || !bytes.Contains(bodies[0], []byte(`"type":"grokbot_wake"`)) || !bytes.Equal(bodies[1], due[0].Body) || bytes.Contains(bodies[1], []byte(`"grokbot_wake"`)) {
+		t.Fatal("revocation failed exact legacy-body recovery")
+	}
+}
+
+func TestTransportOptedReceiptRollback(t *testing.T) {
+	env := testhub.Start(t)
+	op := operatorCaller(t, env)
+	before := grokCensus(t, env)
+	installTrigger(t, env, `CREATE TRIGGER transport_receipt_fail BEFORE INSERT ON meta WHEN NEW.key LIKE 'onboarding.v1/%' AND NEW.key NOT LIKE 'onboarding.v1/connector/%' BEGIN SELECT RAISE(ABORT,'transport injected'); END`)
+	req := grokReq("transport-rollback", "Rollback Transport", fakeRoutineURL(t), fakeRoutineKey(t), "", false)
+	req.Inputs["grokbot_transport"] = "recipient_drain_v1"
+	if _, err := env.Hub.OnboardAgent(context.Background(), op, req); err == nil || !strings.Contains(err.Error(), "transport injected") {
+		t.Fatal("synthetic receipt failure not reached")
+	}
+	if !reflectCensus(t, env, before) {
+		t.Fatal("opted-in route/setup escaped receipt rollback")
 	}
 }

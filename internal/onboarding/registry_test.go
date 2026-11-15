@@ -145,7 +145,7 @@ func TestOnboardingRegistryKinds(t *testing.T) {
 	}
 
 	grok, _ := onboarding.Lookup("grokbot")
-	if got := fieldNames(grok); !reflect.DeepEqual(got, []string{"name", "webhook_url", "webhook_key", "connector_name", "skip_mcp"}) {
+	if got := fieldNames(grok); !reflect.DeepEqual(got, []string{"name", "webhook_url", "webhook_key", "grokbot_transport", "connector_name", "skip_mcp"}) {
 		t.Fatalf("grokbot fields = %v", got)
 	}
 	if !mustField(t, grok, "name").Required {

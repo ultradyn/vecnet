@@ -250,6 +250,7 @@ func (h *Hub) onboardGrok(ctx context.Context, tx *sql.Tx, n onboarding.Normaliz
 	}
 	res.RequestID = n.RequestID
 	res.Kind = n.Kind
+	res.GrokbotTransport = n.GrokbotTransport
 	if res.AuthState == "" {
 		res.AuthState = onboarding.AuthUnlinked
 	}
