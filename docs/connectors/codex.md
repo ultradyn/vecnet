@@ -32,6 +32,19 @@ Node ≥22.18 with working built-in TypeScript and SQLite. Unsupported/embedded
 hosts and hosts requiring an unavailable bridge remain pending; use explicit
 `vecnet --net P inbox`. See the [capability matrix](codex-appserver.md).
 
+The daemon also reports each bound peer's runtime state, delivery health and
+observed Codex version to the hub. Peer details show this separately from manual
+presence and transport reachability. Changes are observed on the daemon's 10-second
+reload; unchanged reports refresh every 30 seconds. Reports expire within 90
+seconds and then show unknown/stale, so a crashed daemon cannot leave permanent
+ready status. Shutdown sends best-effort offline status.
+
+These reports contain no conversation IDs, paths, prompts or credentials. They
+are self-reported metadata, not delivery authority. Reporting failures do not
+block delivery. Removed or expired bindings stop reporting, and updates never
+renew a lease or transfer ownership. Older hubs without runtime reporting can
+continue serving delivery; deploy an updated hub to see these facts.
+
 For advanced setup with already saved credentials, preview
 `vecnet --net P codex setup --dry-run`, then run `vecnet --net P codex setup`.
 If the host does not expose the root ID, the host/operator must supply exact

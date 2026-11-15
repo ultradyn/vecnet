@@ -1108,6 +1108,7 @@ for (const [name, flag, reason, method] of [
   const h = await harness(t, { status: active, binding: { attended: true } });
   h.fake.serverRequest(threadId, method, { threadId: threadId }); h.fake.setThread({ id: threadId, status: { type: 'active', activeFlags: [flag] }, activeTurnId: 'active' });
   await h.sync(); await h.wake(); assert.equal(h.sends().length, 0); assert.equal(h.engine.subscribed(), true); assert.deepEqual(h.engine.liveness(), { live: false, reason });
+  assert.deepEqual(h.engine.runtimeStatus(), { state: 'blocked', delivery: 'unavailable', reason, version: '0.166.0' });
   await h.tick(11 * minute); assert.equal(h.log.entries.filter(e => e.msg === 'codex_binding_blocked').length, 1); assert.deepEqual(h.fake.replies, []);
   h.fake.setThread({ id: threadId, status: active, activeTurnId: 'active' }); await h.sync(); await h.tick(); await eventually(() => h.sends().length === 1);
   await h.tick(); assert.equal(h.sends().length, 1);
@@ -1148,6 +1149,7 @@ test('every recorded request uses only allowlisted methods and keys', async t =>
 });
 test('unreachable socket backs off and never spawns codex', async t => {
   const h = await harness(t, { unreachable: true }); assert.equal(h.opens, 1);
+  assert.deepEqual(h.engine.runtimeStatus(), { state: 'offline', delivery: 'unavailable', reason: 'unreachable' });
   for (const ms of [1000, 2000, 4000, 8000, 15000, 15000]) { const before: number = h.opens; await h.tick(ms); assert.equal(h.opens, before + 1); }
   await h.wake(); assert.equal(h.sends().length, 0); assert.ok(h.records().filter(r => !r.ack).every(r => r.argv.includes('watch')));
 });
@@ -1535,4 +1537,16 @@ test('restart clears recovery after the claim release already committed', async 
   await h.restart();
   assert.equal(h.kv.get('inflight:' + rejected.key), undefined);
   assert.equal(h.kv.get('releasing:' + rejected.claim), undefined);
+});
+
+test('runtime status reports activity and delivery health without private ownership fields', async t => {
+  const h = await harness(t);
+  assert.deepEqual(h.engine.runtimeStatus(), { state: 'idle', delivery: 'ready', version: '0.166.0' });
+  h.fake.setThread({ id: threadId, status: active, activeTurnId: 'active' }); await h.sync();
+  assert.deepEqual(h.engine.runtimeStatus(), { state: 'working', delivery: 'ready', version: '0.166.0' });
+  h.fake.setThread({ id: threadId, status: { type: 'active', activeFlags: ['waitingOnApproval'] }, activeTurnId: 'active' }); await h.sync();
+  assert.deepEqual(h.engine.runtimeStatus(), { state: 'blocked', delivery: 'unavailable', reason: 'waiting_approval', version: '0.166.0' });
+  await h.engine.stop();
+  assert.equal(h.engine.runtimeStatus().state, 'offline');
+  assert.equal(h.engine.runtimeStatus().reason, 'stopped');
 });

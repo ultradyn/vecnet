@@ -34,10 +34,47 @@ function limitsOf(v) {
   return { sendsPerMin: num(v.sends_per_min), threadsPerHour: num(v.threads_per_hour) };
 }
 
+const RUNTIME_REASONS = {
+  connecting: 'Waiting for runtime connection', unreachable: 'Runtime unreachable',
+  refused_version: 'Unsupported runtime version', stopped: 'Runtime stopped',
+  expired: 'Runtime lease expired', archived: 'Runtime archived', not_loaded: 'Waiting for runtime',
+  idle_stale: 'Runtime inactive', approval_policy: 'Approval policy prevents delivery',
+  waiting_approval: 'Waiting for approval', waiting_input: 'Waiting for input', over_limit: 'Runtime limit reached',
+  identity_changed: 'Runtime identity changed', ownership_changed: 'Runtime ownership changed',
+  unverified_thread: 'Runtime not verified', identity_unverified: 'Runtime identity not verified',
+  watch_stopped: 'Runtime connection stopped', delivery_unresolved: 'Delivery outcome unresolved',
+};
+const RUNTIME_STATES = ['idle', 'working', 'blocked', 'offline', 'unknown'];
+const RUNTIME_DELIVERIES = ['ready', 'unavailable', 'unsupported', 'unknown'];
+const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+const reportTime = v => typeof v === 'string' && ISO.test(v) && Number.isFinite(Date.parse(v)) ? v : null;
+
+// Runtime reports are separate from manually authored presence. Only the
+// public fields have a display projection; arbitrary reasons/private fields
+// never become copy. nowMs must be the hub clock, supplied again on each tick.
+function runtimeStatusOf(v, nowMs) {
+  if (!v || typeof v !== 'object' || Array.isArray(v) || v.runtime !== 'codex') return null;
+  const updatedAt = reportTime(v.updated_at), expiresAt = reportTime(v.expires_at);
+  const valid = Number.isFinite(nowMs) && updatedAt && expiresAt
+    && Date.parse(updatedAt) <= nowMs && Date.parse(expiresAt) > Date.parse(updatedAt)
+    && RUNTIME_STATES.includes(v.state) && RUNTIME_DELIVERIES.includes(v.delivery);
+  // Retain the hub's stale projection even while its clock offset catches up.
+  const stale = v.reason === 'stale' || !!(valid && nowMs >= Date.parse(expiresAt));
+  const reason = typeof v.reason === 'string' && Object.hasOwn(RUNTIME_REASONS, v.reason) ? RUNTIME_REASONS[v.reason] : null;
+  return {
+    state: valid && !stale ? v.state : 'unknown',
+    delivery: valid && !stale ? v.delivery : 'unknown',
+    reason: stale ? 'Stale report' : valid ? reason : 'Invalid report',
+    version: str(v.version) || null,
+    updatedAt,
+    stale,
+  };
+}
+
 // peerFacts flattens a PeerRow. Presence and reachability stay separate
 // signals (PROTOCOL §8): a missing value reads unknown, and a source, which
 // only pushes in, has no presence.
-export function peerFacts(row) {
+export function peerFacts(row, nowMs) {
   const r = row || {}, p = r.peer || {};
   const kind = str(p.kind);
   return {
@@ -51,6 +88,7 @@ export function peerFacts(row) {
     createdBy: str(p.created_by),
     presence: kind === 'source' ? 'n/a' : str(p.presence) || 'unknown',
     presenceAt: str(r.presence_at) || null,
+    runtimeStatus: runtimeStatusOf(p.runtime_status, nowMs),
     reach: str(p.reachability) || 'unknown',
     via: str(r.reach_via) || null,
     seen: str(p.last_seen) || null,

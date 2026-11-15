@@ -32,7 +32,8 @@ type DirectoryEntry struct {
 	Teams        []string       `json:"teams"`
 	// Avatar is the sha256 of the peer's avatar PNG (GET
 	// /v1/peers/{id}/avatar), or null (PROTOCOL §8.1).
-	Avatar *string `json:"avatar"`
+	Avatar        *string        `json:"avatar"`
+	RuntimeStatus *RuntimeStatus `json:"runtime_status,omitempty"`
 }
 
 // Reachability values (PROTOCOL §8).
@@ -72,6 +73,10 @@ var enrolledFields = []string{"name", "kind", "enrolled_at"}
 // presence and the hub observes no transport for it, so both are "unknown".
 func (h *Hub) Directory(ctx context.Context) ([]DirectoryEntry, error) {
 	snapshot, err := h.Preferences.LoadSnapshot(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	runtimeStatuses, err := h.RuntimeStatuses(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -128,6 +133,7 @@ func (h *Hub) Directory(ctx context.Context) ([]DirectoryEntry, error) {
 		if err := dec.Decode(&e.Quota); err != nil || e.Quota == nil {
 			e.Quota = map[string]any{}
 		}
+		e.RuntimeStatus = runtimeStatuses[e.PeerID]
 		e.CreatedBy = nullable(createdBy)
 		e.Avatar = nullable(avatar)
 		e.Location = nullable(loc)

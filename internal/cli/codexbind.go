@@ -120,6 +120,9 @@ func (a *app) cmdCodex(args []string, nowTime func() time.Time) error {
 	if args[0] == "status" {
 		return a.cmdCodexStatus(args[1:], nowTime)
 	}
+	if args[0] == "report-status" {
+		return a.cmdCodexReportStatus(args[1:], nowTime)
+	}
 	if args[0] == "verify" {
 		return a.cmdCodexVerify(args[1:], nowTime)
 	}

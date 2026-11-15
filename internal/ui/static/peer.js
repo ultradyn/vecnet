@@ -16,6 +16,7 @@ import { findPeer, inviteCard, peerActions, peerFacts, peerHealth, peerRoutes, p
 import { chip as subChip, expiresIn } from './subs-model.js';
 
 const RELOAD_MS = 30000;
+const AGE_MS = 1000;
 const THREAD_PAGE = 25;
 const errText = e => (e && e.message) || String(e);
 
@@ -265,7 +266,7 @@ export function mount(root, ctx) {
       : h('a', { href: '#thread/' + tid, class: 'tl' }, idText(tid));
   };
   const row = () => findPeer(res.peers.get(), id);
-  const facts = () => { const r = row(); return r ? peerFacts(r) : null; };
+  const facts = () => { const r = row(); return r ? peerFacts(r, nowMs()) : null; };
 
   const launcher = launcherSection(ctx);
   const sections = {};
@@ -436,12 +437,20 @@ export function mount(root, ctx) {
     const f = facts();
     if (!f) return [none('No peer row.')];
     const reachSub = [f.via ? 'via ' + f.via : '', f.seen ? 'seen ' + age(f.seen) : ''].filter(Boolean).join(', ');
+    const rt = f.runtimeStatus;
+    const runtimeRows = rt ? [
+      ['Codex runtime', h('span', { text: rt.state + (rt.reason ? ' · ' + rt.reason : '') })],
+      ['Codex delivery', rt.delivery],
+      rt.version ? ['Codex version', h('span', { class: 'mono sm', text: rt.version })] : null,
+      ['Last runtime report', rt.updatedAt ? time(rt.updatedAt) : 'unknown'],
+    ] : [];
     return [kv([
       ['Presence', h('span', null, h('span', { class: 'pill' }, h('i', { class: 'pd ' + f.presence.replace('/', '') }), f.presence),
         f.presence === 'n/a' ? null : h('span', { class: 'sub mono', text: f.presenceAt ? 'since ' + age(f.presenceAt) : 'never reported', title: f.presenceAt || '' }))],
       ['Last heartbeat', time(f.presenceAt)],
       ['Reachability', h('span', null, h('span', { class: 'pill' }, h('i', { class: 'rch ' + f.reach }), f.reach), reachSub ? h('span', { class: 'sub mono', text: reachSub }) : null)],
       ['Last seen', time(f.seen)],
+      ...runtimeRows,
       ['Capabilities', f.capabilities.length ? h('span', { class: 'chips' }, f.capabilities.map(c => chip(c))) : '—'],
       ['Location', dash(f.location)],
       ['Quota', h('span', { class: 'mono sm', text: f.quota })],
@@ -577,8 +586,12 @@ export function mount(root, ctx) {
   const live = Object.values(res).filter(Boolean);
   const offs = live.map(r => r.subscribe(render));
   const timer = setInterval(() => { for (const r of live) r.reload(); if (inviteRes) inviteRes.reload(); }, RELOAD_MS);
+  // Expire the cached report even if reloads fail or remain in flight. Keep
+  // the refresh local to the fact list so focused action controls persist.
+  const ageTimer = setInterval(() => { fill('presence', [res.peers], 'Presence', drawPresence); }, AGE_MS);
   return () => {
     clearInterval(timer);
+    clearInterval(ageTimer);
     for (const off of offs) off();
     if (inviteOff) inviteOff();
     invite.unmount();

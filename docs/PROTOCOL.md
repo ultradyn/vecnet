@@ -239,6 +239,49 @@ Body `{delivery_id, state, note?}`; `state` is `processed`, `failed`, or `read` 
 
 Body `{state: idle|working|blocked|offline, at, capabilities?, quota?, location?, note?}` [T14]. `quota.weekly_remaining_pct` (0–100) is the standard key that routers and `wake_idle` read [SCH]. Stored in the **Directory**; fanned out as `presence` Events per section 8. MCP `vecnet_presence` is the same operation [T14]. For the operator, whose web and TUI clients may both be open and each re-post the state they last read, a report whose `at` is older than the stored one was overtaken by a newer choice: the hub answers as usual and changes nothing, so a delayed heartbeat cannot undo the other client's change.
 
+### 2.6.1 `POST /v1/runtime-status` (2026-11-15)
+
+An authenticated peer reports for itself; a principal reports for a currently
+owned, enabled peer with `?as=<peer_id>`. A peer cannot target another peer,
+and a principal cannot target a foreign or disabled peer (403 `forbidden`). A
+principal without a target receives 422 `as_required`; operator credentials
+cannot report runtime status. Success is 204.
+
+The JSON object has exactly these fields:
+
+```json
+{"runtime":"codex","state":"idle","delivery":"ready","version":"1.2.3-dev.1","ttl_seconds":60}
+```
+
+`runtime`, `state`, `delivery` and `ttl_seconds` are required. `runtime` is
+`codex`; `state` is `idle`, `working`, `blocked` or `offline`; `delivery` is
+`ready`, `unavailable` or `unsupported`. `offline` requires `unavailable`,
+and `ready` requires `idle` or `working`. A version refusal is reported as
+`blocked` / `unsupported` / `reason: "refused_version"`. `ttl_seconds` is an integer from 1
+through 90. The guarded local reporter bounds it by the remaining binding
+lease; the hub stamps `updated_at` and `expires_at` using its own clock.
+
+Optional `reason` is one of `connecting`, `unreachable`, `refused_version`,
+`stopped`, `expired`, `archived`, `not_loaded`, `idle_stale`, `approval_policy`,
+`waiting_approval`, `waiting_input`, `over_limit`, `identity_changed`,
+`ownership_changed`, `unverified_thread`, `identity_unverified`,
+`watch_stopped`, `delivery_unresolved`. `stale` is reserved for hub read
+projections. Optional `version` is canonical SemVer 2.0.0, at most 128 ASCII
+characters, with three numeric core components, no `v` prefix or numeric
+leading zeroes; standard prerelease and build identifiers are allowed.
+Omitted optional fields clear their previous values. Nulls, empty optional
+strings, unknown fields, wrong types, out-of-range values and invalid
+combinations receive 400 `invalid_body`. The body cap is 1 KiB, including
+uploads without a declared length (413 `payload_too_large`). Errors never
+include submitted values or arbitrary error text.
+
+The hub persists one snapshot per peer, independently of manual presence,
+capabilities, quota and transport reachability. This is an expiring self-report:
+it never authorizes routing, delivery, ownership or local binding, and does not
+release held deliveries. Paths, homes, thread IDs, generations, prompts,
+credentials and arbitrary error content have no fields in this contract.
+Directory projection, expiry and refresh events are specified in section 8.
+
 ### 2.7 Blobs
 
 #### Disk and durable content
@@ -932,7 +975,27 @@ The hub fills `loop` on every Message [ENV]:
 
 ## 8. Directory, presence, reachability
 
-**Directory entry:** `peer_id`, display name, kind (`grokbot`, `dot`, `openclaw`, `pagchat-bot`, `session`, `launcher` (§18.1), `operator`, `source`), `capabilities[]` (free-form tags), `quota` (free-form object), `location`, `presence`, `reachability`, `last_seen`, `enrolled_at`, `teams[]`, `avatar` (the sha256 of the peer's avatar PNG, or `null`; section 8.1), and, on a principal-created peer only, the hub-set `created_by` (§18.4). Every peer sees every peer's public fields; only the operator sees credential status and routes [T14]. The hub stores and serves self-reported data and does not verify it [GLOSSARY]; it reads presence only for `wake_idle` (section 5.2) [SCH].
+**Directory entry:** `peer_id`, display name, kind (`grokbot`, `dot`, `openclaw`, `pagchat-bot`, `session`, `launcher` (§18.1), `operator`, `source`), `capabilities[]` (free-form tags), `quota` (free-form object), `location`, `presence`, `reachability`, `last_seen`, `enrolled_at`, `teams[]`, `avatar` (the sha256 of the peer's avatar PNG, or `null`; section 8.1), optional `runtime_status` (§2.6.1), and, on a principal-created peer only, the hub-set `created_by` (§18.4). Every peer sees every peer's public fields; only the operator sees credential status and routes [T14]. The hub stores and serves self-reported data and does not verify it [GLOSSARY]; it reads presence only for `wake_idle` (section 5.2) [SCH].
+
+**Runtime status** is an optional object `{runtime, state, delivery, reason?,
+version?, updated_at, expires_at}` in both public directory entries and the
+`peer` object of admin peer rows. It is absent (clients may also tolerate null)
+for a peer that has never reported, and absent for sources. At
+`now >= expires_at`, reads show `state: "unknown"`, `delivery: "unknown"`,
+`reason: "stale"`, retaining runtime, version and both hub timestamps. This
+boundary is deliberately different from the manual presence TTL below. The
+stored report survives restarts; read-time expiry neither changes the stored
+row nor emits an event.
+
+The first runtime report, any change in runtime/state/delivery/reason/version,
+and a previously stale report becoming fresh append `directory_updated` with
+`change: "updated"`, `fields: ["runtime_status"]` to every enabled peer and
+wake consumers after the transaction commits. An otherwise identical fresh
+heartbeat only renews timestamps; changing TTL alone does not fan out durable
+events or wake directory consumers. Clients refresh after the event and apply
+the expiry deadline themselves between reads. Runtime status never changes
+manual presence, its subscription policy, quota, capabilities or `wake_idle`
+behavior. Both public and admin projections load snapshots in a batch.
 
 **Presence** is self-reported (`idle`, `working`, `blocked`, `offline`). Factory TTLs are 10 min for `grokbot`, 15 min for `session` and `launcher` (§18.2), and 1 h for other kinds. A report is shown as `unknown` only when its age is strictly greater than the resolved TTL; exactly the TTL remains fresh. Never-reported presence is `unknown`. The hub never invents a presence state [T14].
 

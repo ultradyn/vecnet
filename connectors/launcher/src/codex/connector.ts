@@ -12,6 +12,8 @@ import { bindingFingerprint, parseBinding, readBindings, threadKey } from './con
 import type { FileState } from './connector-authority.ts';
 import { openStatusPublisher } from './connector-status.ts';
 import type { StatusPublisher } from './connector-status.ts';
+import { createRuntimeStatusReporter, runtimeStatusPost } from './runtime-status.ts';
+import type { RuntimeStatusPost } from './runtime-status.ts';
 
 export const CODEX_MAX_KEPT_LOADED = 8;
 export const CODEX_RELOAD_MS = 10_000;
@@ -126,10 +128,11 @@ const fingerprint = (b: Binding) => b.origin + ':' + bindingFingerprint(b);
 
 /** One engine per authoritative canonical home/thread, one connector per file.
  * Launcher registrations supply lifecycle callbacks, never delivery authority. */
-export function startCodexConnector(o: { kv?: KeyValue; clock: Clock; log: Log; env: NodeJS.ProcessEnv; openRpc?: typeof openCodexRpc }): CodexConnector {
+export function startCodexConnector(o: { kv?: KeyValue; clock: Clock; log: Log; env: NodeJS.ProcessEnv; openRpc?: typeof openCodexRpc; postRuntimeStatus?: RuntimeStatusPost }): CodexConnector {
   const log = redactingLog(o.log), { clock } = o;
   const euid = process.geteuid?.() ?? -1;
   const env = Object.fromEntries(Object.entries(o.env).filter((e): e is [string, string] => typeof e[1] === 'string'));
+  const reporter = createRuntimeStatusReporter({ clock, log, post: o.postRuntimeStatus ?? runtimeStatusPost(o.env.VECNET_BIN || 'vecnet', env) });
   const path = codexBindingsPath(o.env), limit = codexMaxBindings(o.env);
   const entries = new Map<string, Entry>(), registrations = new Map<string, Binding>();
   let stopped = false, stopping: Promise<void> | undefined, chain: Promise<void> = Promise.resolve(), timer: { cancel(): void } | undefined;
@@ -200,6 +203,8 @@ export function startCodexConnector(o: { kv?: KeyValue; clock: Clock; log: Log; 
       counts.set(b.codexHome, n); over.set(key, n > limit);
     }
     const retiring: Promise<void>[] = [];
+    // Cancel obsolete owners before waiting for their delivery lanes to drain.
+    reporter.sync([...entries].filter(([key, e]) => wanted.has(key) && fingerprint(wanted.get(key)!) === e.print).map(([, e]) => e));
     for (const [key, e] of entries) {
       const next = wanted.get(key);
       if (!next || fingerprint(next) !== e.print) retiring.push(retire(key));
@@ -219,6 +224,7 @@ export function startCodexConnector(o: { kv?: KeyValue; clock: Clock; log: Log; 
       }
     }
     publisher.publish(clock.now(), entries.values());
+    reporter.sync(entries.values());
   }
   function schedule() {
     if (stopped) return;
@@ -231,6 +237,8 @@ export function startCodexConnector(o: { kv?: KeyValue; clock: Clock; log: Log; 
       stopping ??= (async () => {
         stopped = true; timer?.cancel();
         await chain;
+        // Keep the singleton lock while bounded best-effort offline reports run.
+        await reporter.stop();
         await Promise.allSettled([...entries.keys()].map(retire));
         try { recovery?.close(); }
         finally { publisher?.close(); publisher = undefined; }

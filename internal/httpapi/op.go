@@ -130,14 +130,38 @@ func (s *server) opMatrix(w http.ResponseWriter, r *http.Request) {
 	opResult(w, value, err)
 }
 
+// The HTTP projection adds runtime status without changing the shared operator
+// DTOs used by the TUI. Remove MarshalJSON methods from the embedded aliases so
+// the explicit peer/status fields participate in encoding; collection fields
+// have already been normalized by the operator reader (scopes retain theirs).
 func (s *server) opPeers(w http.ResponseWriter, r *http.Request) {
 	peers, err := s.op.Peers(r.Context())
-	if peers == nil {
-		peers = []opapi.PeerRow{}
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	statuses, err := s.Hub.RuntimeStatuses(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	type plainPeer opapi.Peer
+	type plainRow opapi.PeerRow
+	type runtimePeer struct {
+		plainPeer
+		RuntimeStatus *hub.RuntimeStatus `json:"runtime_status,omitempty"`
+	}
+	type runtimeRow struct {
+		plainRow
+		Peer runtimePeer `json:"peer"`
+	}
+	rows := make([]runtimeRow, 0, len(peers))
+	for _, row := range peers {
+		rows = append(rows, runtimeRow{plainRow: plainRow(row), Peer: runtimePeer{plainPeer: plainPeer(row.Peer), RuntimeStatus: statuses[row.Peer.PeerID]}})
 	}
 	opResult(w, struct {
-		Peers []opapi.PeerRow `json:"peers"`
-	}{peers}, err)
+		Peers []runtimeRow `json:"peers"`
+	}{rows}, nil)
 }
 
 func (s *server) opLoopCuts(w http.ResponseWriter, r *http.Request) {

@@ -46,6 +46,79 @@ const row = (over = {}) => ({
   ...over,
 });
 
+const runtimeNow = Date.parse('2026-11-15T01:00:30Z');
+const runtime = (over = {}) => ({ runtime: 'codex', state: 'working', delivery: 'ready', version: '1.2.3',
+  updated_at: '2026-11-15T01:00:00Z', expires_at: '2026-11-15T01:01:00Z', ...over });
+const runtimeRow = status => row({ peer: { ...row().peer, presence: 'idle', runtime_status: status } });
+
+test('runtime facts read the nested admin peer status without changing manual presence', () => {
+  const f = peerFacts(runtimeRow(runtime()), runtimeNow);
+  assert.equal(f.presence, 'idle');
+  assert.deepEqual(f.runtimeStatus, { state: 'working', delivery: 'ready', reason: null, version: '1.2.3',
+    updatedAt: '2026-11-15T01:00:00Z', stale: false });
+});
+
+test('runtime facts explain blocked and waiting reports using safe reason labels', () => {
+  for (const [reason, label] of [['waiting_approval', 'Waiting for approval'], ['waiting_input', 'Waiting for input'],
+    ['not_loaded', 'Waiting for runtime'], ['delivery_unresolved', 'Delivery outcome unresolved']]) {
+    const f = peerFacts(runtimeRow(runtime({ state: 'blocked', delivery: 'unavailable', reason })), runtimeNow);
+    assert.equal(f.runtimeStatus.state, 'blocked');
+    assert.equal(f.runtimeStatus.delivery, 'unavailable');
+    assert.equal(f.runtimeStatus.reason, label);
+  }
+});
+
+test('runtime connection reasons explain waiting, offline and unsupported delivery', () => {
+  for (const [reason, delivery, label] of [['connecting', 'unavailable', 'Waiting for runtime connection'],
+    ['unreachable', 'unavailable', 'Runtime unreachable'], ['stopped', 'unavailable', 'Runtime stopped'],
+    ['refused_version', 'unsupported', 'Unsupported runtime version']]) {
+    const f = peerFacts(runtimeRow(runtime({ state: 'offline', delivery, reason })), runtimeNow).runtimeStatus;
+    assert.equal(f.reason, label);
+    assert.equal(f.delivery, delivery);
+  }
+});
+
+test('a cached runtime report expires at the exact hub deadline without mutating the row', () => {
+  const r = runtimeRow(runtime({ reason: 'waiting_input' }));
+  const before = peerFacts(r, Date.parse('2026-11-15T01:00:59.999Z'));
+  assert.equal(before.runtimeStatus.delivery, 'ready');
+  const at = peerFacts(r, Date.parse('2026-11-15T01:01:00Z'));
+  assert.equal(at.runtimeStatus.state, 'unknown');
+  assert.equal(at.runtimeStatus.delivery, 'unknown');
+  assert.equal(at.runtimeStatus.reason, 'Stale report');
+  assert.equal(at.runtimeStatus.stale, true);
+  assert.equal(at.runtimeStatus.updatedAt, '2026-11-15T01:00:00Z');
+  assert.equal(r.peer.runtime_status.delivery, 'ready');
+});
+
+test('hub-projected stale reports remain stale even if the local clock is behind', () => {
+  const f = peerFacts(runtimeRow(runtime({ state: 'unknown', delivery: 'unknown', reason: 'stale' })), runtimeNow);
+  assert.equal(f.runtimeStatus.stale, true);
+  assert.equal(f.runtimeStatus.reason, 'Stale report');
+});
+
+test('older hubs and never reported runtimes omit runtime facts', () => {
+  for (const status of [undefined, null, false, 1, 'codex', [], {}, { runtime: 'other' }]) {
+    assert.equal(peerFacts(runtimeRow(status), runtimeNow).runtimeStatus, null);
+  }
+  assert.equal(peerFacts(row(), runtimeNow).runtimeStatus, null);
+  assert.equal(peerFacts(null, runtimeNow).runtimeStatus, null);
+});
+
+test('malformed runtime reports never claim delivery ready', () => {
+  for (const over of [{ state: {} }, { delivery: ['ready'] }, { updated_at: null }, { updated_at: 'bad' },
+    { expires_at: {} }, { expires_at: 'bad' }, { expires_at: '2026-11-15T00:59:59Z' },
+    { updated_at: '2026-11-15T01:00:31Z' }]) {
+    const f = peerFacts(runtimeRow(runtime(over)), runtimeNow).runtimeStatus;
+    assert.equal(f.state, 'unknown', JSON.stringify(over));
+    assert.equal(f.delivery, 'unknown', JSON.stringify(over));
+  }
+  const junk = peerFacts(runtimeRow(runtime({ reason: '/private/thread/secret', version: { secret: true } })), runtimeNow).runtimeStatus;
+  assert.equal(junk.reason, null);
+  assert.equal(junk.version, null);
+  assert.equal(peerFacts(runtimeRow(runtime())).runtimeStatus.delivery, 'unknown', 'no trusted clock cannot promise ready');
+});
+
 test('findPeer still returns an archived peer, so a deep link can open it', () => {
   const at = '2026-11-07T01:00:00.000Z';
   const page = { peers: [row({ archived_at: at, disabled: true })] };

@@ -38,6 +38,9 @@ func limitBody(next http.Handler) http.Handler {
 			return
 		}
 		limit := int64(MaxBodyBytes)
+		if r.Method == http.MethodPost && r.URL.Path == "/v1/runtime-status" {
+			limit = runtimeStatusBodyLimit
+		}
 		if isAvatarUpload(r) {
 			limit = avatarLimit // an avatar image may be up to 2 MiB (PROTOCOL §8.1)
 		}

@@ -502,7 +502,7 @@ func (a *app) ok(human string) error {
 // dispatch runs one command.
 func (a *app) dispatch(cmd string, args []string) error {
 	err := a.dispatchOnce(cmd, args)
-	if cmd == "codex" && len(args) > 0 && (args[0] == "verify" || args[0] == "guard" || args[0] == "settle" || args[0] == "status") {
+	if cmd == "codex" && len(args) > 0 && (args[0] == "verify" || args[0] == "guard" || args[0] == "settle" || args[0] == "status" || args[0] == "report-status") {
 		return err // Ownership-pinned operations never relocate profiles implicitly.
 	}
 	// enrol has no profile yet (a 410 there must not follow another one);

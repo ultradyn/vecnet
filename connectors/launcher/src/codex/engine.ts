@@ -12,6 +12,7 @@ import { planInput } from '../input-plan.ts';
 import { redactingLog, scrubEnv } from '../redact.ts';
 import { openCodexRpc, CodexRpcError } from './rpc.ts';
 import type { CodexRpc } from './rpc.ts';
+import type { RuntimeSnapshot } from './runtime-status.ts';
 import { buildThreadResume, buildThreadUnsubscribe, buildTurnStart, buildTurnSteer, buildTurnsPage, mapStatus, parseResumePolicy } from './protocol.ts';
 
 export interface Binding {
@@ -34,7 +35,7 @@ export interface EngineDeps {
 }
 export interface Engine {
   start(): void; stop(): Promise<void>; state(): 'connecting' | 'ready' | 'unreachable' | 'refused_version';
-  liveness(): Liveness; subscribed(): boolean; setOverLimit(over: boolean): void;
+  liveness(): Liveness; runtimeStatus(): RuntimeSnapshot; subscribed(): boolean; setOverLimit(over: boolean): void;
 }
 /** The Go CLI's `configPath`: VECNET_CONFIG, else XDG_CONFIG_HOME, else HOME. It holds the profiles' credentials. */
 export function vecnetConfigPath(env: Record<string, string | undefined>): string | undefined {
@@ -62,6 +63,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
   let rootVerified = false, watchVerified = false, authenticatedConfig: string | undefined;
   let running = false, rpc: CodexRpc | undefined, watch: ChildProcess | undefined;
   let connectionState: ReturnType<Engine['state']> = 'connecting';
+  let serverVersion: string | undefined;
   let status: unknown = { type: 'notLoaded' }, attached = false, archived = false, overLimit = false;
   // createdAt changes on a fresh bind, but survives TTL/attendance renewal.
   // Keep refusals scoped to this Codex home/thread and binding generation.
@@ -145,6 +147,17 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     return undefined;
   }
   function liveness(): Liveness { const r = reason(); return r ? { live: false, reason: r } : { live: true }; }
+  function runtimeStatus(): RuntimeSnapshot {
+    const version = serverVersion;
+    const snapshot = (state: RuntimeSnapshot['state'], delivery: RuntimeSnapshot['delivery'], why?: string): RuntimeSnapshot =>
+      ({ state, delivery, ...(why ? { reason: why } : {}), ...(version ? { version } : {}) });
+    if (!running) return snapshot('offline', 'unavailable', 'stopped');
+    if (connectionState === 'refused_version') return snapshot('blocked', 'unsupported', 'refused_version');
+    if (connectionState !== 'ready' || !rpc) return snapshot('offline', 'unavailable', connectionState === 'connecting' ? 'connecting' : 'unreachable');
+    const why = reason();
+    if (why) return snapshot(['expired', 'archived', 'not_loaded'].includes(why) ? 'offline' : 'blocked', 'unavailable', why);
+    return snapshot(mapStatus(status) === 'turn_running' ? 'working' : 'idle', 'ready');
+  }
   async function call<T = RecordValue>(method: Parameters<CodexRpc['call']>[0], params: unknown): Promise<T> {
     if (!rpc) throw new CodexRpcError(-1, 'unreachable', true);
     const result = await rpc.call<T>(method, params, timeout);
@@ -441,6 +454,8 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
       const connection = await d.openRpc({ codexHome: b.codexHome, euid: d.euid, log, timeoutMs: timeout });
       if (!running) { connection.close(); return; }
       rpc = connection;
+      // RPC handshake already validates SemVer. Retain only bounded metadata.
+      serverVersion = connection.version.length <= 128 ? connection.version : undefined;
       connection.onClose(() => disconnected(connection));
       connection.onNotification(notice);
       const read = await call('thread/read', { threadId: b.threadId });
@@ -710,7 +725,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
       for (const r of rows()) if (waitingRetry.has(r.key)) await releaseInflight(r);
       await unsubscribe(); const connection = rpc; rpc = undefined; connection?.close();
     },
-    state: () => connectionState, liveness, subscribed: () => attached,
+    state: () => connectionState, liveness, runtimeStatus, subscribed: () => attached,
     setOverLimit(value) { overLimit = value; enqueue(async () => { await reconcile(); if (!value) arm(0); }); },
   };
 }

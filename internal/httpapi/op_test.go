@@ -92,7 +92,9 @@ func TestOpThreadsExcludeParticipant(t *testing.T) {
 
 // These wire copies deliberately avoid a dependency from opapi to hub.
 // Check their field sets as well as JSON so a newly added hub field cannot
-// silently be omitted by an explicit conversion in this test.
+// silently be omitted by an explicit conversion in this test. RuntimeStatus
+// is an HTTP-only extension to the operator peer DTO; its live public/admin
+// projection is checked by TestRuntimeStatusProjectionAndExpiry.
 func TestOpHubJSONParity(t *testing.T) {
 	at, location, via := "2026-11-02T00:00:00.000Z", "Sydney", "team_example"
 	values := []struct {
@@ -107,11 +109,18 @@ func TestOpHubJSONParity(t *testing.T) {
 	for _, tc := range values {
 		t.Run(tc.name, func(t *testing.T) {
 			a, b := reflect.TypeOf(tc.original), reflect.TypeOf(tc.copy)
-			if a.NumField() != b.NumField() {
+			wantFields := a.NumField()
+			if tc.name == "peer" {
+				wantFields-- // RuntimeStatus is added by opPeers, outside opapi.Peer.
+			}
+			if wantFields != b.NumField() {
 				t.Fatalf("field counts differ: %s/%s", a, b)
 			}
 			for i := 0; i < a.NumField(); i++ {
 				af := a.Field(i)
+				if tc.name == "peer" && af.Name == "RuntimeStatus" {
+					continue
+				}
 				bf, ok := b.FieldByName(af.Name)
 				if !ok || af.Tag.Get("json") != bf.Tag.Get("json") {
 					t.Errorf("field mismatch: %s", af.Name)

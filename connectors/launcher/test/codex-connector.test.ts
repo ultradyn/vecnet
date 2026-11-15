@@ -42,11 +42,13 @@ async function setup(t: TestContext, o: { threads?: { id: string; status?: unkno
   mkdirSync(bin, { mode: 0o700 });
   writeFileSync(trace, '');
   const configTrace = join(dir, 'config-trace.log'); writeFileSync(configTrace, '');
+  const reportTrace = join(dir, 'report-trace.log'); writeFileSync(reportTrace, '');
   // A shell stand-in for the Go CLI: watch idles until killed; hooks claim nothing.
   writeFileSync(join(bin, 'vecnet'), `#!/bin/sh
 printf '%s\\n' "$*" >> '${trace}'
 printf '%s\\n' "$VECNET_CONFIG" >> '${configTrace}'
 case " $* " in
+  *" codex report-status "*) cat >> '${reportTrace}'; printf '\\n' >> '${reportTrace}'; exit 0 ;;
   *" codex verify "*) echo '{"verified":true}'; exit 0 ;;
   *" codex guard "*) echo '{"ready":true}'; read outcome; exit 0 ;;
   *" watch "*) exec sleep 3600 ;;
@@ -133,8 +135,32 @@ esac
     assert.deepEqual(fake.replies, []);
     rmSync(dir, { recursive: true, force: true });
   });
-  return { dir, fake, home, env, kv, clock, log, bindingsPath, binding, writeBindings, start, resumed, unsubscribed, subscribed, logged, reload, ready, trace, configTrace };
+  return { dir, fake, home, env, kv, clock, log, bindingsPath, binding, writeBindings, start, resumed, unsubscribed, subscribed, logged, reload, ready, trace, configTrace, reportTrace };
 }
+
+test('only the singleton reports bound runtime status and shutdown offline, never removed owners', async t => {
+  const id = uuid(600), s = await setup(t, { threads: [{ id }] });
+  const reports = () => readFileSync(s.reportTrace, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
+  s.writeBindings([s.binding(id, 1)]);
+  const first = s.start();
+  await eventually(() => s.subscribed(id), 'bound session ready');
+  await s.reload();
+  await eventually(() => reports().some(r => r.state === 'idle' && r.delivery === 'ready'), 'ready status report');
+  assert.deepEqual(reports().at(-1), { state: 'idle', delivery: 'ready', version: '0.166.0' });
+  const duplicate = s.start();
+  await eventually(() => s.logged('codex_connector_duplicate').length > 0, 'duplicate reporter excluded');
+  const before = reports().length;
+  await duplicate.stop(); assert.equal(reports().length, before);
+  s.writeBindings([]); await s.reload();
+  assert.equal(reports().length, before, 'removed owner cannot publish offline or heartbeat');
+  await first.stop(); assert.equal(reports().length, before);
+
+  s.writeBindings([s.binding(id, 2)]);
+  const next = s.start(); await eventually(() => s.subscribed(id), 'replacement ready');
+  await s.reload(); await next.stop();
+  assert.equal(reports().at(-1).state, 'offline'); assert.equal(reports().at(-1).reason, 'stopped');
+  assert.match(readFileSync(s.trace, 'utf8'), /codex report-status .*--expect-generation 00000000000000000000000000000002/);
+});
 
 test('connector starts one engine per binding and stops removed ones', async t => {
   const [a, b, c] = [uuid(1), uuid(2), uuid(3)];
@@ -597,5 +623,8 @@ test('unverified root source never publishes live readiness or starts a watch', 
   const row = JSON.parse(readFileSync(s.bindingsPath + '.status.json', 'utf8')).bindings[0];
   assert.deepEqual(row.liveness, { live: false, reason: 'unverified_thread' });
   assert.equal(s.subscribed(id), false);
-  assert.equal(readFileSync(s.trace, 'utf8'), '');
+  assert.ok(readFileSync(s.trace, 'utf8').trim().split('\n').every(line => line.includes(' codex report-status ')), 'only metadata reports may run');
+  const reports = readFileSync(s.reportTrace, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
+  assert.ok(reports.every(r => r.delivery !== 'ready'));
+  await eventually(() => readFileSync(s.reportTrace, 'utf8').includes('unverified_thread'), 'unverified runtime report');
 });
