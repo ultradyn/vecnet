@@ -5,6 +5,8 @@
 set -uo pipefail
 
 BASE="$HOME/bb-src/vecnet4"
+# bb-src may point to another volume; derive runtime paths from its physical base.
+BASE=$(cd "$BASE" && pwd -P) || exit 64
 lane=$1
 RL="$BASE/$lane"
 TC="$BASE/.toolchain"
