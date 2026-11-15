@@ -82,3 +82,18 @@ thumbnail branch or claim a new installed release/deployment. Full raw logs,
 failed attempts, exact helpers, receipts and reviews are retained outside the
 worktree under `.scratch/vecnet/issue-loop/2026-11-15/issue-60-memory-evidence/`
 after verified archival and before cleanup.
+
+## Integration and cleanup
+
+Master fast-forwarded to `bc3b9ee943c1161e25213df470ef564efa8a8f2a` and the
+normal push was verified against origin/master. All 2,252 existing source and
+fixture entries covered by the full UI gate match the merged checkout. A
+fresh merged focused run passes 44 tests with zero failures/skips; source
+manifests remain stable. Closing metadata changes only Markdown.
+
+All 315 operational evidence files were copied outside the worktree and
+rehashed against their originals before removal. Archive manifest SHA-256:
+`5d7d0055adab04a96f7e7198f700a7f3973b15337cac43c1d73c6d8bc5be4e24`.
+The owned x-boss build-box lane, worktree and merged branch were removed;
+other worktrees were preserved. The archive retains every failed run and
+qualified review. No production install or Fly deployment is included.
