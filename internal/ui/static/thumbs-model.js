@@ -37,6 +37,7 @@ export function eligible(att, hosted) {
 export function createThumbCache({ api, URL, rasterize, onReady = () => {} }) {
   const entries = new Map(); // sha256 -> { state: loading|ok|chip, url }
   const stats = { fetches: 0, created: 0, revoked: 0 };
+  const controller = new AbortController();
   let dead = false;
 
   const revoke = e => {
@@ -51,7 +52,7 @@ export function createThumbCache({ api, URL, rasterize, onReady = () => {} }) {
     entries.set(sha, e);
     stats.fetches++;
     let p;
-    try { p = Promise.resolve(api.blob(sha)); } catch (err) { p = Promise.reject(err); }
+    try { p = Promise.resolve(api.blob(sha, undefined, { signal: controller.signal })); } catch (err) { p = Promise.reject(err); }
     p.then(async blob => {
       if (dead) return;
       if (svg) {
@@ -91,6 +92,7 @@ export function createThumbCache({ api, URL, rasterize, onReady = () => {} }) {
   function release() {
     if (dead) return;
     dead = true;
+    controller.abort();
     for (const e of entries.values()) revoke(e);
     entries.clear();
   }

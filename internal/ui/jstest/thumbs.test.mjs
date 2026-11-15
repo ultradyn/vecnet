@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import http from 'node:http';
+import { once } from 'node:events';
+import { createApi, APIError } from '../static/api.js';
 import { THUMB_MAX, createThumbCache } from '../static/thumbs-model.js';
 
 const MiB = 1 << 20;
@@ -275,4 +278,104 @@ test('release during SVG rasterization creates no PNG URL and wakes nobody', asy
   await tick();
   assert.deepEqual(URL.created, []);
   assert.equal(ready(), 0);
+});
+
+// No response timer: only the client or explicit finally cleanup can close a
+// partial body. The deadline below bounds assertion failure, never the server.
+async function waitFor(check, message) {
+  const deadline = Date.now() + 3000;
+  while (!check()) {
+    assert.ok(Date.now() < deadline, message);
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+}
+
+async function partialBodies(run) {
+  const streams = [], sockets = new Set();
+  let cleaning = false;
+  const server = http.createServer((req, res) => {
+    assert.equal(req.headers.authorization, 'Bearer synthetic-test');
+    const stream = { path: req.url, res, readStarted: false, settled: null, closedByClient: false, closedByCleanup: false };
+    streams.push(stream);
+    res.once('close', () => { stream[cleaning ? 'closedByCleanup' : 'closedByClient'] = true; });
+    res.writeHead(200, { 'Content-Type': 'image/png', 'Content-Length': '8' });
+    res.flushHeaders();
+    res.write('part');
+  });
+  server.on('connection', socket => { sockets.add(socket); socket.once('close', () => sockets.delete(socket)); });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const api = createApi({ secret: 'synthetic-test', fetch: async (path, init) => {
+    const response = await fetch(base + path, init);
+    const stream = streams.find(s => s.path === path && !s.readStarted);
+    const blob = response.blob.bind(response);
+    response.blob = () => {
+      // Start the native body consumer before releasing the owning cache.
+      const pending = blob();
+      stream.readStarted = true;
+      return pending.then(value => { stream.settled = 'ok'; return value; }, error => { stream.settled = error.name; throw error; });
+    };
+    return response;
+  } });
+  try { await run({ api, streams }); }
+  finally {
+    cleaning = true;
+    const closed = new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    for (const socket of sockets) socket.destroy();
+    await closed;
+    await waitFor(() => sockets.size === 0, 'owned HTTP sockets did not drain');
+    assert.equal(server.listening, false);
+  }
+}
+
+test('release closes every actual pending thumbnail body before cleanup, leaving another cache live', async () => {
+  await partialBodies(async ({ api, streams }) => {
+    const obsoleteURL = fakeURL(), liveURL = fakeURL();
+    let obsoleteReady = 0, liveReady = 0;
+    const obsolete = createThumbCache({ api, URL: obsoleteURL, onReady: () => { obsoleteReady++; } });
+    const live = createThumbCache({ api, URL: liveURL, onReady: () => { liveReady++; } });
+    try {
+      obsolete.state(att('a'));
+      obsolete.state(att('a', { name: 'duplicate.png' }));
+      obsolete.state(att('b'));
+      await waitFor(() => streams.length === 2 && streams.every(s => s.readStarted), 'obsolete body reads did not start');
+      live.state(att('a'));
+      await waitFor(() => streams.length === 3 && streams[2].readStarted, 'independent body read did not start');
+      obsolete.release();
+      obsolete.release();
+      await waitFor(() => streams.slice(0, 2).every(s => s.closedByClient), 'release must close obsolete HTTP bodies before fixture cleanup');
+      await waitFor(() => streams.slice(0, 2).every(s => s.settled === 'AbortError'), 'obsolete native body reads must reject on cancellation');
+      assert.equal(streams[2].closedByClient, false, 'a different cache was cancelled');
+      assert.equal(streams[2].settled, null);
+      streams[2].res.end('done');
+      await waitFor(() => liveReady === 1, 'live cache did not finish normally');
+      assert.equal(streams[2].settled, 'ok');
+      assert.equal(live.state(att('a')).state, 'ok');
+      assert.deepEqual(liveURL.created.map(u => [u.type, u.size]), [['image/png', 8]]);
+      assert.deepEqual(obsoleteURL.created, []);
+      assert.equal(obsoleteReady, 0);
+      assert.equal(obsolete.stats.fetches, 2, 'duplicate SHA started another fetch');
+      assert.deepEqual(obsolete.state(att('c')), { state: 'none', url: null });
+      assert.equal(streams.length, 3);
+      assert.ok(streams.every(s => !s.closedByCleanup), 'fixture cleanup supplied the cancellation');
+      live.release();
+      live.release();
+      assert.deepEqual(liveURL.revoked, liveURL.created.map(u => u.url));
+    } finally { obsolete.release(); live.release(); }
+  });
+});
+
+test('blob third-options abort after actual HTTP headers settles as APIError aborted', async () => {
+  await partialBodies(async ({ api, streams }) => {
+    const controller = new AbortController();
+    const result = api.blob(sha('a'), undefined, { signal: controller.signal }).catch(error => error);
+    await waitFor(() => streams.length === 1 && streams[0].readStarted, 'native body read did not start');
+    controller.abort();
+    await waitFor(() => streams[0].closedByClient, 'blob signal did not close the actual HTTP body');
+    const error = await result;
+    assert.ok(error instanceof APIError);
+    assert.deepEqual([error.status, error.code], [0, 'aborted']);
+    assert.equal(streams[0].closedByCleanup, false);
+  });
 });

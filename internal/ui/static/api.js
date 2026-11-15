@@ -478,7 +478,8 @@ export function createApi({ secret, fetch = globalThis.fetch, onUnauthorized = (
     notices: () => get('/v1/hub/notices'),
     prefs, patchPrefs, previewPrefs,
     // blob(sha) reads a hub-hosted blob; blob(sha, id) a direct R2 one.
-    blob: (sha, id) => (id ? download({ sha256: sha, blob_id: id }) : get('/v1/blobs/' + seg(sha), { read: 'blob' })),
+    // Both accept a third options argument to cancel the entire body read.
+    blob: (sha, id, { signal } = {}) => (id ? download({ sha256: sha, blob_id: id }, { signal }) : get('/v1/blobs/' + seg(sha), { read: 'blob', signal })),
     capabilities, download,
     // Metadata only (no link, no mint): an R2 file's state on the hub clock.
     blobStatus: (sha, id, { signal } = {}) => get('/v1/blobs/' + seg(sha) + '/status' + query({ blob_id: id }), { signal }),

@@ -275,6 +275,32 @@ test('agent kinds, submit and status use the operator routes and an abort signal
 const r2 = (f, extra = {}) => createApi({ secret: 'vn_op', fetch: f.fetch, XHR: f.XHR, now: f.now, ...extra });
 const refOf = o => ({ sha256: o.sha256, blob_id: o.blob_id });
 
+test('blob third options forwards the signal to the local hub without becoming a blob id', async () => {
+  const controller = new AbortController();
+  const { api, calls } = harness(() => new Response('png', { headers: { 'Content-Type': 'image/png' } }));
+  for (const id of [undefined, null, '']) {
+    assert.equal(await (await api.blob('abc', id, { signal: controller.signal })).text(), 'png');
+  }
+  assert.ok(calls.every(c => c.url === '/v1/blobs/abc' && c.init.signal === controller.signal));
+  await api.blob('abc');
+  assert.equal(calls[3].url, '/v1/blobs/abc');
+  assert.equal(calls[3].init.signal, undefined);
+});
+
+test('blob third options forwards the signal through R2 discovery, grant and provider while keeping old signatures', async () => {
+  const f = fakeR2(), o = f.seed('signal-bound attachment');
+  const calls = [], controller = new AbortController();
+  const api = r2(f, { fetch: (url, init) => { calls.push({ url, init }); return f.fetch(url, init); } });
+  assert.equal(await (await api.blob(o.sha256, o.blob_id, { signal: controller.signal })).text(), 'signal-bound attachment');
+  assert.equal(calls.length, 3);
+  assert.ok(calls.every(c => c.init.signal === controller.signal));
+  assert.equal(await (await api.blob(o.sha256, o.blob_id)).text(), 'signal-bound attachment');
+  assert.equal(calls.length, 6);
+  assert.ok(calls.slice(3).every(c => c.init.signal === undefined));
+  controller.abort();
+  await assert.rejects(api.blob(o.sha256, o.blob_id, { signal: controller.signal }), error => error instanceof APIError && error.status === 0 && error.code === 'aborted');
+});
+
 test('R2 download: discovery and a fresh grant by bearer, then a credential-free GET; bytes checked against the verified digest', async () => {
   const f = fakeR2();
   const o = f.seed('hello attachment', { cls: '1d' });
