@@ -164,3 +164,25 @@ passes strict TypeScript and 2,181/2,181 launcher/hub-client tests across 955
 top-level cases. All skips/cancellations are zero and wrapper/build-box exits
 are 0/0. The barrier mutation was restored before these gates. Committed source
 pins and all exact commands are in the Fix round 2 report appendix.
+
+## Final source acceptance
+
+Reviewed source `27b931dd9cac3dd4d6848d1c3f5506ca86f230cf`: independent
+task re-review and fresh whole-branch review both PASS for spec and quality.
+All four accepted findings, including the minor timer-precondition correction,
+are addressed. See the adjacent review reports and ledger. No accepted finding
+is deferred. Closing metadata preserves executable source hashes.
+
+Final exact-source evidence: 41 focused, 190 engine/RPC, and strict TypeScript
+plus 2,181 launcher/hub-client tests, all passing with zero skips/cancellations
+and wrapper/build-box exits zero. The 16-case generic launcher E2E passed at
+prior source `8398a1fc`; it is not an exact-current-HEAD integration run. R4/R6
+and the independent reviews found no concrete new public integration risk
+requiring replay for the private clear-coalescing/test-setup change. Metadata
+diagnostics and historical per-gate content-manifest limits remain recorded.
+
+This source acceptance supersedes the earlier pending-review handoff, and
+supports merge to master. It does not claim another installed release, live
+Codex session acceptance, original incident attribution or F1 generic refusal
+classification; #61 remains open for those follow-ups. Raw logs/scripts/reports
+must be copied and hash-verified outside the worktree before cleanup.
