@@ -366,7 +366,8 @@ func TestRouteStatsRelocationRefusals(t *testing.T) {
 				notice, reason = n, "moving notice is no longer active"
 			case "secret-url":
 				n.NewURL = t3StatsURLCanary
-				notice, reason = n, "invalid or unchanged destination"
+				// URL rejection at the receive boundary precedes authenticated follow.
+				notice, reason = n, "hub returned an invalid moving notice"
 			case "replay":
 				seed := &app{ctx: context.Background(), getenv: f.env}
 				if err := seed.updatePins(func(m map[string]pinRecord) error {
