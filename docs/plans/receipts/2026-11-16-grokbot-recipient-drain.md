@@ -83,3 +83,14 @@ The original v0.2.4 release/install predates this source loop. This receipt
 does not claim another installed release or production rollout. Complete
 operational logs, scripts, reports and failed gates must be archived and
 hash-verified outside the worktree before cleanup.
+
+## Integration
+
+Master fast-forwarded to `177e621dfc958e4ba4c48e0f97329f07662ee07d`. All
+2,252 source/fixture entries in the merged checkout match the fully tested and
+reviewed source. A fresh targeted check of that identical merged commit through
+the owned worktree gate passes eight events with zero failures/skips, including
+legacy seven-POST/raw bytes, opted one-POST/count7, two workers, current scoped
+acknowledgement, coordinator-cleanup recovery and Requests1/Coalesced6.
+Closing integration metadata changes only Markdown; installed acceptance stays
+open and no production activation is included.
