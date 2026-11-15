@@ -564,7 +564,8 @@ func TestPreferencesHTTPStoredChangeMetadata(t *testing.T) {
 						if !reflect.DeepEqual(got, want) {
 							t.Fatal("stored change metadata fixture differs")
 						}
-						// Shared snapshot decoding must retain the wire metadata too.
+						// Shared snapshot decoding must retain all Snapshot-owned
+						// fields; runtime is an HTTP-only report checked separately.
 						var snapshot prefs.Snapshot
 						if err := json.Unmarshal(raw, &snapshot); err != nil {
 							t.Fatal(err)
@@ -573,12 +574,24 @@ func TestPreferencesHTTPStoredChangeMetadata(t *testing.T) {
 						if err != nil {
 							t.Fatal(err)
 						}
-						var decoded any
-						_ = json.Unmarshal(roundtrip, &decoded)
-						var original any
-						_ = json.Unmarshal(raw, &original)
-						if !reflect.DeepEqual(decoded, original) {
+						var decoded, original map[string]any
+						if err := json.Unmarshal(roundtrip, &decoded); err != nil {
+							t.Fatal(err)
+						}
+						if err := json.Unmarshal(raw, &original); err != nil {
+							t.Fatal(err)
+						}
+						snapshotFields := map[string]any{"revision": original["revision"], "preferences": original["preferences"]}
+						if !reflect.DeepEqual(decoded, snapshotFields) {
 							t.Fatal("shared snapshot lost change metadata")
+						}
+						runtime, ok := original["runtime"].(map[string]any)
+						if !ok {
+							t.Fatal("missing HTTP runtime report")
+						}
+						enabled, ok := runtime["event_retention_enabled"].(bool)
+						if !ok || enabled != e.Hub.Cfg.EventRetentionEnabled {
+							t.Fatal("HTTP runtime report does not match the startup gate")
 						}
 						return
 					}
