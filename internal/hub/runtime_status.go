@@ -108,7 +108,7 @@ func (h *Hub) SetRuntimeStatus(ctx context.Context, c auth.Caller, asPeer string
 	var peer string
 	changed := false
 	err := h.DB.Tx(ctx, func(tx *sql.Tx) error {
-		snd, err := resolveSender(ctx, tx, c, asPeer)
+		snd, err := h.resolveSender(ctx, tx, c, asPeer)
 		if err != nil {
 			return err
 		}

@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"reflect"
+	"runtime"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/XertroV/vecnet/internal/auth"
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/hub"
 	"github.com/XertroV/vecnet/internal/testhub"
@@ -212,5 +215,47 @@ func TestRuntimeStatusDoesNotGateOrReleaseDelivery(t *testing.T) {
 	sent = mustSend(t, env, sender, b)
 	if _, held := deliveryState(t, env, sent.Deliveries[0].DeliveryID); held != 0 {
 		t.Fatal("runtime offline gated a new delivery")
+	}
+}
+
+func TestRuntimeStatusPrincipalReportRacesIdleSweep(t *testing.T) {
+	env := testhub.Start(t)
+	ctx := context.Background()
+	p, _ := env.NewPeer("session", "race-runtime")
+	old := envelope.FormatTime(env.Now.Now().Add(-72 * time.Hour))
+	archiveExec(t, env, `UPDATE peers SET enrolled_at=?,last_seen=? WHERE peer_id=?`, old, old, p)
+	var prn string
+	if err := env.Hub.DB.QueryRow(`SELECT prn_id FROM peers WHERE peer_id=?`, p).Scan(&prn); err != nil {
+		t.Fatal(err)
+	}
+	env.Hub.DB.SetMaxOpenConns(1)
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	env.Hub.Now = func() time.Time { once.Do(func() { close(entered); <-release }); return env.Now.Now() }
+	reportDone := make(chan error, 1)
+	go func() {
+		reportDone <- env.Hub.SetRuntimeStatus(ctx, auth.Caller{Kind: "principal", PrincipalID: prn}, p, hub.RuntimeStatusReport{Runtime: "codex", State: "idle", Delivery: "ready", TTLSeconds: 60})
+	}()
+	<-entered // The report holds the writer before committing fresh activity.
+	waits := env.Hub.DB.Stats().WaitCount
+	sweepDone := make(chan error, 1)
+	go func() { _, err := env.Hub.ArchiveIdlePeers(ctx, env.Now.Now()); sweepDone <- err }()
+	deadline := time.Now().Add(5 * time.Second)
+	for env.Hub.DB.Stats().WaitCount == waits && time.Now().Before(deadline) {
+		runtime.Gosched()
+	}
+	if env.Hub.DB.Stats().WaitCount == waits {
+		close(release)
+		t.Fatal("sweep never queued")
+	}
+	close(release) // the sweep is queued for the DB writer; the report must record last_seen in its own transaction.
+	if err := <-reportDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-sweepDone; err != nil {
+		t.Fatal(err)
+	}
+	if n := archiveCount(t, env, `SELECT count(*) FROM peers WHERE peer_id=? AND (archived_at IS NOT NULL OR disabled=1)`, p); n != 0 {
+		t.Fatal("peer was archived or disabled despite a committed fresh runtime-status report")
 	}
 }
