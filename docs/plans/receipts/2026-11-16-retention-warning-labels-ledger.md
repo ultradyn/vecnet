@@ -14,3 +14,7 @@ Task 1 review (gpt-6.1-sol/high): Spec PASS; quality PASS; C0/I0/M0. Review focu
 R4 Ruling: Existing Node MockTimers ExperimentalWarning preserved from baseline; no application failure or new finding, no unrelated runtime/test-framework change.
 Task 1: complete (commits 9dc1730c..33381870, allacceptedfindingsfixed,0parked).
 Metrics Task 1: model_impl=gpt-6.1-sol model_rev=gpt-6.1-sol wall=12 dispatches=2 fix_rounds=0 findings=C0/I0/M0 tests_added=5 suite=646/0 diff_lines=+55/-4 blocked=0 stuck_kills=0
+Whole-change review dispatched (gpt-6.1-sol/high final-rev51-labels; BASE9dc1730c..f407edaab3ea8ba25686c4d6130ca2b966ac4846); taskreviewPASS, source unchanged.
+Package filename normalization: initial HEAD alias produced review..HEAD.diff; exact pinned SHA package generated immediately before review input consumption. Identical diff, no source/test rerun needed. Helper now resolves refs before naming.
+Whole-change review (gpt-6.1-sol/high): Spec PASS; Quality PASS; C0/I0/M0. Full9dc1730c..f407edaa reviewed, allsource/receipt claims and10actualPNGstates checked. No accepted finding deferred.
+Metrics Plan labels: tasks=1 agents=3 tokens=n/a final_findings=C0/I0/M0 final_fix_passes=0 rerev_regressions=0 deferred_minors=0 parked=0 merge=pendingff deploy=n/a(sourceonly)
