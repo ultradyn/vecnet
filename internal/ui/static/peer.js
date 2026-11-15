@@ -11,13 +11,15 @@
 // gets a header note that opens the form.
 import { launcherSection } from './launcher.js';
 import { routesSection } from './peer-routes.js';
+import { subscriptionsSection } from './peer-subscriptions.js';
+import { subscriptionRemoved, subscriptionsResource } from './subs.js';
 import { prefill } from './compose.js';
 import { chip, confirmButton, copyButton, h, idCopy, idText, peerLink, toast } from './dom.js';
 import { ago, fullWhen, kindShort, kindTitle, plural, title as threadTitle, when } from './format.js';
 import { invitePanel } from './invite.js';
 import { DEFAULT_TTL, reinvite, TTLS } from './invite-model.js';
-import { findPeer, inviteCard, peerActions, peerFacts, peerHealth, peerRoutes, peerSubs, peerThreads, principalFacts, routeSetup, scopeTarget } from './peer-model.js';
-import { chip as subChip, expiresIn } from './subs-model.js';
+import { findPeer, inviteCard, peerActions, peerFacts, peerHealth, peerRoutes, peerThreads, principalFacts, routeSetup, scopeTarget } from './peer-model.js';
+import { expiresIn } from './subs-model.js';
 
 const RELOAD_MS = 30000;
 const AGE_MS = 1000;
@@ -251,7 +253,7 @@ export function mount(root, ctx) {
     principals: store.resource('peers', () => api.principals()),
     routes: store.resource('peers', () => api.routes()),
     health: store.resource('peers', () => api.deliveryHealth()),
-    subs: store.resource('subs', () => api.subscriptions()),
+    subs: subscriptionsResource(ctx),
     threads: isPeer ? store.resource('threads', () => api.threads({ participant: id, limit: THREAD_PAGE })) : null,
   };
 
@@ -274,6 +276,8 @@ export function mount(root, ctx) {
 
   const launcher = launcherSection(ctx);
   const routesSec = routesSection({ api, id, time, reload: () => res.routes.reload() });
+  const subsSec = subscriptionsSection({ api, id, now: nowMs, reload: () => res.subs.reload(),
+    changed: removedId => subscriptionRemoved(ctx, removedId) });
   const sections = {};
   function section(key, heading) {
     const count = h('span', { class: 'n' });
@@ -326,7 +330,7 @@ export function mount(root, ctx) {
       h('div', { class: 'pv-grid' }, section('identity', 'Identity'), section('presence', 'Presence'), section('access', 'Scopes and limits')),
       section('principal', 'Principal'),
       routesSec.el,
-      section('subs', 'Subscriptions'),
+      subsSec.el,
       section('health', 'Delivery health'),
       section('threads', 'Recent threads')));
 
@@ -503,22 +507,6 @@ export function mount(root, ctx) {
     ])];
   }
 
-  function drawSubs(s) {
-    const list = peerSubs(res.subs.get(), id);
-    s.count.textContent = String(list.length);
-    if (!list.length) return [none('No subscriptions.')];
-    return [table(['Subscription', 'Host', 'Health', 'Expires', 'Last delivery', 'Attempts'], list.map(x => {
-      const c = subChip(x.health);
-      return h('tr', { title: x.health_note || null },
-        h('td', null, h('span', { text: x.name || '—' }), idCopy(x.sub_id, 'subscription id', 'sub')),
-        h('td', { class: 'mono sm', text: x.url || '—' }),
-        h('td', null, h('span', { class: 'chip health h-' + c.tone, text: c.label })),
-        h('td', { class: 'sm', text: expiresIn(x.expires_at, nowMs()) || '—', title: x.expires_at || '' }),
-        h('td', { class: 'sm' }, x.last_status === null || x.last_status === undefined ? '—' : String(x.last_status), x.last_delivery_at ? ' · ' + age(x.last_delivery_at) : ''),
-        h('td', { text: String(x.attempts ?? 0) }));
-    }))];
-  }
-
   function drawHealth(s) {
     const { blocked, failed } = peerHealth(res.health.get(), id);
     s.count.textContent = String(blocked.length + failed.length);
@@ -571,7 +559,7 @@ export function mount(root, ctx) {
     fill('access', [res.peers], 'Scopes and limits', drawAccess);
     fill('principal', [res.peers, res.principals], 'Principal', drawPrincipal);
     { const f = facts(); routesSec.draw(f, res.routes.get() ? peerRoutes(res.routes.get(), id, f ? f.principalId : '') : null, res.routes.error()); }
-    fill('subs', [res.subs], 'Subscriptions', drawSubs);
+    subsSec.draw(res.subs.get(), res.subs.error());
     fill('health', [res.health], 'Delivery health', drawHealth); // titles join in once threads load
     if (res.threads) fill('threads', [res.threads], 'Recent threads', drawThreads);
     else sections.threads.body.replaceChildren(none('A source is never a thread participant.'));
@@ -591,6 +579,7 @@ export function mount(root, ctx) {
     if (inviteOff) inviteOff();
     invite.unmount();
     routesSec.unmount();
+    subsSec.unmount();
     launcher.unmount();
   };
 }

@@ -232,7 +232,7 @@ try {
     await pv.locator('.pv-presence dl').waitFor();
     await pv.locator('.pv-principal dl').waitFor();
     await pv.locator('.pv-threads tbody tr').first().waitFor();
-    await pv.locator('.pv-subs .none, .pv-subs table').first().waitFor();
+    await pv.locator('.pv-sub-summary').waitFor();
     assert(await pv.locator('.empty.error').count() === 1, 'the failure spread beyond its section');
     await page.locator('#main').evaluate(el => { el.scrollTop += document.getElementById('pv-principal').getBoundingClientRect().top - 140; });
     await shot('pv-error');

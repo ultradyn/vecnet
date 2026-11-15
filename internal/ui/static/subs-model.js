@@ -23,6 +23,38 @@ export function chip(health) {
   return { label: health ? String(health) : 'unknown', tone: 'neutral' };
 }
 
+// Keep known problems first without mutating the shared subscription snapshot.
+// Future health states stay neutral, as they do in chip().
+export function subscriptionItems(list, peerId) {
+  return (Array.isArray(list) ? list : [])
+    .filter(s => s && s.peer_id === peerId && typeof s.sub_id === 'string' && s.sub_id)
+    .map(s => ({ ...s, attention: Object.hasOwn(CHIPS, s.health) && s.health !== 'ok' }))
+    .sort((a, b) => Number(b.attention) - Number(a.attention));
+}
+
+// The admin view normally supplies a host. Redact paths and credentials even
+// if an older or unexpected response supplies a whole callback URL instead.
+export function subscriptionHost(value) {
+  if (typeof value !== 'string' || !value.trim()) return 'Unknown host';
+  // Go's URL.Hostname() projection returns IPv6 without brackets or a port.
+  // Validate that representation as an IPv6 authority before displaying it.
+  const host = value.trim();
+  if (!host.includes('://') && host.includes(':') && !/[/@?#\[\]]/.test(host)) {
+    try { new URL('https://[' + host + ']'); return host; } catch {}
+  }
+  try {
+    const u = new URL(value.includes('://') ? value : 'https://' + value);
+    return ['https:', 'http:'].includes(u.protocol) && u.host ? u.host : 'Unknown host';
+  } catch { return 'Unknown host'; }
+}
+
+export function subscriptionRemoveError(e) {
+  if (e && e.status === 403) return 'Only the operator can remove a subscription. Sign in as the operator and try again.';
+  if (e && e.status === 401) return 'Your sign-in has expired. Sign in again to remove this subscription.';
+  if (e && (e.status === 0 || e.code === 'network')) return 'Could not confirm removal. Check your connection and try again; an already removed subscription stays removed.';
+  return 'Could not remove this subscription. Try again.';
+}
+
 function span(s, big, bigUnit, small, smallUnit) {
   return Math.floor(s / big) + bigUnit + ' ' + Math.floor((s % big) / small) + smallUnit;
 }

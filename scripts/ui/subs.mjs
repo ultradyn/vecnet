@@ -77,6 +77,7 @@ try {
     assert(await section.locator('button, [role=button], input, select, textarea').count() === 0, 'dashboard section has buttons');
     // Copy-id buttons (dom.js copyButton) only read, and Add agent (invite.js)
     // only opens its dialog. The only remaining buttons are audit pagination.
+    await page.locator('.dash-audit-fold > summary').click();
     await page.locator('#view section#d-audit').getByRole('button', { name: 'Latest', exact: true }).waitFor();
     const dashboardButtons = await page.locator('#view button:not(.cpy):not(.inv-open)').evaluateAll(buttons => buttons.map(button => ({
       audit: button.closest('section') === document.querySelector('#view section#d-audit'),

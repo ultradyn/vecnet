@@ -9,21 +9,42 @@ import { chip, expiresIn } from './subs-model.js';
 const TICK = 15000;
 const COLUMNS = ['Peer', 'Host', 'Health', 'Expires', 'Last refresh', 'Last delivery', 'Attempts', 'Cursor'];
 
-// One subscriptions view per store, so remounting the dashboard reuses it.
+// One subscriptions view and confirmed-removal set per signed-in store.
+// Filter after awaiting every read: a snapshot begun before removal must not
+// resurrect its ID, even after navigation or a failed follow-up refresh.
 const resources = new WeakMap();
-function subsResource(ctx) {
-  let r = resources.get(ctx.store);
-  if (!r) {
-    r = ctx.store.resource('subs', () => ctx.api.subscriptions());
-    resources.set(ctx.store, r);
+function subscriptionState(ctx) {
+  let state = resources.get(ctx.store);
+  if (!state) {
+    state = { removed: new Set(), resource: null };
+    resources.set(ctx.store, state);
   }
-  return r;
+  return state;
+}
+const visible = (list, removed) => Array.isArray(list) ? list.filter(s => !removed.has(s.sub_id)) : list;
+
+export function subscriptionsResource(ctx) {
+  const state = subscriptionState(ctx);
+  if (!state.resource) state.resource = ctx.store.resource('subs', async () =>
+    visible(await ctx.api.subscriptions(), state.removed));
+  return state.resource;
+}
+
+// Undefined ID only requests reconciliation after an uncertain late failure.
+// Only a confirmed 204/404 permanently excludes an exact ID in this session.
+export function subscriptionRemoved(ctx, id) {
+  const state = subscriptionState(ctx);
+  if (id) {
+    state.removed.add(id);
+    if (state.resource) state.resource.set(visible(state.resource.get(), state.removed));
+  }
+  ctx.store.invalidate('subs', 'inbox');
 }
 
 // reloadShared reloads the shared subscriptions view, for a page that also
 // shows it and refreshes on its own schedule (the dashboard).
 export async function reloadShared(ctx) {
-  const r = subsResource(ctx);
+  const r = subscriptionsResource(ctx);
   await r.reload();
   return true;
 }
@@ -77,7 +98,7 @@ const sections = new WeakMap();
 export function renderSection(el, ctx) {
   const prev = sections.get(el);
   if (prev) prev();
-  const subs = subsResource(ctx);
+  const subs = subscriptionsResource(ctx);
   const draw = () => {
     if (!el.isConnected && el.childNodes.length) return;
     const list = subs.get(), err = subs.error(), now = hubNow(ctx);
@@ -178,7 +199,8 @@ export function renderAttention(el, items, ctx) {
     state = { el, ctx, items: [], pending: new Set(), failed: new Map(), resumed: new Set() };
     states.set(el, state);
   }
-  const list = Array.isArray(items) ? items.filter(i => i && typeof i === 'object') : [];
+  const removed = subscriptionState(ctx).removed;
+  const list = Array.isArray(items) ? items.filter(i => i && typeof i === 'object' && !removed.has(i.id)) : [];
   // A new snapshot carries the hub's answer, so "Resumed" gives way to it.
   if (items !== state.raw) state.resumed.clear();
   state.raw = items;

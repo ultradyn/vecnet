@@ -629,6 +629,7 @@ test('tagsFor operator_view mirrors opapi.Tags', () => {
   for (const [data, want] of [
     [{ reason: 'read', thread_id: 'thr_x' }, ['inbox', 'threads', 'peers', 'thread:thr_x']],
     [{ reason: 'presence', thread_id: null }, ['inbox', 'threads', 'peers']],
+    [{ reason: 'subscription', thread_id: null }, ['inbox', 'threads', 'peers', 'subs']],
     [{ reason: 'sent', thread_id: '' }, ['inbox', 'threads', 'peers']],
     [{ reason: 7, thread_id: 'thr_x' }, []],
     [{ reason: null, thread_id: null }, []],

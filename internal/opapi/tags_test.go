@@ -149,6 +149,11 @@ func TestTagsOperatorView(t *testing.T) {
 		want []string
 	}{
 		{`{"reason":"read","thread_id":"thr_x"}`, []string{"inbox", "threads", "peers", "thread:thr_x"}},
+		{`{"reason":"subscription","thread_id":null}`, []string{"inbox", "threads", "peers", "subs"}},
+		{`{"reason":"subscription","thread_id":"thr_x"}`, []string{"inbox", "threads", "peers", "subs", "thread:thr_x"}},
+		{`{"reason":"other","thread_id":null}`, []string{"inbox", "threads", "peers"}},
+		{`{"reason":"Subscription","thread_id":null}`, []string{"inbox", "threads", "peers"}},
+		{`{"reason":"subscription"}`, []string{}},
 		{`{"reason":"presence","thread_id":null}`, []string{"inbox", "threads", "peers"}},
 		{`{"reason":"sent","thread_id":""}`, []string{"inbox", "threads", "peers"}},
 		{`{"reason":7,"thread_id":"thr_x"}`, []string{}},

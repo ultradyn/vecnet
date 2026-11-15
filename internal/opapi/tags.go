@@ -74,6 +74,9 @@ func Tags(ev envelope.Event) []string {
 			return empty
 		}
 		tags := []string{"inbox", "threads", "peers"}
+		if *reason == "subscription" {
+			tags = append(tags, "subs")
+		}
 		if thread != nil && *thread != "" {
 			tags = append(tags, "thread:"+*thread)
 		}
