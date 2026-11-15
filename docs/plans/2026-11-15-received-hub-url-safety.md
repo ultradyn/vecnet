@@ -81,8 +81,8 @@ func TransportError(err error) error // package httpdiag; nil remains nil; unwra
 ## Integration and exit tests
 
 - [x] Fresh full `go test -mod=readonly -p 2 -count=1 -timeout=20m -json ./...` via the gate script on the exact reviewed source; relevant vet/protocol checks. Broaden further only for new failures or changes.
-- [ ] Review PASS with no accepted unresolved finding; source current with origin/master. Merge to the repository's `master` branch (its main branch) and push normally. No force push.
-- [ ] Verify the merged tree against the reviewed source and required gate results; close #47 with the actual commit and evidence. Preserve the operational ledger/reviews before removing this worktree. Other worktrees and local Markdown tickets remain untouched.
+- [x] Review PASS with no accepted unresolved finding; source current with origin/master. Merge to the repository's `master` branch (its main branch) and push normally. No force push.
+- [x] Verify the merged tree against the reviewed source and required gate results; close #47 with the actual commit and evidence. Preserve the operational ledger/reviews before removing this worktree. Other worktrees and local Markdown tickets remain untouched.
 
 Exit mapping: help/defaults → existing hub flag diagnostics; invitations → existing invite_huburl_response tests; notices/events → Task 1/2 canaries and atomic state checks; relocation → safe error projection and caller tests; redirects → request/upload/CLI/TUI typed diagnostics; bindings → unchanged-file listing test; safe values → signed URL/prefix/IPv6/HTTP positive controls and existing TUI goldens.
 
