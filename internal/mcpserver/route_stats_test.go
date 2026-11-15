@@ -1,7 +1,6 @@
 package mcpserver_test
 
-// SOURCE DRAFT / UNRUN. Semantic wire maps deliberately avoid guessing the
-// unspecified exported names of nested opapi DTOs.
+// Semantic wire maps verify the shared DTO and both MCP protocol eras.
 import (
 	"bytes"
 	"context"
@@ -12,6 +11,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -19,6 +20,7 @@ import (
 	"time"
 
 	"github.com/XertroV/vecnet/internal/auth"
+	"github.com/XertroV/vecnet/internal/cli"
 	venv "github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/hub"
 	"github.com/XertroV/vecnet/internal/mcpserver"
@@ -175,7 +177,7 @@ func TestRouteStatsMCPParityAndErrors(t *testing.T) {
 						t2MCPEqual(t, row, map[string]any{
 							"route_id": grokID, "kind": "grokbot", "host": "routine-stats.example",
 							"owner_kind": "peer", "owner_id": peer, "attempt_scope": "route",
-							"requests": 1, "ok": 0, "fail": 0, "refused": 1, "distinct_ids": 1,
+							"requests": 1, "coalesced": 0, "ok": 0, "fail": 0, "refused": 1, "distinct_ids": 1,
 							"last_used_at": at, "last_success_at": nil, "last_error": "routine_not_started",
 							"last_error_at": at, "last_status": 200,
 							"body_bytes": map[string]any{"avg": 11, "p95": 11, "p99": 11, "samples": 1},
@@ -591,3 +593,85 @@ func (l *t2MCPLog) Bytes() []byte {
 	return append([]byte(nil), l.b.Bytes()...)
 }
 func (l *t2MCPLog) String() string { return string(l.Bytes()) }
+
+// End-to-end serializer parity on one synthetic persisted snapshot, including
+// both MCP protocol eras and the public CLI dispatcher. A DTO-only comparison
+// would miss a dropped field in a consumer or missing human-output token.
+func TestCoalescedHTTPMCPCLIParity(t *testing.T) {
+	e, peer, peerSecret, _, sub := t2MCPFixture(t)
+	grok := t2MCPID("route", 62)
+	at := venv.FormatTime(e.Now.Now())
+	for i := 0; i < 6; i++ {
+		id := t2MCPID("dly", 900+i)
+		t2MCPExec(t, e, `INSERT INTO deliveries(dly_id,msg_id,thr_id,recipient,priority,state,attempt,attempts_left,route_id,expires_at,created_at,updated_at,body_sha256) VALUES(?,?,?,?,'wake','queued',0,3,?,?,?,?,?)`, id, t2MCPID("msg", 900), t2MCPID("thr", 900), peer, grok, venv.FormatTime(e.Now.Now().Add(time.Hour)), at, at, strings.Repeat("a", 64))
+		t2MCPExec(t, e, `INSERT INTO grokbot_covers VALUES(?,?,?,?)`, grok, id, peer, at)
+	}
+	home := t.TempDir()
+	conf := filepath.Join(home, "config.toml")
+	if err := os.WriteFile(conf, []byte(fmt.Sprintf("[profiles.synthetic]\nhub=%q\nsecret=%q\n", e.URL, e.OperatorSecret)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	env := map[string]string{"HOME": home, "VECNET_CONFIG": conf, "VECNET_CODEX_AUTO_DELIVERY": "0", "CODEX_HOME": filepath.Join(home, ".codex"), "XDG_CACHE_HOME": filepath.Join(home, "cache"), "XDG_CONFIG_HOME": filepath.Join(home, "config"), "XDG_DATA_HOME": filepath.Join(home, "data"), "XDG_RUNTIME_DIR": filepath.Join(home, "runtime")}
+	getenv := func(k string) string { return env[k] }
+	for _, id := range []string{peer, grok, sub} {
+		resp, raw := e.Do(e.OperatorSecret, http.MethodGet, "/v1/admin/route-stats?id="+id, nil)
+		if resp.StatusCode != 200 {
+			t.Fatal("HTTP snapshot failed")
+		}
+		want := t2MCPJSON(t, raw)
+		for _, v := range want["routes"].([]any) {
+			row := v.(map[string]any)
+			n := float64(0)
+			if row["route_id"] == grok {
+				n = 6
+			}
+			if row["coalesced"] != n {
+				t.Fatalf("HTTP coalesced=%v want%v", row["coalesced"], n)
+			}
+		}
+		for _, era := range []string{mcpserver.ProtoCurrent, mcpserver.ProtoLegacy} {
+			result := t2MCPResult(t, e, e.OperatorSecret, mcpEraHeaders(t, e, e.OperatorSecret, era), map[string]any{"id": id}, 0, "")
+			t2MCPEqual(t, want, result["structuredContent"])
+		}
+		var out, errs bytes.Buffer
+		code := cli.RunContext(context.Background(), []string{"--net", "synthetic", "--json", "route", "stats", id}, strings.NewReader(""), &out, &errs, getenv)
+		if code != 0 || errs.Len() != 0 {
+			t.Fatalf("CLI JSON exit=%d stderr=%s", code, errs.String())
+		}
+		t2MCPEqual(t, want, t2MCPJSON(t, out.Bytes()))
+		out.Reset()
+		errs.Reset()
+		code = cli.RunContext(context.Background(), []string{"--net", "synthetic", "route", "stats", id}, strings.NewReader(""), &out, &errs, getenv)
+		if code != 0 || errs.Len() != 0 {
+			t.Fatalf("CLI text exit=%d stderr=%s", code, errs.String())
+		}
+		for _, v := range want["routes"].([]any) {
+			row := v.(map[string]any)
+			found := 0
+			for _, line := range strings.Split(out.String(), "\n") {
+				if strings.HasPrefix(line, row["route_id"].(string)+" ") {
+					found++
+					token := fmt.Sprintf("coalesced=%.0f", row["coalesced"])
+					matches := 0
+					for _, field := range strings.Fields(line) {
+						if field == token {
+							matches++
+						}
+					}
+					if matches != 1 {
+						t.Fatalf("CLI text missing exact %s: %s", token, line)
+					}
+				}
+			}
+			if found != 1 {
+				t.Fatal("CLI text missing route")
+			}
+		}
+	}
+	// Positive evidence cannot confer authority on a peer credential.
+	resp, _ := e.Do(peerSecret, http.MethodGet, "/v1/admin/route-stats?id="+grok, nil)
+	if resp.StatusCode != 403 {
+		t.Fatal("HTTP coverage exposed to peer")
+	}
+	t2MCPResult(t, e, peerSecret, modern(), map[string]any{"id": grok}, 0, "forbidden")
+}

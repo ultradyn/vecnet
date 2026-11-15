@@ -61,6 +61,7 @@ func (a *app) routeStats(o opts, selectClient func() (*client, error)) error {
 		safe(report.Window.Since), safe(report.Window.Until))
 	out.WriteString("route-wide: attempts cover the whole route across peers, including shared principal routes; ownership and metadata are current.\n")
 	out.WriteString("OK means request acceptance or run start; it does not establish processing or replies.\n")
+	out.WriteString("Coalesced counts distinct retained first-covered IDs by historical route within the inclusive window, uncapped by attempts; scheduling/handled suppression does not prove remote processing or billing.\n")
 	out.WriteString("Telemetry is best effort; retries add attempts and the sample can cover less than 168h.\n")
 	peers := make([]string, len(report.RetainedDeliveries.PeerIDs))
 	for i, peer := range report.RetainedDeliveries.PeerIDs {
@@ -74,12 +75,12 @@ func (a *app) routeStats(o opts, selectClient func() (*client, error)) error {
 		if row.LastStatus != nil {
 			status = strconv.Itoa(*row.LastStatus)
 		}
-		fmt.Fprintf(&out, "%s owner=%s:%s kind=%s host=%s attempt_scope=%s requests=%d ok=%d fail=%d refused=%d distinct_ids=%d"+
+		fmt.Fprintf(&out, "%s owner=%s:%s kind=%s host=%s attempt_scope=%s requests=%d coalesced=%d ok=%d fail=%d refused=%d distinct_ids=%d"+
 			" last_used_at=%s last_success_at=%s last_error=%s last_error_at=%s last_status=%s"+
 			" body_bytes_avg=%s body_bytes_p95=%s body_bytes_p99=%s body_bytes_samples=%d"+
 			" latency_ms_avg=%s latency_ms_p95=%s latency_ms_p99=%s latency_ms_samples=%d\n",
 			safe(row.RouteID), safe(row.OwnerKind), safe(row.OwnerID), safe(row.Kind), safe(row.Host), safe(row.AttemptScope),
-			row.Requests, row.OK, row.Fail, row.Refused, row.DistinctIDs,
+			row.Requests, row.Coalesced, row.OK, row.Fail, row.Refused, row.DistinctIDs,
 			text(row.LastUsedAt), text(row.LastSuccessAt), text(row.LastError), text(row.LastErrorAt), status,
 			number(row.BodyBytes.Avg), number(row.BodyBytes.P95), number(row.BodyBytes.P99), row.BodyBytes.Samples,
 			number(row.LatencyMS.Avg), number(row.LatencyMS.P95), number(row.LatencyMS.P99), row.LatencyMS.Samples)

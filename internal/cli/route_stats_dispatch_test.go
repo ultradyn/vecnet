@@ -35,7 +35,7 @@ const t4RouteReport = `{
   "window":{"since":"2030-01-03T12:00:00.000Z","until":"2030-01-10T12:00:00.000Z","max_rows":1000,"max_age_hours":168},
   "retained_deliveries":{"peer_ids":[],"total":0,"with_push_evidence":0,"accepted_without_push_evidence":0},
   "routes":[{"route_id":"route_00000000000000000000000011","kind":"http","host":"stats.example","owner_kind":"principal","owner_id":"prn_00000000000000000000000010","attempt_scope":"route",
-    "requests":2,"ok":1,"fail":1,"refused":0,"distinct_ids":1,
+    "requests":2,"coalesced":0,"ok":1,"fail":1,"refused":0,"distinct_ids":1,
     "last_used_at":"2030-01-10T11:59:00.000Z","last_success_at":"2030-01-10T11:58:00.000Z","last_error":"network_error","last_error_at":"2030-01-10T11:59:00.000Z","last_status":null,
     "body_bytes":{"avg":0,"p95":0,"p99":0,"samples":2},"latency_ms":{"avg":3,"p95":4,"p99":4,"samples":2}}]
 }`
@@ -45,7 +45,7 @@ const t4RouteIdleReport = `{
   "window":{"since":"2030-01-03T12:00:00.000Z","until":"2030-01-10T12:00:00.000Z","max_rows":1000,"max_age_hours":168},
   "retained_deliveries":{"peer_ids":[],"total":0,"with_push_evidence":0,"accepted_without_push_evidence":0},
   "routes":[{"route_id":"route_00000000000000000000000011","kind":"http","host":"stats.example","owner_kind":"principal","owner_id":"prn_00000000000000000000000010","attempt_scope":"route",
-    "requests":0,"ok":0,"fail":0,"refused":0,"distinct_ids":0,
+    "requests":0,"coalesced":0,"ok":0,"fail":0,"refused":0,"distinct_ids":0,
     "last_used_at":null,"last_success_at":null,"last_error":null,"last_error_at":null,"last_status":null,
     "body_bytes":{"avg":null,"p95":null,"p99":null,"samples":0},"latency_ms":{"avg":null,"p95":null,"p99":null,"samples":0}}]
 }`

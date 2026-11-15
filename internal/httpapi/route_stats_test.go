@@ -1,7 +1,6 @@
 package httpapi_test
 
-// SOURCE DRAFT / UNRUN. All fixtures are synthetic; no production interface
-// beyond the contracted future Hub.RouteStats is assumed.
+// All fixtures are synthetic and exercise the shared operator-only DTO.
 import (
 	"context"
 	"encoding/json"
@@ -152,7 +151,10 @@ func TestRouteStatsHTTPContractAndErrors(t *testing.T) {
 			}
 			for _, value := range rows {
 				row := value.(map[string]any)
-				t2HTTPKeys(t, row, "route_id", "kind", "host", "owner_kind", "owner_id", "attempt_scope", "requests", "ok", "fail", "refused", "distinct_ids", "last_used_at", "last_success_at", "last_error", "last_error_at", "last_status", "body_bytes", "latency_ms")
+				t2HTTPKeys(t, row, "route_id", "kind", "host", "owner_kind", "owner_id", "attempt_scope", "requests", "coalesced", "ok", "fail", "refused", "distinct_ids", "last_used_at", "last_success_at", "last_error", "last_error_at", "last_status", "body_bytes", "latency_ms")
+				if row["coalesced"] != float64(0) {
+					t.Fatal("non-Grok/subscription coalesced must be present zero")
+				}
 				if row["attempt_scope"] != "route" || row["owner_kind"] != "peer" || row["owner_id"] != peer {
 					t.Fatal("wrong owner/scope metadata")
 				}

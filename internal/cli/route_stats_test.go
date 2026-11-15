@@ -36,15 +36,15 @@ const t3StatsReport = `{
   "retained_deliveries":{"peer_ids":["peer_00000000000000000000000001"],"total":901,"with_push_evidence":500,"accepted_without_push_evidence":2},
   "routes":[
     {"route_id":"route_00000000000000000000000011","kind":"http","host":"stats.example","owner_kind":"principal","owner_id":"prn_00000000000000000000000010","attempt_scope":"route",
-     "requests":300,"ok":298,"fail":1,"refused":1,"distinct_ids":299,
+     "requests":300,"coalesced":0,"ok":298,"fail":1,"refused":1,"distinct_ids":299,
      "last_used_at":"2030-01-10T11:59:00.000Z","last_success_at":"2030-01-10T11:59:00.000Z","last_error":"http_429","last_error_at":"2030-01-10T11:58:00.000Z","last_status":202,
      "body_bytes":{"avg":150.5,"p95":285,"p99":297,"samples":300},"latency_ms":{"avg":12.347,"p95":25,"p99":40,"samples":300}},
     {"route_id":"route_00000000000000000000000012","kind":"grokbot","host":"api2.cursor.sh","owner_kind":"peer","owner_id":"peer_00000000000000000000000001","attempt_scope":"route",
-     "requests":1,"ok":1,"fail":0,"refused":0,"distinct_ids":1,
+     "requests":1,"coalesced":6,"ok":1,"fail":0,"refused":0,"distinct_ids":1,
      "last_used_at":"2030-01-10T11:57:00.000Z","last_success_at":"2030-01-10T11:57:00.000Z","last_error":null,"last_error_at":null,"last_status":204,
      "body_bytes":{"avg":0,"p95":0,"p99":0,"samples":1},"latency_ms":{"avg":0,"p95":0,"p99":0,"samples":1}},
     {"route_id":"sub_00000000000000000000000013","kind":"events","host":"events.example","owner_kind":"peer","owner_id":"peer_00000000000000000000000001","attempt_scope":"route",
-     "requests":0,"ok":0,"fail":0,"refused":0,"distinct_ids":0,
+     "requests":0,"coalesced":0,"ok":0,"fail":0,"refused":0,"distinct_ids":0,
      "last_used_at":null,"last_success_at":null,"last_error":null,"last_error_at":null,"last_status":null,
      "body_bytes":{"avg":null,"p95":null,"p99":null,"samples":0},"latency_ms":{"avg":null,"p95":null,"p99":null,"samples":0}}
   ]
@@ -64,7 +64,7 @@ const t3StatsNoContextReport = `{
   "window":{"since":"2030-01-03T12:00:00.000Z","until":"2030-01-10T12:00:00.000Z","max_rows":1000,"max_age_hours":168},
   "retained_deliveries":{"peer_ids":[],"total":0,"with_push_evidence":0,"accepted_without_push_evidence":0},
   "routes":[{"route_id":"route_00000000000000000000000011","kind":"http","host":"stats.example","owner_kind":"principal","owner_id":"prn_00000000000000000000000010","attempt_scope":"route",
-    "requests":0,"ok":0,"fail":0,"refused":0,"distinct_ids":0,
+    "requests":0,"coalesced":0,"ok":0,"fail":0,"refused":0,"distinct_ids":0,
     "last_used_at":null,"last_success_at":null,"last_error":null,"last_error_at":null,"last_status":null,
     "body_bytes":{"avg":null,"p95":null,"p99":null,"samples":0},"latency_ms":{"avg":null,"p95":null,"p99":null,"samples":0}}]
 }`
@@ -474,14 +474,14 @@ func TestRouteStatsHumanOutputPopulations(t *testing.T) {
 	principal := t3StatsLine(t, out, t3StatsRoute)
 	t3StatsContains(t, principal, "owner=principal:prn_00000000000000000000000010", "kind=http", "host=stats.example", "attempt_scope=route",
 		"last_used_at=2030-01-10T11:59:00.000Z", "last_success_at=2030-01-10T11:59:00.000Z", "last_error=http_429", "last_error_at=2030-01-10T11:58:00.000Z")
-	t3StatsTokens(t, principal, "requests=300", "ok=298", "fail=1", "refused=1", "distinct_ids=299", "last_status=202",
+	t3StatsTokens(t, principal, "requests=300", "coalesced=0", "ok=298", "fail=1", "refused=1", "distinct_ids=299", "last_status=202",
 		"body_bytes_avg=150.5", "body_bytes_p95=285", "body_bytes_p99=297", "body_bytes_samples=300", "latency_ms_avg=12.347", "latency_ms_p95=25", "latency_ms_p99=40", "latency_ms_samples=300")
 	zero := t3StatsLine(t, out, "route_00000000000000000000000012")
 	t3StatsContains(t, zero, "owner=peer:"+t3StatsPeer, "kind=grokbot", "host=api2.cursor.sh", "last_error=-", "last_error_at=-")
-	t3StatsTokens(t, zero, "requests=1", "last_status=204")
+	t3StatsTokens(t, zero, "requests=1", "coalesced=6", "last_status=204")
 	empty := t3StatsLine(t, out, t3StatsSub)
 	t3StatsContains(t, empty, "owner=peer:"+t3StatsPeer, "kind=events", "host=events.example", "last_used_at=-", "last_success_at=-", "last_error=-", "last_error_at=-", "last_status=-")
-	t3StatsTokens(t, empty, "requests=0", "distinct_ids=0")
+	t3StatsTokens(t, empty, "requests=0", "coalesced=0", "distinct_ids=0")
 	for _, prefix := range []string{"body_bytes", "latency_ms"} {
 		for _, metric := range []string{"avg", "p95", "p99"} {
 			key := prefix + "_" + metric
@@ -549,4 +549,28 @@ func TestRouteStatsHumanOutputPopulations(t *testing.T) {
 			})
 		}
 	})
+}
+
+func TestCoalescedCLIInt64AndOldServer(t *testing.T) {
+	for _, tc := range []struct{ name, report, token string }{
+		{"int64", strings.Replace(t3StatsReport, `"coalesced":6`, `"coalesced":4294967296`, 1), "coalesced=4294967296"},
+		{"old-server-omission", strings.ReplaceAll(strings.ReplaceAll(t3StatsReport, `"coalesced":0,`, ""), `"coalesced":6,`, ""), "coalesced=0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, _ := t3StatsServe(t, t3StatsPeer, tc.report, false)
+			t3StatsTokens(t, t3StatsLine(t, out, "route_00000000000000000000000012"), tc.token)
+			out, _ = t3StatsServe(t, t3StatsPeer, tc.report, true)
+			var dto opapi.RouteStats
+			if err := json.Unmarshal([]byte(out), &dto); err != nil {
+				t.Fatal(err)
+			}
+			want := int64(0)
+			if tc.name == "int64" {
+				want = 4294967296
+			}
+			if dto.Routes[1].Coalesced != want || dto.Routes[0].Coalesced != 0 || dto.Routes[2].Coalesced != 0 {
+				t.Fatalf("CLI decoded coverage=%+v", dto.Routes)
+			}
+		})
+	}
 }

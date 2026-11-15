@@ -52,6 +52,18 @@ func (h *Hub) RouteStats(ctx context.Context, caller auth.Caller, id string) (op
 				return err
 			}
 			applyRouteStats(&out.Routes[i], attempts)
+			if out.Routes[i].Kind == RouteKindGrokbot {
+				// The (route_id, delivery_id) primary key makes these distinct
+				// retained first-cover IDs. Historical route attribution and the
+				// inclusive window are independent of the capped attempt sample
+				// and of current delivery routing/peer membership.
+				if err := q.QueryRowContext(ctx, `SELECT count(*) FROM grokbot_covers
+					WHERE route_id=? AND first_covered_at>=? AND first_covered_at<=?`,
+					out.Routes[i].RouteID, out.Window.Since, out.Window.Until).
+					Scan(&out.Routes[i].Coalesced); err != nil {
+					return err
+				}
+			}
 		}
 		return routeStatsDeliveryContext(ctx, q, &out)
 	})

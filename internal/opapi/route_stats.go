@@ -1,7 +1,8 @@
 package opapi
 
-// RouteStats is a retained attempt sample and its separate retained-delivery
-// context. Every field is present on the wire; absent measurements are null.
+// RouteStats contains a retained attempt sample, separate first-cover counts
+// and retained-delivery context. Every field is present on the wire; absent
+// measurements are null.
 // This DTO has no hub or storage dependencies so all read surfaces can share it.
 type RouteStats struct {
 	Subject            RouteStatsSubject            `json:"subject"`
@@ -34,6 +35,8 @@ type RouteStatsRetainedDeliveries struct {
 
 // RouteStatsRow aggregates the whole route, including shared principal routes.
 // Metadata describes current ownership and hostname, not historical routing.
+// Coalesced counts retained first-covered IDs by historical route/window,
+// independently of the attempt sample; non-Grok rows always report zero.
 type RouteStatsRow struct {
 	RouteID       string                 `json:"route_id"`
 	Kind          string                 `json:"kind"`
@@ -42,6 +45,7 @@ type RouteStatsRow struct {
 	OwnerID       string                 `json:"owner_id"`
 	AttemptScope  string                 `json:"attempt_scope"`
 	Requests      int                    `json:"requests"`
+	Coalesced     int64                  `json:"coalesced"`
 	OK            int                    `json:"ok"`
 	Fail          int                    `json:"fail"`
 	Refused       int                    `json:"refused"`

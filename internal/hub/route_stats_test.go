@@ -1,8 +1,9 @@
 package hub_test
 
-// SOURCE DRAFT / UNRUN: Task2 contract, base 36a981af. RouteStats is the
-// explicitly authorized future API; every other fixture seam exists at base.
+// Synthetic fixtures exercise shared route statistics, retained evidence and
+// operator-only snapshot behavior.
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"database/sql/driver"
@@ -10,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -20,6 +22,7 @@ import (
 	"github.com/XertroV/vecnet/internal/auth"
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/hub"
+	"github.com/XertroV/vecnet/internal/opapi"
 	"github.com/XertroV/vecnet/internal/testhub"
 )
 
@@ -146,7 +149,7 @@ func t2Rows(t *testing.T, m map[string]any) []map[string]any {
 			t.Fatal("route must be object")
 		}
 		t2Keys(t, row, "route_id", "kind", "host", "owner_kind", "owner_id", "attempt_scope",
-			"requests", "ok", "fail", "refused", "distinct_ids", "last_used_at",
+			"requests", "coalesced", "ok", "fail", "refused", "distinct_ids", "last_used_at",
 			"last_success_at", "last_error", "last_error_at", "last_status", "body_bytes", "latency_ms")
 		requests, ok := row["requests"].(float64)
 		if !ok || requests < 0 || requests > 1000 {
@@ -194,7 +197,7 @@ func t2Dist(avg, p95, p99 any, n int) map[string]any {
 
 func t2Empty(t *testing.T, row map[string]any) {
 	t.Helper()
-	for _, key := range []string{"requests", "ok", "fail", "refused", "distinct_ids"} {
+	for _, key := range []string{"requests", "coalesced", "ok", "fail", "refused", "distinct_ids"} {
 		t2Equal(t, row[key], 0)
 	}
 	for _, key := range []string{"last_used_at", "last_success_at", "last_error", "last_error_at", "last_status"} {
@@ -617,7 +620,7 @@ func (c *t2ReadConn) ExecContext(ctx context.Context, q string, args []driver.Na
 }
 func t2DomainQuery(q string) bool {
 	q = strings.ToLower(q)
-	for _, name := range []string{"peers", "routes", "event_subscriptions", "route_attempts", "deliveries"} {
+	for _, name := range []string{"peers", "routes", "event_subscriptions", "route_attempts", "deliveries", "grokbot_covers"} {
 		if strings.Contains(q, name) {
 			return true
 		}
@@ -906,7 +909,7 @@ func TestRouteStatsLegacyGrokRunsRemainIndependent(t *testing.T) {
 	want := map[string]any{
 		"route_id": r, "kind": "grokbot", "host": "legacy.example",
 		"owner_kind": "peer", "owner_id": peer, "attempt_scope": "route",
-		"requests": 0, "ok": 0, "fail": 0, "refused": 0, "distinct_ids": 0,
+		"requests": 0, "coalesced": 0, "ok": 0, "fail": 0, "refused": 0, "distinct_ids": 0,
 		"last_used_at": nil, "last_success_at": nil, "last_error": nil,
 		"last_error_at": nil, "last_status": nil,
 		"body_bytes": t2Dist(nil, nil, nil, 0), "latency_ms": t2Dist(nil, nil, nil, 0),
@@ -962,4 +965,293 @@ func TestRouteStatsLegacyGrokRunsRemainIndependent(t *testing.T) {
 	p.failTable = ""
 	check()
 	t2Equal(t, state(), before)
+}
+
+// These fixtures catch counting pending_count (including the leader), counting
+// attempt samples, and reattributing retained coverage to current membership.
+func t4StatsRow(t *testing.T, e *testhub.Env, route string) opapi.RouteStatsRow {
+	t.Helper()
+	s, err := e.Hub.RouteStats(context.Background(), t2Caller(t, e, e.OperatorSecret), route)
+	t2Must(t, err)
+	if len(s.Routes) != 1 {
+		t.Fatalf("route rows=%d want1", len(s.Routes))
+	}
+	return s.Routes[0]
+}
+
+// Capture the actual outgoing client body without replacing its transport or
+// the fixture's independent client-entry and receiver-POST counters.
+type t4Capture struct {
+	base http.RoundTripper
+	body []byte
+}
+
+func (c *t4Capture) RoundTrip(r *http.Request) (*http.Response, error) {
+	var err error
+	c.body, err = io.ReadAll(r.Body)
+	if err != nil {
+		return nil, err
+	}
+	r.Body = io.NopCloser(bytes.NewReader(c.body))
+	return c.base.RoundTrip(r)
+}
+
+func TestRouteStatsSixCoveredOneRequest(t *testing.T) {
+	f := t2Setup(t)
+	f.presence("working")
+	ids := make([]string, 7)
+	prior := map[string]t2HandledRow{}
+	for i := range ids {
+		ids[i] = f.send("wake_idle")
+		prior[ids[i]] = f.handledRow(ids[i])
+	}
+	f.step()
+	f.requests(0)
+	f.presence("idle")
+	d := f.claim()
+	if d.GrokWake.PendingCount != 7 {
+		t.Fatalf("pending_count=%d want7", d.GrokWake.PendingCount)
+	}
+	want := []string{}
+	for _, id := range ids {
+		if id != d.DeliveryID {
+			want = append(want, id)
+		}
+	}
+	sort.Strings(want)
+	rows, err := f.env.Hub.DB.Query(`SELECT delivery_id FROM grokbot_covers WHERE route_id=? ORDER BY delivery_id`, f.route)
+	t2Must(t, err)
+	got := []string{}
+	for rows.Next() {
+		var id string
+		t2Must(t, rows.Scan(&id))
+		got = append(got, id)
+	}
+	t2Must(t, rows.Err())
+	t2Must(t, rows.Close())
+	if len(want) != 6 || !reflect.DeepEqual(got, want) {
+		t.Fatalf("covered IDs=%v want exact followers=%v", got, want)
+	}
+	capture := &t4Capture{base: f.client}
+	f.w.Client.Transport = capture
+	f.w.Push(f.ctx, d)
+	f.step()
+	f.requests(1)
+	var body struct {
+		Type     string `json:"type"`
+		Version  int    `json:"version"`
+		Pending  int    `json:"pending_count"`
+		Delivery struct {
+			ID string `json:"delivery_id"`
+		} `json:"delivery"`
+	}
+	t2Must(t, json.Unmarshal(capture.body, &body))
+	if body.Type != "grokbot_wake" || body.Version != 1 || body.Pending != 7 || body.Delivery.ID != d.DeliveryID {
+		t.Fatalf("actual POST envelope=%+v", body)
+	}
+	for _, id := range want {
+		after := f.handledRow(id)
+		if after.State != "queued" || after.Attempt != 0 || after.Left != prior[id].Left {
+			t.Fatalf("follower accounting=%+v prior=%+v", after, prior[id])
+		}
+		for _, receipt := range receipts(t, f.env, f.a) {
+			if receipt.DeliveryID == id {
+				t.Fatalf("fabricated follower receipt=%+v", receipt)
+			}
+		}
+		if f.scalar(`SELECT count(*) FROM route_attempts WHERE delivery_id=?`, id) != 0 {
+			t.Fatal("fabricated follower attempt")
+		}
+	}
+	if f.covers(d.DeliveryID) != 0 || f.scalar(`SELECT count(*) FROM route_runs WHERE route_id=?`, f.route) != 1 {
+		t.Fatal("leader coverage or follower run reservation")
+	}
+	row := t4StatsRow(t, f.env, f.route)
+	if row.Requests != 1 || row.Coalesced != 6 {
+		t.Fatalf("Requests=%d Coalesced=%d want1/6 (7 pending, 6 followers, 1 POST)", row.Requests, row.Coalesced)
+	}
+}
+
+func TestCoalescedFirstCoverageDistinctWindowAndMove(t *testing.T) {
+	e := t2Env(t)
+	a, _ := e.NewPeer("grokbot", "cover-old-owner")
+	b, _ := e.NewPeer("grokbot", "cover-new-owner")
+	r, other, httpRoute, sub := t2ID("route", 701), t2ID("route", 702), t2ID("route", 703), t2ID("sub", 701)
+	t2Route(t, e, r, "peer", a, "grokbot", "https://historical.example")
+	t2Route(t, e, other, "peer", b, "grokbot", "https://current.example")
+	t2Route(t, e, httpRoute, "peer", b, "http", "https://http.example")
+	t2Sub(t, e, sub, b)
+	now := e.Now.Now()
+	since := now.Add(-168 * time.Hour)
+	cover := func(id, route string, first time.Time) {
+		t.Helper()
+		t2Exec(t, e, `INSERT INTO grokbot_covers(route_id,delivery_id,recipient,first_covered_at) VALUES(?,?,?,?) ON CONFLICT DO NOTHING`, route, id, a, envelope.FormatTime(first))
+	}
+	for i, at := range []time.Time{since.Add(-time.Millisecond), since, now, now.Add(time.Millisecond)} {
+		id := t2ID("dly", 710+i)
+		t2Delivery(t, e, id, a, r, "queued", 0, now)
+		cover(id, r, at)
+	}
+	// More first-cover rows than the sample cap; no attempt evidence required.
+	for i := 0; i < 1001; i++ {
+		id := t2ID("dly", 800+i)
+		t2Delivery(t, e, id, a, r, "queued", 0, now)
+		cover(id, r, now.Add(-time.Hour))
+	}
+	// Re-cover cannot slide an old first time into this window.
+	cover(t2ID("dly", 710), r, now)
+	// A covered ID may also genuinely have attempted evidence; it counts once
+	// in coverage independently of repeated attempts and their sample cap.
+	for i := 0; i < 1001; i++ {
+		t2Attempt(t, e, r, t2ID("dly", 800), now, "ok", 200, nil, 1, 1)
+	}
+	// Current owner, peer membership and delivery routing no longer match the
+	// historical first-covered route. Attribution must remain historical.
+	t2Exec(t, e, `UPDATE routes SET owner_id=? WHERE route_id=?`, b, r)
+	t2Exec(t, e, `UPDATE peers SET route_id=? WHERE peer_id=?`, other, a)
+	t2Exec(t, e, `UPDATE deliveries SET route_id=?,recipient=?`, other, b)
+	for _, id := range []string{httpRoute, sub} {
+		cover(t2ID("dly", 800), id, now)
+	}
+	check := func(want int64) {
+		t.Helper()
+		row := t4StatsRow(t, e, r)
+		if row.Coalesced != want || row.Requests != 1000 || row.DistinctIDs != 1 {
+			t.Fatalf("historical row=%+v want coalesced=%d requests1000 distinct1", row, want)
+		}
+	}
+	check(1003)
+	for _, id := range []string{other, httpRoute, sub} {
+		if row := t4StatsRow(t, e, id); row.Coalesced != 0 {
+			t.Fatalf("other kind/route/subscription counted coverage: %+v", row)
+		}
+	}
+	t2Exec(t, e, `DELETE FROM deliveries WHERE dly_id=?`, t2ID("dly", 800))
+	check(1002)
+	e.Now.Advance(time.Millisecond)
+	// Lower bound leaves and future upper row enters, keeping the total equal.
+	check(1002)
+}
+
+func TestCoalescedRecoversAndHandlesWithoutRewritingFirstEvidence(t *testing.T) {
+	t.Run("later-post-recovery-recover-and-handle", func(t *testing.T) {
+		f := t2Setup(t)
+		f.send("wake")
+		follower := f.send("wake")
+		f.step()
+		f.requests(1)
+		first := f.firstCover(follower)
+		f.env.Now.Advance(hub.PushLease + time.Millisecond)
+		f.respond = func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(400)
+			fmt.Fprint(w, `{"success":false,"error":"invalid payload"}`)
+		}
+		f.step()
+		f.requests(2)
+		if f.handledRow(follower).State != "dead_letter" {
+			t.Fatal("fixture needs terminal follower POST")
+		}
+		var retry string
+		t2Must(t, f.env.Hub.DB.QueryRow(`SELECT retry_at FROM grokbot_wakes WHERE route_id=?`, f.route).Scan(&retry))
+		at, err := envelope.ParseTime(retry)
+		t2Must(t, err)
+		f.env.Now.Advance(at.Sub(f.env.Now.Now()) + time.Millisecond)
+		f.step()
+		f.requests(2)
+		if f.scalar(`SELECT count(*) FROM grokbot_wakes WHERE route_id=?`, f.route) != 0 {
+			t.Fatal("finite coordinator cleanup not exercised")
+		}
+		t2Must(t, f.env.Hub.RetryDeadLetter(f.ctx, follower))
+		f.respond = nil
+		f.step()
+		f.requests(3)
+		f.processed(f.caller(f.b), follower)
+		f.step()
+		f.requests(3)
+		if f.firstCover(follower) != first {
+			t.Fatal("later POST/recovery/handling rewrote first evidence")
+		}
+		row := t4StatsRow(t, f.env, f.route)
+		if row.Requests != 3 || row.Coalesced != 1 || row.DistinctIDs != 2 {
+			t.Fatalf("overlapping populations=%+v want requests3/coalesced1/distinct2", row)
+		}
+	})
+	t.Run("handled-before-begin-and-replacement", func(t *testing.T) {
+		f := t2Setup(t)
+		leader := f.send("wake")
+		follower := f.send("wake")
+		d := f.claim()
+		if f.covers(leader) != 0 {
+			t.Fatal("election falsely covered leader")
+		}
+		first := f.firstCover(follower)
+		f.env.Now.Advance(time.Second)
+		f.processed(f.caller(f.b), leader)
+		f.processed(f.caller(f.b), leader)
+		f.w.Push(f.ctx, d)
+		f.requests(0)
+		if f.covers(leader) != 1 {
+			t.Fatal("handling must separately cover suppressed leader once")
+		}
+		f.step()
+		f.requests(1)
+		f.processed(f.caller(f.b), follower)
+		if f.firstCover(follower) != first {
+			t.Fatal("replacement or handling rewrote prior follower coverage")
+		}
+		row := t4StatsRow(t, f.env, f.route)
+		if row.Requests != 1 || row.Coalesced != 2 {
+			t.Fatalf("handled/replacement stats=%+v want1/2", row)
+		}
+	})
+}
+
+func TestCoalescedOperatorOnlySnapshot(t *testing.T) {
+	t.Run("operator-only-consistent-snapshot", func(t *testing.T) {
+		e := t2Env(t)
+		a, secret := e.NewPeer("grokbot", "cover-snapshot")
+		b, _ := e.NewPeer("grokbot", "cover-next")
+		r := t2ID("route", 704)
+		id := t2ID("dly", 704)
+		t2Route(t, e, r, "peer", a, "grokbot", "https://before.example")
+		t2Delivery(t, e, id, a, r, "queued", 0, e.Now.Now())
+		t2Exec(t, e, `INSERT INTO grokbot_covers VALUES(?,?,?,?)`, r, id, a, envelope.FormatTime(e.Now.Now()))
+		t2Failure(t, e, t2Caller(t, e, secret), r, 403, "forbidden")
+		op := t2Caller(t, e, e.OperatorSecret)
+		original := e.Hub.DB.DB
+		p := &t2ReadProbe{}
+		p.mutate = func() {
+			_, err := original.Exec(`DELETE FROM grokbot_covers WHERE route_id=?`, r)
+			t2Must(t, err)
+			_, err = original.Exec(`UPDATE routes SET owner_id=? WHERE route_id=?`, b, r)
+			t2Must(t, err)
+			e.Now.Advance(time.Hour)
+		}
+		t2Interpose(t, e, p)
+		got, err := e.Hub.RouteStats(context.Background(), op, r)
+		t2Must(t, err)
+		if len(got.Routes) != 1 || got.Routes[0].Coalesced != 1 || got.Routes[0].OwnerID != a {
+			t.Fatalf("coverage escaped pinned snapshot=%+v", got)
+		}
+		if !p.mutated || p.violations != 0 || p.writeAttempts != 0 {
+			t.Fatalf("snapshot probe=%+v", p)
+		}
+		t2Released(t, e.Hub.DB.DB, p)
+		if row := t4StatsRow(t, e, r); row.Coalesced != 0 || row.OwnerID != b {
+			t.Fatalf("committed mutation invisible=%+v", row)
+		}
+	})
+	t.Run("coverage-read-failure-is-sanitized", func(t *testing.T) {
+		e := t2Env(t)
+		a, _ := e.NewPeer("grokbot", "cover-failure")
+		r := t2ID("route", 705)
+		t2Route(t, e, r, "peer", a, "grokbot", "https://failure.example")
+		p := &t2ReadProbe{failTable: "grokbot_covers"}
+		t2Interpose(t, e, p)
+		got, err := e.Hub.RouteStats(context.Background(), t2Caller(t, e, e.OperatorSecret), r)
+		if err == nil || strings.Contains(err.Error(), "synthetic_sql_canary_private") || !reflect.ValueOf(got).IsZero() || p.faultHits != 1 {
+			t.Fatalf("coverage read not atomic/sanitized: report=%+v err=%v hits=%d", got, err, p.faultHits)
+		}
+		t2Released(t, e.Hub.DB.DB, p)
+	})
 }
