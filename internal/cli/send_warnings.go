@@ -20,20 +20,29 @@ func (a *app) sendWarnings(raw json.RawMessage) {
 	}
 	for _, item := range warnings {
 		var warning struct {
-			Code    string `json:"code"`
-			Message string `json:"message"`
-			GroupID string `json:"group_id"`
+			Code      string `json:"code"`
+			Message   string `json:"message"`
+			GroupID   string `json:"group_id"`
+			Recipient string `json:"recipient"`
 		}
-		if json.Unmarshal(item, &warning) != nil || warning.Code != "rapid_thread_creation" {
+		if json.Unmarshal(item, &warning) != nil {
+			continue
+		}
+		subject := warning.GroupID
+		switch warning.Code {
+		case "rapid_thread_creation":
+		case "recipient_not_seen":
+			subject = warning.Recipient
+		default:
 			continue
 		}
 		message := strings.TrimSpace(unbidi(flatten(warning.Message)))
 		if message == "" {
 			continue
 		}
-		group := strings.TrimSpace(unbidi(flatten(warning.GroupID)))
-		if group != "" {
-			a.warn("%s: %s", group, message)
+		subject = strings.TrimSpace(unbidi(flatten(subject)))
+		if subject != "" {
+			a.warn("%s: %s", subject, message)
 		} else {
 			a.warn("%s", message)
 		}

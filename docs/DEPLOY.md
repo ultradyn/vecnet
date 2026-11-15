@@ -24,6 +24,7 @@ After each tested and reviewed master merge that changes shipped hub or UI behav
 | `--mcp-allowed-origins` | `VECNET_MCP_ALLOWED_ORIGINS` | extra `/mcp` origin `https://chatgpt.com`; `none` for public origin only |
 | `--allow-private-egress` | `VECNET_ALLOW_PRIVATE_EGRESS=1` | off; development only, see [Connectors](#connectors) |
 | `--trust-fly-client-ip` | `VECNET_TRUST_FLY_CLIENT_IP=1` | off; on in `fly.toml`, see [Public exposure](#public-exposure) |
+| `--send-warning-after` | `VECNET_SEND_WARNING_AFTER` | `1h`; live preference `presence.send_warning_after`, 60s..8760h, 0 disables; warns on sends to agents unseen for longer |
 | `--restart-retry-ms` | `VECNET_RESTART_RETRY_MS` | `5000` (0–60000); the reconnect hint sent on shutdown, see [Restarts](#restarts) |
 | `--relocated-to` | `VECNET_RELOCATED_TO` | unset; set only on a hub that has moved, see [Moving a hub](#moving-a-hub) |
 | `--blob-backend` | `VECNET_BLOB_BACKEND` | `disk`; explicit `r2` enables direct uploads |

@@ -106,6 +106,7 @@ func TestOpHubJSONParity(t *testing.T) {
 		{"send", hub.SendResponse{MessageID: "msg_example", ThreadID: "thr_example", JobID: "job_example", Spilled: true, Deliveries: []hub.DeliveryRef{{DeliveryID: "dly_example", Recipient: "peer_example", Via: &via, State: "queued"}}}, opapi.SendResult{}},
 		{"send no job", hub.SendResponse{MessageID: "msg_example", ThreadID: "thr_example", Deliveries: []hub.DeliveryRef{}}, opapi.SendResult{}},
 		{"send warning", hub.SendResponse{MessageID: "msg_example", ThreadID: "thr_example", Deliveries: []hub.DeliveryRef{}, Warnings: []hub.SendWarning{{Code: "rapid_thread_creation", Message: "Send succeeded; reply for related work.", GroupID: "team_example", WindowSeconds: 60, Threshold: 2}}}, opapi.SendResult{}},
+		{"send recipient warning", hub.SendResponse{MessageID: "msg_example", ThreadID: "thr_example", Deliveries: []hub.DeliveryRef{}, Warnings: []hub.SendWarning{{Code: "recipient_not_seen", Message: "Send succeeded; last seen 75 minutes ago.", Recipient: "peer_example", LastSeen: at, AgeSeconds: 4500, ThresholdSeconds: 3600}}}, opapi.SendResult{}},
 	}
 	for _, tc := range values {
 		t.Run(tc.name, func(t *testing.T) {

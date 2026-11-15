@@ -266,7 +266,8 @@ func assertPrefsLastRow(t *testing.T, banner bool) {
 	p.press("k")
 	frame = plainAt(t, m, 80, 24)
 	assertPrefRowVisible(t, frame, rows[len(rows)-2])
-	wide := plainAt(t, m, 120, 40)
+	// Leave room for the complete registry, group headings, help and banner.
+	wide := plainAt(t, m, 120, len(rows)+20)
 	assertPrefRowVisible(t, wide, rows[len(rows)-2])
 	if !strings.Contains(wide, "retention.ack_events") {
 		t.Fatalf("taller frame still scrolled the first row away\n%s", wide)

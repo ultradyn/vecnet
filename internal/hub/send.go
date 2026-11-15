@@ -596,6 +596,13 @@ func (h *Hub) sendTx(ctx context.Context, tx *sql.Tx, act actor, req *envelope.S
 			return nil, false, nil, err
 		}
 	}
+	if act.src == nil {
+		warnings, err := recipientWarnings(ctx, tx, targets, nowT, preferenceDuration(snapshot, "presence.send_warning_after"))
+		if err != nil {
+			return nil, false, nil, err
+		}
+		resp.Warnings = append(resp.Warnings, warnings...)
+	}
 
 	respJSON, err := json.Marshal(resp)
 	if err != nil {

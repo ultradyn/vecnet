@@ -95,7 +95,7 @@ func TestPreferencesHTTPMetadataAndConditionalRead(t *testing.T) {
 	if err := json.Unmarshal(raw, &wire); err != nil {
 		t.Fatal(err)
 	}
-	if n := len(prefs.Definitions()); n != 25 {
+	if n := len(prefs.Definitions()); n != 26 {
 		t.Fatalf("registry has %d keys; update this guard deliberately when keys change", n)
 	}
 	if wire.Revision != 0 || len(wire.Preferences) != len(prefs.Definitions()) {

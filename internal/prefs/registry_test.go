@@ -28,6 +28,7 @@ func TestRegistryDefaultsAndBounds(t *testing.T) {
 		{"presence.grokbot_ttl", "duration", "600", 60, 86400, false, true},
 		{"presence.session_ttl", "duration", "900", 60, 86400, false, true},
 		{"presence.launcher_ttl", "duration", "900", 60, 86400, false, true},
+		{"presence.send_warning_after", "duration", "3600", 60, 31536000, true, true},
 		{"agents.auto_archive_after", "duration", "172800", 3600, 31536000, true, true},
 		{"agents.auto_archive_all_kinds", "bool", "false", 0, 0, false, true},
 		{"threads.auto_archive_share", "int", "51", 1, 100, true, true},
@@ -275,8 +276,8 @@ func TestShippedMessageTextHardCap(t *testing.T) {
 }
 
 func TestGrokTTLRegistryMetadata(t *testing.T) {
-	if prefs.RegistryVersion != "3" {
-		t.Errorf("registry contract version = %s, want 3", prefs.RegistryVersion)
+	if prefs.RegistryVersion != "4" {
+		t.Errorf("registry contract version = %s, want 4", prefs.RegistryVersion)
 	}
 	d, err := prefs.Lookup("presence.grokbot_ttl")
 	if err != nil {

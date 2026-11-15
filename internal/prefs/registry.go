@@ -37,7 +37,7 @@ const (
 	// MaxExpirySeconds is the shipped PROTOCOL §18.3 hard cap, independent of
 	// the configured (possibly lower) maximum used for complete-policy validation.
 	MaxExpirySeconds int64 = 604800
-	RegistryVersion        = "3"
+	RegistryVersion        = "4"
 )
 
 var registry = makeRegistry()
@@ -74,6 +74,7 @@ func makeRegistry() []Definition {
 		gated(Definition{Key: "retention.archive_mode", Type: TypeBool, Default: Bool(false), Label: "Archive mode", Description: "Protect message history and readable dependencies from expiry; acknowledged event retention remains independent. This does not export history or preserve attachment bytes forever.", Help: "Disabling archive mode requires confirmation; existing-data cleanup needs separate approval.", Group: GroupRetentionStorage, SettableBy: "operator", Danger: []string{"archive_disabled"}, Owner: "hub", Consumer: "DB archive retention adapter"}, "DB retention adapter is not installed."),
 		gated(Definition{Key: "blobs.expiry", Type: TypeEnum, Default: Enum("1d"), Label: "Attachment expiry", Description: "Expiry for new attachment grants only. Existing object deadlines remain fixed. Off requires verified keep storage, quota and cost confirmation.", Help: "Object expiry is independent of short download capability deadlines.", Group: GroupFiles, SettableBy: "operator", Danger: []string{"blob_expiry_off"}, AllowedValues: []string{"1h", "6h", "12h", "1d", "7d", "30d", "off"}, Owner: "hub", Consumer: "R2 new attachment grants"}, "R2 expiry adapter is not installed."),
 		numeric("events.refresh_interval", TypeDuration, 1800, 60, 86400, GroupNotificationsPresence, "Events refresh interval", "Refresh cadence for MCP Events subscriptions.", "Events refresh worker timers"),
+		zero(numeric("presence.send_warning_after", TypeDuration, 3600, 60, 31536000, GroupNotificationsPresence, "Warn when recipient unseen for", "Warn on successful sends when an agent was last seen longer ago than this interval; open streams count as active. Zero disables the warning.", "Send receipt last-seen advisories")),
 		danger(numeric("presence.default_ttl", TypeDuration, 3600, 60, 86400, GroupNotificationsPresence, "Default presence TTL", "Presence becomes unknown after this interval. Shortening may release held wakes.", "Default presence and held-wake evaluation"), "presence_shortened"),
 		danger(numeric("presence.grokbot_ttl", TypeDuration, 600, 60, 86400, GroupNotificationsPresence, "Grok presence TTL", "Grok presence becomes unknown after this interval. When unset, inherits an explicit presence.default_ttl; otherwise uses the 600-second factory TTL. An explicit Grok value takes precedence. Shortening may release held wakes.", "Grok presence and held-wake evaluation"), "presence_shortened"),
 		danger(numeric("presence.session_ttl", TypeDuration, 900, 60, 86400, GroupNotificationsPresence, "Session presence TTL", "Session presence becomes unknown after this interval. Shortening may release held wakes.", "Session presence and held-wake evaluation"), "presence_shortened"),

@@ -874,7 +874,7 @@ func TestPreferenceFlagDiagnosticsExcludeEnvironment(t *testing.T) {
 	}
 }
 func TestPreferenceBootstrapRejectsInvalidBeforeOpeningStore(t *testing.T) {
-	for _, arg := range []string{"--thread-budget=synthetic-secret", "--presence-ttl=59s", "--default-ttl=1.5s", "--default-max-depth=65", "--creates-per-hour=0", "--session-presence-ttl=-1m", "--launcher-presence-ttl=25h"} {
+	for _, arg := range []string{"--thread-budget=synthetic-secret", "--presence-ttl=59s", "--send-warning-after=59s", "--send-warning-after=-1s", "--send-warning-after=1.5s", "--default-ttl=1.5s", "--default-max-depth=65", "--creates-per-hour=0", "--session-presence-ttl=-1m", "--launcher-presence-ttl=25h"} {
 		dir := filepath.Join(t.TempDir(), "unopened")
 		err := run(context.Background(), []string{"--listen", "127.0.0.1:0", "--data-dir", dir, arg}, io.Discard, noEnv)
 		if err == nil || strings.Contains(err.Error(), "synthetic-secret") {
@@ -893,6 +893,8 @@ func TestPreferenceBootstrapAllEnabledFlags(t *testing.T) {
 	}{
 		{"events-refresh-interval", "events.refresh_interval", "7m", 420},
 		{"presence-ttl", "presence.default_ttl", "2h", 7200},
+		{"send-warning-after", "presence.send_warning_after", "30m", 1800},
+		{"send-warning-after", "presence.send_warning_after", "0s", 0},
 		{"session-presence-ttl", "presence.session_ttl", "30m", 1800},
 		{"launcher-presence-ttl", "presence.launcher_ttl", "45m", 2700},
 		{"default-max-depth", "agents.default_max_depth", "40", 40},
