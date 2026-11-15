@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"net/http"
 	"slices"
@@ -310,6 +311,9 @@ func (h *Hub) ConsumeDotLinkTx(ctx context.Context, tx *sql.Tx, code string) (st
 	if n, _ := res.RowsAffected(); n != 1 {
 		return "", ErrDotLink
 	}
+	if _, err := tx.ExecContext(ctx, `UPDATE peers SET last_seen=? WHERE peer_id=?`, h.nowStr(), peerID); err != nil {
+		return "", fmt.Errorf("hub: observe link redemption: %w", err)
+	}
 	if err := audit.Record(ctx, tx, "hub", "dot_link_consume", []string{peerID}, nil); err != nil {
 		return "", err
 	}
@@ -603,6 +607,30 @@ func RequirePeerLifecycle(c auth.Caller) error {
 func (h *Hub) SetPeerArchived(ctx context.Context, peerID string, archived bool) error {
 	var changed bool
 	err := h.DB.Tx(ctx, func(tx *sql.Tx) error {
+		var err error
+		changed, err = h.setPeerArchivedTx(ctx, tx, peerID, archived, "operator", nil, h.Now())
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	if changed {
+		h.notifyEnabled(ctx)
+		h.Log.Notify(peerID)
+	}
+	if changed && archived {
+		if _, err := h.archiveAbandonedThreads(ctx, h.Now(), peerID); err != nil {
+			slog.Error("hub: archive peer threads", "err", err)
+		}
+	}
+	return nil
+}
+
+// setPeerArchivedTx is shared by manual archival and the idle sweep. The caller
+// owns the transaction and notifies directory and peer readers after commit.
+func (h *Hub) setPeerArchivedTx(ctx context.Context, tx *sql.Tx, peerID string, archived bool, actor string, detail map[string]any, atTime time.Time) (bool, error) {
+	var changed bool
+	err := func() error {
 		var kind string
 		var at sql.NullString
 		if err := tx.QueryRowContext(ctx, `SELECT kind, archived_at FROM peers WHERE peer_id=?`, peerID).Scan(&kind, &at); errors.Is(err, sql.ErrNoRows) {
@@ -616,7 +644,7 @@ func (h *Hub) SetPeerArchived(ctx context.Context, peerID string, archived bool)
 		if at.Valid == archived {
 			return nil
 		}
-		now := h.nowStr()
+		now := envelope.FormatTime(atTime)
 		if archived {
 			if _, err := tx.ExecContext(ctx, `UPDATE peers SET archived_at=?, disabled=1 WHERE peer_id=?`, now, peerID); err != nil {
 				return fmt.Errorf("hub: archive peer: %w", err)
@@ -637,7 +665,7 @@ func (h *Hub) SetPeerArchived(ctx context.Context, peerID string, archived bool)
 				return err
 			}
 		} else {
-			if _, err := tx.ExecContext(ctx, `UPDATE peers SET archived_at=NULL, disabled=1, enrolled_at='' WHERE peer_id=?`, peerID); err != nil {
+			if _, err := tx.ExecContext(ctx, `UPDATE peers SET archived_at=NULL, disabled=1, enrolled_at='',unarchived_at=? WHERE peer_id=?`, now, peerID); err != nil {
 				return fmt.Errorf("hub: unarchive peer: %w", err)
 			}
 		}
@@ -645,20 +673,13 @@ func (h *Hub) SetPeerArchived(ctx context.Context, peerID string, archived bool)
 		if archived {
 			action = "peer_archive"
 		}
-		if err := audit.Record(ctx, tx, "operator", action, []string{peerID}, nil); err != nil {
+		if err := audit.Record(ctx, tx, actor, action, []string{peerID}, detail); err != nil {
 			return err
 		}
 		changed = true
 		return nil
-	})
-	if err != nil {
-		return err
-	}
-	if changed {
-		h.notifyEnabled(ctx)
-		h.Log.Notify(peerID)
-	}
-	return nil
+	}()
+	return changed, err
 }
 
 // RenamePeer sets peerID's display name. The peer id, threads, routes,

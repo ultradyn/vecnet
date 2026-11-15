@@ -101,3 +101,12 @@ export function bucketLabel(snapshot, index) {
   const start = new Date(at).toISOString(), end = new Date(at + MINUTE).toISOString();
   return { start, end, label: `[${start}, ${end}) UTC — messages in this minute` };
 }
+
+// Human local-time readout; the exact half-open UTC interval remains available.
+export function bucketReadout(snapshot, index) {
+ const interval = bucketLabel(snapshot, index);
+ if (!interval) return null;
+ const time = iso => new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+ const minutes = Math.max(0, Math.floor((Date.parse(snapshot.now) - Date.parse(interval.end)) / MINUTE));
+ return { ...interval, text: `${time(interval.start)}–${time(interval.end)} (${minutes ? minutes + ' min ago' : 'just now'})` };
+}

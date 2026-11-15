@@ -49,7 +49,11 @@ import (
 // Raised to 704 KiB for the native/ACP launcher forms and scoped request
 // recovery on 2026-11-15, measured at 708,152 bytes with all newer UI work.
 // The all-files size assertion remains; this is the next 16 KiB boundary.
-const uiMaxBytes = 704 << 10
+// Raised to 720 KiB on 2026-11-15 for bounded dashboard and archive browsers,
+// measured at 729,688 bytes; next 16 KiB boundary with all-files coverage.
+// Raised to 736 KiB on 2026-11-15 merging SVG attachment thumbnails into
+// the dashboard work, measured at 737,319 bytes (39 over 720 KiB).
+const uiMaxBytes = 736 << 10
 
 var (
 	scriptTag   = regexp.MustCompile(`(?is)<script\b([^>]*)>(.*?)</script>`)

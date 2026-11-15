@@ -336,6 +336,11 @@ func (h *Hub) recordPush(ctx context.Context, d DueDelivery, outcome pushOutcome
 		}
 		switch outcome {
 		case pushAccepted:
+			// Keep accepted push activity ordered with idle-sweep eligibility;
+			// the reachability display is still updated only after commit.
+			if _, err := tx.ExecContext(ctx, `UPDATE peers SET last_seen=? WHERE peer_id=?`, nowS, d.Recipient); err != nil {
+				return fmt.Errorf("hub: observe accepted push: %w", err)
+			}
 			if err := set("accepted", left, nil); err != nil {
 				return err
 			}

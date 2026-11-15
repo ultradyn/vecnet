@@ -428,3 +428,14 @@ test('blobStatus reads metadata only: no link and no mint', async () => {
   assert.equal(st.state, 'available');
   assert.deepEqual(calls, ['/v1/blobs/' + 'a'.repeat(64) + '/status?blob_id=blo_00000000000000000000000001']);
 });
+
+
+test('operator archive queries preserve false and escape ids without request bodies', async () => {
+ const { api, calls } = harness(() => new Response(null, { status: 204 }));
+ await api.threads({ archived: false, q: 'a & b', participant: 'peer_x', limit: 10 });
+ const url = new URL(calls[0].url, 'https://hub');
+ assert.equal(url.searchParams.get('archived'), 'false'); assert.equal(url.searchParams.get('q'), 'a & b');
+ await api.archiveThread('thr/a'); await api.unarchiveThread('thr/a'); await api.threadStats();
+ assert.equal(calls[1].url, '/v1/admin/threads/thr%2Fa/archive'); assert.equal(calls[1].init.method, 'POST'); assert.equal(calls[1].init.body, undefined);
+ assert.equal(calls[2].url, '/v1/admin/threads/thr%2Fa/unarchive'); assert.equal(calls[3].url, '/v1/admin/thread-stats');
+});

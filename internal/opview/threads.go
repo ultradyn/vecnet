@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/XertroV/vecnet/internal/auth"
 	"github.com/XertroV/vecnet/internal/envelope"
@@ -42,6 +43,9 @@ func (r *Reader) Threads(ctx context.Context, q opapi.ThreadQuery) (opapi.Thread
 	if q.ExcludeParticipant != "" && !ids.Is(ids.Peer, q.ExcludeParticipant) {
 		return out, threadInvalid("exclude_participant", "exclude_participant must be a peer_ id")
 	}
+	if utf8.RuneCountInString(q.Q) > 128 {
+		return out, threadInvalid("q", "q must be at most 128 runes")
+	}
 	var at, id string
 	if q.Cursor != "" {
 		raw, err := base64.RawURLEncoding.DecodeString(q.Cursor)
@@ -61,7 +65,9 @@ func (r *Reader) Threads(ctx context.Context, q opapi.ThreadQuery) (opapi.Thread
    WHERE (?1='' OR EXISTS(SELECT 1 FROM thread_participants p WHERE p.thr_id=t.thr_id AND p.peer_id=?1))
    AND (?5='' OR NOT EXISTS(SELECT 1 FROM thread_participants x WHERE x.thr_id=t.thr_id AND x.peer_id=?5))
    AND (?2='' OR t.last_message_at<?2 OR (t.last_message_at=?2 AND t.thr_id<?3))
-   ORDER BY t.last_message_at DESC,t.thr_id DESC LIMIT ?4`, q.Participant, at, id, limit+1, q.ExcludeParticipant)
+   AND (?6 IS NULL OR (t.archived_at IS NOT NULL)=?6)
+   AND (?7='' OR instr(lower(t.title),lower(?7))>0)
+   ORDER BY t.last_message_at DESC,t.thr_id DESC LIMIT ?4`, q.Participant, at, id, limit+1, q.ExcludeParticipant, q.Archived, q.Q)
 		if err != nil {
 			return err
 		}
@@ -108,9 +114,9 @@ func readThreadRow(ctx context.Context, tx *sql.Tx, id string, now time.Time) (o
 	out.Thread.ThreadID = id
 	out.Thread.Participants = []string{}
 	err := tx.QueryRowContext(ctx, `SELECT title,group_id,created_by,created_at,last_message_at,
-  message_count,budget_remaining,history_access,locked_participants FROM threads WHERE thr_id=?`, id).
+  message_count,budget_remaining,history_access,locked_participants,archived_at,archived_by FROM threads WHERE thr_id=?`, id).
 		Scan(&out.Thread.Title, &out.Thread.Group, &out.CreatedBy, &out.CreatedAt, &out.LastMessageAt,
-			&out.Thread.MessageCount, &out.Thread.BudgetRemaining, &out.Thread.HistoryAccess, &out.Thread.LockedParticipants)
+			&out.Thread.MessageCount, &out.Thread.BudgetRemaining, &out.Thread.HistoryAccess, &out.Thread.LockedParticipants, &out.ArchivedAt, &out.ArchivedBy)
 	if errors.Is(err, sql.ErrNoRows) {
 		e := hub.E(404, "unknown_thread", "no such thread")
 		e.Details["thread_id"] = id

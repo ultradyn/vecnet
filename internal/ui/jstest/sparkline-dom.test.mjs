@@ -16,7 +16,7 @@ test('sparkline provides a named keyboard plot without raw-value disclosures or 
     for (const tag of ['details', 'summary', 'table']) assert.equal(c.el.querySelectorAll(tag).length, 0, `no ${tag} in a chart`);
     assert.match(svg.attrs['aria-label'], /4 messages.*hour/);
     assert.match(svg.attrs['aria-label'], /arrows.*Home.*End/);
-    assert.equal(c.el.querySelector('.spark-axis').textContent, '1 hour agoNow');
+    assert.equal(c.el.querySelector('.spark-axis').textContent, '−60 m−30 m · peak 3now');
     c.update(s, s, { label: '<img src=x>', max: 5 });
     assert.equal(c.el.querySelector('svg'), svg, 'unchanged snapshots retain the keyboard plot');
   } finally { restore(); }
@@ -29,11 +29,11 @@ test('keyboard and pointer select exact minute, clamp, dismiss and retain select
     const c = module.createSparkline(), s = snapshot(); c.update(s, s, { label: 'Hub' });
     const svg = c.el.querySelector('svg'), read = c.el.querySelector('.spark-readout');
     const key = key => svg.on.keydown({ key, preventDefault() {} });
-    key('Home'); assert.match(read.textContent, /1 messages.*11:00:30/);
-    key('ArrowRight'); assert.match(read.textContent, /3 messages.*11:01:30/);
-    key('End'); key('ArrowRight'); assert.match(read.textContent, /0 messages.*11:59:30/);
+    key('Home'); assert.match(read.textContent, /1 messages.*59 min ago/);
+    key('ArrowRight'); assert.match(read.textContent, /3 messages.*58 min ago/);
+    key('End'); key('ArrowRight'); assert.match(read.textContent, /0 messages.*just now/);
     key('Escape'); assert.equal(read.hidden, true);
-    svg.on.pointermove({ clientX: 4 }); assert.match(read.textContent, /1 messages.*11:00:30/);
+    svg.on.pointermove({ clientX: 4 }); assert.match(read.textContent, /1 messages.*59 min ago/);
     assert.equal(read.hidden, false);
     svg.on.pointerleave(); assert.equal(read.hidden, true);
     key('Home'); const next = snapshot({ peer_a: [9] }); c.update(next, next, { label: 'Hub' });

@@ -208,10 +208,10 @@ export function demoCloser(child, dir, { signal = signalGroup, killAfterMs = 700
 }
 // args are extra demo flags (e.g. --pref-flag for a flag-sourced preference).
 // binary uses a caller-built demo without invoking the shared build helper.
-export async function bootDemo({ scale = false, args = [], binary, recovery } = {}) {
+export async function bootDemo({ scale = false, many = false, args = [], binary, recovery } = {}) {
   const binDir = binary ? dirname(resolve(binary)) : await binaries();
   const dir = await mkdtemp(join(tmpdir(), 'vecnet-ui-data-'));
-  const child = spawn(binary ? resolve(binary) : join(binDir, 'demo'), ['--listen', '127.0.0.1:0', '--data-dir', dir, '--exit-on-stdin-eof', ...(scale ? ['--scale'] : []), ...args], { cwd: root, detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
+  const child = spawn(binary ? resolve(binary) : join(binDir, 'demo'), ['--listen', '127.0.0.1:0', '--data-dir', dir, '--exit-on-stdin-eof', ...(scale ? ['--scale'] : []), ...(many ? ['--many'] : []), ...args], { cwd: root, detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
   const { close, closed } = demoCloser(child, dir, { recovery });
   child.stdin.on('error', () => {}); // The demo may close stdin before its holder.
   // Consume logs, but never echo peer text or credentials into a terminal.
@@ -318,8 +318,8 @@ async function throttle(context, page) {
   console.log(`browser CPU throttled ${rate}x (UI_CPU_THROTTLE)`);
 }
 
-export async function withDemo({ scale = false, signedIn = true, demoArgs = [], demoBinary, recovery } = {}, fn) {
-  const env = await bootDemo({ scale, args: demoArgs, binary: demoBinary, recovery });
+export async function withDemo({ scale = false, many = false, signedIn = true, demoArgs = [], demoBinary, recovery } = {}, fn) {
+  const env = await bootDemo({ scale, many, args: demoArgs, binary: demoBinary, recovery });
   let browser;
   const errors = [], allowed = [], held = [];
   try {

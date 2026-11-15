@@ -37,7 +37,7 @@ const (
 	// MaxExpirySeconds is the shipped PROTOCOL §18.3 hard cap, independent of
 	// the configured (possibly lower) maximum used for complete-policy validation.
 	MaxExpirySeconds int64 = 604800
-	RegistryVersion        = "2"
+	RegistryVersion        = "3"
 )
 
 var registry = makeRegistry()
@@ -78,6 +78,9 @@ func makeRegistry() []Definition {
 		danger(numeric("presence.grokbot_ttl", TypeDuration, 600, 60, 86400, GroupNotificationsPresence, "Grok presence TTL", "Grok presence becomes unknown after this interval. When unset, inherits an explicit presence.default_ttl; otherwise uses the 600-second factory TTL. An explicit Grok value takes precedence. Shortening may release held wakes.", "Grok presence and held-wake evaluation"), "presence_shortened"),
 		danger(numeric("presence.session_ttl", TypeDuration, 900, 60, 86400, GroupNotificationsPresence, "Session presence TTL", "Session presence becomes unknown after this interval. Shortening may release held wakes.", "Session presence and held-wake evaluation"), "presence_shortened"),
 		danger(numeric("presence.launcher_ttl", TypeDuration, 900, 60, 86400, GroupNotificationsPresence, "Launcher presence TTL", "Launcher presence becomes unknown after this interval. Shortening may release held wakes.", "Launcher presence and held-wake evaluation"), "presence_shortened"),
+		zero(numeric("agents.auto_archive_after", TypeDuration, 172800, 3600, 31536000, GroupAgentsDefaults, "Auto-archive idle agents after", "Archive idle agents and revoke their credentials; zero disables automatic archival.", "Hourly idle peer sweep")),
+		{Key: "agents.auto_archive_all_kinds", Type: TypeBool, Default: Bool(false), Label: "Auto-archive every agent kind", Help: "Include every peer kind except operator and source; otherwise only session peers are archived.", Description: "Include every peer kind except operator and source; otherwise only session peers are archived.", Group: GroupAgentsDefaults, SettableBy: "operator", Editable: true, Runtime: "live", Danger: []string{}, Owner: "hub", Consumer: "Hourly idle peer sweep"},
+		zero(numeric("threads.auto_archive_share", TypeInt, 51, 1, 100, GroupAgentsDefaults, "Auto-archive threads when this % of agents are archived", "Archive threads at this archived-agent percentage; operators are excluded and zero disables the sweep.", "Abandoned thread sweep")),
 		numeric("agents.default_max_depth", TypeInt, 32, 1, 64, GroupAgentsDefaults, "Default maximum depth", "Default maximum loop depth for new messages only; existing loops are unchanged.", "New message loop defaults"),
 		numeric("agents.default_ttl", TypeDuration, 86400, 60, 604800, GroupAgentsDefaults, "Default message TTL", "Default lifetime for new messages only; cannot exceed configured MaxExpiry. Existing deadlines are unchanged.", "New message loop defaults"),
 		numeric("agents.thread_budget", TypeInt, 500, 1, 10000, GroupAgentsDefaults, "Default thread budget", "Message budget for new threads only. Existing thread budgets are unchanged.", "New thread budget"),
@@ -91,6 +94,11 @@ func makeRegistry() []Definition {
 		later(numeric("agents.max_expiry", TypeDuration, 604800, 86400, 604800, GroupAgentsDefaults, "Maximum message expiry", "Explicit loop lifetime cap; constrained by the seven-day protocol hard limit.", "Explicit message expiry policy"), "Explicit loop expiry is a protocol policy cap; runtime editing is deferred."),
 		later(numeric("agents.text_cap", TypeInt, 4096, 1024, 4096, GroupAgentsDefaults, "Message text cap", "Text bytes before automatic spill to durable attachment storage; bounded by the Message schema hard cap of 4096 bytes.", "Message spill and connector representation"), "Spill and connector representation review is required before editing."),
 		later(numeric("files.read_token_ttl", TypeDuration, 604800, 60, 604800, GroupFiles, "File read token TTL", "Legacy file read capability lifetime; independent of object expiry and S3 download grants.", "Legacy blob read capabilities"), "Legacy token consumers have not migrated to preferences."),
+	}
+	for i := range defs {
+		if defs[i].Key == "threads.auto_archive_share" {
+			defs[i].Unit = "%"
+		}
 	}
 	sort.Slice(defs, func(i, j int) bool { return defs[i].Key < defs[j].Key })
 	return defs

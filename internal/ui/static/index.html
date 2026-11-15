@@ -51,6 +51,8 @@
       <a id="nav-inbox" href="#inbox"><span class="tt">Inbox</span><span id="inbox-count" class="cnt"></span></a>
       <a id="nav-new" href="#new"><span class="tt">New message</span></a>
       <a id="nav-dash" href="#dash"><span class="tt">Dashboard</span></a>
+      <a id="nav-threads" href="#threads"><span class="tt">Threads</span></a>
+      <a id="nav-peers" href="#peers"><span class="tt">Peers</span></a>
       <a id="nav-settings" href="#settings"><span class="tt">Settings</span><span id="settings-count" class="cnt"></span></a>
       <button id="nav-add" type="button" class="nav-add" disabled><span class="plus" aria-hidden="true"></span><span class="tt">Add agent</span></button>
     </div>
@@ -59,9 +61,9 @@
     <div id="search" class="srch" role="search"></div>
     <button id="side-tog" type="button" class="side-tog" aria-expanded="false" aria-controls="lists">Threads</button>
     <div id="lists">
-      <div class="grp">Your Threads</div>
+      <button id="your-toggle" class="grp disclosure" type="button" aria-expanded="true" aria-controls="threads"><span class="chevron" aria-hidden="true">⌄</span>Your Threads <span id="your-count"></span></button>
       <div id="threads" class="nav rows"></div>
-      <div class="grp">Other Threads</div>
+      <button id="other-toggle" class="grp disclosure" type="button" aria-expanded="true" aria-controls="others"><span class="chevron" aria-hidden="true">⌄</span>Other Threads <span id="other-count"></span></button>
       <div id="others" class="nav rows"></div>
     </div>
     <div id="results" class="sr" role="region" aria-label="Search results" hidden></div>

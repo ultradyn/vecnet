@@ -114,7 +114,7 @@ try {
     await page.locator('#conn.live').waitFor();
     // Nav: Settings sits between Dashboard and Add agent.
     const navIds = await page.locator('nav.side > .nav').first().locator(':scope > a, :scope > button').evaluateAll(els => els.map(e => e.id));
-    assert(navIds.join() === 'nav-inbox,nav-new,nav-dash,nav-settings,nav-add', `sidebar nav ${navIds}`);
+    assert(navIds.join() === 'nav-inbox,nav-new,nav-dash,nav-threads,nav-peers,nav-settings,nav-add', `sidebar nav ${navIds}`);
     // Appearance is set before first paint; dark here.
     assert(await page.evaluate(() => document.documentElement.dataset.theme) === 'dark', 'theme not set on <html>');
 
@@ -131,9 +131,10 @@ try {
     await view('list');
     await quiet();
 
-    // ---------- initial: List default, five sections, wire sources ----------
+    // ---------- initial: List default, six sections, wire sources ----------
     const headings = await page.locator('.st-sec h2').allTextContents();
-    assert(headings.join('|') === 'Retention & storage|Files|Notifications & presence|Agents defaults|Appearanceonly this browser', `sections ${headings}`);
+    assert(headings.join('|') === 'Retention & storage|Files|Notifications & presence|Agents defaults|Automatic archiving|Appearanceonly this browser', `sections ${headings}`);
+    assert((await page.locator('#sec-automatic_archiving').textContent()).includes('existing agents and threads hourly'), 'archive rules have new-only copy');
     const hub0 = await hubPrefs();
     await rowsMatchHub(hub0);
     await both('initial', { list: top, policy: top });

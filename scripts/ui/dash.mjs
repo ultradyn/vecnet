@@ -29,9 +29,10 @@ try {
     const writesBefore = writes();
     await page.evaluate(() => { location.hash = '#dash'; });
     await page.getByRole('heading', { name: 'Dashboard', exact: true }).waitFor();
-    for (const name of ['Peers', 'Threads', 'Delivery health', 'Dead letters', 'Loop control', 'Subscriptions', 'Audit tail']) {
+    for (const name of ['Peers', 'Recent threads', 'Delivery health', 'Dead letters', 'Loop control', 'Subscriptions']) {
       await dash.locator(':scope > section > h2', { hasText: name }).waitFor();
     }
+    await page.locator('.dash-audit-fold > summary').click();
     // Keep subscriptions pending to exercise a slow response alongside the six held sections.
     await sec('subs').locator('.loading').waitFor();
     await releases.subs();
@@ -80,7 +81,7 @@ try {
     assert(await sec('loop').locator('tbody tr').count() === 3, 'loop cut reasons');
 
     // thread rows link to #thread/<id>
-    const hub = await (await asPeer('operator', 'GET', '/v1/admin/threads?limit=200')).json();
+    const hub = await (await asPeer('operator', 'GET', '/v1/admin/threads?archived=false&limit=10')).json();
     const ids = hub.threads.map(r => r.thread.thread_id).sort();
     const hrefs = (await sec('threads').locator('tbody tr a.tl').evaluateAll(as => as.map(a => a.getAttribute('href')))).sort();
     assert(hrefs.length === ids.length, `thread rows ${hrefs.length}, hub threads ${ids.length}`);
@@ -211,7 +212,7 @@ try {
       await peerRow('codex-hark').locator('td', { hasText: new RegExp(`^${quota}%$`) }).waitFor();
     };
     const auditShots = async name => {
-      await scrollIntoViewStable(page, '.dash-audit h2');
+      await scrollIntoViewStable(page, '.dash-audit-fold > summary');
       await page.locator('#main').evaluate(el => {
         el.scrollTop += document.querySelector('.dash-audit').getBoundingClientRect().top - el.getBoundingClientRect().top - 16;
       });
@@ -272,6 +273,35 @@ try {
     const href = await first.getAttribute('href');
     await first.click();
     await page.waitForFunction(h => location.hash === h && document.body.dataset.route === 'thread', href);
+  });
+  await withDemo({ many: true }, async ({ page, demo, shot, countRequests }) => {
+    await page.goto(demo.url + '/ui/#dash');
+    await page.locator('.dash-activity[data-state=ready]').waitFor();
+    await page.locator('#d-peers tbody tr').first().waitFor();
+    await page.locator('#d-threads tbody tr').first().waitFor();
+    assert(await page.locator('#d-peers tbody tr').count() <= 10, 'dashboard peer bound');
+    assert(await page.locator('#d-threads tbody tr').count() <= 10, 'dashboard thread bound');
+    assert(countRequests(req => { const u = new URL(req.url()); return u.pathname === '/v1/admin/threads' && u.searchParams.has('cursor'); }) === 0, 'dashboard walked cursor pages');
+    const boxes = () => page.evaluate(() => ['.dash-activity', '#d-peers tbody tr:nth-child(1)', '#d-peers tbody tr:nth-child(2)'].map(s => { const r = document.querySelector(s).getBoundingClientRect(); return { top: r.top, height: r.height }; }));
+    await page.evaluate(() => document.fonts.ready);
+    const plot = page.locator('.activity-chart svg');
+    const before = await boxes(), r = await plot.boundingBox();
+    await page.mouse.move(r.x + r.width / 2, r.y + r.height / 2);
+    assert(JSON.stringify(await boxes()) === JSON.stringify(before), 'overview hover shifted layout');
+    await shot('dashboard-hover');
+    await page.mouse.move(0, 0); await shot('dashboard-dark');
+    const peer = page.locator('#d-peers .peer-activity svg').first();
+    await peer.evaluate(el => el.scrollIntoView({ block: 'center', inline: 'end' }));
+    const peerBefore = await boxes(), pr = await peer.boundingBox();
+    await page.mouse.move(pr.x + pr.width / 2, pr.y + pr.height / 2);
+    assert(JSON.stringify(await boxes()) === JSON.stringify(peerBefore), 'peer hover shifted layout');
+    await shot('dashboard-peer-hover');
+    await page.mouse.move(0, 0);
+    await page.locator('#main').evaluate(el => { el.scrollTop = 0; });
+    await page.evaluate(() => { document.documentElement.dataset.theme = 'light'; }); await shot('dashboard-light');
+    await page.setViewportSize({ width: 390, height: 844 });
+    assert(await page.evaluate(() => document.documentElement.scrollWidth === innerWidth), 'phone overflow');
+    await shot('dashboard-phone');
   });
   console.log('Dashboard passed: independent sections, read-only session, peers-tag reload, thread links, isolated failure, no CSP violations');
 } finally { await cleanBuild(); }

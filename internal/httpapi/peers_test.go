@@ -179,12 +179,12 @@ func TestDirectoryVisibleToAll(t *testing.T) {
 	if p := str(t, dir[b]["presence"]); p != "unknown" {
 		t.Fatalf("b presence before any report = %q, want unknown", p)
 	}
-	// B has not called the API yet: no observation.
+	// B has only redeemed its invite: record activity without claiming reachability.
 	if r := str(t, dir[b]["reachability"]); r != "unknown" {
 		t.Fatalf("b reachability before any call = %q, want unknown", r)
 	}
-	if string(dir[b]["last_seen"]) != "null" {
-		t.Fatalf("b last_seen before any call = %s, want null", dir[b]["last_seen"])
+	if s := str(t, dir[b]["last_seen"]); s != now {
+		t.Fatalf("b last_seen after invite redemption = %q, want %q", s, now)
 	}
 
 	env.Now.Advance(time.Second)

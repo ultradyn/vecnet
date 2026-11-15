@@ -4,7 +4,7 @@ import { ago, fullWhen, plural, standInTitle } from './format.js';
 
 // One page of other threads, and the hub's page cap (PROTOCOL §2.13). Past
 // the cap the dashboard lists every thread.
-export const OTHER_PAGE = 50;
+export const OTHER_PAGE = 15;
 export const OTHER_MAX = 200;
 const NAMED = 3;
 
@@ -82,7 +82,7 @@ export function threadRow(r, me, nameOf, now, unread = 0) {
 export function yourThreads({ page, summaries, error, me, nameOf, now, unread }) {
   const src = page ? page.threads || [] : summaries ? summaries.map(thread => ({ thread, last_message_at: '' })) : null;
   if (!src) return error ? { state: 'error', note: 'Threads unavailable', rows: [] } : { state: 'loading', note: '…', rows: [] };
-  const rows = src.filter(r => r && r.thread).map(r => threadRow(r, me, nameOf, now, unreadOf(unread, r.thread.thread_id)));
+  const rows = src.filter(r => r && r.thread && !r.archived_at).map(r => threadRow(r, me, nameOf, now, unreadOf(unread, r.thread.thread_id)));
   return rows.length ? { state: 'ok', note: '', rows } : { state: 'empty', note: 'No threads yet', rows };
 }
 
@@ -91,18 +91,26 @@ export function yourThreads({ page, summaries, error, me, nameOf, now, unread })
 // anything Your Threads lists or `me` is in, in case the two snapshots were
 // read at different moments. state is loading, error, empty or ok; note is
 // the placeholder text; more is '' (all shown), 'show' (another page) or
-// 'dash' (past the cap).
+// 'threads' (past the cap).
 export function otherThreads({ page, error, mine, me, nameOf, now, limit = OTHER_PAGE }) {
   if (!page) {
     return error ? { state: 'error', note: 'Other threads unavailable', rows: [], more: '' } : { state: 'loading', note: '…', rows: [], more: '' };
   }
   const listed = new Set((mine || []).map(t => t.thread_id));
   const kept = (page.threads || [])
-    .filter(r => r && r.thread && !listed.has(r.thread.thread_id) && !(r.thread.participants || []).includes(me))
+    .filter(r => r && r.thread && !r.archived_at && !listed.has(r.thread.thread_id) && !(r.thread.participants || []).includes(me))
     .sort(byActivity);
   const rows = kept.slice(0, limit).map(r => threadRow(r, me, nameOf, now));
   const cut = kept.length > limit || !!page.next;
-  const more = !cut ? '' : limit >= OTHER_MAX ? 'dash' : 'show';
+  const more = !cut ? '' : limit >= OTHER_MAX ? 'threads' : 'show';
   if (!rows.length) return { state: 'empty', note: 'No other threads', rows, more };
   return { state: 'ok', note: '', rows, more };
+}
+
+
+export function disclosureOpen(storage, section) {
+ try { return storage?.getItem('vecnet.ui.sidebar.' + section) !== 'closed'; } catch { return true; }
+}
+export function saveDisclosure(storage, section, open) {
+ try { storage?.setItem('vecnet.ui.sidebar.' + section, open ? 'open' : 'closed'); } catch {}
 }
