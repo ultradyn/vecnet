@@ -56,6 +56,7 @@ func (s *server) adminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/admin/routes", s.adminListRoutes)
 	mux.Handle("/v1/admin/route-stats", s.routeStatsHandler())
 	mux.HandleFunc("DELETE /v1/admin/routes/{id}", s.adminRemoveRoute)
+	mux.HandleFunc("PATCH /v1/admin/routes/{id}", s.adminUpdateRoute)
 	mux.HandleFunc("POST /v1/admin/routes/{id}/rotate", s.adminRotateRoute)
 	mux.HandleFunc("POST /v1/admin/routes/{id}/verify", s.adminVerifyRoute)
 	mux.HandleFunc("POST /v1/admin/teams", s.adminAddTeam)
@@ -458,6 +459,42 @@ func (s *server) adminRemoveRoute(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// adminUpdateRoute is PATCH /v1/admin/routes/{id} {"url"?, "key"?}: 204. It
+// changes the route in place (Hub.UpdateRoute): an http route's new URL is
+// unverified until POST …/verify succeeds; a grokbot route takes a new
+// routine URL, a new crsr_ key, or both, and stays live. Neither value is
+// ever echoed.
+func (s *server) adminUpdateRoute(w http.ResponseWriter, r *http.Request) {
+	top, err := readObject(r, []string{"url", "key"}, nil)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	var u hub.RouteUpdate
+	if _, has := top["url"]; has {
+		v, err := stringField(top, "url")
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		u.URL = &v
+	}
+	if _, has := top["key"]; has {
+		v, err := stringField(top, "key")
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		u.Key = &v
+	}
+	if err := s.Hub.UpdateRoute(r.Context(), r.PathValue("id"), u); err != nil {
+		writeError(w, err)
+		return
+	}
+	s.kick() // a grokbot route is live at once: queued deliveries may be due
 	w.WriteHeader(http.StatusNoContent)
 }
 

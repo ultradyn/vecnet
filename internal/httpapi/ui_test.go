@@ -53,7 +53,11 @@ import (
 // measured at 729,688 bytes; next 16 KiB boundary with all-files coverage.
 // Raised to 736 KiB on 2026-11-15 merging SVG attachment thumbnails into
 // the dashboard work, measured at 737,319 bytes (39 over 720 KiB).
-const uiMaxBytes = 736 << 10
+// Raised to 752 KiB on 2026-11-15 for the peer page's push route controls
+// (add, edit, verify, new secret, remove) and read-on-open, measured at
+// 769,209 bytes after UI review fixes (master: 740,483). Next 16 KiB
+// boundary, with 839 bytes of headroom; all-files coverage kept.
+const uiMaxBytes = 752 << 10
 
 var (
 	scriptTag   = regexp.MustCompile(`(?is)<script\b([^>]*)>(.*?)</script>`)

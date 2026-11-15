@@ -68,3 +68,48 @@ body[data-route=peer] .va .col{max-width:1120px}
 /* minmax(0,1fr) and a capped button: a long name or quote ellipsizes in the
    one column instead of widening the page. */
 @media (max-width:1100px){.pv-grid{grid-template-columns:1fr}.pv-head{grid-template-columns:minmax(0,1fr)}.pv-acts{justify-content:flex-start;padding:4px 0 0}.pv-acts .btn{max-width:100%}}
+/* Routes (peer-routes.js): the table gains a column of row actions, then
+   Add route, its form, and a one-time signing secret. A Grok Bot without
+   its routine gets an amber callout above the table. */
+.pv-routes .pv-rt-btns{display:flex;flex-wrap:wrap;gap:6px;justify-content:flex-end}
+.pv-routes td.nw{white-space:nowrap}
+.pv-routes .btn[aria-disabled=true]{opacity:.55;cursor:progress}
+.pv-routes h2:focus{outline:none}
+.pv-routes h2:focus-visible{outline:2px solid #6366f1;outline-offset:3px;border-radius:4px}
+.pv-routes .btn.sm{min-height:28px;padding:3px 10px;font-size:12px;white-space:nowrap}
+.pv-routes .btn.bad{color:var(--bad)}
+.pv-routes .btn.armed{border-color:var(--bad)}
+.pv-rt-missing{margin:4px 0 12px;padding:10px 14px;border:1px solid #fbbf2455;border-left:3px solid var(--wake);border-radius:8px;background:#fbbf240d;font-size:13px;line-height:1.55;color:var(--muted)}
+.pv-rt-missing b{color:var(--text);font-weight:600}
+.pv-rt-acts{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:12px}
+.pv-rt-form{margin-top:14px;padding:12px 16px 14px;border:1px solid var(--line);border-radius:9px;background:#0c1120}
+.pv-rt-form h3{margin:2px 0 10px;font-size:13.5px;font-weight:600}
+.pv-rt-f{display:grid;gap:10px;max-width:640px}
+.pv-rt-row{display:grid;grid-template-columns:110px minmax(0,1fr);align-items:center;gap:10px}
+.pv-rt-row[hidden]{display:none}
+.pv-rt-row label{font-size:12.5px;color:var(--dim)}
+.pv-rt-row input,.pv-rt-row select{min-width:0;background:#0b1020;border:1px solid var(--line2);border-radius:7px;padding:7px 10px;font-size:12.5px;color:var(--text)}
+.pv-rt-row select:disabled{opacity:.7}
+.pv-rt-hint{margin:0 0 0 120px;font-size:12px}
+.pv-rt-f .err:empty,.pv-routes>.err:empty,.pv-rt-msg:empty{display:none}
+.pv-rt-f .err{margin:0 0 0 120px}
+.pv-rt-f .pv-rt-acts{margin:2px 0 0 120px}
+.pv-rt-msg{margin:10px 0 0;font-size:12.5px;color:var(--muted)}
+.pv-routes>.err{margin:10px 0 0}
+.pv-rt-fresh{margin-top:14px;padding-top:14px;border-top:1px solid var(--line)}
+.pv-rt-warn{margin:0 0 8px;font-size:12.5px;color:var(--wake)}
+.pv-rt-secret{display:block;padding:9px 11px;border:1px solid var(--line2);border-radius:7px;background:#0b1020;font-size:12.5px;overflow-wrap:anywhere;user-select:all;-webkit-user-select:all}
+.pv-head .pv-setup{color:var(--wake)}
+.pv-head .pv-setup a{color:var(--text);text-decoration:underline;text-underline-offset:2px;white-space:nowrap}
+/* Phone width: each route is a card, its fields wrapping, the actions on a
+   full-width line of their own, so nothing needs a sideways scroll. */
+@media (max-width:720px){
+  .pv-rt-row{grid-template-columns:1fr;gap:4px}
+  .pv-rt-hint,.pv-rt-f .err,.pv-rt-f .pv-rt-acts{margin-left:0}
+  .pv-routes .pv-rt-table thead{display:none}
+  .pv-routes .pv-rt-table,.pv-routes .pv-rt-table tbody{display:block;min-width:0;width:100%}
+  .pv-routes .pv-rt-table tr{display:flex;flex-wrap:wrap;gap:4px 12px;padding:10px 0;border-bottom:1px solid var(--line)}
+  .pv-routes .pv-rt-table td{display:block;padding:0;border:0}
+  .pv-routes .pv-rt-table td.pv-rt-cell{flex-basis:100%}
+  .pv-routes .pv-rt-btns{justify-content:flex-start}
+}

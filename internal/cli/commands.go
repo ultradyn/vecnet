@@ -157,6 +157,7 @@ admin (operator credential):
   route add --owner ID --url URL | route verify <route_id>
   route add --owner ID --kind grokbot --url URL --key-file PATH
   route list [--json] | route rotate <route_id> --key-file PATH | route remove <route_id>
+  route update <route_id> [--url URL] [--key-file PATH]
   route stats <peer_id|route_id|sub_id> [--json]
        the crsr_ key is read only from a file, 0600, never from argv
   source add --kind github --name N --route ID [--events A,B] [--priority P]
@@ -2007,6 +2008,24 @@ func (a *app) cmdRoute(args []string) error {
 			return err
 		}
 		return a.ok("rotated " + o.pos[1])
+	case len(o.pos) == 2 && o.pos[0] == "update" && (o.str("url") != "" || o.str("key-file") != "") && !o.has("owner") && !o.has("kind"):
+		// PATCH /v1/admin/routes/{id}: change a route in place. An http
+		// route's new URL needs route verify before it pushes again.
+		body := map[string]string{}
+		if u := o.str("url"); u != "" {
+			body["url"] = u
+		}
+		if o.str("key-file") != "" {
+			key, err := a.readKeyFile(o.str("key-file"))
+			if err != nil {
+				return err
+			}
+			body["key"] = key
+		}
+		if err := a.call(http.MethodPatch, "/v1/admin/routes/"+pathEscape(o.pos[1]), body, nil); err != nil {
+			return err
+		}
+		return a.ok("updated " + o.pos[1])
 	case len(o.pos) == 2 && o.pos[0] == "remove":
 		if err := a.call(http.MethodDelete, "/v1/admin/routes/"+pathEscape(o.pos[1]), nil, nil); err != nil {
 			return err
@@ -2019,7 +2038,8 @@ func (a *app) cmdRoute(args []string) error {
 		return a.ok("verified " + o.pos[1])
 	}
 	return usageErr("usage: vecnet route add --owner ID --url URL | " +
-		"route add --owner ID --kind grokbot --url URL --key-file PATH | route verify <route_id> | route list [--json] | route rotate <route_id> --key-file PATH | route remove <route_id> | route stats <peer_id|route_id|sub_id> [--json]")
+		"route add --owner ID --kind grokbot --url URL --key-file PATH | route verify <route_id> | route list [--json] | route rotate <route_id> --key-file PATH | " +
+		"route update <route_id> [--url URL] [--key-file PATH] | route remove <route_id> | route stats <peer_id|route_id|sub_id> [--json]")
 }
 
 func (a *app) cmdTeam(args []string) error {

@@ -469,3 +469,67 @@ func TestSubscriptionsList(t *testing.T) {
 		t.Fatalf("subscriptions list as a peer = %d %q, want 2 forbidden", code, errs)
 	}
 }
+
+// route update changes a route in place: an http route's URL (then needing
+// route verify), a grokbot route's routine URL and/or key from a file. The
+// key never reaches argv, output or an error.
+func TestRouteUpdate(t *testing.T) {
+	env := testhub.Start(t)
+	op := profileUser(t, env.URL, env.OperatorSecret)
+	owner, _ := env.NewPeer("session", "h")
+	grok, _ := env.NewPeer("grokbot", "g")
+	dir := t.TempDir()
+	const key, next = "crsr_0123456789abcdef", "crsr_fedcba9876543210"
+	keyFile := filepath.Join(dir, "k")
+	if err := os.WriteFile(keyFile, []byte(next+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(keyFile, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	httpID := field(t, op.mustRun("route", "add", "--owner", owner, "--url", "http://127.0.0.1:9/hook"), "route_id")
+	if err := env.Hub.MarkRouteVerified(context.Background(), httpID); err != nil {
+		t.Fatal(err)
+	}
+	out := op.mustRun("route", "update", httpID, "--url", "http://127.0.0.1:9/moved")
+	if !strings.Contains(out, "updated "+httpID) {
+		t.Fatalf("route update = %q", out)
+	}
+	if u, err := env.Hub.RouteURL(context.Background(), httpID); err != nil || u != "http://127.0.0.1:9/moved" {
+		t.Fatalf("http route url = %q, %v", u, err)
+	}
+
+	resp, raw := env.Do(env.OperatorSecret, "POST", "/v1/admin/routes", map[string]any{"owner": grok, "kind": "grokbot", "url": routineURL, "key": key})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("add grokbot route: %d %s", resp.StatusCode, raw)
+	}
+	var added struct {
+		RouteID string `json:"route_id"`
+	}
+	if err := json.Unmarshal(raw, &added); err != nil {
+		t.Fatal(err)
+	}
+	code, out, errs := op.run("route", "update", added.RouteID, "--key-file", keyFile)
+	if code != 0 || strings.Contains(out+errs, next) {
+		t.Fatalf("grokbot key update = %d %q %q", code, out, errs)
+	}
+	if stored, err := env.Hub.GrokbotKey(context.Background(), added.RouteID); err != nil || stored != next {
+		t.Fatalf("stored key after update: match %v, %v", stored == next, err)
+	}
+
+	// Usage: nothing to change, or flags that belong to add.
+	for _, args := range [][]string{
+		{"route", "update", httpID},
+		{"route", "update", httpID, "--url", "http://127.0.0.1:9/x", "--owner", owner},
+		{"route", "update", "--url", "http://127.0.0.1:9/x"},
+	} {
+		if code, _, errs := op.run(args...); code != 1 || !strings.Contains(errs, "usage") {
+			t.Fatalf("%v = %d %q, want a usage error", args, code, errs)
+		}
+	}
+	// The hub refuses a key for an http route and does not echo it.
+	if code, out, errs := op.run("route", "update", httpID, "--key-file", keyFile); code != 2 || strings.Contains(out+errs, next) {
+		t.Fatalf("key for an http route = %d %q %q, want 2 without the key", code, out, errs)
+	}
+}

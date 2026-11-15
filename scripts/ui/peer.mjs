@@ -11,8 +11,9 @@ const SHELL_WRITES = /\/v1\/(ack|presence|receipts)(\?|$)/;
 
 try {
   await withDemo({}, async ctx => {
-    const { page, shot, demo, asPeer, hold, fail, allowConsole, countRequests } = ctx;
+    const { page, shot, demo, asPeer, hold, fail, allowConsole, countRequests, quiet } = ctx;
     allowConsole(/status of 500/);
+    allowConsole(/status of 422/); // the route Verify that fails on purpose below
     await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
     const id = key => demo.peers[key].id;
     const clip = () => page.evaluate(() => navigator.clipboard.readText());
@@ -238,6 +239,191 @@ try {
 
     // Read-only: no write left the page.
     assert(writes() === writesBefore, `peer view sent ${writes() - writesBefore} write(s)`);
+    await page.unroute('**/v1/admin/routes');
+
+    // ---- push route setup from the peer page ----
+    // A Grok Bot that enrolled with no routine: the header and the Routes
+    // section call it out, and Set up opens Add route on the Grok Bot kind.
+    const ROUTINE = 'https://api2.cursor.sh/automations/webhook/123e4567-e89b-12d3-a456-426614174000';
+    const ROUTINE2 = 'https://api2.cursor.sh/automations/webhook/89abcdef-0123-4567-89ab-cdef01234567';
+    const KEY = 'crsr_peer-page-canary-0123456789', KEY2 = 'crsr_peer-page-canary-rotated-987';
+    const added = await (await asPeer('operator', 'POST', '/v1/admin/peers', { kind: 'grokbot', name: 'grok-no-hook' })).json();
+    const grokId = added.peer_id;
+    assert(/^peer_/.test(grokId), `added grok ${JSON.stringify(Object.keys(added))}`);
+    await route('#peer/' + grokId);
+    await pv.locator('.pv-head .pv-setup', { hasText: 'Setup incomplete' }).waitFor();
+    const routes = pv.locator('.pv-routes');
+    await routes.locator('.pv-rt-missing', { hasText: 'No Grok Bot routine is set up' }).waitFor();
+    assert(await routes.locator('.pv-rt-add').innerText() === 'Set up Grok Bot routine', 'set-up button label');
+    await page.locator('#main').evaluate(el => { el.scrollTop = 0; });
+    await shot('pv-route-missing');
+    await pv.locator('.pv-head .pv-setup a').click();
+    const form = routes.locator('form.pv-rt-f');
+    await form.waitFor();
+    assert(await form.locator('select').inputValue() === 'grokbot', 'Add route did not start on Grok Bot');
+    assert(await page.evaluate(() => document.activeElement && document.activeElement.type) === 'url', 'URL field not focused');
+    // Checked before sending: a foreign URL and a missing key say so, and send nothing.
+    const routeWrites = () => countRequests(req => WRITE.has(req.method()) && /\/v1\/admin\/routes/.test(new URL(req.url()).pathname));
+    const w0 = routeWrites();
+    await form.locator('input[type=url]').fill('https://example.com/hook');
+    await form.locator('input[type=password]').fill(KEY);
+    await form.locator('button[type=submit]').click();
+    await form.locator('.err', { hasText: 'A Grok Bot routine URL is' }).waitFor();
+    await form.locator('input[type=url]').fill(ROUTINE);
+    await form.locator('input[type=password]').fill('');
+    await form.locator('button[type=submit]').click();
+    await form.locator('.err', { hasText: 'Enter the routine key' }).waitFor();
+    assert(routeWrites() === w0, 'an invalid form was sent');
+    // Bearer-prefixed paste is accepted, as onboarding does.
+    await form.locator('input[type=password]').fill('Bearer ' + KEY);
+    await shot('pv-route-form');
+    await form.locator('button[type=submit]').click();
+    await routes.locator('.pv-rt-msg', { hasText: 'Grok Bot route added' }).waitFor();
+    await routes.locator('tbody tr', { hasText: 'grokbot' }).waitFor();
+    await routes.locator('.pv-rt-missing').waitFor({ state: 'hidden' });
+    await pv.locator('.pv-head .pv-setup').waitFor({ state: 'detached' });
+    let listed = await (await asPeer('operator', 'GET', '/v1/admin/routes')).json();
+    let grokRoute = listed.routes.find(r => r.owner_id === grokId);
+    assert(grokRoute && grokRoute.kind === 'grokbot' && grokRoute.verified_at, `grok route ${JSON.stringify(grokRoute)}`);
+    const grokRouteId = grokRoute.route_id;
+    // Focus lands on the new route's Edit, not on the page body.
+    await page.waitForFunction(() => document.activeElement && document.activeElement.classList.contains('pv-rt-edit'));
+    // One route of its own: Add steps aside for Edit.
+    assert(await routes.locator('.pv-rt-add').isHidden(), 'Add route offered beside an existing own route');
+    // The key never reaches the DOM, an attribute or a stored value.
+    const leaked = await page.evaluate(k => document.documentElement.outerHTML.includes(k) || [...document.querySelectorAll('input')].some(i => i.value.includes(k)), KEY);
+    assert(!leaked, 'the routine key is in the page');
+
+    // Edit: a new key alone; the URL stays.
+    await routes.locator('.pv-rt-edit').click();
+    await form.waitFor();
+    assert(await form.locator('select').isDisabled(), 'kind is editable on an existing route');
+    await form.locator('input[type=password]').fill(KEY2);
+    await form.locator('button[type=submit]').click();
+    await routes.locator('.pv-rt-msg', { hasText: 'Route updated.' }).waitFor();
+    // Edit: the URL alone. Still live: a routine has no challenge.
+    await routes.locator('.pv-rt-edit').click();
+    await form.locator('input[type=url]').fill(ROUTINE2);
+    await form.locator('button[type=submit]').click();
+    await routes.locator('.pv-rt-msg', { hasText: 'Route updated.' }).waitFor();
+    listed = await (await asPeer('operator', 'GET', '/v1/admin/routes')).json();
+    grokRoute = listed.routes.find(r => r.owner_id === grokId);
+    assert(grokRoute && grokRoute.route_id === grokRouteId && grokRoute.verified_at && listed.routes.filter(r => r.owner_id === grokId).length === 1, 'grok route was re-created, duplicated or went unverified');
+    assert(!(await page.evaluate(k => document.documentElement.outerHTML.includes(k), KEY2)), 'the edited routine key is in the page');
+    // Edit then Save keeps keyboard focus on the row's Edit.
+    assert(await page.evaluate(() => document.activeElement && document.activeElement.classList.contains('pv-rt-edit')), 'focus left the row after Save');
+    // An empty edit is refused before sending.
+    await routes.locator('.pv-rt-edit').click();
+    const w1 = routeWrites();
+    await form.locator('button[type=submit]').click();
+    await form.locator('.err', { hasText: 'Enter a new URL, a new key, or both' }).waitFor();
+    assert(routeWrites() === w1, 'an empty edit was sent');
+    await form.locator('button', { hasText: 'Cancel' }).click();
+    await form.waitFor({ state: 'detached' });
+
+    // A session peer with a signed webhook: Add shows the whsec_ once;
+    // Verify against a receiver that echoes the challenge; a new URL that
+    // does not echo is unverified and its Verify fails with a fixed sentence.
+    const { createServer } = await import('node:http');
+    const receiver = createServer((req, res) => {
+      let body = '';
+      req.on('data', c => { body += c; });
+      req.on('end', () => {
+        let challenge = '';
+        try { challenge = JSON.parse(body).challenge || ''; } catch { /* a push, not a challenge */ }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ challenge }));
+      });
+    });
+    await new Promise(resolve => receiver.listen(0, '127.0.0.1', resolve));
+    const hookURL = `http://127.0.0.1:${receiver.address().port}/hook`;
+    try {
+      await route('#peer/' + id('sleuth'));
+      await pv.locator('.pv-head h1', { hasText: 'pag-hark-sleuth' }).waitFor();
+      await routes.locator('.pv-rt-add', { hasText: 'Add route' }).click();
+      assert(await form.locator('select').inputValue() === 'http', 'a session peer did not start on Webhook');
+      assert(await form.locator('input[type=password]').isHidden(), 'the key field shows for a webhook');
+      await form.locator('input[type=url]').fill(hookURL);
+      await form.locator('button[type=submit]').click();
+      const secret = routes.locator('.pv-rt-secret');
+      await secret.waitFor();
+      const whsec = await secret.textContent();
+      assert(/^whsec_/.test(whsec), 'no whsec_ shown');
+      await routes.locator('tbody tr', { hasText: 'unverified' }).waitFor();
+      await setClip('');
+      await routes.locator('.pv-rt-fresh button', { hasText: 'Copy secret' }).click();
+      assert(await clip() === whsec, 'Copy secret');
+      await shot('pv-route-secret');
+      await routes.locator('.pv-rt-fresh button', { hasText: 'Done' }).click();
+      await secret.waitFor({ state: 'detached' });
+      assert(!(await page.evaluate(w => document.documentElement.outerHTML.includes(w), whsec)), 'the secret outlived Done');
+      // Keyboard Verify: focus stays on the button through the request.
+      await routes.locator('.pv-rt-verify', { hasText: 'Verify' }).focus();
+      await page.keyboard.press('Enter');
+      await routes.locator('.pv-rt-msg', { hasText: 'Verified' }).waitFor();
+      await routes.locator('tbody tr .bad', { hasText: 'unverified' }).waitFor({ state: 'detached' });
+      assert(await page.evaluate(() => document.activeElement && document.activeElement.classList.contains('pv-rt-verify')), 'focus left Verify');
+      // An armed Confirm survives a redraw with the same routes. Hold the
+      // page's next routes read (its 30 s reload), arm Remove with focus
+      // elsewhere, then let the read land: the section redraws, Remove stays armed.
+      const routesPath = u => u.pathname === '/v1/admin/routes';
+      const reads = countRequests(req => routesPath(new URL(req.url())));
+      const releaseRoutes = await hold(routesPath);
+      for (const t = Date.now(); countRequests(req => routesPath(new URL(req.url()))) === reads; ) {
+        assert(Date.now() - t < 40000, 'the 30 s reload did not re-read routes');
+        await page.waitForTimeout(100);
+      }
+      await routes.locator('.pv-rt-remove').click();
+      await routes.locator('.pv-rt-remove', { hasText: 'Confirm remove' }).waitFor();
+      await page.evaluate(() => document.activeElement && document.activeElement.blur());
+      await releaseRoutes();
+      await quiet();
+      assert(await routes.locator('.pv-rt-remove', { hasText: 'Confirm remove' }).count() === 1, 'a redraw disarmed Confirm remove');
+      await page.waitForTimeout(3200); // let it fall back unconfirmed
+      await routes.locator('.pv-rt-remove', { hasText: 'Remove' }).waitFor();
+      // Edit to a receiver that answers but does not echo: unverified again.
+      await routes.locator('.pv-rt-edit').click();
+      await form.locator('.pv-rt-hint', { hasText: 'stops pushes until it is verified again' }).waitFor();
+      await form.locator('input[type=url]').fill(demo.url + '/__demo/sink/peer-page');
+      await form.locator('button[type=submit]').click();
+      await routes.locator('.pv-rt-msg', { hasText: 'Press Verify' }).waitFor();
+      await routes.locator('tbody tr .bad', { hasText: 'unverified' }).waitFor();
+      await routes.locator('.pv-rt-verify').click();
+      await routes.locator('.err', { hasText: 'did not echo the challenge' }).waitFor();
+      assert(!(await routes.locator('.err').innerText()).includes('__demo'), 'the verify error quotes the URL');
+      await page.locator('#main').evaluate(el => { el.scrollTop += document.getElementById('pv-routes').getBoundingClientRect().top - 120; });
+      await shot('pv-route-verify-failed');
+      // New secret (confirm), then Remove (confirm): the peer pulls again.
+      await routes.locator('.pv-rt-rotate').click();
+      await routes.locator('.pv-rt-rotate', { hasText: 'Confirm new secret' }).click();
+      await routes.locator('.pv-rt-fresh', { hasText: 'old one keeps working for 24 hours' }).waitFor();
+      const rotated = await routes.locator('.pv-rt-secret').textContent();
+      await routes.locator('.pv-rt-fresh button', { hasText: 'Done' }).click();
+      assert(!(await page.evaluate(w => document.documentElement.outerHTML.includes(w), rotated)), 'the rotated secret outlived Done');
+      assert(await page.evaluate(() => document.activeElement && document.activeElement !== document.body), 'Done left focus on the body');
+      // Phone width: the actions are on screen, no sideways scroll.
+      await page.setViewportSize({ width: 390, height: 844 });
+      const fit = await page.evaluate(() => {
+        const sec = document.getElementById('pv-routes').getBoundingClientRect();
+        return [...document.querySelectorAll('#pv-routes .pv-rt-btns button')].map(b => { const r = b.getBoundingClientRect(); return r.right <= Math.min(sec.right, innerWidth) + 0.5 && r.left >= sec.left - 0.5; });
+      });
+      assert(fit.length >= 3 && fit.every(Boolean), `route actions off screen at 390px: ${JSON.stringify(fit)}`);
+      await page.locator('#pv-routes').evaluate(el => el.scrollIntoView({ block: 'start' }));
+      await shot('pv-route-phone');
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await routes.locator('.pv-rt-remove').click();
+      await routes.locator('.pv-rt-remove', { hasText: 'Confirm remove' }).click();
+      await routes.locator('.pv-rt-msg', { hasText: 'Route removed' }).waitFor();
+      await routes.locator('.none', { hasText: 'This peer pulls its deliveries' }).waitFor();
+      listed = await (await asPeer('operator', 'GET', '/v1/admin/routes')).json();
+      assert(!listed.routes.some(r => r.owner_id === id('sleuth')), 'the route was not removed');
+    } finally {
+      await new Promise(resolve => receiver.close(resolve));
+    }
+    // The operator and sources get no route controls.
+    await route('#peer/' + id('gh'));
+    await routes.locator('.none, table').first().waitFor();
+    assert(await routes.locator('.pv-rt-add:visible, .pv-rt-edit').count() === 0, 'route controls on a source');
   });
-  console.log('Peer detail passed: dashboard to peer, independent sections, full-id copy (selection, button, keyboard, http fallback), disabled, hostile, unknown, peer links in thread/aside/inbox/sidebar, isolated failure');
+  console.log('Peer detail passed: dashboard to peer, independent sections, full-id copy (selection, button, keyboard, http fallback), disabled, hostile, unknown, peer links in thread/aside/inbox/sidebar, isolated failure; push routes: Grok Bot missing-routine callout and setup, form checks, key never in the page, edit key/URL in place, webhook whsec_ once, verify, re-verify after a URL change, fixed verify error, new secret, remove');
 } finally { await cleanBuild(); }

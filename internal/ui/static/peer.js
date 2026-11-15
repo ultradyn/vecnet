@@ -5,14 +5,18 @@
 // hub clock. The header's message actions open the operator's newest thread
 // with the peer, or New message to it (compose.js prefill). A peer that has
 // not enrolled gets the Invite card: its invite state, New invite (the same
-// paste block as Add agent, shown once) and Revoke invite.
+// paste block as Add agent, shown once) and Revoke invite. Routes
+// (peer-routes.js) lists the push routes that reach the peer and lets the
+// operator add, edit, verify and remove them; a Grok Bot without its routine
+// gets a header note that opens the form.
 import { launcherSection } from './launcher.js';
+import { routesSection } from './peer-routes.js';
 import { prefill } from './compose.js';
 import { chip, confirmButton, copyButton, h, idCopy, idText, peerLink, toast } from './dom.js';
 import { ago, fullWhen, kindShort, kindTitle, plural, title as threadTitle, when } from './format.js';
 import { invitePanel } from './invite.js';
 import { DEFAULT_TTL, reinvite, TTLS } from './invite-model.js';
-import { findPeer, inviteCard, peerActions, peerFacts, peerHealth, peerRoutes, peerSubs, peerThreads, principalFacts, scopeTarget } from './peer-model.js';
+import { findPeer, inviteCard, peerActions, peerFacts, peerHealth, peerRoutes, peerSubs, peerThreads, principalFacts, routeSetup, scopeTarget } from './peer-model.js';
 import { chip as subChip, expiresIn } from './subs-model.js';
 
 const RELOAD_MS = 30000;
@@ -269,6 +273,7 @@ export function mount(root, ctx) {
   const facts = () => { const r = row(); return r ? peerFacts(r, nowMs()) : null; };
 
   const launcher = launcherSection(ctx);
+  const routesSec = routesSection({ api, id, time, reload: () => res.routes.reload() });
   const sections = {};
   function section(key, heading) {
     const count = h('span', { class: 'n' });
@@ -320,7 +325,7 @@ export function mount(root, ctx) {
       launcher.el,
       h('div', { class: 'pv-grid' }, section('identity', 'Identity'), section('presence', 'Presence'), section('access', 'Scopes and limits')),
       section('principal', 'Principal'),
-      section('routes', 'Routes'),
+      routesSec.el,
       section('subs', 'Subscriptions'),
       section('health', 'Delivery health'),
       section('threads', 'Recent threads')));
@@ -393,12 +398,16 @@ export function mount(root, ctx) {
       return;
     }
     head.className = 'pv-head' + (f.disabled ? ' off' : '');
+    const rl = res.routes.get() ? peerRoutes(res.routes.get(), id, f.principalId) : null;
+    const missing = rl && routeSetup(f, rl).missing;
     headMain.replaceChildren(...[
       h('h1', null, h('span', { class: 'nm', text: f.name || '(no name)' }),
         kindPill(f.kind),
         f.archivedAt ? chip('archived', 'bad') : (f.disabled ? chip('disabled', 'bad') : null)),
       h('div', { class: 'pv-id' }, h('span', { class: 'mono pid', text: f.id }), copyButton(f.id, 'peer id')),
       f.archivedAt ? h('p', { class: 'note bad', text: 'Archived: credentials were revoked. Unarchive leaves this peer disabled and requires a new invite.' }) : (f.disabled ? h('p', { class: 'note bad', text: 'Disabled: this peer cannot use the hub until an operator enables it.' }) : null),
+      missing ? h('p', { class: 'note pv-setup' }, 'Setup incomplete: no Grok Bot routine reaches it, so messages to it are not delivered. ',
+        h('a', { href: '#peer/' + id, text: 'Set up its routine', onclick: e => { e.preventDefault(); routesSec.openAdd(); } }), '.') : null,
     ].filter(Boolean));
   }
 
@@ -494,20 +503,6 @@ export function mount(root, ctx) {
     ])];
   }
 
-  function drawRoutes(s) {
-    const f = facts();
-    const routes = peerRoutes(res.routes.get(), id, f ? f.principalId : '');
-    s.count.textContent = String(routes.length);
-    if (!routes.length) return [none('No push routes. This peer pulls its deliveries.')];
-    return [table(['Route', 'Owner', 'Kind', 'Host', 'Verified', 'Created'], routes.map(r => h('tr', null,
-      h('td', null, idCopy(r.id, 'route id')),
-      h('td', { class: 'sm', text: r.via === 'peer' ? 'this peer' : 'its principal' }),
-      h('td', { class: 'mono sm', text: r.kind + (r.kind === 'grokbot' && r.runsPerHour ? ' · ' + r.runsPerHour + '/h' : '') }),
-      h('td', { class: 'mono sm', text: r.host || '—' }),
-      h('td', null, r.verified ? time(r.verified) : h('span', { class: 'bad', text: 'unverified' })),
-      h('td', null, time(r.created)))))];
-  }
-
   function drawSubs(s) {
     const list = peerSubs(res.subs.get(), id);
     s.count.textContent = String(list.length);
@@ -575,7 +570,7 @@ export function mount(root, ctx) {
     fill('presence', [res.peers], 'Presence', drawPresence);
     fill('access', [res.peers], 'Scopes and limits', drawAccess);
     fill('principal', [res.peers, res.principals], 'Principal', drawPrincipal);
-    fill('routes', [res.routes], 'Routes', drawRoutes);
+    { const f = facts(); routesSec.draw(f, res.routes.get() ? peerRoutes(res.routes.get(), id, f ? f.principalId : '') : null, res.routes.error()); }
     fill('subs', [res.subs], 'Subscriptions', drawSubs);
     fill('health', [res.health], 'Delivery health', drawHealth); // titles join in once threads load
     if (res.threads) fill('threads', [res.threads], 'Recent threads', drawThreads);
@@ -595,6 +590,7 @@ export function mount(root, ctx) {
     for (const off of offs) off();
     if (inviteOff) inviteOff();
     invite.unmount();
+    routesSec.unmount();
     launcher.unmount();
   };
 }

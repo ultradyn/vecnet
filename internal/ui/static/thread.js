@@ -158,7 +158,9 @@ export function mount(root, ctx) {
 
   // Reading (CoS unread ruling): open at the first unread under New; each
   // unread message gets its own read receipt once seen (thread-read.js), never
-  // a mark-all. Sidebar counts follow the receipts via the hub's events.
+  // a mark-all. A thread whose first message is unread (an agent's new
+  // thread) has that message read on open, without the dwell. Sidebar counts
+  // follow the receipts via the hub's events.
   // A modal (image viewer, matrix, invite) hides the thread: nothing is seen under it.
   const active = () => document.visibilityState === 'visible' && document.hasFocus() && !document.querySelector('dialog[open]');
   const styled = on => id => { const el = document.getElementById('m-' + id); if (el) el.classList.toggle('unread', on); };
@@ -546,6 +548,7 @@ export function mount(root, ctx) {
     if (!opened) {
       opened = true;
       considered = new Set(unread.map(u => u.message_id));
+      if (unread.length && all.length && unread[0].message_id === all[0].message_id) reader.readOnOpen(all[0].message_id);
       const o = opening(unread);
       S.divider = o.divider;
       if (o.at === 'bottom') return null;

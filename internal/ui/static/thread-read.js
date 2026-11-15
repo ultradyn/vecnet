@@ -6,8 +6,10 @@
 // the thread ends before the message can clear the view. Each seen unread
 // message gets a read receipt (PROTOCOL §2.5), batched over BATCH_MS; a
 // failure is retried once after RETRY_MS, quietly, then left unread. Never
-// a mark-all. No DOM: thread.js feeds it IntersectionObserver entries;
-// tests drive it under mocked timers.
+// a mark-all. One exception to the dwell: a thread that opens with its first
+// message unread (an agent's new thread) has that message read at once, or
+// as soon as the page is active (readOnOpen). No DOM: thread.js feeds it
+// IntersectionObserver entries; tests drive it under mocked timers.
 
 export const SEEN_RATIO = 0.6, DWELL_MS = 1000, BATCH_MS = 500, RETRY_MS = 2000;
 
@@ -27,6 +29,7 @@ export function createReader({ api, active, onSeen = () => {}, onLost = () => {}
   const sent = new Map();    // delivery id -> message id
   const queue = new Map();   // delivery id -> attempt, awaiting the batch
   let batch = null, gone = false;
+  let eager = null;          // readOnOpen's message, until read or dropped
 
   function stopDwell(id) {
     const t = dwell.get(id);
@@ -40,7 +43,8 @@ export function createReader({ api, active, onSeen = () => {}, onLost = () => {}
     }, DWELL_MS));
   }
 
-  function see(id) {
+  // see marks id seen and queues its receipt; now sends the batch at once.
+  function see(id, now) {
     if (gone || seen.has(id) || !unread.has(id) || !active()) return;
     seen.add(id);
     stopDwell(id);
@@ -48,8 +52,19 @@ export function createReader({ api, active, onSeen = () => {}, onLost = () => {}
     if (!sent.has(dly)) {
       sent.set(dly, id);
       enqueue(dly, 1);
+      if (now) flush();
     }
     onSeen(id);
+  }
+  // readEager reads readOnOpen's message once the page is active. One that
+  // stopped being unread (read elsewhere) is dropped.
+  function readEager() {
+    if (gone || !eager) return;
+    if (seen.has(eager) || !unread.has(eager)) { eager = null; return; }
+    if (!active()) return;
+    const id = eager;
+    eager = null;
+    see(id, true);
   }
 
   function enqueue(dly, attempt) {
@@ -83,6 +98,15 @@ export function createReader({ api, active, onSeen = () => {}, onLost = () => {}
       unread = new Map((list || []).map(u => [u.message_id, u.delivery_id]));
       for (const id of [...dwell.keys()]) if (!unread.has(id)) stopDwell(id);
       for (const id of shown) startDwell(id);
+      if (eager && !unread.has(eager)) eager = null;
+    },
+    // readOnOpen: the thread opened with id, its first message, unread. It
+    // is read now, with no dwell and no batch wait, or the moment the page
+    // is next active. Only that message: the rest follow the dwell rule.
+    readOnOpen(id) {
+      if (gone || !unread.has(id) || seen.has(id)) return;
+      eager = id;
+      readEager();
     },
     // view: one message's place. Leaving through the top is a pass going
     // down, and so is a tail (pastTop: its top is above the root) after it
@@ -101,12 +125,13 @@ export function createReader({ api, active, onSeen = () => {}, onLost = () => {}
       if (met.has(id) && ((was && !intersecting && above) || (intersecting && pastTop))) see(id);
     },
     // activeChanged (visibility, focus, a modal): tracking starts over, so
-    // nothing moved while away counts.
-    activeChanged: reset,
+    // nothing moved while away counts. A waiting readOnOpen is read now.
+    activeChanged() { reset(); readEager(); },
     seen: id => seen.has(id) && !lost.has(id),
     // destroy stops tracking; earned receipts go out now, retries still run.
     destroy() {
       gone = true;
+      eager = null;
       reset();
       if (queue.size) flush();
     },

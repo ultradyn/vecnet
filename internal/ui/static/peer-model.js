@@ -217,3 +217,103 @@ export function inviteCard(facts, status, routes) {
   if (status.state === 'revoked') card.revokedAt = str(status.revoked_at) || null;
   return card;
 }
+
+// ---- Push routes on the peer page (PATCH/POST/DELETE /v1/admin/routes) ----
+
+// ROUTE_KINDS are what Add route offers: a signed webhook, or a Grok Bot
+// routine (its URL and crsr_ key). GROK_URL is the routine URL the hub
+// accepts (hub.GrokbotURLPattern); the hub checks again.
+export const ROUTE_KINDS = ['http', 'grokbot'];
+export const GROK_URL = /^https:\/\/api2\.cursor\.sh\/automations\/webhook\/[0-9a-f-]{36}$/;
+// routeSetup says what the Routes section offers this peer. editable: the
+// operator may add, edit and remove routes here (never for the operator, a
+// source or an unknown row). missing: a Grok Bot that no grokbot route
+// reaches, its own or its principal's (send falls back to the principal's),
+// the one kind reached only by push (a routine cannot pull): the "added
+// itself but gave no webhook" case. Every other kind can pull, so no route
+// is not a fault. Unknown until routes load (routes null): never missing.
+// canAdd: Add route is offered, which is only while the peer has no route
+// of its own (the hub pushes through one per peer, so a second would
+// quietly take over) or a missing Grok Bot routine needs one. suggest is
+// the kind Add route starts on.
+export function routeSetup(facts, routes) {
+  if (!facts || !facts.id || facts.kind === 'operator' || facts.kind === 'source') return { editable: false, missing: false, suggest: 'http', canAdd: false };
+  const known = Array.isArray(routes);
+  const list = known ? routes : [];
+  const grok = facts.kind === 'grokbot';
+  const missing = known && grok && !facts.archivedAt && !list.some(r => r && r.kind === 'grokbot');
+  const canAdd = known && (missing || !list.some(r => r && r.via === 'peer'));
+  return { editable: true, missing, suggest: grok ? 'grokbot' : 'http', canAdd };
+}
+
+// normalizeKey takes a pasted routine key: trimmed, one leading "Bearer "
+// dropped (as onboarding accepts). It never echoes the value in an error.
+export function normalizeKey(raw) {
+  let s = typeof raw === 'string' ? raw.trim() : '';
+  if (/^bearer\s+/i.test(s)) s = s.replace(/^bearer\s+/i, '');
+  return s;
+}
+const KEY_OK = /^crsr_[\x21-\x7e]+$/;
+
+// routeForm checks an Add or Edit form before anything is sent. kind is
+// the route's kind; editing says whether the route exists (then a blank
+// field means unchanged, but something must change). Returns { body } to
+// send, or { error, field }. Messages never quote the URL or the key.
+export function routeForm({ kind, url, key, editing = false }) {
+  const u = typeof url === 'string' ? url.trim() : '';
+  const k = normalizeKey(key);
+  const body = {};
+  if (u) {
+    let parsed = null;
+    try { parsed = new URL(u); } catch { /* reported below */ }
+    if (!parsed || !/^https?:$/.test(parsed.protocol)) return { error: 'Enter a full https:// URL.', field: 'url' };
+    if (parsed.username || parsed.password) return { error: 'The URL must not hold a user name or password.', field: 'url' };
+    if (parsed.hash || u.includes('#')) return { error: 'The URL must not have a #fragment.', field: 'url' };
+    if (kind === 'grokbot' && !GROK_URL.test(u)) return { error: 'A Grok Bot routine URL is https://api2.cursor.sh/automations/webhook/ followed by its id.', field: 'url' };
+    body.url = u;
+  } else if (!editing) {
+    return { error: 'Enter the URL to push to.', field: 'url' };
+  }
+  if (kind === 'grokbot') {
+    if (k) {
+      if (!KEY_OK.test(k)) return { error: 'A routine key starts crsr_ and has no spaces.', field: 'key' };
+      body.key = k;
+    } else if (!editing) {
+      return { error: 'Enter the routine key (crsr_…).', field: 'key' };
+    }
+  }
+  if (editing && !Object.keys(body).length) return { error: kind === 'grokbot' ? 'Enter a new URL, a new key, or both.' : 'Enter the new URL.', field: 'url' };
+  return { body };
+}
+
+// ROUTE_CODE_ERR: fixed sentences for the hub's answers to a route change.
+// The hub's own message and any unknown code stay off the page, so neither
+// a URL nor a key quoted by a proxy body can render.
+const ROUTE_CODE_ERR = {
+  invalid_url: 'The hub refused that URL: it must be https, to a public host, with no user name or #fragment.',
+  invalid_key: 'The hub refused that key: a routine key starts crsr_ and has no spaces.',
+  not_found: 'This route no longer exists. Reload the page.',
+  route_changed: 'The route\'s URL changed while it was being verified. Verify it again.',
+  forbidden: 'Only the operator can change routes.',
+  rate_limited: 'Too many changes. Wait and try again.',
+};
+const REASONS = {
+  timeout: 'it did not answer in time', connection_refused: 'the connection was refused', dns_error: 'its host name did not resolve',
+  tls_error: 'its TLS certificate was refused', private_address: 'it is a private address', redirect_refused: 'it answered with a redirect',
+  scheme_refused: 'it is not https',
+};
+
+// routeError is the one sentence a failed route action shows. A failed
+// verify names why when the hub gave a known reason code.
+export function routeError(fallback, e, { verifying = false } = {}) {
+  const code = e && typeof e === 'object' && typeof e.code === 'string' ? e.code : '';
+  if (verifying && code === 'invalid_value') {
+    const reason = e.details && typeof e.details.reason === 'string' ? e.details.reason : '';
+    const why = Object.hasOwn(REASONS, reason) ? REASONS[reason]
+      : /^challenge_failed: HTTP (\d{3})$/.test(reason) ? 'it answered HTTP ' + reason.slice(-3)
+        : reason.startsWith('challenge_failed') ? 'it did not echo the challenge' : '';
+    return 'The receiver did not answer its verification challenge' + (why ? ': ' + why + '.' : '.');
+  }
+  if (code === 'invalid_value' && e.details && e.details.field === 'key') return 'Only a Grok Bot route takes a key.';
+  return Object.hasOwn(ROUTE_CODE_ERR, code) ? ROUTE_CODE_ERR[code] : fallback;
+}
