@@ -25,12 +25,12 @@ Files: Modify scripts/bb/remote.sh, docs/BUILDBOX.md, CHANGELOG.md; Create/Test 
 Consumes: remote.sh lane + base64 NUL-separated environment + argv; run.sh current lane creation/sync.
 Produces: unchanged interface, existing BASE resolved with cd/pwd-P; tiny synthetic regression.
 
-- [ ] Read complete current remote wrapper and relevant run.sh caller. Historical f5977804 is reference only, not a merged fix or permission to cherry-pick unrelated commits.
-- [ ] Write synthetic regression in remote.test.sh with owned mktemp fixture and cleanup trap; fixture home/bb-src symlinks to physical volume. Invoke the current wrapper with child-only HOME, framing preserved. Require exact physical private/cache paths and literal framed argument. Use task-specific shell variable names; never repurpose operator HOME/system variables in agent shell.
-- [ ] Gate RED against unchanged production wrapper. Expected behavioral failure identifies logical HOME or TMPDIR, not compilation, fixture or toolchain error. Report raw log and exit.
-- [ ] Resolve existing BASE physically before deriving RL/TC, failing with existing64 convention if unavailable. Keep runtime behavior otherwise identical. Tiny doc/changelog statement.
-- [ ] Gate GREEN synthetic test and bash-n all changed shell scripts. Full Go/Node replay is disproportionate for this Bash-only normalization; add checks only for concrete concern. Record source hashes.
-- [ ] Self-review, git diff-check, commit explicit owned paths conventionally on feature branch, report LAST. Do not amend/rebase/push/merge. Report concerns/deviations honestly, end === DONE ===.
+- [x] Read complete current remote wrapper and relevant run.sh caller. Historical f5977804 is reference only, not a merged fix or permission to cherry-pick unrelated commits.
+- [x] Write synthetic regression in remote.test.sh with owned mktemp fixture and cleanup trap; fixture home/bb-src symlinks to physical volume. Invoke the current wrapper with child-only HOME, framing preserved. Require exact physical private/cache paths and literal framed argument. Use task-specific shell variable names; never repurpose operator HOME/system variables in agent shell.
+- [x] Gate RED against unchanged production wrapper. Expected behavioral failure identifies logical HOME or TMPDIR, not compilation, fixture or toolchain error. Report raw log and exit.
+- [x] Resolve existing BASE physically before deriving RL/TC, failing with existing64 convention if unavailable. Keep runtime behavior otherwise identical. Tiny doc/changelog statement.
+- [x] Gate GREEN synthetic test and bash-n all changed shell scripts. Full Go/Node replay is disproportionate for this Bash-only normalization; add checks only for concrete concern. Record source hashes.
+- [x] Self-review, git diff-check, commit explicit owned paths conventionally on feature branch, report LAST. Do not amend/rebase/push/merge. Report concerns/deviations honestly, end === DONE ===.
 
 ## Review, integration and exit
 
