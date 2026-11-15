@@ -53,11 +53,13 @@ func TestGrokbotRecipientDrainMigrationUpgradeReopen(t *testing.T) {
 	a1Count(t, raw, `SELECT count(*) FROM route_runs WHERE grok_wake_settled_200=0`, 1)
 	a1Count(t, raw, `SELECT count(*) FROM grokbot_wakes`, 0)
 	a1Count(t, raw, `SELECT count(*) FROM grokbot_covers`, 0)
+	a1Count(t, raw, `SELECT count(*) FROM grokbot_legacy_claims`, 0)
 	if _, err := raw.Exec(`UPDATE routes SET grokbot_transport='unknown'`); err == nil {
 		t.Fatal("invalid capability accepted")
 	}
 	a1Exec(t, raw, `INSERT INTO grokbot_covers VALUES ('historical_route','dly_old','peer_old','2026-11-15T00:00:00.000Z')`)
 	a1Exec(t, raw, `INSERT INTO grokbot_wakes(route_id,recipient,representative_id,phase,lease_until) VALUES ('historical_route','peer_old','dly_old','armed','2026-11-15T00:10:00.000Z')`)
+	a1Exec(t, raw, `INSERT INTO grokbot_legacy_claims VALUES ('historical_route','peer_old','dly_old','2026-11-15T00:10:00.000Z')`)
 	if err := raw.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -69,6 +71,7 @@ func TestGrokbotRecipientDrainMigrationUpgradeReopen(t *testing.T) {
 		a1Unchanged(t, db.DB, snapshots)
 		a1Count(t, db, `SELECT count(*) FROM route_runs WHERE grok_wake_token IS NULL`, 1)
 		a1Count(t, db, `SELECT count(*) FROM route_runs WHERE grok_wake_settled_200=0`, 1)
+		a1Count(t, db, `SELECT count(*) FROM grokbot_legacy_claims WHERE route_id='historical_route' AND recipient='peer_old' AND delivery_id='dly_old' AND lease_until='2026-11-15T00:10:00.000Z'`, 1)
 		applied, err := Migrate(ctx, db.DB)
 		if err != nil || len(applied) != 0 {
 			t.Fatalf("reopen=%v %v", applied, err)
@@ -85,4 +88,5 @@ func TestGrokbotRecipientDrainMigrationUpgradeReopen(t *testing.T) {
 	a1Exec(t, db.DB, `DELETE FROM deliveries WHERE dly_id='dly_old'`)
 	a1Count(t, db, `SELECT count(*) FROM grokbot_covers`, 0)
 	a1Count(t, db, `SELECT count(*) FROM grokbot_wakes WHERE phase='armed'`, 1)
+	a1Count(t, db, `SELECT count(*) FROM grokbot_legacy_claims WHERE delivery_id='dly_old' AND lease_until='2026-11-15T00:10:00.000Z'`, 1)
 }

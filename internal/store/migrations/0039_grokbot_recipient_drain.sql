@@ -31,6 +31,16 @@ CREATE TABLE grokbot_wakes (
  PRIMARY KEY (route_id, recipient)
 ) STRICT;
 CREATE INDEX grokbot_wakes_deadlines ON grokbot_wakes(lease_until,retry_at,cover_until);
+-- Enable-time snapshots survive legacy settlement and history collection, but
+-- only until the original finite lease. No FK may erase or pin this identity.
+CREATE TABLE grokbot_legacy_claims (
+ route_id TEXT NOT NULL,
+ recipient TEXT NOT NULL,
+ delivery_id TEXT NOT NULL,
+ lease_until TEXT NOT NULL,
+ PRIMARY KEY (route_id,recipient,delivery_id)
+) STRICT;
+CREATE INDEX grokbot_legacy_claims_expiry ON grokbot_legacy_claims(lease_until);
 CREATE TABLE grokbot_covers (
  route_id TEXT NOT NULL,
  delivery_id TEXT NOT NULL REFERENCES deliveries(dly_id) ON DELETE CASCADE,

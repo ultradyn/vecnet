@@ -55,6 +55,7 @@ func (h *Hub) BeginGrokbotPOST(ctx context.Context, d DueDelivery, now time.Time
    SELECT 1 FROM grokbot_wakes w JOIN deliveries d ON d.dly_id=w.representative_id
    JOIN routes r ON r.route_id=w.route_id JOIN peers p ON p.peer_id=w.recipient
    WHERE w.route_id=?1 AND w.recipient=?2 AND w.token=?3
+   AND NOT EXISTS(SELECT 1 FROM grokbot_legacy_claims l WHERE l.route_id=w.route_id AND l.recipient=w.recipient AND l.lease_until>?5)
    AND d.state='pushed' AND d.attempt=?4 AND d.route_id=w.route_id AND d.recipient=w.recipient AND d.held=0 AND d.expires_at>?5
    AND r.kind='grokbot' AND r.grokbot_transport='recipient_drain_v1' AND r.verified_at IS NOT NULL
    AND r.url=w.expected_url AND r.url=?6 AND coalesce(r.key_enc,'')=w.expected_key
@@ -102,14 +103,22 @@ func (h *Hub) CancelUninvokedGrokbotPOST(ctx context.Context, d DueDelivery, now
 		return errors.New("hub: missing Grok wake claim")
 	}
 	return h.DB.Tx(ctx, func(tx *sql.Tx) error {
+		// Reservation ownership does not expire when coordinator ownership does.
+		if _, err := tx.ExecContext(ctx, `DELETE FROM route_runs WHERE route_id=? AND grok_wake_token=? AND grok_wake_settled_200=0`, d.RouteID, d.GrokWake.Token); err != nil {
+			return err
+		}
 		return deferGrokbotClaim(ctx, tx, d, now.Add(grokbotBudgetErrWait), false, true, now)
 	})
 }
 
 func deferGrokbotClaim(ctx context.Context, tx *sql.Tx, d DueDelivery, next time.Time, failed, allowArmed bool, now time.Time) error {
 	var ordinal int
-	var phase string
-	err := tx.QueryRowContext(ctx, `SELECT failure_ordinal,phase FROM grokbot_wakes WHERE route_id=? AND recipient=? AND token=? AND representative_id=? AND lease_until>?`, d.RouteID, d.Recipient, d.GrokWake.Token, d.DeliveryID, envelope.FormatTime(now)).Scan(&ordinal, &phase)
+	var phase, lease string
+	err := tx.QueryRowContext(ctx, `SELECT failure_ordinal,phase,lease_until FROM grokbot_wakes w
+ WHERE route_id=?1 AND recipient=?2 AND token=?3 AND representative_id=?4 AND (?6 OR lease_until>?5)
+ AND NOT EXISTS(SELECT 1 FROM route_runs rr WHERE rr.route_id=w.route_id AND rr.grok_wake_token=w.token AND rr.grok_wake_settled_200=1)
+ AND EXISTS(SELECT 1 FROM deliveries d WHERE d.dly_id=w.representative_id AND d.route_id=w.route_id
+ AND d.recipient=w.recipient AND d.state='pushed' AND d.attempt=?7 AND d.next_attempt_at=w.lease_until)`, d.RouteID, d.Recipient, d.GrokWake.Token, d.DeliveryID, envelope.FormatTime(now), allowArmed, d.Attempt).Scan(&ordinal, &phase, &lease)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
@@ -131,7 +140,7 @@ func deferGrokbotClaim(ctx context.Context, tx *sql.Tx, d DueDelivery, next time
 	if _, err := tx.ExecContext(ctx, `UPDATE grokbot_wakes SET phase='waiting',lease_until='',cover_until='',cover_valid=0,retry_at=?,failure_ordinal=? WHERE route_id=? AND recipient=? AND token=?`, envelope.FormatTime(next), ordinal, d.RouteID, d.Recipient, d.GrokWake.Token); err != nil {
 		return err
 	}
-	res, err := tx.ExecContext(ctx, `UPDATE deliveries SET state='queued',attempt=attempt-1,next_attempt_at=?,updated_at=? WHERE dly_id=? AND state='pushed' AND attempt=?`, envelope.FormatTime(next), envelope.FormatTime(now), d.DeliveryID, d.Attempt)
+	res, err := tx.ExecContext(ctx, `UPDATE deliveries SET state='queued',attempt=attempt-1,next_attempt_at=?,updated_at=? WHERE dly_id=? AND state='pushed' AND attempt=? AND route_id=? AND recipient=? AND next_attempt_at=?`, envelope.FormatTime(next), envelope.FormatTime(now), d.DeliveryID, d.Attempt, d.RouteID, d.Recipient, lease)
 	if err != nil {
 		return err
 	}
@@ -221,6 +230,11 @@ func setGrokbotTransport(ctx context.Context, tx *sql.Tx, route, transport strin
 	if old == transport {
 		return nil
 	}
+	if transport == GrokbotTransportRecipientDrainV1 {
+		if err := importLegacyGrokbotClaims(ctx, tx, route, envelope.FormatTime(now)); err != nil {
+			return err
+		}
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE routes SET grokbot_transport=? WHERE route_id=?`, transport, route); err != nil {
 		return err
 	}
@@ -234,5 +248,26 @@ func setGrokbotTransport(ctx context.Context, tx *sql.Tx, route, transport strin
 		return err
 	}
 	_, err := tx.ExecContext(ctx, `UPDATE grokbot_wakes SET phase='waiting',lease_until='',retry_at='' WHERE route_id=? AND phase='claimed'`, route)
+	return err
+}
+
+// importLegacyGrokbotClaims runs in the capability writer transaction, before
+// legacy settlement can clear/replace next_attempt_at. Existing opted claims
+// retain their own coordinator identity rather than becoming legacy imports.
+func importLegacyGrokbotClaims(ctx context.Context, tx *sql.Tx, route, now string) error {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO grokbot_legacy_claims(route_id,recipient,delivery_id,lease_until)
+ SELECT d.route_id,d.recipient,d.dly_id,d.next_attempt_at FROM deliveries d
+ WHERE d.route_id=?1 AND d.state='pushed' AND d.priority IN ('wake','wake_idle') AND d.next_attempt_at>?2
+ AND NOT EXISTS(SELECT 1 FROM grokbot_wakes w WHERE w.route_id=d.route_id AND w.recipient=d.recipient
+ AND w.representative_id=d.dly_id AND w.token<>'' AND w.lease_until=d.next_attempt_at)
+ ON CONFLICT(route_id,recipient,delivery_id) DO UPDATE SET lease_until=max(lease_until,excluded.lease_until)`, route, now); err != nil {
+		return err
+	}
+	// Seed only absent coordinators. Imports remain an independent exclusion:
+	// settlement/cancellation of an existing opted token cannot clear them.
+	_, err := tx.ExecContext(ctx, `INSERT INTO grokbot_wakes(route_id,recipient,phase,lease_until)
+ SELECT route_id,recipient,'waiting',max(lease_until) FROM grokbot_legacy_claims
+ WHERE route_id=?1 AND lease_until>?2 GROUP BY route_id,recipient
+ ON CONFLICT(route_id,recipient) DO NOTHING`, route, now)
 	return err
 }

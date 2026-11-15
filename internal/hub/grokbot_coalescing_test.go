@@ -169,3 +169,99 @@ func TestGrokGateRollbackPreservesReservation(t *testing.T) {
 		t.Fatalf("rolled back reservation=%d %v", n, err)
 	}
 }
+
+func TestGrokLegacyImportTransactionAndCleanup(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "legacy-import.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	at := "2026-11-15T00:00:00.000Z"
+	deadline := "2026-11-15T00:10:00.000Z"
+	exec := func(q string, args ...any) {
+		t.Helper()
+		if _, err := db.Exec(q, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	count := func(table string, want int) {
+		t.Helper()
+		var n int
+		if err := db.QueryRow(`SELECT count(*) FROM ` + table).Scan(&n); err != nil || n != want {
+			t.Fatalf("%s count=%d want=%d err=%v", table, n, want, err)
+		}
+	}
+	exec(`INSERT INTO routes(route_id,owner_kind,owner_id,kind,url,created_at) VALUES ('import','peer','peer','grokbot','https://example.test',?)`, at)
+	// Many legacy leaders must be captured set-wise; include a sibling domain
+	// and an opted token that must retain its existing coordinator identity.
+	exec(`WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<2049)
+ INSERT INTO deliveries(dly_id,msg_id,thr_id,recipient,priority,state,attempt,attempts_left,route_id,expires_at,next_attempt_at,created_at,updated_at,body_sha256)
+ SELECT 'legacy_'||i,'msg_'||i,'thr_'||i,CASE WHEN i=2049 THEN 'sibling' ELSE 'peer' END,'wake','pushed',1,8,'import','2026-12-01T00:00:00.000Z',?2,?1,?1,'synthetic' FROM n`, at, deadline)
+	exec(`INSERT INTO grokbot_wakes(route_id,recipient,representative_id,token,phase,lease_until,failure_ordinal,retry_at) VALUES ('import','sibling','legacy_2049','opted-token','armed',?1,4,?1)`, deadline)
+	// Rollback must include both the capability and every captured identity.
+	err = db.Tx(ctx, func(tx *sql.Tx) error {
+		if err := setGrokbotTransport(ctx, tx, "import", GrokbotTransportRecipientDrainV1, time.Date(2026, 11, 15, 0, 0, 0, 0, time.UTC)); err != nil {
+			return err
+		}
+		return fmt.Errorf("synthetic capability rollback")
+	})
+	if err == nil || !strings.Contains(err.Error(), "synthetic capability rollback") {
+		t.Fatalf("rollback=%v", err)
+	}
+	count("grokbot_legacy_claims", 0)
+	var transport string
+	if err := db.QueryRow(`SELECT grokbot_transport FROM routes WHERE route_id='import'`).Scan(&transport); err != nil || transport != GrokbotTransportDeliveryV1 {
+		t.Fatalf("rollback transport=%q %v", transport, err)
+	}
+	if err := db.Tx(ctx, func(tx *sql.Tx) error {
+		return setGrokbotTransport(ctx, tx, "import", GrokbotTransportRecipientDrainV1, time.Date(2026, 11, 15, 0, 0, 0, 0, time.UTC))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	count("grokbot_legacy_claims", 2048)
+	var n int
+	if err := db.QueryRow(`SELECT count(*) FROM grokbot_wakes WHERE route_id='import' AND recipient='sibling' AND token='opted-token' AND phase='armed' AND lease_until=?1 AND retry_at=?1 AND failure_ordinal=4`, deadline).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("existing token changed=%d %v", n, err)
+	}
+	// Recipient identity and finite deadline survive physical history collection.
+	exec(`DELETE FROM deliveries`)
+	exec(`DELETE FROM routes`)
+	cleanup := func(now string, want int) {
+		t.Helper()
+		if err := db.Tx(ctx, func(tx *sql.Tx) error { return cleanupGrokbotWakes(ctx, tx, now) }); err != nil {
+			t.Fatal(err)
+		}
+		count("grokbot_legacy_claims", want)
+	}
+	cleanup("2026-11-15T00:09:59.999Z", 2048)
+	count("grokbot_wakes", 2)
+	// Both scoped identity and expiration cleanup use bounded indexed searches.
+	for _, probe := range []struct{ q, index string }{
+		{`EXPLAIN QUERY PLAN SELECT 1 FROM grokbot_legacy_claims WHERE route_id='import' AND recipient='peer' AND delivery_id='legacy_1' AND lease_until>'2026-11-15'`, "INDEX"},
+		{`EXPLAIN QUERY PLAN DELETE FROM grokbot_legacy_claims WHERE lease_until<='2026-11-15'`, "grokbot_legacy_claims_expiry"},
+	} {
+		rows, err := db.Query(probe.q)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var plan strings.Builder
+		for rows.Next() {
+			var id, parent, unused int
+			var detail string
+			if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+				t.Fatal(err)
+			}
+			plan.WriteString(detail)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		rows.Close()
+		if !strings.Contains(plan.String(), probe.index) {
+			t.Fatalf("missing index %q: %s", probe.index, plan.String())
+		}
+	}
+	cleanup(deadline, 0)
+	count("grokbot_wakes", 0)
+}

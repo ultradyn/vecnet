@@ -23,7 +23,9 @@ const grokPendingPredicate = `d.route_id=?1 AND d.recipient=?2
 func coverGrokbotFollowers(ctx context.Context, tx *sql.Tx, route, recipient, representative, now string) error {
 	_, err := tx.ExecContext(ctx, `INSERT INTO grokbot_covers(route_id,delivery_id,recipient,first_covered_at)
  SELECT d.route_id,d.dly_id,d.recipient,?3 FROM deliveries d INDEXED BY deliveries_grok_domain WHERE `+grokPendingPredicate+`
- AND (?4='' OR d.dly_id<>?4) ON CONFLICT(route_id,delivery_id) DO NOTHING`, route, recipient, now, representative)
+ AND (?4='' OR d.dly_id<>?4)
+ AND NOT EXISTS(SELECT 1 FROM grokbot_legacy_claims l WHERE l.route_id=d.route_id AND l.recipient=d.recipient
+ AND l.delivery_id=d.dly_id AND l.lease_until>?3) ON CONFLICT(route_id,delivery_id) DO NOTHING`, route, recipient, now, representative)
 	return err
 }
 
@@ -38,7 +40,8 @@ const grokCandidateQuery = `SELECT d.dly_id,d.recipient,d.thr_id,d.route_id,r.ur
  AND r.verified_at IS NOT NULL AND d.expires_at>?1
  AND (d.event_seq,d.dly_id)>(?2,?3)
  AND ((r.kind='grokbot' AND r.grokbot_transport='recipient_drain_v1'
-       AND NOT ((w.lease_until>?1 OR w.retry_at>?1 OR w.cover_until>?1)
+       AND NOT ((w.lease_until>?1 OR w.retry_at>?1 OR w.cover_until>?1
+                 OR EXISTS(SELECT 1 FROM grokbot_legacy_claims l WHERE l.route_id=d.route_id AND l.recipient=d.recipient AND l.lease_until>?1))
                 AND EXISTS(SELECT 1 FROM grokbot_covers c WHERE c.route_id=d.route_id AND c.delivery_id=d.dly_id)))
       OR ((r.kind!='grokbot' OR r.grokbot_transport!='recipient_drain_v1') AND d.held=0 AND (d.next_attempt_at IS NULL OR d.next_attempt_at<=?1)))
  ORDER BY d.event_seq,d.dly_id LIMIT ?4`
@@ -107,7 +110,7 @@ func (h *Hub) claimPushCandidates(ctx context.Context, tx *sql.Tx, now time.Time
 				// An armed lease survives transport revocation. Lifecycle invalidation
 				// hooks in T2 clear cover rights without withdrawing this exclusion.
 				var gated bool
-				if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM grokbot_wakes WHERE route_id=? AND recipient=? AND lease_until>?)`, c.d.RouteID, c.d.Recipient, nowS).Scan(&gated); err != nil {
+				if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM grokbot_wakes WHERE route_id=?1 AND recipient=?2 AND lease_until>?3) OR EXISTS(SELECT 1 FROM grokbot_legacy_claims WHERE route_id=?1 AND recipient=?2 AND lease_until>?3)`, c.d.RouteID, c.d.Recipient, nowS).Scan(&gated); err != nil {
 					return nil, nil, err
 				}
 				if gated {
@@ -157,7 +160,11 @@ func (h *Hub) electGrokbotWake(ctx context.Context, tx *sql.Tx, c *grokCandidate
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return false, err
 	}
-	if lease > nowS || retry > nowS || cover > nowS {
+	var legacyLease string
+	if err := tx.QueryRowContext(ctx, `SELECT coalesce(max(lease_until),'') FROM grokbot_legacy_claims WHERE route_id=? AND recipient=?`, d.RouteID, d.Recipient).Scan(&legacyLease); err != nil {
+		return false, err
+	}
+	if legacyLease > nowS || lease > nowS || retry > nowS || cover > nowS {
 		return false, coverGrokbotFollowers(ctx, tx, d.RouteID, d.Recipient, rep, nowS)
 	}
 	if c.held || c.next > nowS {
@@ -165,16 +172,6 @@ func (h *Hub) electGrokbotWake(ctx context.Context, tx *sql.Tx, c *grokCandidate
 	}
 	ordered, err := grokCandidateOrdered(ctx, tx, *d)
 	if err != nil || !ordered {
-		return false, err
-	}
-	// Enabling while a legacy request is already claimed imports its known
-	// lease as a barrier, never as evidence that it supports draining.
-	var legacyLease string
-	if err := tx.QueryRowContext(ctx, `SELECT coalesce(max(next_attempt_at),'') FROM deliveries WHERE route_id=? AND recipient=? AND state='pushed' AND next_attempt_at>?`, d.RouteID, d.Recipient, nowS).Scan(&legacyLease); err != nil {
-		return false, err
-	}
-	if legacyLease > nowS {
-		_, err = tx.ExecContext(ctx, `INSERT INTO grokbot_wakes(route_id,recipient,phase,lease_until) VALUES (?,?,'waiting',?) ON CONFLICT(route_id,recipient) DO UPDATE SET phase='waiting',lease_until=excluded.lease_until`, d.RouteID, d.Recipient, legacyLease)
 		return false, err
 	}
 	if rep != d.DeliveryID || frozen == nil {
@@ -222,7 +219,11 @@ func freezeGrokbotBody(ctx context.Context, tx *sql.Tx, d *DueDelivery) error {
 }
 
 func cleanupGrokbotWakes(ctx context.Context, tx *sql.Tx, now string) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM grokbot_legacy_claims WHERE lease_until<=?`, now); err != nil {
+		return err
+	}
 	_, err := tx.ExecContext(ctx, `DELETE FROM grokbot_wakes WHERE lease_until<=?1 AND retry_at<=?1 AND cover_until<=?1
+ AND NOT EXISTS(SELECT 1 FROM grokbot_legacy_claims l WHERE l.route_id=grokbot_wakes.route_id AND l.recipient=grokbot_wakes.recipient)
  AND NOT EXISTS(SELECT 1 FROM deliveries d WHERE d.route_id=grokbot_wakes.route_id AND d.recipient=grokbot_wakes.recipient AND d.state IN ('queued','pushed') AND d.priority IN ('wake','wake_idle') AND d.expires_at>?1)`, now)
 	return err
 }
