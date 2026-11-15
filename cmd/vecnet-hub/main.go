@@ -561,6 +561,7 @@ func registerPreferenceFlags(fs *flag.FlagSet, getenv func(string) string) func(
 		{key: "blobs.expiry", flag: "blobs-expiry"},
 		{key: "events.refresh_interval", flag: "events-refresh-interval"},
 		{key: "presence.default_ttl", flag: "presence-ttl"},
+		{key: "presence.send_warning_after", flag: "send-warning-after"},
 		{key: "presence.session_ttl", flag: "session-presence-ttl"},
 		{key: "presence.launcher_ttl", flag: "launcher-presence-ttl"},
 		{key: "agents.default_max_depth", flag: "default-max-depth"},

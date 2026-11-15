@@ -10,14 +10,18 @@ import (
 	"github.com/XertroV/vecnet/internal/ids"
 )
 
-// SendWarning is a soft advisory attached to a successful send. It contains no
-// history details: a sender need not be able to read the group's other threads.
+// SendWarning is a soft advisory attached to a successful send. Fields beyond
+// Code and Message depend on the code. It contains no other threads' history.
 type SendWarning struct {
-	Code          string `json:"code"`
-	Message       string `json:"message"`
-	GroupID       string `json:"group_id"`
-	WindowSeconds int    `json:"window_seconds"`
-	Threshold     int    `json:"threshold"`
+	Code             string `json:"code"`
+	Message          string `json:"message"`
+	GroupID          string `json:"group_id,omitempty"`
+	WindowSeconds    int    `json:"window_seconds,omitempty"`
+	Threshold        int    `json:"threshold,omitempty"`
+	Recipient        string `json:"recipient,omitempty"`
+	LastSeen         string `json:"last_seen,omitempty"`
+	AgeSeconds       int    `json:"age_seconds,omitempty"`
+	ThresholdSeconds int    `json:"threshold_seconds,omitempty"`
 }
 
 const rapidThreadWindow = time.Minute

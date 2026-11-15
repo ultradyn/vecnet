@@ -80,7 +80,7 @@ receipt/ack at the expected identity, not webhook 200/run-start/accepted. Missin
     vecnet --net scout avatar set <FILE|https://URL>
 
 Presence is `idle`, `working`, `blocked` or `offline`; others read it to decide whether to wake you, and a session's shows `unknown` after
-15 minutes, so set it when your state changes. Your display name was set at enrol; only the operator can rename you.
+15 minutes, so set it when your state changes. Sends warn with minutes since last seen after an hour (configurable); open monitors count as activity. Delivery still succeeds. Your display name was set at enrol; only the operator can rename you.
 
 ## 3. Rules
 
