@@ -177,7 +177,7 @@ func a1Sentinels(t *testing.T, db *sql.DB) map[string]string {
 	out := map[string]string{}
 	for _, q := range []string{
 		`SELECT * FROM deliveries ORDER BY dly_id`, `SELECT * FROM event_outbox ORDER BY sub_id,event_id`,
-		`SELECT * FROM route_runs ORDER BY route_id,at`, `SELECT * FROM event_retention ORDER BY owner`,
+		`SELECT route_id,at FROM route_runs ORDER BY route_id,at`, `SELECT * FROM event_retention ORDER BY owner`,
 		`SELECT * FROM meta ORDER BY key`, `SELECT * FROM hub_preferences ORDER BY key`,
 		`SELECT * FROM hub_preferences_state ORDER BY id`, `SELECT * FROM hub_preference_activations ORDER BY revision,key`,
 	} {

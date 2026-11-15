@@ -16,13 +16,18 @@ func TestGroupThreadCreationsMigrationBackfill(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var pending []string
 	for _, m := range all {
 		if m.name >= "0038_" {
-			break
+			pending = append(pending, m.name)
+			continue
 		}
 		if _, err := applyOne(context.Background(), db, m); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if len(pending) == 0 || pending[0] != "0038_group_thread_creations.sql" {
+		t.Fatalf("pending migration tail must start with 0038: %v", pending)
 	}
 	for _, g := range []string{"grp_a", "grp_b", "grp_reply"} {
 		a1Exec(t, db, fmt.Sprintf(`INSERT INTO groups(grp_id,created_by,created_at,last_active_at) VALUES('%s','peer_old','2026-11-15T00:00:00.000Z','2026-11-15T00:00:00.000Z')`, g))
@@ -53,8 +58,8 @@ func TestGroupThreadCreationsMigrationBackfill(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(applied, []string{"0038_group_thread_creations.sql"}) {
-		t.Fatalf("upgrade applied %v", applied)
+	if !reflect.DeepEqual(applied, pending) {
+		t.Fatalf("upgrade applied %v, want full pending tail %v", applied, pending)
 	}
 	rows, err := db.Query(`SELECT group_id,thread_id,created_at FROM group_thread_creations ORDER BY group_id,thread_id`)
 	if err != nil {

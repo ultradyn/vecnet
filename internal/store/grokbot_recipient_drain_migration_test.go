@@ -47,7 +47,10 @@ func TestGrokbotRecipientDrainMigrationUpgradeReopen(t *testing.T) {
 	}
 	a1Unchanged(t, raw, snapshots)
 	a1Count(t, raw, `SELECT count(*) FROM routes WHERE grokbot_transport='delivery_v1'`, 1)
+	// Original route_id/at values are covered by snapshots; additive columns
+	// must independently receive their declared historical-row defaults.
 	a1Count(t, raw, `SELECT count(*) FROM route_runs WHERE grok_wake_token IS NULL`, 1)
+	a1Count(t, raw, `SELECT count(*) FROM route_runs WHERE grok_wake_settled_200=0`, 1)
 	a1Count(t, raw, `SELECT count(*) FROM grokbot_wakes`, 0)
 	a1Count(t, raw, `SELECT count(*) FROM grokbot_covers`, 0)
 	if _, err := raw.Exec(`UPDATE routes SET grokbot_transport='unknown'`); err == nil {
@@ -64,6 +67,8 @@ func TestGrokbotRecipientDrainMigrationUpgradeReopen(t *testing.T) {
 			t.Fatal(err)
 		}
 		a1Unchanged(t, db.DB, snapshots)
+		a1Count(t, db, `SELECT count(*) FROM route_runs WHERE grok_wake_token IS NULL`, 1)
+		a1Count(t, db, `SELECT count(*) FROM route_runs WHERE grok_wake_settled_200=0`, 1)
 		applied, err := Migrate(ctx, db.DB)
 		if err != nil || len(applied) != 0 {
 			t.Fatalf("reopen=%v %v", applied, err)
