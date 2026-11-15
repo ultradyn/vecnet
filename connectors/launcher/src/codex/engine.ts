@@ -82,6 +82,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
   let completionProbe: CodexRpc | undefined, completionRetry: { cancel(): void } | undefined, completionRetryIndex = 0;
   const completionRows = new Set<string>();
   const settlementProofs = new Map<string, InflightRow>();
+  const receiptClears = new Map<string, { row: InflightRow; confirmed: boolean }>();
   let settlementRetry: { cancel(): void } | undefined, settlementRetryIndex = 0;
   const children = new Set<ChildProcess>();
   const unresolvedLogged = new Set<string>(), pendingLogged = new Set<string>();
@@ -145,8 +146,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
         for (const proof of [...settlementProofs.values()]) {
           if (!canRetrySettlement()) return;
           const current = parseRow('inflight:' + proof.key);
-          if (!current || current.attempt !== proof.attempt || current.claim !== proof.claim || !sameOwner(current.owner, owner) ||
-              JSON.stringify(current.deliveries) !== JSON.stringify(proof.deliveries)) {
+          if (!current || !sameProofAttempt(current, proof)) {
             quarantine('inflight:' + proof.key); return;
           }
           try { await clear(proof); }
@@ -161,10 +161,18 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
       });
     });
   }
+  function sameProofAttempt(a: InflightRow, b: InflightRow): boolean {
+    return a.key === b.key && a.attempt === b.attempt && a.claim === b.claim && sameOwner(a.owner, b.owner!) &&
+      JSON.stringify(a.deliveries) === JSON.stringify(b.deliveries);
+  }
   async function clear(r: InflightRow, outcome: 'accepted' | 'released' = 'accepted') {
     // Preserve the original proof before fallible durable confirmation. This
     // obligation is independent of loaded-thread observation and idle age.
     if (outcome === 'accepted') {
+      const current = parseRow('inflight:' + r.key), outstanding = settlementProofs.get(r.key);
+      if (!current || !sameProofAttempt(current, r) || (outstanding && !sameProofAttempt(outstanding, r))) {
+        quarantine('inflight:' + r.key); throw new Error('receipt_provenance_changed');
+      }
       receipts.add(r.key);
       if (!settlementProofs.has(r.key)) settlementProofs.set(r.key, { ...r, owner: { ...owner }, deliveries: [...r.deliveries] });
       const proof = settlementProofs.get(r.key)!;
@@ -175,6 +183,8 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     }
     kv.delete('inflight:' + r.key); kv.delete('releasing:' + r.claim); kv.delete('diagnostic:unresolved:' + r.key);
     waitingRetry.delete(r.key); waitForIdle.delete(r.key); receipts.delete(r.key); unresolvedLogged.delete(r.key); pendingLogged.delete(r.key);
+    const pending = receiptClears.get(r.key);
+    if (outcome === 'accepted' && pending && sameProofAttempt(pending.row, r)) pending.confirmed = true;
     settlementProofs.delete(r.key);
     if (!settlementProofs.size) { settlementRetry?.cancel(); settlementRetry = undefined; settlementRetryIndex = 0; }
   }
@@ -480,7 +490,19 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
       if (parseRow('inflight:' + key)) {
         receipts.add(key);
         const r = JSON.parse(kv.get('inflight:' + key)!) as InflightRow;
-        if (r.state !== 'sending') enqueue(async () => { await clear(r); await verifyWatch(); arm(0); });
+        if (r.state !== 'sending' && !receiptClears.has(key)) {
+          const pending = { row: r, confirmed: false }; receiptClears.set(key, pending);
+          enqueue(async () => {
+            try {
+              // A history scan ahead of this queued receipt can confirm the
+              // same attempt. Only that exact successful retirement is stale.
+              if (pending.confirmed) {
+                if (kv.get('inflight:' + key) !== undefined) { quarantine('inflight:' + key); return; }
+              } else await clear(r);
+              await verifyWatch(); arm(0);
+            } finally { if (receiptClears.get(key) === pending) receiptClears.delete(key); }
+          });
+        }
       }
     }
     if (method === 'turn/completed') { recoverCompletion(obj(p.turn).id ?? p.turnId); return; }
@@ -863,7 +885,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
         if (c.exitCode !== null || c.signalCode !== null) { resolve(); return; }
         c.once('close', () => resolve()); c.kill();
       }));
-      await queue; await Promise.all(exits);
+      await queue; await Promise.all(exits); receiptClears.clear();
       // Drain the killed claim before releasing its nonce: Go may still be
       // committing it. Keep accepted/ambiguous inflight rows for recovery.
       await recoverClaims();

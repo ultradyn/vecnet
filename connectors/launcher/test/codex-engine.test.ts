@@ -676,13 +676,28 @@ for (const watchTrigger of [false, true]) test(`F2 fix1 TR61-01 outstanding gap 
   }) });
   h.fake.withholdNextItem(); await h.wake(); h.deps.minGapMs = 5000;
   const original = structuredClone(h.rows()[0]); assert.ok(original);
-  h.plan.settleFailure = true; h.save(); h.fake.recordLater(original.key, h.clock.now()); await h.tick(0);
-  // wake's normal two-second tick leaves the production five-second gap armed.
+  let armedGap: { at: number; fired: boolean; cancelled: boolean } | undefined;
+  const timer = h.clock.timer;
+  h.clock.timer = (ms, fn) => {
+    // With proof withheld, wake's two-second tick reaches push while the
+    // five-second minimum gap still has roughly three seconds remaining.
+    const observed = ms > 2500 && ms < 3500 ? { at: h.clock.now() + ms, fired: false, cancelled: false } : undefined;
+    if (observed) { assert.equal(armedGap, undefined); armedGap = observed; }
+    const alarm = timer(ms, () => { if (observed) observed.fired = true; fn(); });
+    return { cancel() { if (observed) observed.cancelled = true; alarm.cancel(); } };
+  };
   await h.wake([{ id: 'i1', priority: 'wake_idle' }]);
+  h.clock.timer = timer;
+  assert.ok(armedGap, 'the real minimum-gap timer must be created before proof arrives');
+  assert.ok(armedGap.at > h.clock.now()); assert.equal(armedGap.fired, false); assert.equal(armedGap.cancelled, false);
+  assert.equal(receiptSettles(h).length, 0, 'the original pending row has no item proof while the timer is armed');
+  h.plan.settleFailure = true; h.save(); h.fake.recordLater(original.key, h.clock.now()); await h.tick(0);
   const claims = h.hooks().filter(r => r.argv.includes('--event')).length, guards = deliveryGuards(h).length;
   h.fake.completeTurnOnly(threadId, 'active', { type: 'idle' }); await h.sync();
   const proof = receiptSettles(h)[0].argv;
   await h.tick(6000);
+  assert.equal(armedGap.fired, true, 'the already-armed gap callback executes while proof still fails');
+  assert.equal(armedGap.cancelled, false);
   assert.equal(h.hooks().filter(r => r.argv.includes('--event')).length, claims, 'gap cannot acquire a new claim before proof confirmation');
   assert.equal(deliveryGuards(h).length, guards); assert.equal(h.sends().length, 1); assert.deepEqual(h.rows(), [original]);
   if (watchTrigger) {
@@ -745,6 +760,60 @@ test('F2 fix1 TR61-01 receipt during an awaited checkpoint blocks fresh admissio
   h.plan.settleFailure = false; h.save();
   for (let i = 0; i < 20 && h.sends().length === 1; i++) await h.tick(1000);
   assert.equal(h.sends().length, 2); assert.deepEqual(h.rows(), []); assert.equal(h.releases().length, 0);
+});
+
+for (const firstFails of [false, true]) test(`F2 fix2 TR61-03 duplicate receipts with first confirmation failure ${firstFails}`, async t => {
+  let h: RecoveryHarness, key = '', notices = 0, removals = 0;
+  h = await harness(t, { status: active, wrap: rpc => ({ ...rpc,
+    onNotification(fn) { rpc.onNotification((method, params) => {
+      if ((method === 'item/started' || method === 'item/completed') && (params as { item?: { clientId?: string } }).item?.clientId === key) {
+        assert.ok(h.kv.get('inflight:' + key), 'both receipt notices arrive while the original row exists'); notices++;
+      }
+      fn(method, params);
+    }); },
+  }) });
+  h.fake.withholdNextItem(); await h.wake();
+  const original = structuredClone(h.rows()[0]); key = original.key;
+  const remove = h.kv.delete;
+  h.kv.delete = k => {
+    remove(k);
+    if (k === 'inflight:' + key) {
+      assert.equal(notices, 2, 'both clears were requested before first successful cleanup');
+      removals++; h.plan.settleFailure = true; h.save();
+    }
+  };
+  h.plan.settleFailure = firstFails; h.save();
+  h.fake.recordLater(key, h.clock.now()); h.clock.advance(0);
+  h.fake.notifySubscribers(threadId, 'item/completed', { threadId, turnId: 'active', item: { type: 'userMessage', clientId: key } });
+  await h.sync(); assert.equal(notices, 2);
+  if (firstFails) { assert.deepEqual(h.rows(), [original]); h.plan.settleFailure = false; h.save(); }
+  for (let i = 0; i < 20; i++) await h.tick(1000);
+  assert.equal(removals, 1); assert.deepEqual(h.rows(), []);
+  assert.deepEqual(h.engine.liveness(), { live: true }, 'a stale duplicate cannot quarantine unchanged ownership');
+  assert.equal(h.log.entries.filter(e => e.msg === 'codex_recovery_quarantined').length, 0);
+  const confirmations = receiptSettles(h).filter(r => r.argv.includes(key));
+  if (!firstFails) assert.equal(confirmations.length, 1, 'confirmed stale clear must not make another fallible confirmation');
+  else assert.ok(confirmations.length >= 2, 'failed first confirmation retains its exact proof retry');
+  for (const r of confirmations) assert.deepEqual(r.argv, confirmations[0].argv);
+  h.plan.settleFailure = false; h.save(); await h.wake([{ id: 'w2', priority: 'wake' }]);
+  assert.equal(h.sends().length, 2, 'no recreated proof barrier blocks one subsequent eligible delivery');
+  await h.tick(2 * minute); assert.equal(h.sends().length, 2); assert.equal(h.releases().length, 0);
+});
+
+for (const altered of ['attempt', 'deliveries', 'missing'] as const) test(`F2 fix2 TR61-03 unconfirmed altered ${altered} stays fail-closed`, async t => {
+  const h = await harness(t, { status: active });
+  h.fake.withholdNextItem(); await h.wake();
+  const original = structuredClone(h.rows()[0]);
+  h.plan.settleFailure = true; h.save(); h.fake.recordLater(original.key, h.clock.now()); await h.tick(0);
+  const proof = receiptSettles(h)[0].argv;
+  if (altered === 'missing') h.kv.delete('inflight:' + original.key);
+  else h.kv.set('inflight:' + original.key, JSON.stringify({ ...original, ...(altered === 'attempt' ? { attempt: 'd'.repeat(32) } : { deliveries: ['different'] }) }));
+  h.plan.settleFailure = false; h.save();
+  for (let i = 0; i < 20; i++) await h.tick(1000);
+  assert.deepEqual(h.engine.liveness(), { live: false, reason: 'ownership_changed' });
+  assert.ok(h.log.entries.some(e => e.msg === 'codex_recovery_quarantined'));
+  for (const r of receiptSettles(h)) assert.deepEqual(r.argv, proof);
+  assert.equal(h.sends().length, 1); assert.equal(h.releases().length, 0);
 });
 
 // Round-three probes, exercised through the fake wire and real hook children.

@@ -8,8 +8,8 @@ than being treated as proof of idle or permission to send input.
 
 - Base: `4adae810180f02970ea46c4920a46668dc6d82a7`, branch `fix/issue-61-terminal-recovery`.
 - Historical reference only: `8e69ff5bb3f7aff4d7a6a90bd35823cd3c4461aa`.
-- Engine blob: `31a3f5ca103f9486343c1fb4b4cb379f0bca459e`.
-- Engine-test blob: `6d6ab21012f9ded4d7817f3bc03c46a7af88c358`.
+- Engine blob: `6ca887a8b7a15f4f0ecdd36c4f4eba812433c7f2`.
+- Engine-test blob: `455edb91421773b692d953db216df003be063295`.
 - Fake-app-server blob: `d521e3a1f394c4082ddd6ef813f16e70928646eb`.
 
 The historical branch was not merged. Public Engine/Binding interfaces, durable
@@ -122,3 +122,45 @@ Commands: gate `fix1-engine-rpc` with both complete engine/RPC test files, gate
 `fix1-ln-check just ln-check`, and gate `fix1-ln-e2e just ln-e2e`. Independent
 controller re-review remains required; no merge, deployment or incident/F1
 acceptance is claimed.
+
+## Fix round 2 — controller R7 / TR61-03 and TR61-04
+
+Base `8398a1fcc66434f0c363baf3a88c18db81b607f1`. TR61-01/02 remain
+addressed; prior full gates and E2E results above are previous-source evidence.
+
+Coalesce receipt clears per key while their asynchronous operation is queued or
+running. An exact successful history/receipt cleanup can mark that queued request
+confirmed; it skips another fallible confirmation only if its row is still
+absent. A live altered row, changed outstanding proof, or missing unconfirmed
+row remains fail-closed. The coalescer is removed on completion/failure and stop;
+failed first confirmation retains the independent proof retry. No durable schema,
+public interface or fake-server default changes.
+
+`fix2-red-duplicate.log` reproduces unchanged-owner quarantine on current source
+when both item notices arrive before first cleanup, then a synthetic KV deletion
+hook makes redundant confirmation fail. Wrapper/build-box exits 1/1 (one fail,
+one failed-first-recovery control passes). `fix2-green-focused.log` passes 41/41,
+including both duplicate variants and three altered/missing unconfirmed-proof
+controls; exits 0/0.
+
+Timer-claim correction: the fix-round-1 GREEN did not actually arm a gap timer
+before proof existed. That earlier report claim is withdrawn. The corrected test
+queues wake_idle while the original row has no proof, explicitly records the
+roughly three-second remainder of the production five-second gap, asserts it is
+armed and uncancelled before proof arrives, and observes its callback firing
+while confirmation still fails. All no-claim/guard/turn and post-proof exactly-once
+assertions remain. `fix2-gap-control.log` passes 2/2 on unchanged production
+source, honestly recorded as a coverage control. Temporarily disabling only
+`proofBlocksDelivery()` produces `fix2-gap-mutation.log` RED (both cases take an
+extra claim, 3 vs 2; exits 1/1). The mutation was restored before final gates.
+
+Fresh final affected/strict/full results and exact commands are in the appended
+task report. No E2E rerun is required for private clear idempotence and an oracle
+repair under R7; prior 16-case E2E remains previous-source evidence. Independent
+same-reviewer re-review and final source PASS remain controller-owned.
+
+Fresh final gates: `fix2-engine-rpc.log` passes 190/190, and `fix2-ln-check.log`
+passes strict TypeScript and 2,181/2,181 launcher/hub-client tests across 955
+top-level cases. All skips/cancellations are zero and wrapper/build-box exits
+are 0/0. The barrier mutation was restored before these gates. Committed source
+pins and all exact commands are in the Fix round 2 report appendix.
