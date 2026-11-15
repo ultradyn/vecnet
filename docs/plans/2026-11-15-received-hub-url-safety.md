@@ -16,7 +16,7 @@
 - Preserve status/code and validated relocation recovery fields, typed error chains, timeout/retry classification, context cancellation and CLI exit codes. Unrelated rich API errors keep their existing contracts.
 - Invalid received notices must not cause partial event callbacks, state retention, cursor advancement, acknowledgement, follow or destination requests. Persisted binding inspection never rewrites bindings or claims ownership.
 - Use synthetic peers, URLs, servers, profiles and bindings only. No real credentials, sessions, data stores, production probes or delivery operations.
-- Every build/test runs through the x-boss build-box runner with at most two Go jobs/threads, a private physical TMPDIR and umask 0077. Save RED/GREEN output and actual wrapper exit status.
+- Every build/test runs through the x-boss build-box runner with at most two Go jobs/threads, a mode-0700 physical TMPDIR root and CI-compatible umask 0022. Save RED/GREEN output and actual wrapper exit status.
 - Keep source changes within the named receive/diagnostic consumers. No database migration, web UI feature, hub behavior change or automatic production deployment is part of this client fix.
 
 ## Review Focus
