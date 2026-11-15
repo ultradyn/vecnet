@@ -35,3 +35,11 @@ GitHub#51 remains open for all other performance, Settings and rollout items.
 Try it synthetically: `BB_HOST=x-boss BB_JOBS=2 BB_PULLBACK=0 just bb bash scripts/bb/remote.test.sh`.
 Raw operational evidence must be copied and hash-verified outside the worktree
 before deleting only this worktree and merged branch.
+
+## Integration lifecycle
+
+Merged/pushed at`23e97129`, identical executable blobs to reviewed`e6e9c865`.
+GitHub#51 now marks only the named build-box item complete. Both workers exited
+zero. All48 operational workspace files were copied and hash-verified into
+`.scratch/vecnet/issue-loop/2026-11-15/issue-51-physical-path-evidence` before
+removing the owned worktree and merged branch; manifest retained there.
