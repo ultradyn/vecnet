@@ -392,6 +392,10 @@ func TestHubMovedErrorProjection(t *testing.T) {
 			var want map[string]any
 			if u.valid {
 				want = details
+			} else if field == "new_url" {
+				want = map[string]any{"notice": n}
+			} else {
+				want = map[string]any{"new_url": target}
 			}
 			cases = append(cases, relocationCase{u.name + "/" + field, details, want})
 		}
@@ -554,12 +558,14 @@ func TestUploadRelocationRecoveryFields(t *testing.T) {
 				if api.Message != wantMessage {
 					t.Errorf("relocation public prose = %q, want %q", api.Message, wantMessage)
 				}
+				var want map[string]any
 				if tc.valid {
-					if noticeResponseJSON(t, api.Details) != noticeResponseJSON(t, tc.details) {
-						t.Error("upload lost checked signed recovery fields")
-					}
-				} else if len(api.Details) != 0 {
-					t.Error("upload kept invalid recovery details")
+					want = tc.details
+				} else if tc.name == "invalid-target" {
+					want = map[string]any{"notice": n}
+				}
+				if noticeResponseJSON(t, api.Details) != noticeResponseJSON(t, want) {
+					t.Error("upload lost independently checked recovery or kept invalid details")
 				}
 				if strings.Contains(err.Error()+noticeResponseJSON(t, api.Details), "NR_UPLOAD") {
 					t.Error("upload exposed received error prose")
@@ -643,6 +649,78 @@ func TestUploadRelocationRejectsMalformedDocument(t *testing.T) {
 				}
 				f.check(t, wantRequests)
 			})
+		}
+	}
+}
+
+func TestRelocationIndependentRecoveryResponses(t *testing.T) {
+	n := noticeResponseOriginal(t)
+	for _, surface := range []string{"request", "discovery", "r2-mint"} {
+		for _, value := range []json.RawMessage{json.RawMessage(`null`), json.RawMessage(`7`), json.RawMessage(`true`), json.RawMessage(`[]`), json.RawMessage(`{}`), json.RawMessage(`"https://alice:NR_SIBLING@received.example"`), json.RawMessage(`"https://received.example?NR_SIBLING"`), json.RawMessage(`"https://received.example#NR_SIBLING"`), json.RawMessage(`"https://[NR_SIBLING"`)} {
+			for _, field := range []string{"new_url", "notice-hub", "notice-new-url"} {
+				t.Run(surface+"/"+string(value)+"/"+field, func(t *testing.T) {
+					details := map[string]any{"new_url": n.NewURL, "notice": n, "debug": "NR_SIBLING"}
+					want := map[string]any{"new_url": n.NewURL}
+					if field == "new_url" {
+						details[field] = value
+						want = map[string]any{"notice": n}
+					} else {
+						bad := map[string]any{"hub": n.Hub, "new_url": n.NewURL}
+						if field == "notice-hub" {
+							bad["hub"] = value
+						} else {
+							bad["new_url"] = value
+						}
+						details["notice"] = bad
+					}
+					f := newNoticeResponseFixture(t, func(w http.ResponseWriter, r *http.Request) {
+						if surface == "r2-mint" && r.URL.Path == "/I47/v1/blob-capabilities" {
+							_, _ = io.WriteString(w, `{"backend":"r2","max_size":100,"checksum_profile":"sha256"}`)
+							return
+						}
+						wantMethod, wantPath := http.MethodGet, "/I47/v1/admin/peers"
+						if surface == "discovery" {
+							wantPath = "/I47/v1/blob-capabilities"
+						}
+						if surface == "r2-mint" {
+							wantMethod, wantPath = http.MethodPost, "/I47/v1/blobs/uploads"
+						}
+						if r.Method != wantMethod || r.URL.Path != wantPath {
+							t.Error("unexpected request/follow effect")
+						}
+						w.WriteHeader(http.StatusGone)
+						_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": "hub_moved", "message": "NR_SIBLING", "details": details}})
+					})
+					var err error
+					if surface == "request" {
+						_, err = f.c.Peers(context.Background())
+					} else {
+						var got envelope.Attachment
+						got, err = f.c.Upload(context.Background(), strings.NewReader("abc"), 3, "text/plain", "fixture.txt")
+						if got != (envelope.Attachment{}) {
+							t.Error("rejected upload returned attachment")
+						}
+					}
+					var api *Error
+					if !errors.As(err, &api) || api.Status != 410 || api.Code != "hub_moved" {
+						t.Fatalf("typed status/code changed: %v", err)
+					}
+					if api.Message != "invalid hub relocation" || noticeResponseJSON(t, api.Details) != noticeResponseJSON(t, want) {
+						t.Errorf("independent checked recovery changed: message=%q details=%v", api.Message, api.Details)
+					}
+					if accepted, ok := api.Details["notice"].(envelope.HubNotice); ok && accepted != n {
+						t.Error("accepted signed fields changed")
+					}
+					if strings.Contains(err.Error()+noticeResponseJSON(t, api.Details), "NR_") {
+						t.Error("unsafe sibling or error prose exposed")
+					}
+					calls := int32(1)
+					if surface == "r2-mint" {
+						calls = 2
+					}
+					f.check(t, calls)
+				})
+			}
 		}
 	}
 }

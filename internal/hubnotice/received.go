@@ -73,31 +73,33 @@ func ValidateBatch(events []envelope.Event, allowHTTP bool) error {
 	return nil
 }
 
-// ProjectRelocation replaces received error prose and keeps only validated
-// recovery fields. Notice message prose is retained as part of the signed notice;
-// URL validation neither authenticates nor filters that prose.
+// ProjectRelocation replaces received error prose and independently keeps each
+// validated recovery field. A rejected sibling never erases a checked notice or
+// target. Notice message prose is retained as part of the signed notice; URL
+// validation neither authenticates nor filters that prose.
 func ProjectRelocation(details map[string]any, allowHTTP bool) (string, map[string]any) {
+	message := "hub moved"
 	var safe map[string]any
 	if value, present := details["new_url"]; present {
 		target, ok := value.(string)
 		if !ok || !validURL(target, allowHTTP) {
-			return "invalid hub relocation", nil
+			message = "invalid hub relocation"
+		} else {
+			safe = map[string]any{"new_url": target}
 		}
-		safe = map[string]any{"new_url": target}
 	}
 	if value, present := details["notice"]; present {
 		raw, err := json.Marshal(value)
 		if err != nil {
-			return "invalid hub relocation", nil
+			message = "invalid hub relocation"
+		} else if n, err := DecodeNotice(raw, allowHTTP); err != nil {
+			message = "invalid hub relocation"
+		} else {
+			if safe == nil {
+				safe = make(map[string]any)
+			}
+			safe["notice"] = n
 		}
-		n, err := DecodeNotice(raw, allowHTTP)
-		if err != nil {
-			return "invalid hub relocation", nil
-		}
-		if safe == nil {
-			safe = make(map[string]any)
-		}
-		safe["notice"] = n
 	}
-	return "hub moved", safe
+	return message, safe
 }
