@@ -1,7 +1,7 @@
 # GitHub #51 physical build-box paths
 
 Goal: make build-box path comparisons reliable when bb-src is a symlink to another volume.
-Spec: GitHub #51 Test hygiene item; frozen issue-51-refresh.json. Selected base masterda6122ba7d; exact SHA recorded in ledger.
+Spec: GitHub #51 Test hygiene item; frozen issue-51-refresh.json. Selected master base `da6122bae8210062b8ac15c77346eff639db3dc3`.
 Architecture: canonicalize the existing remote BASE before deriving lane, toolchain, HOME, TMPDIR, XDG and cache paths. Do not canonicalize unrelated user paths or change synchronization locations.
 Tech: existing Bash remote wrapper; synthetic shell regression.
 
