@@ -19,7 +19,9 @@ import (
 	"github.com/XertroV/vecnet/internal/blobclient"
 	"github.com/XertroV/vecnet/internal/blobwire"
 	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/httpdiag"
 	"github.com/XertroV/vecnet/internal/hubid"
+	"github.com/XertroV/vecnet/internal/hubnotice"
 	"github.com/XertroV/vecnet/internal/opapi"
 )
 
@@ -101,7 +103,7 @@ func (c *Client) requestMatch(ctx context.Context, method, path string, body any
 	}
 	resp, err := c.hc.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, httpdiag.TransportError(err)
 	}
 	return checkedResponse(resp)
 }
@@ -122,6 +124,9 @@ func checkedResponse(resp *http.Response) (*http.Response, error) {
 		// when a proxy did not send the protocol's JSON envelope.
 		_ = json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&wire)
 		e := &Error{Status: resp.StatusCode, Code: wire.Error.Code, Message: wire.Error.Message, Details: wire.Error.Details}
+		if e.Status == http.StatusGone && e.Code == "hub_moved" {
+			e.Message, e.Details = hubnotice.ProjectRelocation(e.Details, true)
+		}
 		if e.Message == "" {
 			e.Message = http.StatusText(e.Status)
 		}
@@ -280,12 +285,27 @@ func decodeJSON(resp *http.Response, out any) (string, error) {
 	return etag, nil
 }
 
+// Notices validates the complete received list before exposing any entries.
+// Public HTTP permission is owned by the operator client's caller, as in gate.
 func (c *Client) Notices(ctx context.Context) ([]envelope.HubNotice, error) {
 	var out struct {
-		Notices []envelope.HubNotice `json:"notices"`
+		Notices []json.RawMessage `json:"notices"`
 	}
-	err := c.do(ctx, "GET", "/v1/hub/notices", nil, &out)
-	return out.Notices, err
+	if err := c.do(ctx, "GET", "/v1/hub/notices", nil, &out); err != nil {
+		return nil, err
+	}
+	var notices []envelope.HubNotice
+	if out.Notices != nil {
+		notices = make([]envelope.HubNotice, 0, len(out.Notices))
+	}
+	for _, raw := range out.Notices {
+		n, err := hubnotice.DecodeNotice(raw, true)
+		if err != nil {
+			return nil, err
+		}
+		notices = append(notices, n)
+	}
+	return notices, nil
 }
 func (c *Client) LoopCuts(ctx context.Context, hours int) (out opapi.LoopCuts, err error) {
 	q := url.Values{}
@@ -438,7 +458,7 @@ func (c *Client) UploadWithProgress(ctx context.Context, r io.Reader, size int64
 	req.Header.Set("Content-Type", mediaType)
 	resp, err := c.uploadHC.Do(req)
 	if err != nil {
-		return envelope.Attachment{}, err
+		return envelope.Attachment{}, httpdiag.TransportError(err)
 	}
 	resp, err = checkedResponse(resp)
 	if err != nil {
@@ -504,31 +524,66 @@ func (c *Client) BlobWithOptions(ctx context.Context, sha string, max int64, opt
 // transport errors so callers keep errors.As classification from the operator
 // client. Direct-provider errors never pass through this transport.
 type blobTransport struct {
-	c       *Client
-	failure error
+	c          *Client
+	failure    error
+	relocation *relocationBody
 }
 
 func (t *blobTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	r := req.Clone(req.Context())
 	r.Header.Set("Authorization", "Bearer "+t.c.secret)
-	rt := t.c.uploadHC.Transport
-	if rt == nil {
-		rt = http.DefaultTransport
-	}
-	resp, err := rt.RoundTrip(r)
-	t.failure = nil
-	if err != nil {
-		t.failure = &url.Error{Op: r.Method, URL: t.c.base, Err: err}
+	// Run Client.Do here so malformed Location parsing is captured before the
+	// blob client replaces hub transport causes with its fixed reason code.
+	// uploadHC refuses redirects and has no transfer deadline of its own.
+	resp, err := t.c.uploadHC.Do(r)
+	t.failure = httpdiag.TransportError(err)
+	t.relocation = nil
+	if err == nil && resp.StatusCode == http.StatusGone {
+		// Retain the bounded raw response as the blob client consumes it. Its
+		// typed moving notice erases null/type admission and other follow fields.
+		t.relocation = &relocationBody{ReadCloser: resp.Body}
+		resp.Body = t.relocation
 	}
 	return resp, err
 }
 func (t *blobTransport) outcome(err error) error {
 	var e *blobclient.Error
+	// A truncated or canceled body remains a transport/context failure even
+	// if its partial bytes happen to contain a complete relocation JSON value.
+	if errors.As(err, &e) && !e.HubTransport && t.relocation != nil && !t.relocation.overflow {
+		_, projected := checkedResponse(&http.Response{
+			StatusCode: http.StatusGone,
+			Body:       io.NopCloser(bytes.NewReader(t.relocation.raw)),
+		})
+		var moved *Error
+		if errors.As(projected, &moved) && moved.Code == "hub_moved" {
+			return moved
+		}
+	}
 	if errors.As(err, &e) && e.HubTransport && t.failure != nil {
 		return t.failure
 	}
 	return transferError(err)
 }
+
+// relocationBody observes exactly the bytes consumed by blobclient, without
+// changing read/close behavior or keeping more than its 64 KiB response limit.
+type relocationBody struct {
+	io.ReadCloser
+	raw      []byte
+	overflow bool
+}
+
+func (b *relocationBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	remaining := (64 << 10) - len(b.raw)
+	if n > remaining {
+		b.overflow = true
+	}
+	b.raw = append(b.raw, p[:min(n, remaining)]...)
+	return n, err
+}
+
 func (c *Client) blobs() (*blobclient.Client, *blobTransport) {
 	transport := &blobTransport{c: c}
 	return blobclient.New(c.base, transport, nil, nil), transport

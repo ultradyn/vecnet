@@ -40,6 +40,11 @@ func wireFixture(v reflect.Value) {
 		for i := 0; i < v.NumField(); i++ {
 			wireFixture(v.Field(i))
 		}
+		// Keep every field populated, with real URL strings for received notices.
+		if v.Type() == reflect.TypeFor[envelope.HubNotice]() {
+			v.FieldByName("Hub").SetString("https://Source.Example:8443/Vecnet/%2Fexact/")
+			v.FieldByName("NewURL").SetString("https://[2001:db8::7]:8443/Next/%2Fexact/")
+		}
 		// Keep filling every field, then satisfy the trust-aware wire marshalers.
 		if v.Type() == reflect.TypeFor[blobwire.Integrity]() {
 			v.FieldByName("Algorithm").SetString("sha256")
