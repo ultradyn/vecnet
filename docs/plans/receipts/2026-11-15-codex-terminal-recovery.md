@@ -186,3 +186,12 @@ supports merge to master. It does not claim another installed release, live
 Codex session acceptance, original incident attribution or F1 generic refusal
 classification; #61 remains open for those follow-ups. Raw logs/scripts/reports
 must be copied and hash-verified outside the worktree before cleanup.
+
+## Integration lifecycle
+
+Merged and pushed to master at `4a9f8f83`; executable blobs match reviewed
+source `27b931dd`. GitHub #61 progress was posted, and the issue remains open.
+All seven worker processes exited zero. The operational workspace was copied
+to `.scratch/vecnet/issue-loop/2026-11-15/issue-61-terminal-evidence` and all
+171 files were hash-verified before removing the owned worktree and merged
+branch. `ARCHIVE-MANIFEST.json` retains the complete copy hashes.
