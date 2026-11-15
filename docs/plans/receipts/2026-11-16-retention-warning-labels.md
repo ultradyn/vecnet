@@ -29,3 +29,9 @@ BB_HOST=x-boss BB_JOBS=2 BB_PULLBACK=0 SHOTS_DIR=/tmp/vecnet-retention-label-sho
 Operational brief, logs, reports, scripts and all 156 RED/GREEN PNGs must be copied and hash-verified outside the owned worktree before cleanup.
 
 [Task review](2026-11-16-retention-warning-labels-task-review.md) [whole-change review](2026-11-16-retention-warning-labels-final-review.md) and [ledger](2026-11-16-retention-warning-labels-ledger.md). The existing Node MockTimers ExperimentalWarning is present in both baseline and final logs.
+
+## Integration
+
+Merged and pushed at `c5f6b208b23ecec7ce23ef493b7f48da3e5e4261`; all 2,252 merged source/fixture entries match the tested and reviewed bytes. Only Markdown changed after source `33381870`.
+
+[GitHub update](https://github.com/ultradyn/vecnet/issues/51#issuecomment-6898587236) completes only this checklist item. All 222 operational files (228 entries, 29,812,314 bytes) were copied and SHA256-verified before removing the owned e5f5 worktree, merged feature branch and isolated x-boss lane. Post-cleanup verification also passed. Archive: `.scratch/vecnet/issue-loop/2026-11-15/issue-51-retention-labels-evidence`; manifest SHA256 `156b7578ad8cb8f1592c6d71334c059463eb0db448002c6f269d7b19b8fd3f60`. Other worktrees and shared build caches were left intact.
