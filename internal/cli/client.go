@@ -12,8 +12,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/XertroV/vecnet/internal/blobclient"
 	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/httpdiag"
 	"github.com/XertroV/vecnet/internal/hubid"
+	"github.com/XertroV/vecnet/internal/hubnotice"
 )
 
 // requestTimeout bounds one ordinary request; uploads and streams set their
@@ -57,17 +60,21 @@ func (e *netError) Error() string {
 	if e == nil || e.err == nil {
 		return "network: unreachable"
 	}
-	// Unwrap keeps dial, TLS and timeout classification. The hub URL was
-	// checked before the client was built, so the request URL is safe to show.
-	return "network: " + e.err.Error()
+	// Blob transfers already classify this failure with a fixed public code.
+	if b, ok := e.err.(*blobclient.Error); ok && b.HubTransport && b.Code == "blob_unavailable" {
+		return "network: blob_unavailable"
+	}
+	// Keep typed causes for classification, but never print their received prose.
+	return "network: " + httpdiag.TransportError(e.err).Error()
 }
 func (e *netError) Unwrap() error { return e.err }
 
 // client talks HTTP to one hub with one bearer.
 type client struct {
-	base   string // hub origin without a trailing slash
-	secret string // "" sends no Authorization header
-	hc     *http.Client
+	base      string // hub origin without a trailing slash
+	secret    string // "" sends no Authorization header
+	allowHTTP bool   // explicit selected-profile/environment policy for received URLs
+	hc        *http.Client
 	// clientHeader is the X-Vecnet-Client value of a bare human run
 	// (operator.go), sent on every request; the hub reads it on sends.
 	clientHeader string
@@ -141,14 +148,14 @@ func (c *client) send(req *http.Request) (*http.Response, error) {
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		defer resp.Body.Close()
-		return nil, readHubError(resp)
+		return nil, readHubError(resp, c.allowHTTP)
 	}
 	return resp, nil
 }
 
 // readHubError decodes the PROTOCOL §2 error envelope; a body that is not
 // one becomes http_<status>.
-func readHubError(resp *http.Response) error {
+func readHubError(resp *http.Response, allowHTTP bool) error {
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	var env struct {
 		Error *struct {
@@ -158,6 +165,9 @@ func readHubError(resp *http.Response) error {
 		} `json:"error"`
 	}
 	if json.Unmarshal(raw, &env) == nil && env.Error != nil && env.Error.Code != "" {
+		if resp.StatusCode == http.StatusGone && env.Error.Code == "hub_moved" {
+			env.Error.Message, env.Error.Details = hubnotice.ProjectRelocation(env.Error.Details, allowHTTP)
+		}
 		return &hubError{Status: resp.StatusCode, Code: env.Error.Code, Message: env.Error.Message, Details: env.Error.Details}
 	}
 	return &hubError{Status: resp.StatusCode, Code: fmt.Sprintf("http_%d", resp.StatusCode), Message: http.StatusText(resp.StatusCode)}
@@ -183,7 +193,7 @@ func (c *client) doNoTimeout(ctx context.Context, method, path string, q url.Val
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return &netError{err: err}
+		return &netError{err: &url.Error{Op: "read", URL: req.URL.String(), Err: err}}
 	}
 	if out == nil {
 		return nil

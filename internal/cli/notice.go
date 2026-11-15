@@ -8,9 +8,13 @@ import (
 	"time"
 
 	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/hubnotice"
 )
 
 func noticeText(n envelope.HubNotice, cleared bool) string {
+	if hubnotice.ValidateNotice(n, true) != nil {
+		return hubnotice.ErrInvalidNotice.Error()
+	}
 	label := n.Kind
 	if cleared {
 		label = "cleared " + label
@@ -19,20 +23,43 @@ func noticeText(n envelope.HubNotice, cleared bool) string {
 			label += " " + n.At
 		}
 		if n.NewURL != "" {
-			if where, ok := printableHub(n.NewURL, false); ok {
-				label += " -> " + where
-			}
+			label += " -> " + n.NewURL
 		}
 	}
 	return "[" + label + "] " + n.Message
 }
 
+// receivedHTTP comes only from the selected profile or explicit environment opt-in.
+func (a *app) receivedHTTP(c *client) bool {
+	return (c != nil && c.allowHTTP) || (a.getenv != nil && a.getenv(insecureEnv) == "1")
+}
+
 func (a *app) activeNotices(c *client) ([]envelope.HubNotice, error) {
-	var body struct {
-		Notices []envelope.HubNotice `json:"notices"`
+	// profile follow constructs its client directly. Resolve that selected
+	// profile's explicit policy too, without lending it to a different client.
+	if !c.allowHTTP && a.getenv != nil {
+		_, _, p, err := a.profileSelection()
+		if err == nil && p.AllowInsecureHTTP && strings.TrimRight(p.Hub, "/") == c.base && p.Secret == c.secret {
+			copy := *c
+			copy.allowHTTP = true
+			c = &copy
+		}
 	}
-	err := c.do(a.ctx, http.MethodGet, "/v1/hub/notices", nil, nil, &body)
-	return body.Notices, err
+	var body struct {
+		Notices []json.RawMessage `json:"notices"`
+	}
+	if err := c.do(a.ctx, http.MethodGet, "/v1/hub/notices", nil, nil, &body); err != nil {
+		return nil, err
+	}
+	notices := make([]envelope.HubNotice, 0, len(body.Notices))
+	for _, raw := range body.Notices {
+		n, err := hubnotice.DecodeNotice(raw, a.receivedHTTP(c))
+		if err != nil {
+			return nil, err
+		}
+		notices = append(notices, n)
+	}
+	return notices, nil
 }
 
 func (a *app) cmdNotice(args []string) error {
@@ -97,15 +124,19 @@ func (a *app) cmdNotice(args []string) error {
 			body["expires_at"] = value
 		}
 		var result struct {
-			Notice envelope.HubNotice `json:"notice"`
+			Notice json.RawMessage `json:"notice"`
 		}
 		if err = c.do(a.ctx, http.MethodPost, "/v1/admin/notices", nil, body, &result); err != nil {
 			return err
 		}
-		if a.json {
-			return a.emitValue(result.Notice)
+		notice, err := hubnotice.DecodeNotice(result.Notice, a.receivedHTTP(c))
+		if err != nil {
+			return err
 		}
-		fmt.Fprintf(a.stdout, "%s %s\n", result.Notice.NoticeID, firstRunes(unbidi(flatten(noticeText(result.Notice, false))), monitorTextRunes))
+		if a.json {
+			return a.emitValue(notice)
+		}
+		fmt.Fprintf(a.stdout, "%s %s\n", notice.NoticeID, firstRunes(unbidi(flatten(noticeText(notice, false))), monitorTextRunes))
 		return nil
 	case "list":
 		notices, e := a.activeNotices(c)
@@ -151,6 +182,9 @@ func (a *app) cmdNotice(args []string) error {
 }
 
 func noticeEventFields(data json.RawMessage) eventFields {
+	if hubnotice.ValidateEvent(envelope.Event{Type: "hub_notice", Data: data}, true) != nil {
+		return eventFields{sender: "hub", senderName: "hub", text: hubnotice.ErrInvalidNotice.Error()}
+	}
 	var n envelope.HubNoticeEvent
 	if json.Unmarshal(data, &n) != nil {
 		return eventFields{}

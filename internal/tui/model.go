@@ -2,12 +2,14 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"net/url"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/hubid"
 	"github.com/XertroV/vecnet/internal/tui/theme"
 )
 
@@ -306,8 +308,13 @@ func (m *Model) quit() tea.Cmd {
 
 // hubHost is the host of the hub URL, without credentials or path.
 func hubHost(hub string) string {
+	// Like opclient, TUI callers own public-HTTP policy. Never infer URL safety
+	// from url.Parse succeeding, or return rejected input on parse failure.
+	if err := hubid.CheckHubURL(hub); err != nil && !errors.Is(err, hubid.ErrPlainHTTP) {
+		return "(unusable)"
+	}
 	if u, err := url.Parse(hub); err == nil && u.Host != "" {
 		return Clean(u.Host)
 	}
-	return Clean(hub)
+	return "(unusable)"
 }

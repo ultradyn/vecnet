@@ -13,6 +13,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/hubnotice"
 	"github.com/XertroV/vecnet/internal/tui/theme"
 )
 
@@ -533,7 +534,7 @@ func viewNotices(th *theme.Theme, ns []envelope.HubNotice, now time.Time, loc *t
 	active := 0
 	for i := range ns {
 		n := &ns[i]
-		if !activeNotice(*n, now) {
+		if hubnotice.ValidateNotice(*n, true) != nil || !activeNotice(*n, now) {
 			continue
 		}
 		active++

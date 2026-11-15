@@ -33,6 +33,7 @@ import (
 
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/hubid"
+	"github.com/XertroV/vecnet/internal/hubnotice"
 	"github.com/XertroV/vecnet/internal/inboxview"
 	"github.com/XertroV/vecnet/internal/opapi"
 )
@@ -442,6 +443,7 @@ func (a *app) connect() (*client, string, cache, error) {
 		dir = ""
 	}
 	c := newClient(p.Hub, p.Secret)
+	c.allowHTTP = p.AllowInsecureHTTP || a.getenv(insecureEnv) == "1"
 	if label != nil {
 		c.clientHeader = label.Header()
 	}
@@ -722,7 +724,9 @@ func (a *app) cmdEnrol(args []string) error {
 	if display != "" {
 		req["name"] = display
 	}
-	if err := newClient(hubURL, "").do(a.ctx, http.MethodPost, "/v1/enrol", nil, req, &out); err != nil {
+	c := newClient(hubURL, "")
+	c.allowHTTP = insecure || a.getenv(insecureEnv) == "1"
+	if err := c.do(a.ctx, http.MethodPost, "/v1/enrol", nil, req, &out); err != nil {
 		if intent != nil {
 			intent.State = "canceled"
 			intent.Reason = "enrollment request did not commit credentials; use a fresh or still-valid invitation"
@@ -741,9 +745,7 @@ func (a *app) cmdEnrol(args []string) error {
 		// profile to follow yet: point at the new hub instead.
 		if errors.As(err, &he) && he.Status == http.StatusGone && he.Code == "hub_moved" {
 			if raw, ok := he.Details["new_url"].(string); ok {
-				if next, ok := printableHub(raw, insecure || a.getenv(insecureEnv) == "1"); ok {
-					he.Hint = "hub moved to " + next + "; ask for an invite there"
-				}
+				he.Hint = "hub moved to " + raw + "; ask for an invite there"
 			}
 		}
 		return err
@@ -1255,7 +1257,13 @@ func (a *app) poll(c *client, after string, wait int) (pollBody, error) {
 	ctx, cancel := context.WithTimeout(a.ctx, requestTimeout+time.Duration(wait)*time.Second)
 	defer cancel()
 	err := c.doNoTimeout(ctx, http.MethodGet, "/v1/events", q, nil, &body)
-	return body, err
+	if err == nil {
+		err = hubnotice.ValidateBatch(body.Events, a.receivedHTTP(c))
+	}
+	if err != nil {
+		return pollBody{}, err
+	}
+	return body, nil
 }
 
 // oldestCursor returns details.oldest_cursor of a 409 cursor_purged.
@@ -1387,6 +1395,10 @@ func (a *app) cmdAck(args []string) error {
 
 // rememberEvents caches message → thread for every delivery in evs.
 func (a *app) rememberEvents(ch cache, evs []envelope.Event) {
+	// Defensive seam for callers outside poll; HTTP policy is checked at admission.
+	if hubnotice.ValidateBatch(evs, true) != nil {
+		return
+	}
 	pairs := map[string]string{}
 	for _, ev := range evs {
 		if ev.Type != "delivery" {

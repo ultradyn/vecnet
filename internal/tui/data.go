@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"slices"
 	"strings"
 	"time"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/XertroV/vecnet/internal/blobwire"
 	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/hubnotice"
 	"github.com/XertroV/vecnet/internal/opapi"
 	"github.com/XertroV/vecnet/internal/opclient"
 )
@@ -208,9 +210,32 @@ func (m *Model) startLoads(tags []string, ack chan<- error) tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
+// receivedHubError exposes checked recovery fields while keeping the original
+// typed chain for classification. Callers must never unwrap for presentation.
+type receivedHubError struct {
+	checked *opclient.Error
+	cause   error
+}
+
+func (e *receivedHubError) Error() string { return e.checked.Error() }
+func (e *receivedHubError) Unwrap() error { return e.cause }
+func (e *receivedHubError) As(target any) bool {
+	p, ok := target.(**opclient.Error)
+	if ok {
+		*p = e.checked
+	}
+	return ok
+}
+
 // onLoad applies a finished load, runs the one load folded behind it if there
 // is one, and otherwise settles whatever waits on this key.
 func (m *Model) onLoad(msg loadMsg) tea.Cmd {
+	var received *opclient.Error
+	if errors.As(msg.err, &received) && received.Status == http.StatusGone && received.Code == "hub_moved" {
+		checked := *received
+		checked.Message, checked.Details = hubnotice.ProjectRelocation(received.Details, true)
+		msg.err = &receivedHubError{checked: &checked, cause: msg.err}
+	}
 	delete(m.inflight, msg.key)
 	if msg.err == nil {
 		delete(m.Data.Errs, msg.key)
@@ -446,6 +471,14 @@ func (m *Model) fetch(key string) tea.Cmd {
 	case "notices":
 		return func() tea.Msg {
 			v, err := api.Notices(ctx)
+			// Non-HTTP APIs must meet the same URL contract as opclient.
+			if err == nil {
+				for _, n := range v {
+					if err = hubnotice.ValidateNotice(n, true); err != nil {
+						break
+					}
+				}
+			}
 			// A hub from before notices has none to show; that is not an error.
 			if isStatus(err, 404) {
 				v, err = nil, nil
@@ -606,6 +639,9 @@ func (m *Model) startTail() tea.Cmd {
 		// Each handler call waits for its reload, so the tail acks only what
 		// the views already show, and a failed reload replays.
 		handle := func(b opclient.Batch) error {
+			if err := hubnotice.ValidateBatch(b.Events, true); err != nil {
+				return err
+			}
 			if len(b.Events) == 0 && !b.Reset {
 				return nil
 			}
@@ -662,6 +698,12 @@ func (m *Model) onTailStatus(status string) tea.Cmd {
 }
 
 func (m *Model) onTailBatch(msg tailBatchMsg) tea.Cmd {
+	if err := hubnotice.ValidateBatch(msg.batch.Events, true); err != nil {
+		if msg.ack != nil {
+			msg.ack <- err
+		}
+		return nil
+	}
 	tags := []string{}
 	for _, ev := range msg.batch.Events {
 		eventTags := opapi.Tags(ev)
@@ -746,6 +788,9 @@ func (st *ThreadState) rewindFrom(i int) {
 
 // remember keeps the newest events. A replay after a failed ack is not news.
 func (m *Model) remember(ev envelope.Event) {
+	if hubnotice.ValidateEvent(ev, true) != nil {
+		return
+	}
 	for _, st := range m.Data.Thread {
 		if st.BlobStates == nil {
 			st.BlobStates = map[string]blobwire.State{}

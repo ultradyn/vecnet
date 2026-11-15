@@ -220,6 +220,7 @@ func (a *app) cmdCodex(args []string, nowTime func() time.Time) error {
 		// looking up the authenticated caller, as ordinary hub commands do.
 		a.ensurePin(name, p)
 		c := newClient(p.Hub, p.Secret)
+		c.allowHTTP = p.AllowInsecureHTTP || a.getenv(insecureEnv) == "1"
 		if label := a.operatorLabel(p); label != nil {
 			c.clientHeader = label.Header()
 		}
@@ -248,21 +249,26 @@ func (a *app) cmdCodex(args []string, nowTime func() time.Time) error {
 	if err != nil {
 		return err
 	}
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return err
+	if args[0] != "bindings" {
+		dir := filepath.Dir(path)
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			return err
+		}
+		if err := os.Chmod(dir, 0700); err != nil {
+			return err
+		}
+		unlock, err := lockPath(a.ctx, path+".lock")
+		if err != nil {
+			return err
+		}
+		defer unlock()
 	}
-	if err := os.Chmod(dir, 0700); err != nil {
-		return err
-	}
-	unlock, err := lockPath(a.ctx, path+".lock")
-	if err != nil {
-		return err
-	}
-	defer unlock()
-	optouts, err := readCodexOptOuts(path)
-	if err != nil {
-		return err
+	var optouts codexOptOuts
+	if args[0] != "bindings" {
+		optouts, err = readCodexOptOuts(path)
+		if err != nil {
+			return err
+		}
 	}
 	if args[0] == "bind" && a.localEnrollmentRetry && optouts.disabled(namespace, binding.Profile, binding.As) {
 		return errCodexOptOut
@@ -294,6 +300,10 @@ func (a *app) cmdCodex(args []string, nowTime func() time.Time) error {
 			state := "active"
 			if !now.Before(b.ExpiresAt) {
 				state = "expired"
+			}
+			// b is a presentation copy; inspection never rewrites stored rows.
+			if checkHubURL(b.Hub, a.getenv(insecureEnv) == "1") != nil {
+				b.Hub = "(unusable)"
 			}
 			list = append(list, listedBinding{b, state})
 		}

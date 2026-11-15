@@ -19,6 +19,7 @@ import (
 
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/hubid"
+	"github.com/XertroV/vecnet/internal/hubnotice"
 )
 
 // Watch timing (PROTOCOL §13.1).
@@ -734,6 +735,9 @@ func (w *watcher) stopMoveTimer() {
 func (w *watcher) refreshMoving() {
 	notices, err := w.a.activeNotices(w.c)
 	if err != nil {
+		if errors.Is(err, hubnotice.ErrInvalidNotice) {
+			w.systemLine("relocation_unverified", "not following: invalid hub notice")
+		}
 		return
 	}
 	var moving *envelope.HubNotice
@@ -1016,9 +1020,6 @@ func (w *watcher) stream() error {
 					}
 					return nil
 				}
-				if hasData {
-					w.live()
-				}
 				// Empty data (the hub's priming event) only moves the
 				// cursor; it is not an event (PROTOCOL §13.1).
 				if joined := strings.Join(data, "\n"); hasData && joined != "" {
@@ -1028,6 +1029,9 @@ func (w *watcher) stream() error {
 						}
 						return err
 					}
+				}
+				if hasData {
+					w.live()
 				}
 				w.cursor = idBuf
 				data, hasData, evType = nil, false, ""
@@ -1283,6 +1287,9 @@ func (w *watcher) handle(evType, data string, replay bool) error {
 	}
 	if ev.Type == "" {
 		ev.Type = evType
+	}
+	if err := hubnotice.ValidateEvent(ev, w.a.receivedHTTP(w.c) || w.profile.AllowInsecureHTTP); err != nil {
+		return err
 	}
 	if ev.Type == "hub_notice" {
 		var n envelope.HubNoticeEvent

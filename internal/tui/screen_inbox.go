@@ -14,6 +14,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/hubnotice"
 	"github.com/XertroV/vecnet/internal/opapi"
 	"github.com/XertroV/vecnet/internal/opclient"
 	"github.com/XertroV/vecnet/internal/tui/theme"
@@ -1186,6 +1187,9 @@ func inboxEventText(ev envelope.Event, peers inboxPeers) string {
 		}
 		return strings.TrimSpace(peers.name(d.PeerID) + " " + Clean(d.Change) + " " + Clean(strings.Join(d.Fields, ", ")))
 	case "hub_notice":
+		if hubnotice.ValidateEvent(ev, true) != nil {
+			return hubnotice.ErrInvalidNotice.Error()
+		}
 		var e envelope.HubNoticeEvent
 		if json.Unmarshal(ev.Data, &e) != nil {
 			return raw

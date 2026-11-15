@@ -36,7 +36,7 @@ func TestNoticePostListClear(t *testing.T) {
 }
 
 func noticeEvent(message string) envelope.Event {
-	raw, _ := json.Marshal(envelope.HubNoticeEvent{Change: "posted", Notice: envelope.HubNotice{Kind: "moving", At: "2026-11-06T02:00:00.000Z", NewURL: "https://new.example", Message: message}})
+	raw, _ := json.Marshal(envelope.HubNoticeEvent{Change: "posted", Notice: envelope.HubNotice{Hub: "https://source.example", Kind: "moving", At: "2026-11-06T02:00:00.000Z", NewURL: "https://new.example", Message: message}})
 	return envelope.Event{Cursor: "c", Type: "hub_notice", Data: raw}
 }
 func TestMonitorLineHubNotice(t *testing.T) {
@@ -47,7 +47,7 @@ func TestMonitorLineHubNotice(t *testing.T) {
 	if strings.ContainsAny(got, "\r\n\x1b\u202e") || utf8.RuneCountInString(strings.TrimPrefix(got, "c hub_notice - hub ")) > 120 {
 		t.Fatalf("unsafe or oversized: %q", got)
 	}
-	raw, _ := json.Marshal(envelope.HubNoticeEvent{Change: "cleared", Notice: envelope.HubNotice{Kind: "maintenance", Message: "done"}})
+	raw, _ := json.Marshal(envelope.HubNoticeEvent{Change: "cleared", Notice: envelope.HubNotice{Hub: "https://source.example", Kind: "maintenance", Message: "done"}})
 	if got := monitorLine(envelope.Event{Cursor: "c", Type: "hub_notice", Data: raw}, nil); got != "c hub_notice - hub hub: [cleared maintenance] done" {
 		t.Fatal(got)
 	}
