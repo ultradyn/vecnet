@@ -72,6 +72,7 @@ func (s *server) adminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/admin/audit", s.adminAudit)
 	mux.HandleFunc("GET /v1/admin/counters", s.adminCounters)
 	mux.HandleFunc("GET /v1/admin/subscriptions", s.adminListSubscriptions)
+	mux.HandleFunc("DELETE /v1/admin/subscriptions/{id}", s.adminRemoveSubscription)
 	mux.HandleFunc("POST /v1/admin/subscriptions/{id}/pause", s.adminPauseSubscription)
 	mux.HandleFunc("POST /v1/admin/subscriptions/{id}/resume", s.adminResumeSubscription)
 }

@@ -384,6 +384,8 @@ A principal (for example pag-chat's `pagd`) may create and disable its own peers
 
 ## Reconnect and credential changes
 
+On a peer page, **Subscriptions** shows callback health, failure details and delivery attempts, with problems first. Choose **Remove** on a subscription to review its host and exact ID, then confirm **Remove subscription**. Removal stops future callbacks and discards that subscription's queued attempts; a request already in flight can finish. It leaves the peer, inbox messages and thread history available. An active client can subscribe again, so stop that client's subscription loop if it keeps returning. Removing one in another tab updates the list automatically. An already removed subscription is treated as complete; a failed removal keeps the dialog open to retry.
+
 CLI watch and the MCP relay keep brief hub outages silent. The first failed attempt at or after 5 s writes `vecnet: <name>: hub unreachable for <N>s; reconnecting…` to stderr, once per outage; only an announced outage writes `vecnet: <name>: reconnected after <N>s` on recovery (`<name>` is `watch` or `mcp`, `<N>` is elapsed whole seconds). Detailed errors resume after 60 s without recovery. Monitor event output on stdout is unchanged.
 
 A new client follows the owner's acked cursor rather than forcing replay from `e0.0`. If retention purges a saved cursor, 409 `cursor_purged` supplies `oldest_cursor`; the client refetches snapshots/history and resumes there. A 401 stops event retries and returns the browser to sign-in. Update the stored credential before reconnecting. The TUI stops on a rejected credential and must be restarted with a valid profile. Connection status and cached data should be considered together when the hub is unreachable.

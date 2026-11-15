@@ -447,6 +447,7 @@ export function createApi({ secret, fetch = globalThis.fetch, onUnauthorized = (
     retryDeadLetter: dly => post('/v1/admin/dead-letters/' + seg(dly) + '/retry'),
     discardDeadLetter: dly => post('/v1/admin/dead-letters/' + seg(dly) + '/discard'),
     subscriptions: () => get('/v1/admin/subscriptions'),
+    removeSubscription: id => request('DELETE', '/v1/admin/subscriptions/' + seg(id)),
     resumeSubscription: id => post('/v1/admin/subscriptions/' + seg(id) + '/resume'),
     loopCuts: hours => get('/v1/admin/loop-cuts' + query({ hours })),
     deliveryHealth: () => get('/v1/admin/delivery-health'),

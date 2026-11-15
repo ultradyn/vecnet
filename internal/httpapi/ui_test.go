@@ -57,7 +57,10 @@ import (
 // (add, edit, verify, new secret, remove) and read-on-open, measured at
 // 769,209 bytes after UI review fixes (master: 740,483). Next 16 KiB
 // boundary, with 839 bytes of headroom; all-files coverage kept.
-const uiMaxBytes = 752 << 10
+// Raised to 784 KiB for peer subscription cards, removal confirmation and
+// shared removal recovery, measured at 786,702 bytes; next 16 KiB boundary,
+// with every file still counted.
+const uiMaxBytes = 784 << 10
 
 var (
 	scriptTag   = regexp.MustCompile(`(?is)<script\b([^>]*)>(.*?)</script>`)
