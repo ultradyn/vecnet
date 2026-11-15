@@ -272,7 +272,8 @@ func (w *Worker) Verify(ctx context.Context, routeID string) error {
 	if err := json.Unmarshal(answer.Bytes(), &echo); err != nil || echo.Challenge != challenge {
 		return &hub.OutboundError{Reason: "challenge_failed: wrong or missing echo", Err: fmt.Errorf("%w: wrong or missing echo", ErrChallenge)}
 	}
-	if err := w.Hub.MarkRouteVerified(ctx, routeID); err != nil {
+	// Only the URL that answered: an update meanwhile leaves it unverified.
+	if err := w.Hub.MarkRouteVerifiedAt(ctx, routeID, url); err != nil {
 		return err
 	}
 	w.Kick()

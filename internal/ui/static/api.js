@@ -411,6 +411,14 @@ export function createApi({ secret, fetch = globalThis.fetch, onUnauthorized = (
     peerLifecycle: (peerId, action) => post('/v1/admin/peers/' + seg(peerId) + '/' + action),
     principals: () => get('/v1/admin/principals'),
     routes: () => get('/v1/admin/routes'),
+    // Push routes (PROTOCOL §2.12): add answers {route_id, whsec?} (a whsec_
+    // once, for an http route); rotate an http route answers {whsec}. Neither
+    // a URL nor a key is ever returned. update is PATCH {url?, key?}: 204.
+    addRoute: body => post('/v1/admin/routes', { body }),
+    updateRoute: (id, body) => request('PATCH', '/v1/admin/routes/' + seg(id), { body }),
+    verifyRoute: id => post('/v1/admin/routes/' + seg(id) + '/verify'),
+    rotateRoute: id => post('/v1/admin/routes/' + seg(id) + '/rotate'),
+    removeRoute: id => request('DELETE', '/v1/admin/routes/' + seg(id)),
     inbox: ({ limit, before, unread } = {}) => get('/v1/admin/inbox' + query({ limit, before, unread: unread ? 1 : undefined })),
     myThreads: ({ limit } = {}) => get('/v1/threads' + query({ limit })),
     // Thread title search (PROTOCOL §2.8, §15 item 4): the hub matches q

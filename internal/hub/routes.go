@@ -197,6 +197,86 @@ func (h *Hub) RemoveRoute(ctx context.Context, routeID string) error {
 	})
 }
 
+// RouteUpdate is a change to an existing route: a new URL, a new routine
+// key (grokbot routes only), or both. A nil field is unchanged.
+type RouteUpdate struct {
+	URL *string
+	Key *string
+}
+
+// UpdateRoute changes routeID in place: its owner, id, keys and queued
+// deliveries stay, so nothing falls back to pull between a remove and an
+// add. An http route's URL is checked like AddRoute's; a new URL clears its
+// verification, since the new receiver has not answered a challenge, and
+// pushes wait until it does. A grokbot route's URL must match
+// GrokbotURLPattern, and key replaces its routine key (as RotateGrokbotKey);
+// it stays verified. Checks run in this order: an empty update is 422
+// invalid_value; an unknown route 404 not_found; a key on an http route
+// 422 invalid_value (field key); then the key's and the URL's own checks.
+// Queued deliveries backing off after failures against the old URL or key
+// are due again at once (their attempts are kept), so a fix is not followed
+// by an hour's wait. A push already claimed may still finish against the
+// old URL. Neither the URL nor the key reaches an error or the audit
+// detail, which records only which fields changed.
+func (h *Hub) UpdateRoute(ctx context.Context, routeID string, u RouteUpdate) error {
+	if u.URL == nil && u.Key == nil {
+		return invalidRouteField("url", "give a new url, key or both")
+	}
+	return h.DB.Tx(ctx, func(tx *sql.Tx) error {
+		kind, err := routeKind(ctx, tx, routeID)
+		if err != nil {
+			return err
+		}
+		if u.Key != nil && kind != RouteKindGrokbot {
+			return invalidRouteField("key", "only a grokbot route takes a key")
+		}
+		var sealed string
+		if u.Key != nil {
+			if sealed, err = h.sealGrokbotKey(*u.Key); err != nil {
+				return err
+			}
+		}
+		changed := []string{}
+		if u.URL != nil {
+			if kind == RouteKindGrokbot && !GrokbotURLPattern.MatchString(*u.URL) {
+				return invalidURL("url", errors.New("not a Grok Bot routine webhook URL"))
+			}
+			if _, uerr := h.EgressPolicy().CheckURL(*u.URL); uerr != nil {
+				return invalidURL("url", uerr)
+			}
+			var old string
+			if err := tx.QueryRowContext(ctx, `SELECT url FROM routes WHERE route_id = ?`, routeID).Scan(&old); err != nil {
+				return fmt.Errorf("hub: update route: %w", err)
+			}
+			if old != *u.URL {
+				q := `UPDATE routes SET url = ? WHERE route_id = ?`
+				if kind == RouteKindHTTP {
+					q = `UPDATE routes SET url = ?, verified_at = NULL WHERE route_id = ?`
+				}
+				if _, err := tx.ExecContext(ctx, q, *u.URL, routeID); err != nil {
+					return fmt.Errorf("hub: update route: %w", err)
+				}
+				changed = append(changed, "url")
+			}
+		}
+		if u.Key != nil {
+			if _, err := tx.ExecContext(ctx, `UPDATE routes SET key_enc = ? WHERE route_id = ?`, sealed, routeID); err != nil {
+				return fmt.Errorf("hub: replace routine key: %w", err)
+			}
+			changed = append(changed, "key")
+		}
+		if len(changed) == 0 {
+			return nil // the same URL: nothing to do
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE deliveries SET next_attempt_at = NULL, updated_at = ? WHERE route_id = ? AND state = 'queued' AND next_attempt_at IS NOT NULL`,
+			h.nowStr(), routeID); err != nil {
+			return fmt.Errorf("hub: reschedule route deliveries: %w", err)
+		}
+		return audit.Record(ctx, tx, "operator", "route_update", []string{routeID}, map[string]any{"kind": kind, "fields": changed})
+	})
+}
+
 // RotateRoute issues a new key for routeID and retires every active older
 // key RouteKeyOverlap from now (PROTOCOL §3.5). An unknown route is 404
 // not_found; a grokbot route, which has no whsec_ to rotate, is 422
@@ -278,15 +358,34 @@ func (h *Hub) RouteURL(ctx context.Context, routeID string) (string, error) {
 // MarkRouteVerified records that routeID answered its verification
 // challenge (PROTOCOL §3.2); from now on ClaimDue pushes through it.
 func (h *Hub) MarkRouteVerified(ctx context.Context, routeID string) error {
+	return h.markRouteVerified(ctx, routeID, nil)
+}
+
+// MarkRouteVerifiedAt is MarkRouteVerified for the URL that was challenged:
+// if UpdateRoute changed the route's URL while the challenge was out, the
+// new receiver never answered, so nothing is marked and the answer is 409
+// route_changed. Worker.Verify uses it.
+func (h *Hub) MarkRouteVerifiedAt(ctx context.Context, routeID, challengedURL string) error {
+	return h.markRouteVerified(ctx, routeID, &challengedURL)
+}
+
+func (h *Hub) markRouteVerified(ctx context.Context, routeID string, challengedURL *string) error {
 	return h.DB.Tx(ctx, func(tx *sql.Tx) error {
-		res, err := tx.ExecContext(ctx, `UPDATE routes SET verified_at = ? WHERE route_id = ?`, h.nowStr(), routeID)
+		var url string
+		err := tx.QueryRowContext(ctx, `SELECT url FROM routes WHERE route_id = ?`, routeID).Scan(&url)
+		if errors.Is(err, sql.ErrNoRows) {
+			return unknownRoute(routeID)
+		}
 		if err != nil {
 			return fmt.Errorf("hub: verify route: %w", err)
 		}
-		if n, err := res.RowsAffected(); err != nil {
+		if challengedURL != nil && *challengedURL != url {
+			e := E(http.StatusConflict, "route_changed", "the route's URL changed during verification; verify it again")
+			e.Details["route_id"] = routeID
+			return e
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE routes SET verified_at = ? WHERE route_id = ?`, h.nowStr(), routeID); err != nil {
 			return fmt.Errorf("hub: verify route: %w", err)
-		} else if n == 0 {
-			return unknownRoute(routeID)
 		}
 		return audit.Record(ctx, tx, "operator", "route_verified", []string{routeID}, nil)
 	})
