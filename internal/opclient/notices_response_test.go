@@ -602,3 +602,47 @@ func TestUploadRelocationDoesNotMaskBodyFailure(t *testing.T) {
 		})
 	}
 }
+
+func TestUploadRelocationRejectsMalformedDocument(t *testing.T) {
+	for _, surface := range []string{"discovery", "r2-mint"} {
+		for _, tc := range []struct{ name, suffix string }{
+			{"trailing-junk", " TRAILING_INVALID_JSON"},
+			{"second-document", ` {"synthetic":"second JSON value"}`},
+		} {
+			t.Run(surface+"/"+tc.name, func(t *testing.T) {
+				f := newNoticeResponseFixture(t, func(w http.ResponseWriter, r *http.Request) {
+					if surface == "r2-mint" && r.URL.Path == "/I47/v1/blob-capabilities" {
+						if r.Method != http.MethodGet {
+							t.Error("capabilities method changed")
+						}
+						_, _ = io.WriteString(w, `{"backend":"r2","max_size":100,"checksum_profile":"sha256"}`)
+						return
+					}
+					wantMethod, wantPath := http.MethodGet, "/I47/v1/blob-capabilities"
+					if surface == "r2-mint" {
+						wantMethod, wantPath = http.MethodPost, "/I47/v1/blobs/uploads"
+					}
+					if r.Method != wantMethod || r.URL.Path != wantPath {
+						t.Error("unexpected upload request or follow effect")
+					}
+					w.WriteHeader(http.StatusGone)
+					_, _ = io.WriteString(w, `{"error":{"code":"hub_moved","message":"synthetic","details":{"new_url":"https://next.example"}}}`+tc.suffix)
+				})
+				got, err := f.c.Upload(context.Background(), strings.NewReader("abc"), 3, "text/plain", "fixture.txt")
+				var api *Error
+				if got != (envelope.Attachment{}) || !errors.As(err, &api) {
+					t.Fatalf("malformed response changed result/error type: attachment=%+v err=%v", got, err)
+				}
+				if api.Status != http.StatusGone || api.Code != "http_410" || api.Message != "http_410" ||
+					!reflect.DeepEqual(api.Details, map[string]any{"retry_after_seconds": float64(0)}) {
+					t.Errorf("malformed whole body changed existing error: Status=%d Code=%q Message=%q Details=%v", api.Status, api.Code, api.Message, api.Details)
+				}
+				wantRequests := int32(1)
+				if surface == "r2-mint" {
+					wantRequests = 2
+				}
+				f.check(t, wantRequests)
+			})
+		}
+	}
+}

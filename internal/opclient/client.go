@@ -550,7 +550,9 @@ func (t *blobTransport) outcome(err error) error {
 	var e *blobclient.Error
 	// A truncated or canceled body remains a transport/context failure even
 	// if its partial bytes happen to contain a complete relocation JSON value.
-	if errors.As(err, &e) && !e.HubTransport && t.relocation != nil && !t.relocation.overflow {
+	// Preserve blobclient's whole-document rejection of trailing junk or a
+	// second JSON value before checkedResponse's single-value decode.
+	if errors.As(err, &e) && !e.HubTransport && t.relocation != nil && !t.relocation.overflow && json.Valid(t.relocation.raw) {
 		_, projected := checkedResponse(&http.Response{
 			StatusCode: http.StatusGone,
 			Body:       io.NopCloser(bytes.NewReader(t.relocation.raw)),
