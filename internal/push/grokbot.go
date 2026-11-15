@@ -22,6 +22,10 @@ import (
 // a log or a stored error.
 func (w *Worker) pushGrokbot(ctx context.Context, d hub.DueDelivery) {
 	w.init()
+	if d.GrokWake != nil {
+		w.pushGrokbotWake(ctx, d)
+		return
+	}
 	base := context.WithoutCancel(ctx)
 	now := w.now()
 	ok, wait := w.Hub.GrokbotBudgetOK(ctx, d.RouteID, now)

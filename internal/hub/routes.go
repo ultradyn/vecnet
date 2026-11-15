@@ -73,6 +73,7 @@ func (h *Hub) AddRoute(ctx context.Context, ownerKind, ownerID, rawURL string) (
 type newRoute struct {
 	ownerKind, ownerID, kind, url string
 	keyEnc                        string
+	grokbotTransport              string
 	verified                      bool
 }
 
@@ -95,6 +96,9 @@ func (h *Hub) insertRoute(ctx context.Context, tx *sql.Tx, r newRoute) (routeID,
 	}
 	now = h.nowStr()
 	routeID = ids.New(routePrefix)
+	if r.grokbotTransport == "" {
+		r.grokbotTransport = GrokbotTransportDeliveryV1
+	}
 	var verifiedAt, keyEnc any
 	if r.verified {
 		verifiedAt = now
@@ -103,8 +107,8 @@ func (h *Hub) insertRoute(ctx context.Context, tx *sql.Tx, r newRoute) (routeID,
 		keyEnc = r.keyEnc
 	}
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO routes(route_id, owner_kind, owner_id, kind, url, verified_at, created_at, key_enc) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		routeID, r.ownerKind, r.ownerID, r.kind, r.url, verifiedAt, now, keyEnc); err != nil {
+		`INSERT INTO routes(route_id, owner_kind, owner_id, kind, url, verified_at, created_at, key_enc, grokbot_transport) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		routeID, r.ownerKind, r.ownerID, r.kind, r.url, verifiedAt, now, keyEnc, r.grokbotTransport); err != nil {
 		return "", "", fmt.Errorf("hub: insert route: %w", err)
 	}
 	if r.ownerKind == "peer" {
@@ -135,20 +139,21 @@ func (h *Hub) insertRoute(ctx context.Context, tx *sql.Tx, r newRoute) (routeID,
 // Nor the URL's path or query, which can hold a callback credential: only its
 // host, as every operator read shows routes (PROTOCOL §2.12, §2.13).
 type RouteInfo struct {
-	RouteID     string  `json:"route_id"`
-	OwnerKind   string  `json:"owner_kind"`
-	OwnerID     string  `json:"owner_id"`
-	Kind        string  `json:"kind"`
-	Host        string  `json:"host"`
-	VerifiedAt  *string `json:"verified_at"`
-	CreatedAt   string  `json:"created_at"`
-	RunsPerHour int     `json:"runs_per_hour"`
+	GrokbotTransport *string `json:"grokbot_transport"`
+	RouteID          string  `json:"route_id"`
+	OwnerKind        string  `json:"owner_kind"`
+	OwnerID          string  `json:"owner_id"`
+	Kind             string  `json:"kind"`
+	Host             string  `json:"host"`
+	VerifiedAt       *string `json:"verified_at"`
+	CreatedAt        string  `json:"created_at"`
+	RunsPerHour      int     `json:"runs_per_hour"`
 }
 
 // ListRoutes returns every push route, oldest first.
 func (h *Hub) ListRoutes(ctx context.Context) ([]RouteInfo, error) {
 	rows, err := h.DB.QueryContext(ctx,
-		`SELECT route_id, owner_kind, owner_id, kind, url, verified_at, created_at, runs_per_hour
+		`SELECT route_id, owner_kind, owner_id, kind, url, verified_at, created_at, runs_per_hour, CASE WHEN kind = 'grokbot' THEN grokbot_transport END
 		 FROM routes ORDER BY created_at, route_id`)
 	if err != nil {
 		return nil, fmt.Errorf("hub: list routes: %w", err)
@@ -158,7 +163,7 @@ func (h *Hub) ListRoutes(ctx context.Context) ([]RouteInfo, error) {
 	for rows.Next() {
 		var r RouteInfo
 		var rawURL string
-		if err := rows.Scan(&r.RouteID, &r.OwnerKind, &r.OwnerID, &r.Kind, &rawURL, &r.VerifiedAt, &r.CreatedAt, &r.RunsPerHour); err != nil {
+		if err := rows.Scan(&r.RouteID, &r.OwnerKind, &r.OwnerID, &r.Kind, &rawURL, &r.VerifiedAt, &r.CreatedAt, &r.RunsPerHour, &r.GrokbotTransport); err != nil {
 			return nil, fmt.Errorf("hub: list routes: %w", err)
 		}
 		// A malformed legacy URL shows no host, and is never echoed.
@@ -200,8 +205,9 @@ func (h *Hub) RemoveRoute(ctx context.Context, routeID string) error {
 // RouteUpdate is a change to an existing route: a new URL, a new routine
 // key (grokbot routes only), or both. A nil field is unchanged.
 type RouteUpdate struct {
-	URL *string
-	Key *string
+	URL              *string
+	Key              *string
+	GrokbotTransport *string
 }
 
 // UpdateRoute changes routeID in place: its owner, id, keys and queued
@@ -219,7 +225,7 @@ type RouteUpdate struct {
 // old URL. Neither the URL nor the key reaches an error or the audit
 // detail, which records only which fields changed.
 func (h *Hub) UpdateRoute(ctx context.Context, routeID string, u RouteUpdate) error {
-	if u.URL == nil && u.Key == nil {
+	if u.URL == nil && u.Key == nil && u.GrokbotTransport == nil {
 		return invalidRouteField("url", "give a new url, key or both")
 	}
 	return h.DB.Tx(ctx, func(tx *sql.Tx) error {
@@ -229,6 +235,14 @@ func (h *Hub) UpdateRoute(ctx context.Context, routeID string, u RouteUpdate) er
 		}
 		if u.Key != nil && kind != RouteKindGrokbot {
 			return invalidRouteField("key", "only a grokbot route takes a key")
+		}
+		if u.GrokbotTransport != nil {
+			if kind != RouteKindGrokbot {
+				return invalidRouteField("grokbot_transport", "only a grokbot route takes a transport")
+			}
+			if err := validateGrokbotTransport(*u.GrokbotTransport); err != nil {
+				return err
+			}
 		}
 		var sealed string
 		if u.Key != nil {
@@ -264,6 +278,12 @@ func (h *Hub) UpdateRoute(ctx context.Context, routeID string, u RouteUpdate) er
 				return fmt.Errorf("hub: replace routine key: %w", err)
 			}
 			changed = append(changed, "key")
+		}
+		if u.GrokbotTransport != nil {
+			if err := setGrokbotTransport(ctx, tx, routeID, *u.GrokbotTransport, h.Now()); err != nil {
+				return err
+			}
+			changed = append(changed, "grokbot_transport")
 		}
 		if len(changed) == 0 {
 			return nil // the same URL: nothing to do

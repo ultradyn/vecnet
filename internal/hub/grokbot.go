@@ -62,6 +62,14 @@ const (
 // The key is sealed under meta.hub_key and never returned. The route is
 // verified at once, since routines have no challenge, and it has no whsec_.
 func (h *Hub) AddGrokbotRoute(ctx context.Context, ownerKind, ownerID, routineURL, key string) (routeID string, err error) {
+	return h.AddGrokbotRouteWithTransport(ctx, ownerKind, ownerID, routineURL, key, GrokbotTransportDeliveryV1)
+}
+
+// AddGrokbotRouteWithTransport requires an explicit supported transport selection.
+func (h *Hub) AddGrokbotRouteWithTransport(ctx context.Context, ownerKind, ownerID, routineURL, key, transport string) (routeID string, err error) {
+	if err := validateGrokbotTransport(transport); err != nil {
+		return "", err
+	}
 	if ownerKind != "peer" && ownerKind != "principal" {
 		return "", invalidRouteField("owner_kind", "a route is owned by a peer or a principal")
 	}
@@ -72,7 +80,7 @@ func (h *Hub) AddGrokbotRoute(ctx context.Context, ownerKind, ownerID, routineUR
 	err = h.DB.Tx(ctx, func(tx *sql.Tx) error {
 		routeID, _, err = h.insertRoute(ctx, tx, newRoute{
 			ownerKind: ownerKind, ownerID: ownerID, kind: RouteKindGrokbot, url: routineURL,
-			keyEnc: sealed, verified: true,
+			keyEnc: sealed, verified: true, grokbotTransport: transport,
 		})
 		return err
 	})
@@ -188,6 +196,20 @@ func (h *Hub) GrokbotBudgetOK(ctx context.Context, routeID string, now time.Time
 	ok, wait := false, time.Duration(0)
 	err := h.DB.Tx(ctx, func(tx *sql.Tx) error {
 		ok, wait = false, 0
+		var err error
+		ok, wait, err = takeGrokbotRun(ctx, tx, routeID, nil, now)
+		return err
+	})
+	if err != nil {
+		slog.Error("hub: grokbot budget", "route", routeID, "err", err)
+		return false, grokbotBudgetErrWait
+	}
+	return ok, wait
+}
+
+// takeGrokbotRun shares the original rolling budgets with token-owned runs.
+func takeGrokbotRun(ctx context.Context, tx *sql.Tx, routeID string, token any, now time.Time) (ok bool, wait time.Duration, err error) {
+	err = func() error {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM route_runs WHERE at <= ?`,
 			envelope.FormatTime(now.Add(-GrokbotBudgetWindow))); err != nil {
 			return fmt.Errorf("hub: prune route runs: %w", err)
@@ -202,8 +224,8 @@ func (h *Hub) GrokbotBudgetOK(ctx context.Context, routeID string, now time.Time
 		}
 		if used < limit && total < GrokbotAccountRunsPerHour {
 			ok = true
-			if _, err := tx.ExecContext(ctx, `INSERT INTO route_runs(route_id, at) VALUES (?, ?)`,
-				routeID, envelope.FormatTime(now)); err != nil {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO route_runs(route_id, at, grok_wake_token) VALUES (?, ?, ?)`,
+				routeID, envelope.FormatTime(now), token); err != nil {
 				return fmt.Errorf("hub: record route run: %w", err)
 			}
 			return nil
@@ -223,12 +245,8 @@ func (h *Hub) GrokbotBudgetOK(ctx context.Context, routeID string, now time.Time
 			wait = max(wait, w)
 		}
 		return nil
-	})
-	if err != nil {
-		slog.Error("hub: grokbot budget", "route", routeID, "err", err)
-		return false, grokbotBudgetErrWait
-	}
-	return ok, wait
+	}()
+	return ok, wait, err
 }
 
 // grokbotRunWait is the time until the run at index offset, oldest first,
@@ -257,7 +275,7 @@ func grokbotRunWait(ctx context.Context, tx *sql.Tx, routeID string, offset int,
 // started, grokbot.md §2).
 func (h *Hub) ReleaseGrokbotRun(ctx context.Context, routeID string, at time.Time) error {
 	if _, err := h.DB.ExecContext(ctx,
-		`DELETE FROM route_runs WHERE rowid = (SELECT rowid FROM route_runs WHERE route_id = ? AND at = ? LIMIT 1)`,
+		`DELETE FROM route_runs WHERE rowid = (SELECT rowid FROM route_runs WHERE route_id = ? AND at = ? AND grok_wake_token IS NULL LIMIT 1)`,
 		routeID, envelope.FormatTime(at)); err != nil {
 		return fmt.Errorf("hub: release route run: %w", err)
 	}
@@ -304,6 +322,10 @@ func ClassifyGrokbot(status int, body []byte) (outcome string) {
 // is back or its key replaced (§3.3, §5.5). body is the response body and is
 // never stored.
 func (h *Hub) GrokbotPushResult(ctx context.Context, d DueDelivery, status int, body []byte, retryAfter time.Duration, netErr error, now time.Time) error {
+	return h.recordPush(ctx, d, grokbotPushOutcome(status, body, netErr), status, retryAfter, netErr, now)
+}
+
+func grokbotPushOutcome(status int, body []byte, netErr error) pushOutcome {
 	outcome := pushRetry
 	if netErr == nil {
 		switch ClassifyGrokbot(status, body) {
@@ -316,5 +338,5 @@ func (h *Hub) GrokbotPushResult(ctx context.Context, d DueDelivery, status int, 
 			outcome = pushTerminal
 		}
 	}
-	return h.recordPush(ctx, d, outcome, status, retryAfter, netErr, now)
+	return outcome
 }

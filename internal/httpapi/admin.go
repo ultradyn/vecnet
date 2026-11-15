@@ -370,7 +370,7 @@ func (s *server) adminArchive(archived bool) http.HandlerFunc {
 // pushes nothing until verified. Kind grokbot takes the routine's crsr_ key
 // and is 201 {"route_id"}: live at once, and the key is never returned.
 func (s *server) adminAddRoute(w http.ResponseWriter, r *http.Request) {
-	top, err := readObject(r, []string{"owner", "url", "kind", "key"}, []string{"owner", "url"})
+	top, err := readObject(r, []string{"owner", "url", "kind", "key", "grokbot_transport"}, []string{"owner", "url"})
 	if err != nil {
 		writeError(w, err)
 		return
@@ -414,6 +414,10 @@ func (s *server) adminAddRoute(w http.ResponseWriter, r *http.Request) {
 	}
 	switch routeKind {
 	case "", hub.RouteKindHTTP:
+		if _, has := top["grokbot_transport"]; has {
+			invalid("grokbot_transport", "only a grokbot route takes a transport")
+			return
+		}
 		if _, has := top["key"]; has {
 			invalid("key", "only a grokbot route takes a key")
 			return
@@ -426,13 +430,21 @@ func (s *server) adminAddRoute(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		writeJSON(w, http.StatusCreated, map[string]string{"route_id": id, "whsec": whsec})
 	case hub.RouteKindGrokbot:
-		id, err := s.Hub.AddGrokbotRoute(r.Context(), kind, owner, u, key)
+		transport := hub.GrokbotTransportDeliveryV1
+		if _, has := top["grokbot_transport"]; has {
+			transport, err = routeTransportField(top)
+			if err != nil {
+				writeError(w, err)
+				return
+			}
+		}
+		id, err := s.Hub.AddGrokbotRouteWithTransport(r.Context(), kind, owner, u, key, transport)
 		if err != nil {
 			writeError(w, err)
 			return
 		}
 		s.kick() // verified at once: queued deliveries may be due now
-		writeJSON(w, http.StatusCreated, map[string]string{"route_id": id})
+		writeJSON(w, http.StatusCreated, map[string]string{"route_id": id, "grokbot_transport": transport})
 	default:
 		invalid("kind", "kind is http or grokbot")
 	}
@@ -469,7 +481,7 @@ func (s *server) adminRemoveRoute(w http.ResponseWriter, r *http.Request) {
 // routine URL, a new crsr_ key, or both, and stays live. Neither value is
 // ever echoed.
 func (s *server) adminUpdateRoute(w http.ResponseWriter, r *http.Request) {
-	top, err := readObject(r, []string{"url", "key"}, nil)
+	top, err := readObject(r, []string{"url", "key", "grokbot_transport"}, nil)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -490,6 +502,14 @@ func (s *server) adminUpdateRoute(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		u.Key = &v
+	}
+	if _, has := top["grokbot_transport"]; has {
+		v, err := routeTransportField(top)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		u.GrokbotTransport = &v
 	}
 	if err := s.Hub.UpdateRoute(r.Context(), r.PathValue("id"), u); err != nil {
 		writeError(w, err)
@@ -919,4 +939,15 @@ func (s *server) adminMaintenanceStatus(w http.ResponseWriter, r *http.Request) 
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, result)
+}
+
+// Capability validation uses safe 422 field errors, including null/type errors.
+func routeTransportField(top map[string]json.RawMessage) (string, error) {
+	v, err := stringField(top, "grokbot_transport")
+	if err != nil {
+		e := hub.E(http.StatusUnprocessableEntity, "invalid_value", "transport must be delivery_v1 or recipient_drain_v1")
+		e.Details["field"] = "grokbot_transport"
+		return "", e
+	}
+	return v, nil
 }

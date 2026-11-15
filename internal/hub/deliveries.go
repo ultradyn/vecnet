@@ -70,12 +70,14 @@ func PushBackoff(attempt int, retryAfter time.Duration, rnd func() float64) time
 // DueDelivery is one claimed push: the route to push through (Kind is its
 // routes.kind), its active keys (newest first; none on a grokbot route) and
 // the exact bytes of the Delivery Event, which every attempt resends
-// unchanged (§3.3).
+// unchanged (§3.3). Opted-in GrokWake claims carry a frozen outer envelope
+// containing those original Delivery bytes.
 type DueDelivery struct {
 	DeliveryID, Recipient, ThreadID, RouteID, URL, Kind string
+	GrokWake                                            *GrokWakeClaim
 	Keys                                                []string
 	Attempt                                             int    // this attempt's number, 1-based
-	Body                                                []byte // the Delivery JSON (with per-recipient blob_url), as appended to the log
+	Body                                                []byte // exact wire body; legacy Delivery or opted-in frozen wake
 }
 
 // ClaimDue claims up to limit deliveries due for a push at now and marks
@@ -93,43 +95,13 @@ func (h *Hub) ClaimDue(ctx context.Context, now time.Time, limit int) ([]DueDeli
 	var out []DueDelivery
 	err := h.DB.Tx(ctx, func(tx *sql.Tx) error {
 		out = nil
-		rows, err := tx.QueryContext(ctx,
-			`SELECT d.dly_id, d.recipient, d.thr_id, d.route_id, r.url, r.kind, d.attempt, e.data, e.payload_format, coalesce(e.msg_id,''), coalesce(e.snapshot_id,''), d.body_sha256
-			 FROM deliveries d
-			 JOIN routes r ON r.route_id = d.route_id
-			 JOIN events e ON e.seq = d.event_seq
-			 WHERE d.state IN ('queued', 'pushed') AND d.priority != 'hold' AND d.held = 0
-			   AND r.verified_at IS NOT NULL
-			   AND (d.next_attempt_at IS NULL OR d.next_attempt_at <= ?1)
-			   AND d.expires_at > ?1
-			   AND NOT EXISTS (
-			     SELECT 1 FROM deliveries p
-			     WHERE p.recipient = d.recipient AND p.thr_id = d.thr_id AND p.event_seq < d.event_seq
-			       AND p.state IN ('queued', 'pushed') AND p.priority != 'hold' AND p.held = 0
-			       AND p.route_id IS NOT NULL)
-			 ORDER BY d.event_seq
-			 LIMIT ?2`, nowS, limit)
-		if err != nil {
-			return fmt.Errorf("hub: claim due: %w", err)
-		}
 		var payloads []eventpayload.StoredPayload
-		for rows.Next() {
-			var d DueDelivery
-			var p eventpayload.StoredPayload
-			if err := rows.Scan(&d.DeliveryID, &d.Recipient, &d.ThreadID, &d.RouteID, &d.URL, &d.Kind, &d.Attempt, &p.Data, &p.Format, &p.MsgID, &p.SnapshotID, &p.BodySHA256); err != nil {
-				rows.Close()
-				return fmt.Errorf("hub: claim due: %w", err)
-			}
-			payloads = append(payloads, p)
-			d.Attempt++
-			out = append(out, d)
+		var err error
+		out, payloads, err = h.claimPushCandidates(ctx, tx, now, limit)
+		if err != nil {
+			return err
 		}
-		if err := rows.Close(); err != nil {
-			return fmt.Errorf("hub: claim due: %w", err)
-		}
-		if err := rows.Err(); err != nil {
-			return fmt.Errorf("hub: claim due: %w", err)
-		}
+
 		// Event iterators are closed; reuse this writer transaction even with a
 		// one-connection pool. Hydration failure rolls back the entire claim.
 		for _, p := range payloads {
@@ -143,6 +115,11 @@ func (h *Hub) ClaimDue(ctx context.Context, now time.Time, limit int) ([]DueDeli
 		}
 		for i, body := range bodies {
 			out[i].Body = body
+			if out[i].GrokWake != nil {
+				if err := freezeGrokbotBody(ctx, tx, &out[i]); err != nil {
+					return err
+				}
+			}
 		}
 		lease := envelope.FormatTime(now.Add(PushLease))
 		keys := map[string][]string{}
@@ -178,6 +155,18 @@ func (h *Hub) ClaimDue(ctx context.Context, now time.Time, limit int) ([]DueDeli
 func (h *Hub) DeferPush(ctx context.Context, d DueDelivery, next time.Time) error {
 	at := h.nowStr()
 	return h.DB.Tx(ctx, func(tx *sql.Tx) error {
+		if d.GrokWake != nil {
+			var current bool
+			if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM grokbot_wakes w JOIN deliveries d ON d.dly_id=w.representative_id WHERE w.route_id=? AND w.recipient=? AND w.token=? AND w.phase='claimed' AND d.dly_id=? AND d.state='pushed' AND d.attempt=?)`, d.RouteID, d.Recipient, d.GrokWake.Token, d.DeliveryID, d.Attempt).Scan(&current); err != nil {
+				return err
+			}
+			if !current {
+				return nil
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE grokbot_wakes SET phase='waiting',lease_until='',retry_at=max(retry_at,?) WHERE route_id=? AND recipient=? AND token=?`, envelope.FormatTime(next), d.RouteID, d.Recipient, d.GrokWake.Token); err != nil {
+				return err
+			}
+		}
 		res, err := tx.ExecContext(ctx,
 			`UPDATE deliveries SET state = 'queued', attempt = attempt - 1, next_attempt_at = ?, updated_at = ?
 		 WHERE dly_id = ? AND state = 'pushed' AND attempt = ?`,
@@ -242,6 +231,12 @@ func (h *Hub) PushResult(ctx context.Context, d DueDelivery, status int, retryAf
 
 // recordPush applies outcome; see PushResult and GrokbotPushResult.
 func (h *Hub) recordPush(ctx context.Context, d DueDelivery, outcome pushOutcome, status int, retryAfter time.Duration, netErr error, now time.Time) error {
+	return h.recordPushGated(ctx, d, outcome, status, retryAfter, netErr, now, nil, nil)
+}
+
+// recordPushGated settles the domain and existing representative outcome in
+// one writer transaction; notifications retain their post-commit boundary.
+func (h *Hub) recordPushGated(ctx context.Context, d DueDelivery, outcome pushOutcome, status int, retryAfter time.Duration, netErr error, now time.Time, gate func(*sql.Tx) (bool, error), retryAt *time.Time) error {
 	nowS := envelope.FormatTime(now)
 	var lastStatus any
 	if netErr == nil {
@@ -262,6 +257,15 @@ func (h *Hub) recordPush(ctx context.Context, d DueDelivery, outcome pushOutcome
 	applied := false
 	err := h.DB.Tx(ctx, func(tx *sql.Tx) error {
 		notify, applied, alert = "", false, nil
+		if gate != nil {
+			ok, err := gate(tx)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return nil
+			}
+		}
 		var state, msgID, thr, sender string
 		var attempt, left int
 		var senderIsPeer bool
@@ -351,6 +355,9 @@ func (h *Hub) recordPush(ctx context.Context, d DueDelivery, outcome pushOutcome
 				return deadLetter(left, "push retries exhausted")
 			}
 			next := envelope.FormatTime(now.Add(PushBackoff(d.Attempt, retryAfter, nil)))
+			if retryAt != nil && !retryAt.IsZero() {
+				next = envelope.FormatTime(*retryAt)
+			}
 			if err := set("queued", left, next); err != nil {
 				return err
 			}
