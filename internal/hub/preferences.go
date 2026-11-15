@@ -183,14 +183,15 @@ func newPreferencesWithPolicy(db *store.DB, cfg Config, now func() time.Time, po
 		consumerGeneration = policy.preferenceGeneration()
 	}
 	canonical, err := json.Marshal(struct {
-		Bootstrap          map[string]prefs.Effective
-		Registry           string
-		Policy             string
-		MaxExpiry          int64
-		Installed          map[string]bool
-		Consumer           string
-		HardEventRetention time.Duration
-	}{p.bootstrap, prefs.RegistryVersion, cfg.PreferencePolicyGeneration, p.maxExpiry, p.installed, consumerGeneration, cfg.UnackedEventRetention})
+		Bootstrap             map[string]prefs.Effective
+		Registry              string
+		Policy                string
+		MaxExpiry             int64
+		Installed             map[string]bool
+		Consumer              string
+		HardEventRetention    time.Duration
+		EventRetentionEnabled bool
+	}{p.bootstrap, prefs.RegistryVersion, cfg.PreferencePolicyGeneration, p.maxExpiry, p.installed, consumerGeneration, cfg.UnackedEventRetention, cfg.EventRetentionEnabled})
 	if err != nil {
 		return nil, err
 	}

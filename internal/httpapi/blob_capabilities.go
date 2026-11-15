@@ -76,16 +76,20 @@ func (s *server) blobStorage(w http.ResponseWriter, r *http.Request) {
 // Keep the prefs-owned snapshot and ETag intact; aggregate usage is visible
 // only through the operator settings surface and its dedicated live counter.
 func (s *server) writePreferencesSnapshot(w http.ResponseWriter, r *http.Request, snapshot prefs.Snapshot) {
-	if s.Hub.Blobs.Transfers == nil {
-		writeJSON(w, 200, snapshot)
-		return
+	result := map[string]any{
+		"revision":    snapshot.Revision,
+		"preferences": snapshot.Descriptors(),
+		"runtime":     map[string]bool{"event_retention_enabled": s.Hub.Cfg.EventRetentionEnabled},
 	}
-	storage, err := s.blobStorageValues(r.Context())
-	if err != nil {
-		writeError(w, err)
-		return
+	if s.Hub.Blobs.Transfers != nil {
+		storage, err := s.blobStorageValues(r.Context())
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		result["storage"] = storage
 	}
-	writeJSON(w, 200, map[string]any{"revision": snapshot.Revision, "preferences": snapshot.Descriptors(), "storage": storage})
+	writeJSON(w, 200, result)
 }
 
 // r2Origins is the exact R2 S3 origin clients transfer with, while R2
