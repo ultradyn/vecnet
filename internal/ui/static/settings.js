@@ -9,7 +9,7 @@
 // Apply; it never sends a request.
 import { h } from './dom.js';
 import {
-  BLOB_NEW_ONLY, GROUPS, LANES, TICKS, blobOffText, bytesText, createSettingsStore, durationText, enumLabel, formatValue, laneView, lanePosition, lockOf,
+  BLOB_NEW_ONLY, GROUPS, LANES, TICKS, blobOffText, bytesText, createSettingsStore, durationText, enumLabel, eventRetentionNote, formatValue, laneView, lanePosition, lockOf,
   formatDuration, grokPresencePolicy, previewRefusal, rangeText, storageView, timingOf, unitOf, visibleRows,
 } from './settings-model.js';
 
@@ -29,7 +29,7 @@ const DANGER_NOTE = {
   blob_expiry_off: 'Off asks for confirmation with the hub\'s storage figures.',
 };
 const GROUP_NOTE = {
-  retention_storage: 'Archive mode protects message history from expiry. Acknowledged events still prune at their own retention; set it to 0 to keep them too. Archive mode is not an export or a backup: see Backups in docs/DEPLOY.md.',
+  retention_storage: 'Archive mode protects message history from expiry. Scheduled acknowledged-event pruning also requires its rollout gate; archive mode does not pause that policy. Set it to 0 to keep them too. Archive mode is not an export or a backup: see Backups in docs/DEPLOY.md.',
   files: 'An attachment expires at its recorded deadline, checked every 30 seconds; the storage provider may remove the bytes later. Existing attachments keep their deadlines.',
   agents_defaults: 'These apply to newly created agents, messages and threads. Existing ones, and explicit per-agent limits, are unchanged.',
 };
@@ -156,6 +156,7 @@ function details(store, row, id) {
   const danger = (row.danger || []).map(c => DANGER_NOTE[c]).filter(Boolean)[0];
   return [
     h('p', { class: 'st-h', id: id + '-h', text: row.description || '' }),
+    row.key === 'retention.ack_events' ? retentionNote(st.eventRetentionEnabled) : null,
     row.key === 'blobs.expiry' ? h('p', { class: 'st-blob-new', text: BLOB_NEW_ONLY }) : null,
     h('p', { class: 'st-meta', text: metaText(row) }),
     presenceOverride(row) ? h('p', { class: 'st-meta', text:
@@ -278,6 +279,10 @@ function listAside(store) {
 
 // ---------- Policy view ----------
 
+function retentionNote(enabled) {
+  return h('p', { class: 'st-meta', 'data-event-retention': enabled === false ? 'disabled' : enabled === true ? 'enabled' : 'not-reported', text: eventRetentionNote(enabled) });
+}
+
 function laneEl(store, lane, focusFor) {
   const st = store.state, v = laneView(store, lane);
   if (!v) return null;
@@ -310,6 +315,7 @@ function laneEl(store, lane, focusFor) {
   return h('div', { class: cls, 'data-row': lane.key },
     h('div', { class: 'st-ll' }, h('b', { text: lane.label }), chip(src), lockChip(v.lock), h('span', { class: 'st-val', text: v.text })),
     track,
+    lane.key === 'retention.ack_events' ? retentionNote(st.eventRetentionEnabled) : null,
     v.lock ? h('p', { class: 'st-lock-s ' + v.lock.kind, id: sid(lane.key) + '-ll', text: v.lock.text }) : null,
     err ? h('p', { class: 'st-err', text: err }) : null);
 }
@@ -398,7 +404,7 @@ function policyBody(store, focusFor) {
       store.rowOf('retention.archive_mode') && lockOf(store.rowOf('retention.archive_mode')) ? h('p', { class: 'st-lock-s st-arch-why', id: sid('retention.archive_mode') + '-al', text: 'Archive mode is unavailable: ' + lockOf(store.rowOf('retention.archive_mode')).text }) : null,
       axis,
       ...LANES.map(l => laneEl(store, l, focusFor)),
-      h('p', { class: 'st-dim st-lane-note', text: 'Archive mode pauses the Messages lane only. Acknowledged events keep pruning; set their retention to 0 to keep them too.' }),
+      h('p', { class: 'st-dim st-lane-note', text: 'Archive mode pauses the Messages lane only. Scheduled acknowledged-event pruning also requires its rollout gate; archive mode does not pause that policy. Set their retention to 0 to keep them too.' }),
       forecast(store)),
     h('section', { class: 'st-words', 'aria-labelledby': 'st-words-h' },
       h('h2', { id: 'st-words-h', text: 'Everything else, in plain words' }),
@@ -505,7 +511,7 @@ function riskText(store, risk, impact) {
   const val = k => { const r = store.rowOf(k); return r ? formatValue(r, store.value(k)) : ''; };
   switch (risk.code) {
     case 'presence_shortened': return 'Agents turn unknown sooner after their last presence report. Wakes held for an agent whose presence is now stale may be released.';
-    case 'archive_disabled': return `Message history becomes eligible for expiry under History retention (${val('retention.history')}) for messages from now on. Messages already here stay protected unless you also approve applying the policy to existing data. Acknowledged events keep pruning at their own retention either way.`;
+    case 'archive_disabled': return `Message history becomes eligible for expiry under History retention (${val('retention.history')}) for messages from now on. Messages already here stay protected unless you also approve applying the policy to existing data. Scheduled acknowledged-event pruning also requires its rollout gate; archive mode does not pause that policy.`;
     case 'retention_shortened': return 'The new limit applies to rows created from now on. Existing rows keep their previous rule unless you also approve applying it to existing data.';
     case 'blob_expiry_off': return blobOffText((impact && impact.storage) || store.state.storage) + ' Figures are estimates. Turning expiry back on later does not delete kept files.';
     case 'retention_apply_existing': return 'Existing rows older than the fixed cutoff become eligible at the next nightly sweep, not now. Pinned rows are kept. Deleted data cannot be restored by Undo; take a backup first (docs/DEPLOY.md, Backups).';

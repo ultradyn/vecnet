@@ -31,10 +31,10 @@ export function rows({ installed = false } = {}) {
 
 // storage, when set, is the operator-only R2 figures the hub adds beside the
 // preferences (internal/httpapi/blob_capabilities.go writePreferencesSnapshot).
-export function fakeHub({ preferences = rows(), revision = 3, storage = null } = {}) {
-  const hub = { revision, preferences: preferences.map(r => ({ ...r })), calls: [], fail: null, gen: 'g1', storage };
+export function fakeHub({ preferences = rows(), revision = 3, storage = null, runtime } = {}) {
+  const hub = { revision, preferences: preferences.map(r => ({ ...r })), calls: [], fail: null, gen: 'g1', storage, runtime };
   const etag = () => `"prefs-${hub.revision}-${hub.gen}"`;
-  const snapshot = () => ({ revision: hub.revision, preferences: hub.preferences.map(r => ({ ...r })), ...(hub.storage ? { storage: { ...hub.storage } } : {}) });
+  const snapshot = () => ({ revision: hub.revision, preferences: hub.preferences.map(r => ({ ...r })), ...(hub.storage ? { storage: { ...hub.storage } } : {}), ...(hub.runtime === undefined ? {} : { runtime: structuredClone(hub.runtime) }) });
   const err = (status, code, details = {}) => Object.assign(new Error(code), { status, code, details });
   // Risks compare before and after, as preferenceRisks does: a reset that
   // shortens a presence TTL is as risky as a set.

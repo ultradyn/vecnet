@@ -32,7 +32,7 @@ try {
       const r = await operator('GET', '/v1/admin/prefs');
       assert(r.ok, `GET prefs ${r.status}`);
       const body = await r.json();
-      return { etag: r.headers.get('etag'), revision: body.revision, rows: new Map(body.preferences.map(p => [p.key, p])) };
+      return { etag: r.headers.get('etag'), revision: body.revision, runtime: body.runtime, rows: new Map(body.preferences.map(p => [p.key, p])) };
     };
     const view = async v => {
       await page.locator(`.st-view button[data-fk=view-${v}]`).click();
@@ -136,6 +136,15 @@ try {
     assert(headings.join('|') === 'Retention & storage|Files|Notifications & presence|Agents defaults|Automatic archiving|Appearanceonly this browser', `sections ${headings}`);
     assert((await page.locator('#sec-automatic_archiving').textContent()).includes('existing agents and threads hourly'), 'archive rules have new-only copy');
     const hub0 = await hubPrefs();
+    assert(hub0.runtime?.event_retention_enabled === false, 'real demo must report the default-off pruning gate');
+    const gateOff = async () => {
+      const ack = page.locator('[data-row="retention.ack_events"]').first();
+      const note = ack.locator('[data-event-retention="disabled"]');
+      assert(await note.textContent() === 'Acknowledged-event pruning gate: disabled (last reported by hub). Saving this policy does not enable pruning.', 'last-reported disabled note missing beside ack retention');
+      await into('[data-row="retention.ack_events"]');
+      assert(await note.isVisible(), 'disabled note is not visible beside centered ack row');
+    };
+    await both('gate-off', { list: gateOff, policy: gateOff });
     await rowsMatchHub(hub0);
     await both('initial', { list: top, policy: top });
 
@@ -659,6 +668,6 @@ try {
       await shot(`prefs-${v}-ttl-flags-${size}`);
     }
   });
-  console.log('settings passed: loading, initial, hub availability for every row, unavailable, flag, dirty, invalid, saving, saved, default, confirm, retention-available, retention-edited, retention-confirm, retention-existing-confirm, retention-saved, revision replay rejected, conflict, error, empty and appearance; List and Policy; desk and phone');
+  console.log('settings passed: loading, initial, real default-off pruning report and four centered gate-off captures, hub availability for every row, unavailable, flag, dirty, invalid, saving, saved, default, confirm, retention-available, retention-edited, retention-confirm, retention-existing-confirm, retention-saved, revision replay rejected, conflict, error, empty and appearance; List and Policy; desk and phone');
 } finally { await cleanBuild(); }
 

@@ -1264,3 +1264,244 @@ test('mounted settings re-reads storage when the connection goes live, with no f
     globalThis.location = prevLoc;
   }
 });
+
+
+// ---------- last-reported acknowledged-event pruning gate ----------
+const retentionRuntime = enabled => ({ event_retention_enabled: enabled });
+const reportedReply = (enabled, etag = '"report"') => ({ status: 200, etag, body: {
+  revision: 4, preferences: rows({ installed: true }),
+  ...(enabled === undefined ? {} : { runtime: retentionRuntime(enabled) }),
+} });
+const deferred = () => {
+  let resolve, reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+};
+
+test('event retention report accepts booleans and treats missing or malformed metadata as not reported', async t => {
+  for (const [name, runtime, want] of [
+    ['false', retentionRuntime(false), false], ['true', retentionRuntime(true), true],
+    ['legacy', undefined, null], ['null container', null, null], ['array', [], null],
+    ['array with boolean', Object.assign([], retentionRuntime(true)), null],
+    ['string container', 'true', null], ['number container', 1, null], ['missing member', {}, null],
+    ['null member', retentionRuntime(null), null], ['string member', retentionRuntime('false'), null],
+    ['number member', retentionRuntime(0), null], ['object member', retentionRuntime({}), null], ['array member', retentionRuntime([]), null],
+  ]) await t.test(name, async () => {
+    const { st } = await ready({ hub: { runtime } });
+    assert.equal(st.phase, 'ready', 'older hubs remain readable');
+    assert.equal(st.eventRetentionEnabled, want);
+  });
+  await t.test('accepted GET and PATCH replace a known report with not reported', async () => {
+    const { hub, store, st } = await ready({ hub: { runtime: retentionRuntime(true) } });
+    hub.runtime = undefined;
+    hub.gen = 'g2';
+    await store.refresh();
+    assert.equal(st.eventRetentionEnabled, null);
+    hub.runtime = retentionRuntime(false);
+    store.edit('events.refresh_interval', '10m');
+    await store.save();
+    assert.equal(st.eventRetentionEnabled, false);
+    hub.runtime = retentionRuntime('true');
+    store.edit('events.refresh_interval', '15m');
+    await store.save();
+    assert.equal(st.eventRetentionEnabled, null);
+    assert.equal(store.value('retention.ack_events'), 604800, 'duration cannot imply activation');
+  });
+});
+
+test('event retention note appears in List and Policy without changing policy controls', async () => {
+  const prev = { document: globalThis.document, window: globalThis.window, CSS: globalThis.CSS, location: globalThis.location };
+  const body = new StEl('body'), root = new StEl('div'), listeners = new Map();
+  const add = (type, fn) => { if (!listeners.has(type)) listeners.set(type, new Set()); listeners.get(type).add(fn); };
+  const remove = (type, fn) => listeners.get(type)?.delete(fn);
+  globalThis.document = { body, activeElement: body, hidden: false, createElement: tag => new StEl(tag), getElementById: () => null, addEventListener: add, removeEventListener: remove };
+  globalThis.window = { localStorage: memStorage(), addEventListener: add, removeEventListener: remove };
+  globalThis.CSS = { escape: s => String(s).replace(/[^a-zA-Z0-9_-]/g, ch => '\\' + ch) };
+  globalThis.location = { host: 'hub.test' };
+  const hub = fakeHub({ preferences: rows({ installed: true }), runtime: retentionRuntime(false) });
+  const field = fk => walkSt(root, e => e.attrs['data-fk'] === fk)[0];
+  const click = fk => { for (const fn of field(fk).on.click || []) fn(); };
+  const off = mountSettings(root, { api: hub.api, toast() {}, store: { onConn: () => () => {} },
+    appearance: { get: () => ({ theme: 'system', density: 'comfortable' }), subscribe: () => () => {} } });
+  try {
+    await flush();
+    let tracks;
+    for (const [enabled, attr, text] of [
+      [false, 'disabled', 'Acknowledged-event pruning gate: disabled (last reported by hub). Saving this policy does not enable pruning.'],
+      [true, 'enabled', 'Acknowledged-event pruning gate: enabled (last reported by hub).'],
+      [undefined, 'not-reported', 'Acknowledged-event pruning gate: not reported by this hub.'],
+    ]) {
+      hub.runtime = enabled === undefined ? undefined : retentionRuntime(enabled);
+      hub.gen += 'x';
+      for (const fn of listeners.get('focus') || []) fn();
+      await flush();
+      for (const view of ['list', 'policy']) {
+        click('view-' + view);
+        const ack = walkSt(root, e => e.attrs['data-row'] === 'retention.ack_events')[0];
+        const note = walkSt(ack, e => e.attrs['data-event-retention'] === attr)[0];
+        assert.ok(note, view + ': note is beside the acknowledged-event row');
+        assert.equal(note.textContent, text);
+        assert.equal(walkSt(ack, e => e.className === 'st-src s-default').length, 1);
+        assert.match(root.textContent, /Scheduled acknowledged-event pruning also requires its rollout gate; archive mode does not pause that policy\./);
+        if (view === 'list') {
+          assert.equal(field('st-retention-ack-events').disabled, false);
+          const search = field('q');
+          search.value = 'acknowledged';
+          for (const fn of search.on.input || []) fn({ target: search });
+          assert.ok(walkSt(root, e => e.attrs['data-event-retention'] === attr).length, 'filtered List retains the note');
+          const current = field('q'); current.value = '';
+          for (const fn of current.on.input || []) fn({ target: current });
+        } else {
+          const now = walkSt(ack, e => e.attrs.role === 'radio').map(e => [e.attrs['aria-label'], e.attrs['aria-checked'], e.disabled, e.style.left]);
+          assert.ok(now.some(e => e[0].includes('Never pruned')));
+          if (tracks) assert.deepEqual(now, tracks, 'gate reports do not alter tracks or controls');
+          tracks = now;
+          assert.match(ack.textContent, /7 d, then pruned if the pruning gate is enabled/);
+        }
+      }
+    }
+    assert.equal(hub.calls.filter(c => c.op !== 'get').length, 0, 'view/filter/report changes never write or preview');
+    // The report stays informational through the existing confirmation flow.
+    click('view-list');
+    hub.runtime = retentionRuntime(false);
+    for (const fn of listeners.get('focus') || []) fn();
+    await flush();
+    const input = field('st-presence-default_ttl') || field('st-presence-default-ttl');
+    input.value = '10m'; for (const fn of input.on.input || []) fn({ target: input });
+    click('save'); await flush();
+    const cf = action => walkSt(body, e => e.attrs['data-cf'] === action)[0];
+    assert.ok(cf('ok'), 'the existing preview still opens confirmation');
+    for (const fn of cf('no').on.click || []) fn();
+    assert.equal(hub.calls.filter(c => c.op === 'patch').length, 0, 'Cancel writes nothing');
+    click('save'); await flush();
+    for (const fn of cf('ok').on.click || []) fn();
+    await flush();
+    const patch = hub.calls.filter(c => c.op === 'patch');
+    assert.equal(patch.length, 1);
+    assert.deepEqual(patch[0].patch, { set: { 'presence.default_ttl': 600 }, reset: [], confirm: ['tok:{"set":{"presence.default_ttl":600},"reset":[],"apply_existing":false}'] });
+    assert.equal(patch[0].tag, '"prefs-3-g1xxx"');
+    assert.ok(walkSt(root, e => e.attrs['data-event-retention'] === 'disabled').length, 'saving does not enable pruning');
+  } finally { off(); for (const [key, value] of Object.entries(prev)) globalThis[key] = value; }
+});
+
+test('event retention report follows accepted network generations, not cached conflict bodies', async t => {
+  await t.test('dirty, same-tag, 304 and cached adoption', async () => {
+    for (const adopt of ['undo', 'adoptNewer']) for (const latest of [false, undefined]) {
+      const { hub, store, st } = await ready({ hub: { runtime: retentionRuntime(false) } });
+      store.edit('events.refresh_interval', '10m');
+      hub.runtime = retentionRuntime(true);
+      hub.competing('agents.default_max_depth', 40);
+      await store.refresh();
+      assert.equal(st.eventRetentionEnabled, true, 'dirty refresh reports immediately');
+      const tag = st.etag;
+      hub.api.prefs = async () => reportedReply(latest, tag);
+      const changes = []; store.subscribe((_, change) => changes.push(change));
+      await store.refresh();
+      assert.equal(st.eventRetentionEnabled, latest ?? null, 'same-tag 200 still reports');
+      assert.deepEqual(changes, ['settings'], 'quiet report change uses normal notification');
+      hub.api.prefs = async () => ({ status: 304, etag: tag });
+      await store.refresh();
+      assert.equal(st.eventRetentionEnabled, latest ?? null, '304 retains report');
+      store[adopt]();
+      assert.equal(st.eventRetentionEnabled, latest ?? null, adopt + ' cannot replay cached true');
+    }
+  });
+  await t.test('conflict recovery reports before cached rows are adopted', async () => {
+    const { hub, store, st } = await ready({ hub: { runtime: retentionRuntime(false) } });
+    store.edit('events.refresh_interval', '10m');
+    hub.competing('agents.default_max_depth', 40);
+    hub.runtime = retentionRuntime(true);
+    await store.save();
+    assert.equal(st.newer.reason, 'conflict');
+    assert.equal(st.eventRetentionEnabled, true);
+    assert.equal(store.value('events.refresh_interval'), 600);
+  });
+  for (const latest of [false, undefined, '304']) await t.test('late GET cannot replace ' + latest, async () => {
+    const { hub, store, st } = await ready({ hub: { runtime: retentionRuntime(false) } });
+    const old = deferred(); hub.api.prefs = () => old.promise;
+    const pending = store.refresh();
+    hub.api.prefs = async () => latest === '304' ? { status: 304 } : reportedReply(latest);
+    await store.refresh();
+    old.resolve(reportedReply(true)); await pending;
+    assert.equal(st.eventRetentionEnabled, latest === false || latest === '304' ? false : null);
+  });
+  for (const latest of [false, undefined]) await t.test('load ordering and superseded PATCH still acknowledge saved values: ' + latest, async () => {
+    const { hub, store, st } = await ready({ hub: { runtime: retentionRuntime(false) } });
+    const old = deferred(); hub.api.prefs = () => old.promise;
+    const loading = store.load();
+    hub.api.prefs = async () => reportedReply(undefined);
+    await store.load(); old.resolve(reportedReply(true)); await loading;
+    assert.equal(st.eventRetentionEnabled, null, 'older load cannot resurrect true');
+    store.edit('events.refresh_interval', '10m');
+    const patch = deferred(); hub.api.patchPrefs = () => patch.promise;
+    const saving = store.save();
+    hub.api.prefs = async () => reportedReply(latest);
+    await store.load();
+    const saved = reportedReply(true, '"saved"');
+    Object.assign(saved.body.preferences.find(r => r.key === 'events.refresh_interval'), { value: 600, source: 'stored' });
+    patch.resolve(saved); await saving;
+    assert.equal(st.eventRetentionEnabled, latest ?? null, 'older PATCH status is superseded');
+    assert.equal(store.value('events.refresh_interval'), 600, 'saved values are acknowledged');
+    assert.deepEqual(store.dirtyKeys(), []);
+    assert.deepEqual(st.saved.keys, ['events.refresh_interval']);
+  });
+});
+
+test('busy and failed settings refresh retain the last event retention report', async t => {
+  await t.test('busy entry, failure, unreadable reply and normal recovery', async () => {
+    const { hub, store, st } = await ready({ hub: { preferences: r2Rows(), storage: storage(GiB), runtime: retentionRuntime(false) } });
+    store.edit('presence.default_ttl', '10m'); await store.save();
+    const confirm = st.confirm, before = hub.calls.length;
+    hub.runtime = retentionRuntime(true); hub.storage = storage(2 * GiB);
+    await store.refresh();
+    assert.deepEqual(hub.calls.slice(before).map(c => c.op), ['storage']);
+    assert.equal(st.confirm, confirm); assert.equal(st.storage.used_bytes, 2 * GiB);
+    assert.equal(st.eventRetentionEnabled, false);
+    store.cancelConfirm();
+    hub.api.prefs = async () => { throw Object.assign(new Error('offline'), { status: 503 }); };
+    await store.refresh(); assert.equal(st.eventRetentionEnabled, false);
+    hub.api.prefs = async () => ({ status: 200, etag: '"invalid"', body: { runtime: retentionRuntime(true) } });
+    await store.refresh(); assert.equal(st.eventRetentionEnabled, false);
+    hub.api.prefs = async () => reportedReply(true);
+    await store.refresh(); assert.equal(st.eventRetentionEnabled, true);
+    hub.runtime = retentionRuntime(false);
+    await store.save(); await store.confirm();
+    assert.equal(st.eventRetentionEnabled, false, 'normal PATCH replaces last report');
+  });
+  for (const status of [200, 304]) await t.test('late same-tag ' + status + ' while confirming or saving', async () => {
+    for (const busy of ['confirming', 'saving']) {
+      const { hub, store, st } = await ready({ hub: { runtime: retentionRuntime(false) } });
+      const old = deferred(), late = deferred(); let n = 0;
+      hub.api.prefs = () => (++n === 1 ? old.promise : late.promise);
+      const first = store.refresh(), second = store.refresh();
+      let finish;
+      if (busy === 'confirming') { store.edit('presence.default_ttl', '10m'); await store.save(); }
+      else {
+        store.edit('events.refresh_interval', '10m');
+        const pending = deferred(); hub.api.patchPrefs = () => pending.promise;
+        finish = { pending, saving: store.save() };
+      }
+      const confirm = st.confirm;
+      late.resolve(status === 304 ? { status: 304 } : reportedReply(true, st.etag)); await second;
+      assert.equal(st.eventRetentionEnabled, false, 'late busy reply supplies no report');
+      assert.equal(st.confirm, confirm);
+      if (finish) { finish.pending.reject(Object.assign(new Error('refused'), { status: 503 })); await finish.saving; }
+      else store.cancelConfirm();
+      old.resolve(reportedReply(true, st.etag)); await first;
+      assert.equal(st.eventRetentionEnabled, true, 'discarded busy reply advances no barrier');
+    }
+  });
+  await t.test('destroy discards load, refresh, PATCH and conflict recovery reports', async () => {
+    for (const op of ['load', 'refresh', 'patch', 'conflict']) {
+      const { hub, store, st } = await ready({ hub: { runtime: retentionRuntime(false) } });
+      const pending = deferred();
+      hub.api.prefs = () => pending.promise;
+      hub.api.patchPrefs = op === 'conflict' ? async () => { throw { code: 'prefs_revision_conflict' }; } : () => pending.promise;
+      let work;
+      if (op === 'load' || op === 'refresh') work = store[op]();
+      else { store.edit('events.refresh_interval', '10m'); work = store.save(); await flush(); }
+      store.destroy(); pending.resolve(reportedReply(true)); await work;
+      assert.equal(st.eventRetentionEnabled, false, op);
+    }
+  });
+});

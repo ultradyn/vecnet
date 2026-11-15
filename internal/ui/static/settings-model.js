@@ -222,15 +222,26 @@ export function validSnapshot(body) {
   return body.preferences.every(p => p && typeof p.key === 'string' && typeof p.type === 'string' && typeof p.label === 'string');
 }
 
+// Runtime metadata is an optional report, never a policy value or lock.
+export function eventRetentionEnabledOf(body) {
+  const runtime = body && body.runtime;
+  return runtime && typeof runtime === 'object' && !Array.isArray(runtime) && typeof runtime.event_retention_enabled === 'boolean'
+    ? runtime.event_retention_enabled : null;
+}
+export function eventRetentionNote(enabled) {
+  if (enabled === false) return 'Acknowledged-event pruning gate: disabled (last reported by hub). Saving this policy does not enable pruning.';
+  if (enabled === true) return 'Acknowledged-event pruning gate: enabled (last reported by hub).';
+  return 'Acknowledged-event pruning gate: not reported by this hub.';
+}
+
 // ---------- Policy lanes ----------
 
 // Lanes on a log time axis, one per thing the hub keeps. Archive mode pauses
-// message history only: acknowledged events keep pruning at their own
-// retention (the prototype's claim otherwise is superseded; set
-// retention.ack_events to 0 to keep them too).
+// message history only: scheduled acknowledged-event pruning also requires
+// its rollout gate; retention.ack_events 0 keeps them too.
 export const LANES = [
   { key: 'retention.history', label: 'Messages', then: 'then deleted at the nightly sweep', archive: true },
-  { key: 'retention.ack_events', label: 'Acknowledged events', then: 'then pruned' },
+  { key: 'retention.ack_events', label: 'Acknowledged events', then: 'then pruned if the pruning gate is enabled' },
   { key: 'blobs.expiry', label: 'Files', then: 'then the object expires' },
   { key: 'agents.default_ttl', label: 'Undelivered messages', then: 'then they expire' },
 ];
@@ -370,9 +381,10 @@ export function createSettingsStore({ api, appearance, storage }) {
   const subs = new Set();
   const ctl = new AbortController();
   let dead = false, offAppearance = () => {};
+  let requestGeneration = 0, runtimeGeneration = 0;
   const look = appearance ? appearance.get() : { theme: 'system', density: 'comfortable' };
   const st = {
-    phase: 'loading', loadError: null, etag: '', revision: 0, rows: [], draft: new Map(), storage: null,
+    phase: 'loading', loadError: null, etag: '', revision: 0, rows: [], draft: new Map(), storage: null, eventRetentionEnabled: null,
     busy: '', confirm: null, newer: null, saveError: null, serverErrors: {}, focus: '',
     saved: null, announce: { text: '', n: 0 }, view: loadView(storage), q: '', only: 'all', open: '',
     appearance: { saved: { ...look }, draft: { ...look }, note: '' },
@@ -385,6 +397,18 @@ export function createSettingsStore({ api, appearance, storage }) {
   // meter, later re-reads ask the live counter even when prefs answers 304.
   let sawStorage = false;
   const storageSig = s => !s ? '' : s.unavailable ? 'unavailable' : FIGURES.map(k => s[k]).join(',');
+
+  // Only accepted network responses may update this report. A 304 advances
+  // the barrier without supplying metadata; cached adoption never enters here.
+  function acceptRuntime(body, generation) {
+    if (generation < runtimeGeneration) return false;
+    runtimeGeneration = generation;
+    if (!body) return false;
+    const enabled = eventRetentionEnabledOf(body);
+    const changed = enabled !== st.eventRetentionEnabled;
+    st.eventRetentionEnabled = enabled;
+    return changed;
+  }
 
   function adopt(body, etag) {
     st.rows = body.preferences.slice();
@@ -447,9 +471,11 @@ export function createSettingsStore({ api, appearance, storage }) {
     st.loadError = null;
     emit();
     try {
+      const generation = ++requestGeneration;
       const r = await api.prefs({ signal: ctl.signal });
       if (!live()) return;
       if (!validSnapshot(r.body)) throw { status: 0, code: 'network', message: 'The hub sent settings this page cannot read.' };
+      acceptRuntime(r.body, generation);
       adopt(r.body, r.etag);
       st.phase = 'ready';
     } catch (e) {
@@ -490,6 +516,7 @@ export function createSettingsStore({ api, appearance, storage }) {
       return;
     }
     let r;
+    const generation = ++requestGeneration;
     try { r = await api.prefs({ etag: st.etag, signal: ctl.signal }); } catch (e) {
       if (!live() || aborted(e) || quiet) return;
       st.saveError = { code: 'reload', text: 'Could not reload settings: ' + describeLoad(e).text };
@@ -497,6 +524,13 @@ export function createSettingsStore({ api, appearance, storage }) {
       return;
     }
     if (!live()) return;
+    // A confirmation/save may have begun while this read was in flight.
+    // Discard only the new report/barrier, preserving row and meter behavior.
+    let runtimeChanged = false;
+    if (!st.busy) {
+      if (r.status === 304) acceptRuntime(null, generation);
+      else if (validSnapshot(r.body)) runtimeChanged = acceptRuntime(r.body, generation);
+    }
     const unchanged = r.status === 304 || !r.body || r.etag === st.etag || !validSnapshot(r.body);
     if (!unchanged) {
       if (st.busy) return;
@@ -515,7 +549,7 @@ export function createSettingsStore({ api, appearance, storage }) {
     const before = storageSig(st.storage);
     await refreshMeter();
     if (!live()) return;
-    if (!unchanged) emit();
+    if (!unchanged || runtimeChanged) emit();
     else if (storageSig(st.storage) !== before) emit('storage');
   }
 
@@ -583,9 +617,13 @@ export function createSettingsStore({ api, appearance, storage }) {
       // Keep the draft; fetch the latest values for manual reconciliation.
       st.saveError = null;
       try {
+        const generation = ++requestGeneration;
         const r = await api.prefs({ signal: ctl.signal });
         if (!live()) return;
-        if (validSnapshot(r.body)) st.newer = { reason: 'conflict', body: r.body, etag: r.etag, changed: changedKeys(st.rows, r.body.preferences) };
+        if (validSnapshot(r.body)) {
+          acceptRuntime(r.body, generation);
+          st.newer = { reason: 'conflict', body: r.body, etag: r.etag, changed: changedKeys(st.rows, r.body.preferences) };
+        }
       } catch (err) {
         if (!live() || aborted(err)) return;
         st.newer = { reason: 'conflict', body: null, etag: '', changed: [] };
@@ -661,9 +699,11 @@ export function createSettingsStore({ api, appearance, storage }) {
     if (token) body.confirm = [token];
     if (applyExisting) body.apply_existing = true;
     try {
+      const generation = ++requestGeneration;
       const r = await api.patchPrefs(body, st.etag, { signal: ctl.signal });
       if (!live()) return;
       if (!validSnapshot(r.body)) throw { status: 0, code: 'network', message: 'unreadable reply' };
+      acceptRuntime(r.body, generation);
       applySaved(r, keys);
     } catch (e) {
       if (!live() || aborted(e)) return;
