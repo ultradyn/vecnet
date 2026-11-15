@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -23,9 +24,11 @@ func TestRuntimeStatusMigrationUpgrade(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var pending []string
 	for _, m := range migs {
 		if m.name >= "0037" {
-			break
+			pending = append(pending, m.name)
+			continue
 		}
 		if _, err := applyOne(ctx, db, m); err != nil {
 			t.Fatal(err)
@@ -43,7 +46,7 @@ func TestRuntimeStatusMigrationUpgrade(t *testing.T) {
 	if err := db.QueryRow(`SELECT max(name) FROM schema_migrations`).Scan(&prior); err != nil || prior != "0036_thread_archive.sql" {
 		t.Fatalf("fixture must match deployed migration 0036: %s, %v", prior, err)
 	}
-	if applied, err := Migrate(ctx, db); err != nil || len(applied) != 1 || applied[0] != "0037_peer_runtime_status.sql" {
+	if applied, err := Migrate(ctx, db); err != nil || !reflect.DeepEqual(applied, pending) {
 		t.Fatalf("runtime upgrade=%v err=%v", applied, err)
 	}
 	var n int

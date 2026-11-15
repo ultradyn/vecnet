@@ -32,6 +32,7 @@ type SendResponse struct {
 	Deliveries []DeliveryRef `json:"deliveries"`
 	JobID      string        `json:"job_id,omitempty"`
 	Spilled    bool          `json:"spilled"`
+	Warnings   []SendWarning `json:"warnings,omitempty"`
 }
 
 // DeliveryRef is one entry of SendResponse.deliveries.
@@ -587,6 +588,13 @@ func (h *Hub) sendTx(ctx context.Context, tx *sql.Tx, act actor, req *envelope.S
 	resp := &SendResponse{MessageID: msg.MessageID, ThreadID: thr.ID, Deliveries: refs, Spilled: msg.Content.Truncated}
 	if effect.jobRequest {
 		resp.JobID = effect.jobID
+	}
+
+	if thr.isNew {
+		resp.Warnings, err = recordGroupThreadCreations(ctx, tx, thr.ID, addressed, nowT)
+		if err != nil {
+			return nil, false, nil, err
+		}
 	}
 
 	respJSON, err := json.Marshal(resp)
