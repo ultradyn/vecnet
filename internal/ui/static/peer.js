@@ -11,6 +11,7 @@
 // gets a header note that opens the form.
 import { launcherSection } from './launcher.js';
 import { routesSection } from './peer-routes.js';
+import { readAllButton } from './read-all.js';
 import { subscriptionsSection } from './peer-subscriptions.js';
 import { subscriptionRemoved, subscriptionsResource } from './subs.js';
 import { prefill } from './compose.js';
@@ -292,7 +293,7 @@ export function mount(root, ctx) {
   // focus off a button.
   const headMain = h('div', { class: 'pv-main' });
   const acts = h('div', { class: 'pv-acts', role: 'group', 'aria-label': 'Message this peer' });
-  let actsKey = '', lifeKey = '', life = [];
+  let actsKey = '', lifeKey = '', life = [], readBtn = null, readBtnName = '';
   const head = h('header', { class: 'pv-head' }, headMain, acts);
 
   // The Invite card reads the invite status only once the peer row shows a
@@ -350,7 +351,19 @@ export function mount(root, ctx) {
   function renderActs(f) {
     const a = f && res.threads ? peerActions(f, res.threads.get(), ctx.me, res.threads.error()) : null;
     const q = a && a.open;
-    const key = peerActionsKey(f, a, t => threadTitle(t, ctx.me, nameOf));
+    // Mark all from this peer read: only while it has sent the operator
+    // unread messages (the inbox head's unread_by_sender) or a run is in
+    // progress. The node is kept, so a run keeps its focus and progress.
+    const head = ctx.inboxHead && ctx.inboxHead.get();
+    const fromIt = head && head.unread_by_sender ? head.unread_by_sender[id] || 0 : 0;
+    const nm = (f && f.name) || id;
+    if (!readBtn || readBtnName !== nm) {
+      readBtn = readAllButton(api, store, { label: 'Mark all from ' + nm + ' read', confirm: 'Confirm mark read', sender: id, cls: 'pv-read-all' });
+      readBtnName = nm;
+    }
+    const showRead = isPeer && !!f && f.id !== ctx.me && (fromIt > 0 || readBtn.running());
+    const readKey = showRead ? '+read:' + nm : '';
+    const key = peerActionsKey(f, a, t => threadTitle(t, ctx.me, nameOf)) + readKey;
     if (key === actsKey) {
       const ago = acts.querySelector('.ago');
       if (ago && q.at) ago.textContent = age(q.at);
@@ -359,12 +372,13 @@ export function mount(root, ctx) {
     actsKey = key;
     // A new offer (another thread became the newest, say) replaces the
     // buttons; focus on one moves to its replacement.
-    const had = acts.contains(document.activeElement) && ['pv-new', 'pv-open', 'pv-toggle', 'pv-archive'].find(c => document.activeElement.classList.contains(c));
+    const had = acts.contains(document.activeElement) && ['pv-new', 'pv-open', 'pv-toggle', 'pv-archive', 'pv-read-all'].find(c => document.activeElement.classList.contains(c));
     // Keep lifecycle nodes (and confirmation timers) when only message
     // offers change. A lifecycle change gets fresh, unarmed controls.
-    const lk = peerActionsKey(f, null);
+    const lk = peerActionsKey(f, null) + readKey;
     if (lk !== lifeKey) {
       lifeKey = lk; life = [];
+      if (showRead) life.push(readBtn);
       if (f && f.kind !== 'operator' && f.kind !== 'source') {
         const run = async action => {
           try { await api.peerLifecycle(id, action); toast('Peer ' + (action === 'enable' ? 'enabled' : action + 'd') + '.'); res.peers.reload(); }
@@ -568,6 +582,7 @@ export function mount(root, ctx) {
   render();
   const live = Object.values(res).filter(Boolean);
   const offs = live.map(r => r.subscribe(render));
+  if (ctx.inboxHead) offs.push(ctx.inboxHead.subscribe(() => renderActs(facts())));
   const timer = setInterval(() => { for (const r of live) r.reload(); if (inviteRes) inviteRes.reload(); }, RELOAD_MS);
   // Expire the cached report even if reloads fail or remain in flight. Keep
   // the refresh local to the fact list so focused action controls persist.

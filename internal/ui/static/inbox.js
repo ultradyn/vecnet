@@ -7,6 +7,7 @@ import { avatar, confirmButton, h, idCopy, idText, peerLink } from './dom.js';
 import { ago, when } from './format.js';
 import { deadLetterParts, heldWhy, olderPager, sections, withOlder } from './inbox-model.js';
 import * as presence from './presence.js';
+import { readAllButton } from './read-all.js';
 import * as subs from './subs.js';
 
 const PAGE = 50;
@@ -42,7 +43,11 @@ export function mount(root, ctx) {
   const attention = h('div', { class: 'attention', id: sectionId('attention') });
   const banner = h('div', { class: 'banner error', role: 'alert', hidden: true });
   const body = h('div', { class: 'inbox' });
-  root.replaceChildren(h('h1', { text: 'Inbox' }), h('p', { class: 'lede', text: LEDE }), banner, body);
+  // Mark all read (thread spam): every unread delivery but open decisions,
+  // after a second click. Shown only while there is something unread.
+  const readAll = readAllButton(api, store, { label: 'Mark all read', confirm: 'Confirm mark all read', cls: 'ib-read-all' });
+  readAll.hidden = true;
+  root.replaceChildren(h('div', { class: 'ib-head' }, h('h1', { text: 'Inbox' }), readAll), h('p', { class: 'lede', text: LEDE }), banner, body);
 
   const reload = async () => { store.invalidate('inbox'); await store.settled(); };
 
@@ -291,6 +296,8 @@ export function mount(root, ctx) {
       return;
     }
 
+    // Hide only when idle: a running mark-read keeps its button (and focus).
+    if (!readAll.running()) readAll.hidden = !(value.unread > 0);
     if (older.pending(value)) { syncOlder(value); return; }
     // Capture before dead-letter controls move to new cards: even moving a
     // retained node drops focus. Its confirmation state stays on that node.

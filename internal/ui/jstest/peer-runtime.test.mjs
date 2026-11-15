@@ -19,14 +19,14 @@ const NOW = Date.parse('2026-11-15T01:00:30Z');
 const report = (over = {}) => ({ runtime: 'codex', state: 'working', delivery: 'ready', version: '1.2.3',
   updated_at: '2026-11-15T01:00:00Z', expires_at: '2026-11-15T01:01:00Z', ...over });
 
-function world(t, status) {
+function world(t, status, { id = PEER, kind = 'session', unread = 0 } = {}) {
   const previous = globalThis.document;
   globalThis.document = { createElement: tag => new PeerEl(tag), activeElement: null };
   t.after(() => { globalThis.document = previous; });
   t.mock.timers.enable({ apis: ['setInterval'] });
   let hubNow = NOW, reads = 0, admin = 0;
   const responses = [
-    { peers: [{ peer: { peer_id: PEER, name: '<img src=x onerror=alert(1)>', kind: 'session', presence: 'idle', runtime_status: status }, credential: 'active' }] },
+    { peers: [{ peer: { peer_id: id, name: '<img src=x onerror=alert(1)>', kind, presence: 'idle', runtime_status: status }, credential: 'active' }] },
     { principals: [] }, { routes: [] }, { blocked: [], failed: [] }, [], { threads: [] },
   ];
   const api = { adminPeers: () => { reads++; return responses[0]; } };
@@ -35,7 +35,7 @@ function world(t, status) {
     return { get: () => value, error: () => null, subscribe: () => () => {}, reload: () => { load?.(); } };
   } };
   const root = new PeerEl('main');
-  const off = mount(root, { api, store, peerId: PEER, me: 'peer_op', nameOf: id => id, nav() {}, recoveryStorage: null });
+  const off = mount(root, { api, store, peerId: id, me: 'peer_op', inboxHead: { get: () => ({ unread_by_sender: { [id]: unread } }), subscribe: () => () => {} }, nameOf: id => id, nav() {}, recoveryStorage: null });
   t.after(off);
   const facts = () => {
     const list = root.querySelector('.pv-presence').querySelector('dl');
@@ -90,4 +90,19 @@ test('peer detail renders hostile strings as text and drops private or malformed
 test('peer detail omits runtime fields for an older hub', t => {
   const w = world(t, undefined);
   assert.doesNotMatch(w.root.textContent, /Codex runtime|Codex delivery|Last runtime report/);
+});
+
+test('bulk read offer is only for other peers with unread, not directory sources', t => {
+  const w = world(t, undefined, { id: 'src_webhook', kind: 'source', unread: 1 });
+  assert.equal(w.root.querySelector('.pv-read-all'), null);
+});
+
+test('bulk read offer exists for an agent with unread', t => {
+  const w = world(t, undefined, { unread: 1 });
+  assert.match(w.root.querySelector('.pv-read-all').textContent, /^Mark all from /);
+});
+
+test('bulk read offer never appears for the operator itself', t => {
+  const w = world(t, undefined, { id: 'peer_op', kind: 'operator', unread: 1 });
+  assert.equal(w.root.querySelector('.pv-read-all'), null);
 });

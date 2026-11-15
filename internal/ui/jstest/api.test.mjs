@@ -439,3 +439,19 @@ test('operator archive queries preserve false and escape ids without request bod
  assert.equal(calls[1].url, '/v1/admin/threads/thr%2Fa/archive'); assert.equal(calls[1].init.method, 'POST'); assert.equal(calls[1].init.body, undefined);
  assert.equal(calls[2].url, '/v1/admin/threads/thr%2Fa/unarchive'); assert.equal(calls[3].url, '/v1/admin/thread-stats');
 });
+
+test('bulk read pages preserve both snapshot bounds and count progress', async () => {
+  let page = 0;
+  const { api, calls } = harness(() => json(200, { marked: ++page === 1 ? 500 : 2, more: page === 1, until: '2026-11-15T01:00:00.000Z', before_seq: '9007199254740993' }));
+  const progress = [];
+  assert.equal(await api.markAllRead({ sender: 'peer_spammer', onPage: n => progress.push(n) }), 502);
+  assert.deepEqual(JSON.parse(calls[0].init.body), { sender: 'peer_spammer' });
+  assert.deepEqual(JSON.parse(calls[1].init.body), { sender: 'peer_spammer', until: '2026-11-15T01:00:00.000Z', before_seq: '9007199254740993' });
+  assert.deepEqual(progress, [500, 502]);
+});
+
+test('bulk read safety limit reports partial progress instead of success', async () => {
+  const { api, calls } = harness(() => json(200, { marked: 500, more: true, until: '2026-11-15T01:00:00.000Z', before_seq: '123' }));
+  await assert.rejects(api.markAllRead(), e => e.code === 'read_all_limit' && e.marked === 100000);
+  assert.equal(calls.length, 200);
+});

@@ -100,6 +100,9 @@ type Inbox struct {
 	// UnreadByThread splits Unread by thread id: only threads with unread
 	// deliveries appear, and its values sum to Unread.
 	UnreadByThread map[string]int `json:"unread_by_thread"`
+	// UnreadBySender splits Unread by the sending peer (only senders with
+	// unread appear; values sum to Unread): who to bulk-read for spam.
+	UnreadBySender map[string]int `json:"unread_by_sender"`
 	NextBefore     *string        `json:"next_before"`
 }
 
@@ -126,6 +129,26 @@ func (v Inbox) MarshalJSON() ([]byte, error) {
 
 type ReadResult struct {
 	Marked int `json:"marked"`
+}
+
+// ReadAllQuery is POST /v1/admin/inbox/read: mark the operator's unread
+// deliveries read, all of them or only those from Sender (a peer_ id).
+// Until bounds delivery creation time (empty means now). BeforeSeq is the
+// immutable delivery event high-water (empty captures it); callers echo both
+// bounds through More so even arrivals with the same timestamp stay unread.
+type ReadAllQuery struct {
+	Sender    string `json:"sender"`
+	Until     string `json:"until"`
+	BeforeSeq string `json:"before_seq"`
+}
+
+// ReadAllResult says how many deliveries one call marked; More is true when
+// unread deliveries within both bounds remain (echo Until and BeforeSeq).
+type ReadAllResult struct {
+	Marked    int    `json:"marked"`
+	More      bool   `json:"more"`
+	Until     string `json:"until"`
+	BeforeSeq string `json:"before_seq"`
 }
 
 type ThreadQuery struct {

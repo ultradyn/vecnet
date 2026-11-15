@@ -168,6 +168,32 @@ export function mount(root, ctx) {
   // opened: the first full snapshot placed the view; considered: unread
   // messages already placed, so any other is a live arrival.
   let unread = [], opened = false, considered = new Set();
+  // Mark thread read: the operator's explicit choice (a second click), the
+  // one way this view marks a whole thread. Opening never does. The node is
+  // kept across header redraws so a run keeps its focus.
+  let readBusy = false, readArmed = 0;
+  const readBtn = h('button', { type: 'button', class: 'btn thread-read-all', text: 'Mark thread read' });
+  const readDisarm = () => { clearTimeout(readArmed); readArmed = 0; readBtn.classList.remove('armed'); if (!readBusy) readBtn.textContent = 'Mark thread read'; };
+  readBtn.addEventListener('click', async () => {
+    if (readBusy) return;
+    if (!readArmed) { readBtn.textContent = 'Confirm mark read'; readBtn.classList.add('armed'); readArmed = setTimeout(readDisarm, 3000); return; }
+    readDisarm();
+    readBusy = true;
+    readBtn.setAttribute('aria-disabled', 'true');
+    readBtn.textContent = 'Marking…';
+    try {
+      const r = await api.readThread(threadId);
+      if (gone) return;
+      toast(r && r.marked ? 'Marked ' + r.marked + ' read.' : 'Nothing unread.');
+      store.invalidate('inbox', tag);
+    } catch (e) {
+      if (!gone) toast('Could not mark the thread read' + (e && e.code ? ' (' + e.code + ')' : '') + '. Try again.', true);
+    } finally {
+      readBusy = false;
+      readBtn.removeAttribute('aria-disabled');
+      readBtn.textContent = 'Mark thread read';
+    }
+  });
   const onActive = () => { reader.activeChanged(); if (io) observe(); };
   const onVisible = () => {
     onActive();
@@ -611,8 +637,17 @@ export function mount(root, ctx) {
     const t = thread(), all = msgs(), d = detail.get();
     const dead = !history.get() && history.error() && history.error().code === 'unknown_thread';
     comp.hidden = !!dead;
+    const headHadFocus = head.contains(document.activeElement) && document.activeElement === readBtn;
     head.replaceChildren(t ? h('h1', { class: t.title ? null : 'un', text: title(t, me, nameOf) }) : h('h1', null, idText(threadId)),
       h('div', { class: 'ids', text: threadId + (t ? ' · ' + plural(t.message_count, 'message') : '') }));
+    // Offered while this thread has unread for the operator (the inbox
+    // head's count, which the sidebar shows too) or while a run is going.
+    const ib = ctx.inboxHead && ctx.inboxHead.get();
+    const left = ib && ib.unread_by_thread ? ib.unread_by_thread[threadId] || 0 : 0;
+    if (left > 0 || readBusy) {
+      head.append(readBtn);
+      if (headHadFocus) readBtn.focus({ preventScroll: true });
+    }
     if (d?.row && api.archiveThread) {
       const archived = !!d.row.archived_at;
       head.append(confirmButton(archived ? 'Unarchive' : 'Archive', archived ? 'Confirm unarchive' : 'Confirm archive', async () => {
@@ -705,6 +740,13 @@ export function mount(root, ctx) {
   window.addEventListener('blur', onActive);
   const timer = setInterval(tick, 1000);
   const off = [history.subscribe(onHistory), detail.subscribe(render), matrix.subscribe(render), ctx.threads.subscribe(render), ctx.peers.subscribe(render)];
+  // The inbox head's per-thread count shows or hides Mark thread read.
+  let readShown = null;
+  if (ctx.inboxHead) off.push(ctx.inboxHead.subscribe(() => {
+    const ib = ctx.inboxHead.get();
+    const now = !!(ib && ib.unread_by_thread && ib.unread_by_thread[threadId]);
+    if (now !== readShown) { readShown = now; render(); }
+  }));
   return () => {
     const ta = comp.querySelector('textarea');
     if (!S.pending && !S.sending && ta.value.trim()) drafts.set(threadId, { text: ta.value });

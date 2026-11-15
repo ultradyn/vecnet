@@ -59,7 +59,8 @@ import (
 // boundary, with 839 bytes of headroom; all-files coverage kept.
 // Raised to 784 KiB for peer subscription cards, removal confirmation and
 // shared removal recovery, measured at 786,702 bytes; next 16 KiB boundary,
-// with every file still counted.
+// with every file still counted. Bulk mark-read adds 7,308 bytes on merge
+// (794,010 total); both features fit the same 784 KiB cap.
 const uiMaxBytes = 784 << 10
 
 var (
