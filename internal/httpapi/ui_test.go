@@ -55,8 +55,8 @@ import (
 // the dashboard work, measured at 737,319 bytes (39 over 720 KiB).
 // Raised to 752 KiB on 2026-11-15 for the peer page's push route controls
 // (add, edit, verify, new secret, remove) and read-on-open, measured at
-// 764,396 bytes (master: 740,483). Next 16 KiB boundary, all-files coverage
-// kept.
+// 769,209 bytes after UI review fixes (master: 740,483). Next 16 KiB
+// boundary, with 839 bytes of headroom; all-files coverage kept.
 const uiMaxBytes = 752 << 10
 
 var (

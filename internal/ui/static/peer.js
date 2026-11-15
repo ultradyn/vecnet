@@ -406,7 +406,7 @@ export function mount(root, ctx) {
         f.archivedAt ? chip('archived', 'bad') : (f.disabled ? chip('disabled', 'bad') : null)),
       h('div', { class: 'pv-id' }, h('span', { class: 'mono pid', text: f.id }), copyButton(f.id, 'peer id')),
       f.archivedAt ? h('p', { class: 'note bad', text: 'Archived: credentials were revoked. Unarchive leaves this peer disabled and requires a new invite.' }) : (f.disabled ? h('p', { class: 'note bad', text: 'Disabled: this peer cannot use the hub until an operator enables it.' }) : null),
-      missing ? h('p', { class: 'note pv-setup' }, 'Setup incomplete: no Grok Bot routine, so messages to it are not delivered. ',
+      missing ? h('p', { class: 'note pv-setup' }, 'Setup incomplete: no Grok Bot routine reaches it, so messages to it are not delivered. ',
         h('a', { href: '#peer/' + id, text: 'Set up its routine', onclick: e => { e.preventDefault(); routesSec.openAdd(); } }), '.') : null,
     ].filter(Boolean));
   }

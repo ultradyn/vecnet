@@ -11,7 +11,7 @@ const SHELL_WRITES = /\/v1\/(ack|presence|receipts)(\?|$)/;
 
 try {
   await withDemo({}, async ctx => {
-    const { page, shot, demo, asPeer, hold, fail, allowConsole, countRequests } = ctx;
+    const { page, shot, demo, asPeer, hold, fail, allowConsole, countRequests, quiet } = ctx;
     allowConsole(/status of 500/);
     allowConsole(/status of 422/); // the route Verify that fails on purpose below
     await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
@@ -285,6 +285,9 @@ try {
     let listed = await (await asPeer('operator', 'GET', '/v1/admin/routes')).json();
     let grokRoute = listed.routes.find(r => r.owner_id === grokId);
     assert(grokRoute && grokRoute.kind === 'grokbot' && grokRoute.verified_at, `grok route ${JSON.stringify(grokRoute)}`);
+    const grokRouteId = grokRoute.route_id;
+    // Focus lands on the new route's Edit, not on the page body.
+    await page.waitForFunction(() => document.activeElement && document.activeElement.classList.contains('pv-rt-edit'));
     // One route of its own: Add steps aside for Edit.
     assert(await routes.locator('.pv-rt-add').isHidden(), 'Add route offered beside an existing own route');
     // The key never reaches the DOM, an attribute or a stored value.
@@ -305,7 +308,10 @@ try {
     await routes.locator('.pv-rt-msg', { hasText: 'Route updated.' }).waitFor();
     listed = await (await asPeer('operator', 'GET', '/v1/admin/routes')).json();
     grokRoute = listed.routes.find(r => r.owner_id === grokId);
-    assert(grokRoute.route_id === listed.routes.find(r => r.owner_id === grokId).route_id && grokRoute.verified_at, 'grok route lost its id or went unverified');
+    assert(grokRoute && grokRoute.route_id === grokRouteId && grokRoute.verified_at && listed.routes.filter(r => r.owner_id === grokId).length === 1, 'grok route was re-created, duplicated or went unverified');
+    assert(!(await page.evaluate(k => document.documentElement.outerHTML.includes(k), KEY2)), 'the edited routine key is in the page');
+    // Edit then Save keeps keyboard focus on the row's Edit.
+    assert(await page.evaluate(() => document.activeElement && document.activeElement.classList.contains('pv-rt-edit')), 'focus left the row after Save');
     // An empty edit is refused before sending.
     await routes.locator('.pv-rt-edit').click();
     const w1 = routeWrites();
@@ -351,9 +357,30 @@ try {
       await routes.locator('.pv-rt-fresh button', { hasText: 'Done' }).click();
       await secret.waitFor({ state: 'detached' });
       assert(!(await page.evaluate(w => document.documentElement.outerHTML.includes(w), whsec)), 'the secret outlived Done');
-      await routes.locator('.pv-rt-verify', { hasText: 'Verify' }).click();
+      // Keyboard Verify: focus stays on the button through the request.
+      await routes.locator('.pv-rt-verify', { hasText: 'Verify' }).focus();
+      await page.keyboard.press('Enter');
       await routes.locator('.pv-rt-msg', { hasText: 'Verified' }).waitFor();
       await routes.locator('tbody tr .bad', { hasText: 'unverified' }).waitFor({ state: 'detached' });
+      assert(await page.evaluate(() => document.activeElement && document.activeElement.classList.contains('pv-rt-verify')), 'focus left Verify');
+      // An armed Confirm survives a redraw with the same routes. Hold the
+      // page's next routes read (its 30 s reload), arm Remove with focus
+      // elsewhere, then let the read land: the section redraws, Remove stays armed.
+      const routesPath = u => u.pathname === '/v1/admin/routes';
+      const reads = countRequests(req => routesPath(new URL(req.url())));
+      const releaseRoutes = await hold(routesPath);
+      for (const t = Date.now(); countRequests(req => routesPath(new URL(req.url()))) === reads; ) {
+        assert(Date.now() - t < 40000, 'the 30 s reload did not re-read routes');
+        await page.waitForTimeout(100);
+      }
+      await routes.locator('.pv-rt-remove').click();
+      await routes.locator('.pv-rt-remove', { hasText: 'Confirm remove' }).waitFor();
+      await page.evaluate(() => document.activeElement && document.activeElement.blur());
+      await releaseRoutes();
+      await quiet();
+      assert(await routes.locator('.pv-rt-remove', { hasText: 'Confirm remove' }).count() === 1, 'a redraw disarmed Confirm remove');
+      await page.waitForTimeout(3200); // let it fall back unconfirmed
+      await routes.locator('.pv-rt-remove', { hasText: 'Remove' }).waitFor();
       // Edit to a receiver that answers but does not echo: unverified again.
       await routes.locator('.pv-rt-edit').click();
       await form.locator('.pv-rt-hint', { hasText: 'stops pushes until it is verified again' }).waitFor();
@@ -370,7 +397,20 @@ try {
       await routes.locator('.pv-rt-rotate').click();
       await routes.locator('.pv-rt-rotate', { hasText: 'Confirm new secret' }).click();
       await routes.locator('.pv-rt-fresh', { hasText: 'old one keeps working for 24 hours' }).waitFor();
+      const rotated = await routes.locator('.pv-rt-secret').textContent();
       await routes.locator('.pv-rt-fresh button', { hasText: 'Done' }).click();
+      assert(!(await page.evaluate(w => document.documentElement.outerHTML.includes(w), rotated)), 'the rotated secret outlived Done');
+      assert(await page.evaluate(() => document.activeElement && document.activeElement !== document.body), 'Done left focus on the body');
+      // Phone width: the actions are on screen, no sideways scroll.
+      await page.setViewportSize({ width: 390, height: 844 });
+      const fit = await page.evaluate(() => {
+        const sec = document.getElementById('pv-routes').getBoundingClientRect();
+        return [...document.querySelectorAll('#pv-routes .pv-rt-btns button')].map(b => { const r = b.getBoundingClientRect(); return r.right <= Math.min(sec.right, innerWidth) + 0.5 && r.left >= sec.left - 0.5; });
+      });
+      assert(fit.length >= 3 && fit.every(Boolean), `route actions off screen at 390px: ${JSON.stringify(fit)}`);
+      await page.locator('#pv-routes').evaluate(el => el.scrollIntoView({ block: 'start' }));
+      await shot('pv-route-phone');
+      await page.setViewportSize({ width: 1440, height: 900 });
       await routes.locator('.pv-rt-remove').click();
       await routes.locator('.pv-rt-remove', { hasText: 'Confirm remove' }).click();
       await routes.locator('.pv-rt-msg', { hasText: 'Route removed' }).waitFor();

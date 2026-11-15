@@ -11,25 +11,38 @@ const KEY = 'crsr_0123456789abcdef';
 const facts = (kind, extra = {}) => ({ id: 'peer_A', kind, archivedAt: null, ...extra });
 const route = (kind, via = 'peer') => ({ id: 'route_' + kind + via, kind, via });
 
-test('routeSetup: a Grok Bot with no routine of its own is missing setup; other kinds pull, so no route is fine', () => {
-  assert.deepEqual(routeSetup(facts('grokbot'), []), { editable: true, missing: true, suggest: 'grokbot' });
-  // Its principal's route, or an http route, does not run the routine.
-  assert.equal(routeSetup(facts('grokbot'), [route('grokbot', 'principal')]).missing, true);
-  assert.equal(routeSetup(facts('grokbot'), [route('http')]).missing, true);
-  assert.equal(routeSetup(facts('grokbot'), [route('grokbot')]).missing, false);
+test('routeSetup: a Grok Bot no grokbot route reaches is missing setup; other kinds pull, so no route is fine', () => {
+  assert.deepEqual(routeSetup(facts('grokbot'), []), { editable: true, missing: true, suggest: 'grokbot', canAdd: true });
+  // An http route does not run the routine: still missing, and Add is
+  // offered though it takes over (the routine is what it needs).
+  assert.deepEqual(routeSetup(facts('grokbot'), [route('http')]), { editable: true, missing: true, suggest: 'grokbot', canAdd: true });
+  // Its principal's grokbot route reaches it (send falls back to it).
+  assert.deepEqual(routeSetup(facts('grokbot'), [route('grokbot', 'principal')]), { editable: true, missing: false, suggest: 'grokbot', canAdd: true });
+  assert.deepEqual(routeSetup(facts('grokbot'), [route('grokbot')]), { editable: true, missing: false, suggest: 'grokbot', canAdd: false });
   // Archived: no callout (it cannot be reached anyway; Unarchive first).
   assert.equal(routeSetup(facts('grokbot', { archivedAt: '2026-11-15T00:00:00Z' }), []).missing, false);
   for (const kind of ['session', 'dot', 'openclaw', 'pagchat-bot', 'launcher']) {
-    assert.deepEqual(routeSetup(facts(kind), []), { editable: true, missing: false, suggest: 'http' }, kind);
+    assert.deepEqual(routeSetup(facts(kind), []), { editable: true, missing: false, suggest: 'http', canAdd: true }, kind);
+    // One route of its own: Edit, not Add (a second would take over).
+    assert.equal(routeSetup(facts(kind), [route('http')]).canAdd, false, kind);
+    // Only its principal's: its own may be added (it takes precedence).
+    assert.equal(routeSetup(facts(kind), [route('http', 'principal')]).canAdd, true, kind);
   }
-  // Before routes load (null), a Grok Bot is not yet called out as missing.
-  assert.equal(routeSetup(facts('grokbot'), null).missing, true, 'null routes read as none; the view only draws once loaded');
+});
+
+test('routeSetup: before routes load or when the read fails, nothing is called missing or offered', () => {
+  assert.deepEqual(routeSetup(facts('grokbot'), null), { editable: true, missing: false, suggest: 'grokbot', canAdd: false });
+  assert.deepEqual(routeSetup(facts('session'), undefined), { editable: true, missing: false, suggest: 'http', canAdd: false });
 });
 
 test('routeSetup: the operator, a source, or no row: nothing to edit', () => {
   for (const f of [facts('operator'), facts('source'), null, { id: '', kind: 'session' }]) {
-    assert.deepEqual(routeSetup(f, []), { editable: false, missing: false, suggest: 'http' });
+    assert.deepEqual(routeSetup(f, []), { editable: false, missing: false, suggest: 'http', canAdd: false });
   }
+});
+
+test('routeError: a verify raced by a URL change says to verify again', () => {
+  assert.match(routeError('Could not verify the route.', { code: 'route_changed', details: {} }, { verifying: true }), /changed while it was being verified/);
 });
 
 test('routeForm: add needs a URL, and a Grok Bot also its key on the routine pattern', () => {

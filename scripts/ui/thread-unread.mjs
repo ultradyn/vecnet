@@ -80,16 +80,10 @@ try {
     // One non-waiting read: count-then-textContent races the pill's removal and
     // textContent would then wait its full timeout for an element that is gone.
     const pill = async () => (await row.locator('.ur').allTextContents())[0] ?? '';
-    const pillIs2 = async (r, want) => {
+    const pillOf = async r => (await r.locator('.ur').allTextContents())[0] ?? '';
+    const pillIs = async (want, why, r = row) => {
       const deadline = Date.now() + 30000;
-      for (let got = (await r.locator('.ur').allTextContents())[0] ?? ''; got !== want; got = (await r.locator('.ur').allTextContents())[0] ?? '') {
-        assert(Date.now() < deadline, `the sidebar pill shows '${got}', want '${want}'`);
-        await page.waitForTimeout(100);
-      }
-    };
-    const pillIs = async (want, why) => {
-      const deadline = Date.now() + 30000;
-      for (let got = await pill(); got !== want; got = await pill()) {
+      for (let got = await pillOf(r); got !== want; got = await pillOf(r)) {
         assert(Date.now() < deadline, `${why}: the sidebar pill shows '${got}', want '${want}'`);
         await page.waitForTimeout(100);
       }
@@ -268,7 +262,21 @@ try {
       await page.waitForTimeout(50);
     }
     assert(sentAt.get(tailDly) - sentAt.get(spamDly) >= 900, `the second message was read on open too: ${sentAt.get(tailDly) - sentAt.get(spamDly)} ms after the first`);
-    await pillIs2(spamRow, '');
+    await pillIs('', 'after reading a new thread', spamRow);
+
+    // The common path: opened while focused, read at once.
+    const spam2 = await send('codex', { thread_title: 'Agent status ping 2', recipients: [demo.operator_peer], content: { text: 'Status: still green.' } });
+    const spam2Dly = spam2.deliveries.find(d => d.recipient === demo.operator_peer).delivery_id;
+    const spam2Row = page.locator(`#threads a[href="#thread/${spam2.thread_id}"]`);
+    await spam2Row.locator('.ur', { hasText: '1' }).waitFor();
+    const t1 = Date.now();
+    await spam2Row.click();
+    for (; !sentAt.has(spam2Dly); ) {
+      assert(Date.now() - t1 < 5000, 'a focused open did not read the first message');
+      await page.waitForTimeout(20);
+    }
+    assert(sentAt.get(spam2Dly) - t1 < 900, `focused read on open took ${sentAt.get(spam2Dly) - t1} ms`);
+    await pillIs('', 'after a focused open', spam2Row);
 
     assert(countRequests(markAll) === 0, `the view posted mark-all ${countRequests(markAll)} times`);
     const once = receipts.filter(r => r.delivery_id !== awayDly).map(r => r.delivery_id);

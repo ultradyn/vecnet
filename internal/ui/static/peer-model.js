@@ -227,15 +227,23 @@ export const ROUTE_KINDS = ['http', 'grokbot'];
 export const GROK_URL = /^https:\/\/api2\.cursor\.sh\/automations\/webhook\/[0-9a-f-]{36}$/;
 // routeSetup says what the Routes section offers this peer. editable: the
 // operator may add, edit and remove routes here (never for the operator, a
-// source or an unknown row). missing: a Grok Bot with no grokbot route of
-// its own, the one kind that is reached only by push (a routine cannot
-// pull): the "added itself but gave no webhook" case. Every other kind can
-// pull, so no route is not a fault. suggest is the kind Add route starts on.
+// source or an unknown row). missing: a Grok Bot that no grokbot route
+// reaches, its own or its principal's (send falls back to the principal's),
+// the one kind reached only by push (a routine cannot pull): the "added
+// itself but gave no webhook" case. Every other kind can pull, so no route
+// is not a fault. Unknown until routes load (routes null): never missing.
+// canAdd: Add route is offered, which is only while the peer has no route
+// of its own (the hub pushes through one per peer, so a second would
+// quietly take over) or a missing Grok Bot routine needs one. suggest is
+// the kind Add route starts on.
 export function routeSetup(facts, routes) {
-  if (!facts || !facts.id || facts.kind === 'operator' || facts.kind === 'source') return { editable: false, missing: false, suggest: 'http' };
-  const own = (Array.isArray(routes) ? routes : []).filter(r => r.via === 'peer');
+  if (!facts || !facts.id || facts.kind === 'operator' || facts.kind === 'source') return { editable: false, missing: false, suggest: 'http', canAdd: false };
+  const known = Array.isArray(routes);
+  const list = known ? routes : [];
   const grok = facts.kind === 'grokbot';
-  return { editable: true, missing: grok && !facts.archivedAt && !own.some(r => r.kind === 'grokbot'), suggest: grok ? 'grokbot' : 'http' };
+  const missing = known && grok && !facts.archivedAt && !list.some(r => r && r.kind === 'grokbot');
+  const canAdd = known && (missing || !list.some(r => r && r.via === 'peer'));
+  return { editable: true, missing, suggest: grok ? 'grokbot' : 'http', canAdd };
 }
 
 // normalizeKey takes a pasted routine key: trimmed, one leading "Bearer "
