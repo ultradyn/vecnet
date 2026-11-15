@@ -1,6 +1,6 @@
 # GitHub #51 Settings pruning report — source acceptance
 
-Source acceptance pending final independent review. Executable source currently
+Reviewed whole branch `14e77c17e171c296de0885559271f5b866a88255`; executable source
 `e208e271f7e81a7a928ada002d9eefe8a5ebccd2`, base master `6902e9de`.
 
 Successful operator preferences GET/PATCH on disk and R2 hubs exposes the
@@ -22,7 +22,9 @@ is included. GitHub #51 remains open for its other follow-ups.
 Two Sol implementation subagents used PIRFL with independent per-task reviews.
 Task1 backend review: Spec compliance PASS, Code quality PASS, no findings.
 Task2 review: Spec compliance PASS, Code quality PASS, no findings.
-Whole-branch review: PENDING.
+Fresh whole-branch review: Spec compliance PASS, Code quality PASS, no findings.
+No accepted finding, including minors, is deferred. Closing metadata preserves
+all nine tested/reviewed source hashes.
 
 Behavioral RED showed missing runtime metadata, unchanged gate-restart ETags
 and stale conditionals. An existing Snapshot round-trip oracle was adapted to
@@ -58,3 +60,13 @@ profiles, services, gate activation or installed deployment were exercised.
 Try synthetically: `SHOTS_DIR=/tmp/vecnet-settings-shots BB_HOST=x-boss BB_JOBS=2 BB_PULLBACK=0 just bb node scripts/ui/prefs.mjs`.
 Raw operational reports, gates and PNGs must be copied and hash-verified outside
 the owned worktree before removing it and its merged branch.
+
+[Backend review](2026-11-15-settings-pruning-report-task-1-review.md),
+[UI review](2026-11-15-settings-pruning-report-task-2-review.md),
+[whole-branch review](2026-11-15-settings-pruning-report-final-review.md) and
+[ledger](2026-11-15-settings-pruning-report-ledger.md).
+
+A final-review package assembly attempt also stopped before worker launch when
+a broad credential-pattern check matched a synthetic fixture Authorization
+expression. The controller verified the exact code expression, retained the
+failed attempt and launched the corrected package; no private value was present.
