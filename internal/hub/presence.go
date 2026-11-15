@@ -165,6 +165,11 @@ func (h *Hub) SetPresence(ctx context.Context, c auth.Caller, asPeer string, p P
 			p.State, pres.At, string(newCaps), string(newQuota), nullIfEmpty(location), nullIfEmpty(p.Note), peer); err != nil {
 			return fmt.Errorf("hub: store presence: %w", err)
 		}
+		if p.State == "idle" {
+			if err := explicitIdleGrokbotWakes(ctx, tx, peer); err != nil {
+				return err
+			}
+		}
 		subs, err := presenceSubscribers(ctx, tx, peer)
 		if err != nil {
 			return err

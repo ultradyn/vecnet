@@ -99,6 +99,9 @@ func (h *Hub) movePeer(ctx context.Context, tx *sql.Tx, peerID, prnID, actor str
 	if oldPrn == prnID {
 		return nil
 	}
+	if err := invalidateGrokbotWakes(ctx, tx, "", peerID, h.nowStr(), true); err != nil {
+		return err
+	}
 	now := h.nowStr()
 	if _, err := tx.ExecContext(ctx, `UPDATE peers SET prn_id = ? WHERE peer_id = ?`, prnID, peerID); err != nil {
 		return fmt.Errorf("hub: move peer: %w", err)
@@ -571,6 +574,9 @@ func (h *Hub) setPeerDisabledTx(ctx context.Context, tx *sql.Tx, peerID string, 
 	if was == disabled {
 		return false, nil
 	}
+	if err := invalidateGrokbotWakes(ctx, tx, "", peerID, h.nowStr(), !disabled); err != nil {
+		return false, err
+	}
 	v, action, change := 0, "peer_enable", "enrolled"
 	if disabled {
 		v, action, change = 1, "peer_disable", "removed"
@@ -645,6 +651,9 @@ func (h *Hub) setPeerArchivedTx(ctx context.Context, tx *sql.Tx, peerID string, 
 			return nil
 		}
 		now := envelope.FormatTime(atTime)
+		if err := invalidateGrokbotWakes(ctx, tx, "", peerID, now, !archived); err != nil {
+			return err
+		}
 		if archived {
 			if _, err := tx.ExecContext(ctx, `UPDATE peers SET archived_at=?, disabled=1 WHERE peer_id=?`, now, peerID); err != nil {
 				return fmt.Errorf("hub: archive peer: %w", err)
@@ -823,6 +832,9 @@ func (h *Hub) RetryDeadLetter(ctx context.Context, dly string) error {
 		if err := supersedeRequeuedReaction(ctx, tx, dly, now); err != nil {
 			return err
 		}
+		if err := invalidateGrokbotDelivery(ctx, tx, dly, h.nowStr(), true); err != nil {
+			return err
+		}
 		if err := audit.Record(ctx, tx, "operator", "dead_letter_retry", []string{dly}, nil); err != nil {
 			return err
 		}
@@ -852,6 +864,9 @@ func (h *Hub) DiscardDeadLetter(ctx context.Context, dly string) error {
 		}
 		if n, _ := res.RowsAffected(); n != 1 {
 			return unknownDeadLetter(dly)
+		}
+		if err := invalidateGrokbotDelivery(ctx, tx, dly, h.nowStr(), false); err != nil {
+			return err
 		}
 		if err := audit.Record(ctx, tx, "operator", "dead_letter_discard", []string{dly}, nil); err != nil {
 			return err

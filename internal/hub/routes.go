@@ -188,6 +188,9 @@ func (h *Hub) RemoveRoute(ctx context.Context, routeID string) error {
 		if _, err := routeKind(ctx, tx, routeID); err != nil {
 			return err
 		}
+		if err := invalidateGrokbotWakes(ctx, tx, routeID, "", h.nowStr(), false); err != nil {
+			return err
+		}
 		for _, query := range []string{
 			`UPDATE peers SET route_id = NULL WHERE route_id = ?`,
 			`UPDATE deliveries SET route_id = NULL WHERE route_id = ?`,
@@ -251,6 +254,7 @@ func (h *Hub) UpdateRoute(ctx context.Context, routeID string, u RouteUpdate) er
 			}
 		}
 		changed := []string{}
+		endpointChanged := false
 		if u.URL != nil {
 			if kind == RouteKindGrokbot && !GrokbotURLPattern.MatchString(*u.URL) {
 				return invalidURL("url", errors.New("not a Grok Bot routine webhook URL"))
@@ -271,6 +275,7 @@ func (h *Hub) UpdateRoute(ctx context.Context, routeID string, u RouteUpdate) er
 					return fmt.Errorf("hub: update route: %w", err)
 				}
 				changed = append(changed, "url")
+				endpointChanged = true
 			}
 		}
 		if u.Key != nil {
@@ -278,6 +283,7 @@ func (h *Hub) UpdateRoute(ctx context.Context, routeID string, u RouteUpdate) er
 				return fmt.Errorf("hub: replace routine key: %w", err)
 			}
 			changed = append(changed, "key")
+			endpointChanged = true
 		}
 		if u.GrokbotTransport != nil {
 			if err := setGrokbotTransport(ctx, tx, routeID, *u.GrokbotTransport, h.Now()); err != nil {
@@ -287,6 +293,11 @@ func (h *Hub) UpdateRoute(ctx context.Context, routeID string, u RouteUpdate) er
 		}
 		if len(changed) == 0 {
 			return nil // the same URL: nothing to do
+		}
+		if kind == RouteKindGrokbot && endpointChanged {
+			if err := invalidateGrokbotWakes(ctx, tx, routeID, "", h.nowStr(), true); err != nil {
+				return err
+			}
 		}
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE deliveries SET next_attempt_at = NULL, updated_at = ? WHERE route_id = ? AND state = 'queued' AND next_attempt_at IS NOT NULL`,

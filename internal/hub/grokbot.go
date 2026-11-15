@@ -159,6 +159,9 @@ func (h *Hub) RotateGrokbotKey(ctx context.Context, routeID, key string) error {
 		if _, err := tx.ExecContext(ctx, `UPDATE routes SET key_enc = ? WHERE route_id = ?`, sealed, routeID); err != nil {
 			return fmt.Errorf("hub: replace routine key: %w", err)
 		}
+		if err := invalidateGrokbotWakes(ctx, tx, routeID, "", h.nowStr(), true); err != nil {
+			return err
+		}
 		return audit.Record(ctx, tx, "operator", "route_rotate", []string{routeID}, nil)
 	})
 }

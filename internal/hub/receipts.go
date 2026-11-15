@@ -65,13 +65,13 @@ func (h *Hub) ReceiptChanged(ctx context.Context, c auth.Caller, deliveryID, sta
 	changed := false
 	err := h.DB.Tx(ctx, func(tx *sql.Tx) error {
 		notify, operators = false, nil
-		var msg, thr, recipient, prn, recipientKind string
+		var msg, thr, recipient, prn, recipientKind, previousState string
 		var senderIsPeer bool
 		err := tx.QueryRowContext(ctx,
-			`SELECT d.msg_id, d.thr_id, d.recipient, p.prn_id, p.kind, m.sender,
+			`SELECT d.msg_id, d.thr_id, d.recipient, p.prn_id, p.kind, d.state, m.sender,
 			        EXISTS (SELECT 1 FROM peers s WHERE s.peer_id = m.sender)
 			 FROM deliveries d JOIN peers p ON p.peer_id = d.recipient JOIN messages m ON m.msg_id = d.msg_id
-			 WHERE d.dly_id = ?`, deliveryID).Scan(&msg, &thr, &recipient, &prn, &recipientKind, &sender, &senderIsPeer)
+			 WHERE d.dly_id = ?`, deliveryID).Scan(&msg, &thr, &recipient, &prn, &recipientKind, &previousState, &sender, &senderIsPeer)
 		if errors.Is(err, sql.ErrNoRows) {
 			return notRecipient(deliveryID)
 		}
@@ -96,6 +96,11 @@ func (h *Hub) ReceiptChanged(ctx context.Context, c auth.Caller, deliveryID, sta
 			}
 			if n == 0 {
 				return nil // terminal or repeated: nothing to report
+			}
+		}
+		if state == "processed" && (previousState == "queued" || previousState == "pushed") {
+			if err := coverHandledGrokbotDelivery(ctx, tx, deliveryID, now); err != nil {
+				return err
 			}
 		}
 		if state == "read" {

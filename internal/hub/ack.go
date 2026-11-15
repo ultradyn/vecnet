@@ -32,6 +32,16 @@ var ErrPeerDisabled = errors.New("hub: peer disabled")
 // A filter naming another principal's peer (or no peer) is 403
 // not_your_peer; a narrowed stream to a disabled peer is ErrPeerDisabled.
 func (h *Hub) StreamOwners(ctx context.Context, c auth.Caller, peerFilter string) (owners []string, ackOwner, ackScope string, err error) {
+	return streamOwners(ctx, h.DB, c, peerFilter)
+}
+
+// The same scope rules serve read APIs and the Ack writer transaction.
+type streamOwnerQuery interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+func streamOwners(ctx context.Context, q streamOwnerQuery, c auth.Caller, peerFilter string) (owners []string, ackOwner, ackScope string, err error) {
 	notYours := func() error {
 		e := E(http.StatusForbidden, "not_your_peer", "peer names a peer the credential does not own")
 		e.Details["peer"] = peerFilter
@@ -50,7 +60,7 @@ func (h *Hub) StreamOwners(ctx context.Context, c auth.Caller, peerFilter string
 	if peerFilter != "" {
 		var prn string
 		var disabled int
-		err := h.DB.QueryRowContext(ctx, `SELECT prn_id, disabled FROM peers WHERE peer_id = ?`, peerFilter).Scan(&prn, &disabled)
+		err := q.QueryRowContext(ctx, `SELECT prn_id, disabled FROM peers WHERE peer_id = ?`, peerFilter).Scan(&prn, &disabled)
 		if errors.Is(err, sql.ErrNoRows) || (err == nil && prn != c.PrincipalID) {
 			return nil, "", "", notYours()
 		}
@@ -62,7 +72,7 @@ func (h *Hub) StreamOwners(ctx context.Context, c auth.Caller, peerFilter string
 		}
 		return []string{peerFilter}, c.PrincipalID, peerFilter, nil
 	}
-	rows, err := h.DB.QueryContext(ctx, `SELECT peer_id FROM peers WHERE prn_id = ? ORDER BY peer_id`, c.PrincipalID)
+	rows, err := q.QueryContext(ctx, `SELECT peer_id FROM peers WHERE prn_id = ? ORDER BY peer_id`, c.PrincipalID)
 	if err != nil {
 		return nil, "", "", fmt.Errorf("hub: stream peers: %w", err)
 	}
@@ -90,15 +100,15 @@ func (h *Hub) StreamOwners(ctx context.Context, c auth.Caller, peerFilter string
 // from another epoch is eventlog.ErrCursorPurged. Acking the same cursor
 // twice changes nothing the second time.
 func (h *Hub) Ack(ctx context.Context, c auth.Caller, peerFilter string, cur eventlog.Cursor) error {
-	owners, ackOwner, ackScope, err := h.StreamOwners(ctx, c, peerFilter)
-	if errors.Is(err, ErrPeerDisabled) {
-		return E(http.StatusForbidden, "forbidden", "the peer is disabled")
-	}
-	if err != nil {
-		return err
-	}
 	var notify []string
-	err = h.DB.Tx(ctx, func(tx *sql.Tx) error {
+	err := h.DB.Tx(ctx, func(tx *sql.Tx) error {
+		owners, ackOwner, ackScope, err := streamOwners(ctx, tx, c, peerFilter)
+		if errors.Is(err, ErrPeerDisabled) {
+			return E(http.StatusForbidden, "forbidden", "the peer is disabled")
+		}
+		if err != nil {
+			return err
+		}
 		notify = nil
 		if cur.Epoch != h.Log.Epoch() {
 			floor, err := h.Log.OldestForTx(ctx, tx, owners)
@@ -129,6 +139,9 @@ func (h *Hub) Ack(ctx context.Context, c auth.Caller, peerFilter string, cur eve
 		nowT := h.Now()
 		at := envelope.FormatTime(nowT)
 		for _, d := range accepted {
+			if err := coverHandledGrokbotDelivery(ctx, tx, d.dly, at); err != nil {
+				return err
+			}
 			if !d.senderIsPeer {
 				continue // a hub-authored message: no peer log to receive it
 			}

@@ -213,6 +213,9 @@ func (h *Hub) GrokbotWakePushResult(ctx context.Context, d DueDelivery, status i
 // It never deletes armed/ambiguous exclusions or rolling-hour reservations.
 // resetCadence is appropriate for repair only when no armed lease remains.
 func invalidateGrokbotWakes(ctx context.Context, tx *sql.Tx, route, recipient, now string, resetCadence bool) error {
+	if err := cancelUnarmedGrokbotClaims(ctx, tx, route, recipient, now); err != nil {
+		return err
+	}
 	_, err := tx.ExecContext(ctx, `UPDATE grokbot_wakes SET cover_valid=0,cover_until='',
  failure_ordinal=CASE WHEN ?4 AND NOT(lease_until>?3 AND phase IN ('armed','waiting')) THEN 0 ELSE failure_ordinal END,
  retry_at=CASE WHEN ?4 AND NOT(lease_until>?3 AND phase IN ('armed','waiting')) THEN '' ELSE retry_at END
@@ -241,14 +244,7 @@ func setGrokbotTransport(ctx context.Context, tx *sql.Tx, route, transport strin
 	if err := invalidateGrokbotWakes(ctx, tx, route, "", envelope.FormatTime(now), false); err != nil {
 		return err
 	}
-	// Unarmed claims have proven noninvocation. Give back their existing claim
-	// attempt without deleting gates for armed or ambiguous invocations.
-	if _, err := tx.ExecContext(ctx, `UPDATE deliveries SET state='queued',attempt=attempt-1,next_attempt_at=NULL,updated_at=?1
- WHERE state='pushed' AND route_id=?2 AND EXISTS(SELECT 1 FROM grokbot_wakes w WHERE w.route_id=?2 AND w.recipient=deliveries.recipient AND w.representative_id=deliveries.dly_id AND w.phase='claimed')`, envelope.FormatTime(now), route); err != nil {
-		return err
-	}
-	_, err := tx.ExecContext(ctx, `UPDATE grokbot_wakes SET phase='waiting',lease_until='',retry_at='' WHERE route_id=? AND phase='claimed'`, route)
-	return err
+	return nil
 }
 
 // importLegacyGrokbotClaims runs in the capability writer transaction, before
