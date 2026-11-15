@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"database/sql"
+	"errors"
 )
 
 // cancelUnarmedGrokbotClaims only compensates the exact still-current claim.
@@ -72,5 +73,42 @@ func coverHandledGrokbotDelivery(ctx context.Context, tx *sql.Tx, delivery, now 
  AND NOT EXISTS(SELECT 1 FROM grokbot_legacy_claims l WHERE l.route_id=d.route_id AND l.recipient=d.recipient
  AND l.delivery_id=d.dly_id AND l.lease_until>?2)
  ON CONFLICT(route_id,delivery_id) DO NOTHING`, delivery, now)
+	if err != nil {
+		return err
+	}
+	// First coverage may already belong to this delivery's time as a follower.
+	// Claim compensation is a separate transition, even when INSERT did nothing.
+	return compensateHandledGrokbotClaim(ctx, tx, delivery, now)
+}
+
+// compensateHandledGrokbotClaim retires only a proven unarmed claim in the
+// handling writer transaction. Keep the real handled state, remaining attempts,
+// shared failure cadence, frozen retry chain and independent legacy barriers.
+func compensateHandledGrokbotClaim(ctx context.Context, tx *sql.Tx, delivery, now string) error {
+	var route, recipient, token, lease string
+	var attempt int
+	err := tx.QueryRowContext(ctx, `SELECT w.route_id,w.recipient,w.token,w.lease_until,d.attempt
+ FROM grokbot_wakes w JOIN deliveries d ON d.route_id=w.route_id AND d.recipient=w.recipient
+ AND d.dly_id=w.representative_id WHERE d.dly_id=? AND d.state IN ('processed','accepted') AND d.attempt>0
+ AND w.phase='claimed' AND w.token<>'' AND w.lease_until<>'' AND w.lease_until=d.next_attempt_at
+ AND NOT EXISTS(SELECT 1 FROM route_runs rr WHERE rr.route_id=w.route_id AND rr.grok_wake_token=w.token)`, delivery).
+		Scan(&route, &recipient, &token, &lease, &attempt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE deliveries SET attempt=attempt-1,next_attempt_at=NULL,updated_at=?
+ WHERE dly_id=? AND route_id=? AND recipient=? AND state IN ('processed','accepted') AND attempt=? AND next_attempt_at=?`, now, delivery, route, recipient, attempt, lease)
+	if err != nil {
+		return err
+	}
+	n, err := result.RowsAffected()
+	if err != nil || n != 1 {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `UPDATE grokbot_wakes SET phase='waiting',lease_until='',cover_until='',cover_valid=0
+ WHERE route_id=? AND recipient=? AND token=? AND representative_id=? AND phase='claimed' AND lease_until=?`, route, recipient, token, delivery, lease)
 	return err
 }

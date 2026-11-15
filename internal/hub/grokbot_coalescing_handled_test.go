@@ -1,6 +1,7 @@
 package hub_test
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"database/sql/driver"
@@ -8,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -35,6 +37,7 @@ func TestProcessedAndScopedAckSuppress(t *testing.T) {
 		t.Run(scope, func(t *testing.T) {
 			f := t2Setup(t)
 			id := f.send("wake")
+			prior := f.handledRow(id)
 			d := f.claim()
 			var prn string
 			t2Must(t, f.env.Hub.DB.QueryRow(`SELECT prn_id FROM peers WHERE peer_id=?`, f.b).Scan(&prn))
@@ -75,12 +78,52 @@ func TestProcessedAndScopedAckSuppress(t *testing.T) {
 				if f.covers(id) != 1 {
 					t.Fatal("actual unarmed handled work lacks coverage")
 				}
+				state := "accepted"
+				if scope == "processed-peer" || scope == "processed-principal" {
+					state = "processed"
+				}
+				f.assertHandledRetirement(id, d, prior, state) // Handling itself must commit compensation.
 				f.w.Push(f.ctx, d)
 				f.step()
 				f.requests(0)
 				if f.scalar(`SELECT count(*) FROM route_runs WHERE route_id=?`, f.route) != 0 {
 					t.Fatal("handled work spent budget")
 				}
+				f.assertHandledRetirement(id, d, prior, state)
+				first := f.firstCover(id)
+				f.env.Now.Advance(time.Millisecond)
+				switch scope {
+				case "processed-peer":
+					if f.processed(peer, id) {
+						t.Fatal("repeated processed changed")
+					}
+				case "processed-principal":
+					if f.processed(principal, id) {
+						t.Fatal("repeated processed changed")
+					}
+				case "peer/*":
+					t2Must(t, f.ack(peer, ""))
+				case "principal/peer":
+					t2Must(t, f.ack(principal, f.b))
+				case "principal/*":
+					t2Must(t, f.ack(principal, ""))
+				}
+				f.w.Push(f.ctx, d)
+				f.assertHandledRetirement(id, d, prior, state)
+				if f.firstCover(id) != first {
+					t.Fatal("repeated handling rewrote first cover")
+				}
+				f.handlingReceipt(id, state)
+				f.requests(0)
+				f.send("wake")
+				f.step()
+				f.requests(1) // Real replacement must not wait for an obsolete claimed lease.
+				f.w.Push(f.ctx, d)
+				f.requests(1)
+				if f.scalar(`SELECT count(*) FROM route_runs WHERE route_id=?`, f.route) != 1 {
+					t.Fatal("stale handled worker changed replacement reservation")
+				}
+				f.handlingReceipt(id, state)
 			} else {
 				if f.covers(id) != 0 {
 					t.Fatal("nonrecipient scope fabricated coverage")
@@ -129,11 +172,20 @@ func TestAckDuringPostKeepsExclusion(t *testing.T) {
 			id := f.send("wake")
 			d := f.claim()
 			unblock := f.block(d)
+			before := f.handledRow(id)
+			gate := f.handledGate()
 			peer := auth.Caller{Kind: "peer", PeerID: f.b}
 			if kind == "ack" {
 				t2Must(t, f.ack(peer, ""))
 			} else {
 				f.processed(peer, id)
+			}
+			after := f.handledRow(id)
+			if after.Attempt != before.Attempt || after.Left != before.Left || after.Next != before.Next || f.handledGate() != gate {
+				t.Fatal("handling compensated or retired an armed/ambiguous invocation")
+			}
+			if f.scalar(`SELECT count(*) FROM route_runs WHERE route_id=?`, f.route) != 1 {
+				t.Fatal("handling refunded invoked reservation")
 			}
 			if f.covers(id) != 0 {
 				t.Fatal("armed leader mislabeled no-POST while telemetry absent")
@@ -162,6 +214,7 @@ func TestAckDuringPostKeepsExclusion(t *testing.T) {
 func TestBulkCoverExcludesLeaderAndHandledBeforeBeginIsSeparate(t *testing.T) {
 	f := t2Setup(t)
 	leader := f.send("wake")
+	prior := f.handledRow(leader)
 	follower := f.send("wake")
 	d := f.claim()
 	f.send("wake")
@@ -177,6 +230,14 @@ func TestBulkCoverExcludesLeaderAndHandledBeforeBeginIsSeparate(t *testing.T) {
 	}
 	f.w.Push(f.ctx, d)
 	f.requests(0)
+	f.assertHandledRetirement(leader, d, prior, "processed")
+	f.handlingReceipt(leader, "processed")
+	first := f.firstCover(follower)
+	f.step()
+	f.requests(1)
+	if f.firstCover(follower) != first {
+		t.Fatal("replacement changed prior follower evidence")
+	}
 }
 func TestReCoverReplacementKeepsFirstEvidence(t *testing.T) {
 	f := t2Setup(t)
@@ -461,11 +522,20 @@ func TestAmbiguousHandledLeaderIsNotNoPost(t *testing.T) {
 			if f.scalar(`SELECT count(*) FROM grokbot_wakes WHERE route_id=? AND phase='waiting' AND lease_until>?`, f.route, envelope.FormatTime(f.env.Now.Now())) != 1 {
 				t.Fatal("ambiguity did not retain exclusion")
 			}
+			before := f.handledRow(id)
+			gate := f.handledGate()
 			peer := f.caller(f.b)
 			if operation == "ack" {
 				t2Must(t, f.ack(peer, ""))
 			} else {
 				f.processed(peer, id)
+			}
+			after := f.handledRow(id)
+			if after.Attempt != before.Attempt || after.Left != before.Left || after.Next != before.Next || f.handledGate() != gate {
+				t.Fatal("handling compensated or retired an armed/ambiguous invocation")
+			}
+			if f.scalar(`SELECT count(*) FROM route_runs WHERE route_id=?`, f.route) != 1 {
+				t.Fatal("handling refunded invoked reservation")
 			}
 			if f.covers(id) != 0 {
 				t.Fatal("ambiguous invoked leader mislabeled no-POST")
@@ -486,6 +556,389 @@ func TestAmbiguousHandledLeaderIsNotNoPost(t *testing.T) {
 			f.env.Now.Advance(at.Sub(f.env.Now.Now()) + time.Millisecond)
 			f.step()
 			f.requests(2)
+		})
+	}
+}
+
+// These assertions check the durable accounting transition separately from
+// no-POST coverage. A handled row must never be requeued for compensation.
+type t2HandledRow struct {
+	State         string
+	Attempt, Left int
+	Next          sql.NullString
+}
+
+func (f *t2Fixture) handledRow(id string) t2HandledRow {
+	f.t.Helper()
+	var r t2HandledRow
+	t2Must(f.t, f.env.Hub.DB.QueryRow(`SELECT state,attempt,attempts_left,next_attempt_at FROM deliveries WHERE dly_id=?`, id).Scan(&r.State, &r.Attempt, &r.Left, &r.Next))
+	return r
+}
+func (f *t2Fixture) assertHandledRetirement(id string, d hub.DueDelivery, prior t2HandledRow, state string) {
+	f.t.Helper()
+	after := f.handledRow(id)
+	if after.State != state || after.Left != prior.Left {
+		f.t.Fatalf("handled state/budget=%+v prior=%+v want state=%s", after, prior, state)
+	}
+	if after.Attempt != prior.Attempt {
+		f.t.Errorf("handled attempt=%d want exact prior %d", after.Attempt, prior.Attempt)
+	}
+	if after.Next.Valid {
+		f.t.Errorf("handled claim lease remains %s", after.Next.String)
+	}
+	if f.scalar(`SELECT count(*) FROM grokbot_wakes WHERE route_id=? AND recipient=? AND token=? AND (phase='claimed' OR lease_until!='')`, d.RouteID, d.Recipient, d.GrokWake.Token) != 0 {
+		f.t.Error("handled unarmed token retains its claimed exclusion")
+	}
+	if f.scalar(`SELECT count(*) FROM route_runs WHERE route_id=? AND grok_wake_token=?`, d.RouteID, d.GrokWake.Token) != 0 {
+		f.t.Fatal("noninvoked handled token has a reservation")
+	}
+}
+func (f *t2Fixture) firstCover(id string) string {
+	f.t.Helper()
+	var first string
+	t2Must(f.t, f.env.Hub.DB.QueryRow(`SELECT first_covered_at FROM grokbot_covers WHERE route_id=? AND delivery_id=?`, f.route, id).Scan(&first))
+	if f.covers(id) != 1 {
+		f.t.Fatal("coverage duplicated")
+	}
+	return first
+}
+func (f *t2Fixture) handlingReceipt(id, state string) {
+	f.t.Helper()
+	n := 0
+	for _, r := range receipts(f.t, f.env, f.a) {
+		if r.DeliveryID == id {
+			n++
+			if r.State != state || r.By != f.b {
+				f.t.Fatalf("unexpected handling receipt: %+v", r)
+			}
+		}
+	}
+	if n != 1 {
+		f.t.Fatalf("handling receipt count=%d want1", n)
+	}
+}
+func TestHandledCoveredLeaderCompensatesPriorAttempt(t *testing.T) {
+	for _, operation := range []string{"processed", "ack"} {
+		t.Run(operation, func(t *testing.T) {
+			f := t2Setup(t)
+			f.send("wake")
+			id := f.send("wake")
+			f.step()
+			f.requests(1)
+			first := f.firstCover(id)
+			f.env.Now.Advance(hub.PushLease + time.Millisecond)
+			f.respond = func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(503) }
+			f.step()
+			f.requests(2)
+			prior := f.handledRow(id)
+			if prior.State != "queued" || prior.Attempt != 1 {
+				t.Fatalf("prior actual retry=%+v", prior)
+			}
+			var retry string
+			t2Must(t, f.env.Hub.DB.QueryRow(`SELECT retry_at FROM grokbot_wakes WHERE route_id=?`, f.route).Scan(&retry))
+			at, e := envelope.ParseTime(retry)
+			t2Must(t, e)
+			f.env.Now.Advance(at.Sub(f.env.Now.Now()) + time.Millisecond)
+			d := f.claim()
+			if d.DeliveryID != id || d.Attempt != 2 {
+				t.Fatalf("covered retry claim=%+v", d)
+			}
+			var frozen []byte
+			t2Must(t, f.env.Hub.DB.QueryRow(`SELECT frozen_body FROM grokbot_wakes WHERE route_id=? AND token=?`, f.route, d.GrokWake.Token).Scan(&frozen))
+			state := "accepted"
+			peer := f.caller(f.b)
+			if operation == "processed" {
+				state = "processed"
+				f.processed(peer, id)
+				if f.processed(peer, id) {
+					t.Fatal("repeated processing changed")
+				}
+			} else {
+				t2Must(t, f.ack(peer, ""))
+				t2Must(t, f.ack(peer, ""))
+			}
+			f.assertHandledRetirement(id, d, prior, state)
+			f.handlingReceipt(id, state)
+			if f.firstCover(id) != first {
+				t.Fatal("handling previously covered leader changed its first evidence")
+			}
+			var retained []byte
+			t2Must(t, f.env.Hub.DB.QueryRow(`SELECT frozen_body FROM grokbot_wakes WHERE route_id=? AND token=?`, f.route, d.GrokWake.Token).Scan(&retained))
+			if !bytes.Equal(frozen, retained) {
+				t.Fatal("handling erased frozen retry body")
+			}
+			if f.scalar(`SELECT failure_ordinal FROM grokbot_wakes WHERE route_id=?`, f.route) != 1 {
+				t.Fatal("handling reset failure ordinal")
+			}
+			f.w.Push(f.ctx, d)
+			f.w.Push(f.ctx, d)
+			f.requests(2)
+			f.send("wake")
+			f.step()
+			f.requests(3)
+			// Replacement failure continues the domain cadence instead of resetting it.
+			if f.scalar(`SELECT failure_ordinal FROM grokbot_wakes WHERE route_id=?`, f.route) != 2 {
+				t.Fatal("replacement reset inherited failure cadence")
+			}
+			f.step()
+			f.requests(3)
+			t2Must(t, f.env.Hub.DB.QueryRow(`SELECT retry_at FROM grokbot_wakes WHERE route_id=?`, f.route).Scan(&retry))
+			at, e = envelope.ParseTime(retry)
+			t2Must(t, e)
+			f.env.Now.Advance(at.Sub(f.env.Now.Now()) + time.Millisecond)
+			f.respond = nil
+			f.step()
+			f.requests(4)
+			if f.firstCover(id) != first {
+				t.Fatal("replacement rewrote handled leader's first evidence")
+			}
+			f.handlingReceipt(id, state)
+		})
+	}
+}
+func TestHandledUnarmedRetirementPreservesIndependentWait(t *testing.T) {
+	for _, barrier := range []string{"legacy", "cadence"} {
+		for _, operation := range []string{"processed", "ack"} {
+			t.Run(barrier+"/"+operation, func(t *testing.T) {
+				f := t2Setup(t)
+				id := f.send("wake")
+				prior := f.handledRow(id)
+				other := f.send("wake")
+				d := f.claim()
+				until := f.env.Now.Now().Add(2 * time.Minute)
+				untilS := envelope.FormatTime(until)
+				// Construct independent persisted boundary state without making a network
+				// claim: normal election cannot itself create an opted claim under a gate.
+				if barrier == "legacy" {
+					_, e := f.env.Hub.DB.Exec(`INSERT INTO grokbot_legacy_claims(route_id,recipient,delivery_id,lease_until) VALUES (?,?,?,?)`, f.route, f.b, other, untilS)
+					t2Must(t, e)
+				} else {
+					_, e := f.env.Hub.DB.Exec(`UPDATE grokbot_wakes SET retry_at=?,failure_ordinal=3 WHERE route_id=?`, untilS, f.route)
+					t2Must(t, e)
+				}
+				stamp := envelope.FormatTime(f.env.Now.Now())
+				_, e := f.env.Hub.DB.Exec(`INSERT INTO route_runs(route_id,at,grok_wake_token,grok_wake_settled_200) VALUES (?,?,NULL,0),(?,?,'t2-fix1-unrelated-token',1)`, f.route, stamp, f.route, stamp)
+				t2Must(t, e)
+				state := "processed"
+				if operation == "processed" {
+					f.processed(f.caller(f.b), id)
+				} else {
+					state = "accepted"
+					var seq int64
+					t2Must(t, f.env.Hub.DB.QueryRow(`SELECT event_seq FROM deliveries WHERE dly_id=?`, id).Scan(&seq))
+					t2Must(t, f.env.Hub.Ack(f.ctx, f.caller(f.b), "", eventlog.Cursor{Epoch: f.env.Hub.Log.Epoch(), Seq: seq}))
+				}
+				f.assertHandledRetirement(id, d, prior, state)
+				f.handlingReceipt(id, state)
+				f.w.Push(f.ctx, d)
+				if f.scalar(`SELECT count(*) FROM route_runs WHERE route_id=? AND at=? AND (grok_wake_token IS NULL OR grok_wake_token='t2-fix1-unrelated-token' AND grok_wake_settled_200=1)`, f.route, stamp) != 2 {
+					t.Fatal("handling refunded an unrelated reservation")
+				}
+				if barrier == "legacy" {
+					if f.scalar(`SELECT count(*) FROM grokbot_legacy_claims WHERE route_id=? AND recipient=? AND delivery_id=? AND lease_until=?`, f.route, f.b, other, untilS) != 1 {
+						t.Fatal("handling erased independent legacy identity")
+					}
+				} else {
+					if f.scalar(`SELECT count(*) FROM grokbot_wakes WHERE route_id=? AND retry_at=? AND failure_ordinal=3`, f.route, untilS) != 1 {
+						t.Fatal("handling erased shared failure cadence")
+					}
+				}
+				f.step()
+				f.requests(0)
+				f.env.Now.Advance(2*time.Minute - time.Millisecond)
+				f.step()
+				f.requests(0)
+				f.env.Now.Advance(2 * time.Millisecond)
+				f.step()
+				f.requests(1)
+			})
+		}
+	}
+}
+func TestHandledWaitingRetryKeepsCadence(t *testing.T) {
+	for _, operation := range []string{"processed", "ack"} {
+		t.Run(operation, func(t *testing.T) {
+			f := t2Setup(t)
+			f.respond = func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(503) }
+			id := f.send("wake")
+			f.step()
+			f.requests(1)
+			before := f.handledRow(id)
+			var retry string
+			t2Must(t, f.env.Hub.DB.QueryRow(`SELECT retry_at FROM grokbot_wakes WHERE route_id=?`, f.route).Scan(&retry))
+			if operation == "processed" {
+				f.processed(f.caller(f.b), id)
+			} else {
+				t2Must(t, f.ack(f.caller(f.b), ""))
+			}
+			after := f.handledRow(id)
+			if after.Attempt != before.Attempt || after.Left != before.Left || after.Next != before.Next {
+				t.Fatalf("waiting retry compensated or changed: before=%+v after=%+v", before, after)
+			}
+			if f.scalar(`SELECT count(*) FROM grokbot_wakes WHERE route_id=? AND phase='waiting' AND retry_at=? AND failure_ordinal=1`, f.route, retry) != 1 {
+				t.Fatal("handling withdrew waiting retry")
+			}
+			if f.covers(id) != 0 {
+				t.Fatal("invoked retry mislabeled no-POST")
+			}
+			f.send("wake")
+			f.step()
+			f.requests(1)
+			at, e := envelope.ParseTime(retry)
+			t2Must(t, e)
+			f.env.Now.Advance(at.Sub(f.env.Now.Now()) + time.Millisecond)
+			f.respond = nil
+			f.step()
+			f.requests(2)
+		})
+	}
+}
+
+func (f *t2Fixture) handledGate() string {
+	f.t.Helper()
+	var snapshot string
+	t2Must(f.t, f.env.Hub.DB.QueryRow(`SELECT json_object('phase',phase,'token',token,'representative',representative_id,'lease',lease_until,'retry',retry_at,'cover',cover_until,'ordinal',failure_ordinal,'valid',cover_valid,'count',pending_count,'body',hex(frozen_body),'idle',idle_counter,'captured_idle',begin_idle_counter) FROM grokbot_wakes WHERE route_id=? AND recipient=?`, f.route, f.b).Scan(&snapshot))
+	return snapshot
+}
+func TestHandledImportedLegacyRetainsInvocation(t *testing.T) {
+	for _, operation := range []string{"processed", "ack"} {
+		t.Run(operation, func(t *testing.T) {
+			f := t2Setup(t)
+			mode := hub.GrokbotTransportDeliveryV1
+			t2Must(t, f.env.Hub.UpdateRoute(f.ctx, f.route, hub.RouteUpdate{GrokbotTransport: &mode}))
+			id := f.send("wake")
+			due, e := f.env.Hub.ClaimDue(f.ctx, f.env.Now.Now(), 16)
+			t2Must(t, e)
+			if len(due) != 1 || due[0].GrokWake != nil {
+				t.Fatalf("legacy claim=%+v", due)
+			}
+			before := f.handledRow(id)
+			deadline, e := envelope.ParseTime(before.Next.String)
+			t2Must(t, e)
+			unblock := f.block(due[0])
+			f.requests(1)
+			mode = hub.GrokbotTransportRecipientDrainV1
+			t2Must(t, f.env.Hub.UpdateRoute(f.ctx, f.route, hub.RouteUpdate{GrokbotTransport: &mode}))
+			gate := f.handledGate()
+			if operation == "processed" {
+				f.processed(f.caller(f.b), id)
+			} else {
+				t2Must(t, f.ack(f.caller(f.b), ""))
+			}
+			after := f.handledRow(id)
+			if after.Attempt != before.Attempt || after.Left != before.Left || after.Next != before.Next || f.handledGate() != gate {
+				t.Fatal("handling compensated or retired imported legacy invocation")
+			}
+			if f.scalar(`SELECT count(*) FROM grokbot_legacy_claims WHERE route_id=? AND recipient=? AND delivery_id=? AND lease_until=?`, f.route, f.b, id, before.Next.String) != 1 {
+				t.Fatal("handling changed imported identity/deadline")
+			}
+			if f.covers(id) != 0 {
+				t.Fatal("imported invoked leader mislabeled no-POST")
+			}
+			if f.scalar(`SELECT count(*) FROM route_runs WHERE route_id=? AND grok_wake_token IS NULL`, f.route) != 1 {
+				t.Fatal("legacy reservation refunded")
+			}
+			unblock()
+			f.respond = nil
+			f.send("wake")
+			f.step()
+			f.requests(1)
+			f.env.Now.Advance(deadline.Sub(f.env.Now.Now()) + time.Millisecond)
+			f.step()
+			f.requests(2)
+			state := "accepted"
+			if operation == "processed" {
+				state = "processed"
+			}
+			f.handlingReceipt(id, state)
+		})
+	}
+}
+func TestHandledUnarmedRequiresExactClaimProof(t *testing.T) {
+	for _, mismatch := range []string{"delivery-lease", "representative", "reservation"} {
+		t.Run(mismatch, func(t *testing.T) {
+			f := t2Setup(t)
+			id := f.send("wake")
+			d := f.claim()
+			switch mismatch {
+			case "delivery-lease":
+				_, e := f.env.Hub.DB.Exec(`UPDATE deliveries SET next_attempt_at=? WHERE dly_id=?`, envelope.FormatTime(f.env.Now.Now().Add(hub.PushLease+time.Millisecond)), id)
+				t2Must(t, e)
+			case "representative":
+				_, e := f.env.Hub.DB.Exec(`UPDATE grokbot_wakes SET representative_id='t2-fix1-other-delivery' WHERE route_id=?`, f.route)
+				t2Must(t, e)
+			case "reservation":
+				_, e := f.env.Hub.DB.Exec(`INSERT INTO route_runs(route_id,at,grok_wake_token) VALUES (?,?,?)`, f.route, envelope.FormatTime(f.env.Now.Now()), d.GrokWake.Token)
+				t2Must(t, e)
+			}
+			before := f.handledRow(id)
+			gate := f.handledGate()
+			f.processed(f.caller(f.b), id)
+			after := f.handledRow(id)
+			if after.Attempt != before.Attempt || after.Left != before.Left || after.Next != before.Next || gate != f.handledGate() {
+				t.Fatal("handling compensated without exact unarmed proof")
+			}
+			f.w.Push(f.ctx, d)
+			f.requests(0)
+			if mismatch == "reservation" && f.scalar(`SELECT count(*) FROM route_runs WHERE grok_wake_token=?`, d.GrokWake.Token) != 1 {
+				t.Fatal("handling refunded reservation despite missing noninvocation proof")
+			}
+		})
+	}
+}
+
+func TestHandledUnarmedCompensationRollsBackWithReceipt(t *testing.T) {
+	for _, operation := range []string{"processed", "ack"} {
+		t.Run(operation, func(t *testing.T) {
+			f := t2Setup(t)
+			id := f.send("wake")
+			prior := f.handledRow(id)
+			d := f.claim()
+			claimed, gate := f.handledRow(id), f.handledGate()
+			peer := f.caller(f.b)
+			cursor, acked, e := f.env.Hub.Log.Acked(f.ctx, f.b, "*")
+			t2Must(t, e)
+			events := f.scalar(`SELECT count(*) FROM events`)
+			audits := f.scalar(`SELECT count(*) FROM audit`)
+			_, e = f.env.Hub.DB.Exec(`CREATE TRIGGER t2_fail_handling_receipt BEFORE INSERT ON events
+ WHEN NEW.type='receipt' BEGIN SELECT RAISE(ABORT,'synthetic handling receipt failure'); END`)
+			t2Must(t, e)
+			handle := func() error {
+				if operation == "ack" {
+					return f.ack(peer, "")
+				}
+				changed, err := f.env.Hub.ReceiptChanged(f.ctx, peer, id, "processed", "")
+				if err != nil && changed {
+					t.Fatal("failed receipt reported committed change")
+				}
+				return err
+			}
+			if e := handle(); e == nil || !strings.Contains(e.Error(), "synthetic handling receipt failure") {
+				t.Fatalf("expected synthetic receipt failure, got %v", e)
+			}
+			if f.handledRow(id) != claimed || f.handledGate() != gate || f.covers(id) != 0 {
+				t.Fatal("failed handling committed state, compensation, retirement or coverage")
+			}
+			afterCursor, afterAcked, e := f.env.Hub.Log.Acked(f.ctx, f.b, "*")
+			t2Must(t, e)
+			if afterAcked != acked || afterCursor.String() != cursor.String() || f.scalar(`SELECT count(*) FROM events`) != events || f.scalar(`SELECT count(*) FROM audit`) != audits {
+				t.Fatal("failed handling committed cursor, receipt or audit")
+			}
+			_, e = f.env.Hub.DB.Exec(`DROP TRIGGER t2_fail_handling_receipt`)
+			t2Must(t, e)
+			t2Must(t, handle())
+			state := "processed"
+			if operation == "ack" {
+				state = "accepted"
+			}
+			f.assertHandledRetirement(id, d, prior, state)
+			f.handlingReceipt(id, state)
+			f.firstCover(id)
+			f.w.Push(f.ctx, d)
+			f.requests(0)
+			f.send("wake")
+			f.step()
+			f.requests(1)
 		})
 	}
 }
