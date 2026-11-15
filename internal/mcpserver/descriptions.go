@@ -37,6 +37,7 @@ var toolDescriptions = map[string]string{
 
 // Short descriptions explain meaning; the guide carries syntax and limits.
 var propertyDescriptions = map[string]string{
+	"grokbot_transport":   "Saved request transport; historical Grok omission means delivery_v1.",
 	"as":                  "Act as your owned peer.",
 	"peer":                "Read and ack this peer's inbox.",
 	"idempotency_key":     "Unique per message. Reuse only for its retry.",

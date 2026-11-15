@@ -2,6 +2,7 @@ package mcpserver_test
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -64,5 +65,37 @@ func TestOnboardingValidationDoesNotEchoArguments(t *testing.T) {
 	}
 	if takeMCPCensus(t, env) != before {
 		t.Fatal("validation wrote onboarding state")
+	}
+}
+
+// The saved transport is safe status metadata, never an implicit add opt-in.
+func TestOnboardingTransportProjectionContract(t *testing.T) {
+	env := testhub.Start(t)
+	for _, era := range []string{mcpserver.ProtoCurrent, mcpserver.ProtoLegacy} {
+		t.Run(era, func(t *testing.T) {
+			headers := mcpEraHeaders(t, env, env.OperatorSecret, era)
+			tools := mcpTools(t, env, env.OperatorSecret, headers)
+			status := toolByName(t, tools, "vecnet_agent_status")["outputSchema"].(map[string]any)
+			field := status["properties"].(map[string]any)["grokbot_transport"].(map[string]any)
+			if field["type"] != "string" || !reflect.DeepEqual(field["enum"], []any{"delivery_v1", "recipient_drain_v1"}) {
+				t.Fatalf("transport schema = %#v", field)
+			}
+			description, _ := field["description"].(string)
+			if !strings.Contains(description, "Saved request transport") || !strings.Contains(description, "historical Grok omission means delivery_v1") {
+				t.Errorf("transport description = %q", description)
+			}
+			if required, ok := status["required"].([]any); ok {
+				for _, name := range required {
+					if name == "grokbot_transport" {
+						t.Error("transport must remain optional")
+					}
+				}
+			}
+			add := toolByName(t, tools, "vecnet_agent_add")["inputSchema"].(map[string]any)
+			inputs := add["properties"].(map[string]any)["inputs"].(map[string]any)
+			if _, exists := inputs["properties"].(map[string]any)["grokbot_transport"]; exists {
+				t.Error("human handoff must not expose transport opt-in")
+			}
+		})
 	}
 }

@@ -39,6 +39,13 @@
       "enrol_ttl_seconds": {
         "type": "integer"
       },
+      "grokbot_transport": {
+        "enum": [
+          "delivery_v1",
+          "recipient_drain_v1"
+        ],
+        "type": "string"
+      },
       "kind": {
         "type": "string"
       },
