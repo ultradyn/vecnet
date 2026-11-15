@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -456,5 +457,107 @@ func TestReceivedNoticeSelectedProfilePolicy(t *testing.T) {
 				t.Error("notice admission side effects")
 			}
 		})
+	}
+}
+
+func TestReceivedRelocationDirectClientHTTPPolicy(t *testing.T) {
+	for _, policy := range []string{"strict", "environment", "profile", "mismatched-hub", "mismatched-credential", "environment-mismatched-profile"} {
+		for _, field := range []string{"target", "notice-hub", "notice-new-url"} {
+			t.Run(policy+"/"+field, func(t *testing.T) {
+				key := testIdentityKey(t, "1")
+				n := noticeWithSecrets(t, "https://source.example/Vecnet/%2Fexact/", "https://[2001:db8::7]:8443/Vecnet/%2Fexact/", nil)
+				target := "https://[2001:db8::7]:8443/Vecnet/%2Fexact/"
+				switch field {
+				case "target":
+					target = "http://public.example/Vecnet/%2Fexact/"
+				case "notice-hub":
+					n.Hub = "http://public.example/Vecnet/%2Fexact/"
+				case "notice-new-url":
+					n.NewURL = "http://public.example/Vecnet/%2Fexact/"
+				}
+				if err := key.SignNotice(&n); err != nil {
+					t.Fatal(err)
+				}
+				var source, destinations atomic.Int32
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					source.Add(1)
+					w.WriteHeader(410)
+					json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": "hub_moved", "message": "https://message.example?token=T2R_MESSAGE", "details": map[string]any{"new_url": target, "notice": n, "unknown": "T2R_UNKNOWN"}}})
+				}))
+				defer srv.Close()
+				profileHub, profileSecret := srv.URL, "vn_operator_synthetic"
+				if policy == "mismatched-hub" || policy == "environment-mismatched-profile" {
+					profileHub = srv.URL + "/different"
+				}
+				if policy == "mismatched-credential" {
+					profileSecret = "vn_operator_other"
+				}
+				profileAllow := policy == "profile" || strings.HasPrefix(policy, "mismatched") || policy == "environment-mismatched-profile"
+				_, env := pinTestEnv(t, fmt.Sprintf("[profiles.p]\nhub=%q\nsecret=%q\nallow_insecure_http=%t\n", profileHub, profileSecret, profileAllow))
+				if strings.HasPrefix(policy, "environment") {
+					prior := env
+					env = func(k string) string {
+						if k == insecureEnv {
+							return "1"
+						}
+						return prior(k)
+					}
+				}
+				a, out, errs, _ := receivedApp(t, srv.URL, true)
+				a.getenv = env
+				c := newClient(srv.URL, "vn_operator_synthetic")
+				original := *c
+				wire := &http.Transport{}
+				defer wire.CloseIdleConnections()
+				c.hc.Transport = receivedRoundTrip(func(r *http.Request) (*http.Response, error) {
+					if r.URL.Host != strings.TrimPrefix(srv.URL, "http://") {
+						destinations.Add(1)
+						return nil, fmt.Errorf("unexpected destination")
+					}
+					return wire.RoundTrip(r)
+				})
+				notices, err := a.activeNotices(c)
+				var he *hubError
+				if notices != nil || !errors.As(err, &he) || he.Status != 410 || he.Code != "hub_moved" {
+					t.Fatalf("lost relocation classification: %v", err)
+				}
+				allow := policy == "profile" || strings.HasPrefix(policy, "environment")
+				wantMessage := "invalid hub relocation"
+				if allow {
+					wantMessage = "hub moved"
+				}
+				if he.Message != wantMessage {
+					t.Errorf("policy=%s message=%q want=%q details=%v", policy, he.Message, wantMessage, he.Details)
+				}
+				wantFields := 2
+				if !allow {
+					wantFields = 1
+				}
+				if len(he.Details) != wantFields {
+					t.Errorf("checked recovery fields lost: %v", he.Details)
+				}
+				if allow || field != "target" {
+					if he.Details["new_url"] != target {
+						t.Error("checked target changed")
+					}
+				} else if _, ok := he.Details["new_url"]; ok {
+					t.Error("strict target admitted")
+				}
+				if allow || field == "target" {
+					got, ok := he.Details["notice"].(envelope.HubNotice)
+					if !ok || !reflect.DeepEqual(got, n) || hubid.VerifyNotice(key.Pubkey(), got) != nil {
+						t.Error("checked signed notice changed")
+					}
+				} else if _, ok := he.Details["notice"]; ok {
+					t.Error("strict notice admitted")
+				}
+				if c.allowHTTP != original.allowHTTP || c.base != original.base || c.secret != original.secret || c.hc != original.hc {
+					t.Error("original client mutated")
+				}
+				if source.Load() != 1 || destinations.Load() != 0 || out.Len() != 0 || errs.Len() != 0 || strings.Contains(err.Error(), "T2R_") {
+					t.Error("unexpected request/output effect")
+				}
+			})
+		}
 	}
 }

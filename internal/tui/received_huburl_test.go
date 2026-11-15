@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/hubid"
 	"github.com/XertroV/vecnet/internal/opclient"
@@ -209,5 +210,126 @@ func TestReceivedTUIFakeRelocationError(t *testing.T) {
 				t.Error("mutated caller error")
 			}
 		})
+	}
+}
+
+type receivedLoadCapture struct {
+	staticScreen
+	err error
+}
+
+func (s *receivedLoadCapture) Update(msg tea.Msg, _ *Model) tea.Cmd {
+	if loaded, ok := msg.(Loaded); ok {
+		s.err = loaded.Err
+	}
+	return nil
+}
+
+func TestReceivedTUIRelocationDiagnosticPreserved(t *testing.T) {
+	for _, source := range []string{"http", "fake"} {
+		for _, mode := range []string{"invalid-only", "invalid-sibling-signed", "invalid-notice-safe-target", "safe", "already-rejected"} {
+			t.Run(source+"/"+mode, func(t *testing.T) {
+				var destinations, requests atomic.Int32
+				dst := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { destinations.Add(1) }))
+				defer dst.Close()
+				n := receivedTUISigned(t)
+				safeTarget := "https://[2001:db8::7]:8443/Vecnet/%2Fexact/"
+				details := map[string]any{"unknown": "T2R_UNKNOWN"}
+				message := "https://message.example?token=T2R_MESSAGE"
+				wantMessage := "invalid hub relocation"
+				switch mode {
+				case "invalid-only":
+					details["new_url"] = dst.URL + "?token=T2R_INVALID"
+				case "invalid-sibling-signed":
+					details["new_url"] = dst.URL + "?token=T2R_INVALID"
+					details["notice"] = n
+				case "invalid-notice-safe-target":
+					bad := n
+					bad.NewURL = dst.URL + "?token=T2R_INVALID_NOTICE"
+					details["new_url"] = safeTarget
+					details["notice"] = bad
+				case "safe":
+					details["new_url"] = safeTarget
+					details["notice"] = n
+					wantMessage = "hub moved"
+				case "already-rejected":
+					message = "invalid hub relocation"
+					details["new_url"] = safeTarget
+					if source == "http" {
+						wantMessage = "hub moved"
+					}
+				}
+				beforeRaw, _ := json.Marshal(details)
+				var api API
+				if source == "http" {
+					srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						requests.Add(1)
+						w.WriteHeader(410)
+						json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": "hub_moved", "message": message, "details": details}})
+					}))
+					defer srv.Close()
+					api = opclient.New(srv.URL, "vn_operator_synthetic")
+				} else {
+					f := newFake()
+					f.fail("Notices", &opclient.Error{Status: 410, Code: "hub_moved", Message: message, Details: details})
+					api = f
+				}
+				m := newModel(context.Background(), Options{API: api, Now: func() time.Time { return fixedNow }})
+				defer m.cancel()
+				m.Conn = ConnLive
+				capture := &receivedLoadCapture{}
+				m.screens = []Screen{capture}
+				load := m.fetch("notices")().(loadMsg)
+				before := load.err
+				var original *opclient.Error
+				if !errors.As(before, &original) {
+					t.Fatal("missing typed API error")
+				}
+				originalMessage := original.Message
+				originalDetails, _ := json.Marshal(original.Details)
+				m.onLoad(load)
+				err := m.Data.Errs["notices"]
+				var checked *opclient.Error
+				if !errors.As(err, &checked) || checked.Status != 410 || checked.Code != "hub_moved" {
+					t.Fatalf("lost typed error: %v", err)
+				}
+				if checked.Message != wantMessage || !strings.Contains(m.toast.text, ": "+wantMessage) || capture.err == nil || capture.err.Error() != err.Error() {
+					t.Errorf("lost diagnostic: before=%v after=%v toast=%q broadcast=%v", before, err, m.toast.text, capture.err)
+				}
+				if !errors.Is(err, before) {
+					t.Error("original typed cause lost")
+				}
+				wantFields := 0
+				switch mode {
+				case "invalid-sibling-signed", "invalid-notice-safe-target", "already-rejected":
+					wantFields = 1
+				case "safe":
+					wantFields = 2
+				}
+				if len(checked.Details) != wantFields {
+					t.Error("unsafe recovery retained or checked sibling lost")
+				}
+				if mode == "invalid-sibling-signed" || mode == "safe" {
+					got, ok := checked.Details["notice"].(envelope.HubNotice)
+					key, _ := hubid.KeyFromSeedHex(strings.Repeat("1", 64))
+					if !ok || !reflect.DeepEqual(got, n) || hubid.VerifyNotice(key.Pubkey(), got) != nil {
+						t.Error("signed sibling changed")
+					}
+				}
+				if mode == "invalid-notice-safe-target" || mode == "safe" || mode == "already-rejected" {
+					if checked.Details["new_url"] != safeTarget {
+						t.Error("checked prefix/IPv6 target changed")
+					}
+				}
+				afterRaw, _ := json.Marshal(details)
+				afterOriginal, _ := json.Marshal(original.Details)
+				if string(beforeRaw) != string(afterRaw) || original.Message != originalMessage || string(originalDetails) != string(afterOriginal) {
+					t.Error("caller input mutated")
+				}
+				if destinations.Load() != 0 || (source == "http" && requests.Load() != 1) || strings.Contains(err.Error()+m.toast.text+capture.err.Error(), "T2R_") {
+					t.Error("unchecked prose or request escaped")
+				}
+			})
+		}
 	}
 }

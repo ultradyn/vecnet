@@ -37,13 +37,16 @@ func (a *app) receivedHTTP(c *client) bool {
 func (a *app) activeNotices(c *client) ([]envelope.HubNotice, error) {
 	// profile follow constructs its client directly. Resolve that selected
 	// profile's explicit policy too, without lending it to a different client.
-	if !c.allowHTTP && a.getenv != nil {
+	allowHTTP := a.receivedHTTP(c)
+	if !allowHTTP && a.getenv != nil {
 		_, _, p, err := a.profileSelection()
-		if err == nil && p.AllowInsecureHTTP && strings.TrimRight(p.Hub, "/") == c.base && p.Secret == c.secret {
-			copy := *c
-			copy.allowHTTP = true
-			c = &copy
-		}
+		allowHTTP = err == nil && p.AllowInsecureHTTP && strings.TrimRight(p.Hub, "/") == c.base && p.Secret == c.secret
+	}
+	// Error responses need the same explicit policy as successful notices.
+	if allowHTTP && !c.allowHTTP {
+		copy := *c
+		copy.allowHTTP = true
+		c = &copy
 	}
 	var body struct {
 		Notices []json.RawMessage `json:"notices"`

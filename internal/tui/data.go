@@ -234,6 +234,11 @@ func (m *Model) onLoad(msg loadMsg) tea.Cmd {
 	if errors.As(msg.err, &received) && received.Status == http.StatusGone && received.Code == "hub_moved" {
 		checked := *received
 		checked.Message, checked.Details = hubnotice.ProjectRelocation(received.Details, true)
+		// A prior admission boundary may already have omitted rejected fields.
+		// Preserve only its fixed refusal marker; never forward supplied prose.
+		if received.Message == "invalid hub relocation" {
+			checked.Message = "invalid hub relocation"
+		}
 		msg.err = &receivedHubError{checked: &checked, cause: msg.err}
 	}
 	delete(m.inflight, msg.key)
