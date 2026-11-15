@@ -1529,6 +1529,36 @@ async function withMountedSettings(hub, run) {
   finally { off(); for (const [key, value] of Object.entries(prev)) globalThis[key] = value; }
 }
 
+test('retention warnings name every known affected setting and tolerate absent key metadata', async t => {
+  const explanation = 'The new limit applies to rows created from now on. Existing rows keep their previous rule unless you also approve applying it to existing data.';
+  for (const c of [
+    { name: 'multiple keys with an unknown key', keys: ['retention.history', 'unknown.setting', 'retention.ack_events'], labels: ['History retention', 'Acknowledged event retention'] },
+    { name: 'missing keys', labels: [] },
+    { name: 'non-array keys', keys: 'retention.history', labels: [] },
+    { name: 'labels are text', keys: ['retention.history'], label: 'History <img src=x> retention', labels: ['History <img src=x> retention'] },
+  ]) await t.test(c.name, async () => {
+    const preferences = rows({ installed: true });
+    if (c.label) preferences.find(r => r.key === 'retention.history').label = c.label;
+    const hub = fakeHub({ preferences });
+    hub.extraRisks = () => [{ code: 'retention_shortened', keys: c.keys, message: 'Original Hub retention warning.' }];
+    await withMountedSettings(hub, async ({ input, click }) => {
+      input('st-retention-history', '1d'); click('save'); await flush();
+      const dialog = walkSt(document.body, el => el.tag === 'dialog')[0];
+      assert.equal(dialog.open, true);
+      const cards = walkSt(dialog, el => el.attrs['data-risk'] === 'retention_shortened');
+      assert.equal(cards.length, 1);
+      const copy = cards[0].children[0].textContent;
+      for (const label of c.labels) assert.ok(copy.includes(label), 'warning missing label: ' + label);
+      assert.ok(copy.endsWith(explanation), 'original explanation is preserved');
+      if (!c.labels.length) assert.equal(copy, explanation);
+      assert.ok(!copy.includes('unknown.setting'), 'unknown keys do not become raw labels');
+      assert.equal(cards[0].children[1].textContent, 'Hub: Original Hub retention warning.');
+      assert.equal(walkSt(cards[0], el => el.tag === 'img').length, 0, 'labels cannot create markup');
+      assert.equal(hub.calls.filter(call => call.op === 'patch').length, 0, 'rendering a preview writes nothing');
+    });
+  });
+});
+
 test('send warning threshold edits in List and Policy with wire bounds, zero disable and saved provenance', async t => {
   for (const view of ['list', 'policy']) await t.test(view, async () => {
     const hub = fakeHub();

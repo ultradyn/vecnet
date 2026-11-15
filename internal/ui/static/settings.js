@@ -512,7 +512,10 @@ function riskText(store, risk, impact) {
   switch (risk.code) {
     case 'presence_shortened': return 'Agents turn unknown sooner after their last presence report. Wakes held for an agent whose presence is now stale may be released.';
     case 'archive_disabled': return `Message history becomes eligible for expiry under History retention (${val('retention.history')}) for messages from now on. Messages already here stay protected unless you also approve applying the policy to existing data. Scheduled acknowledged-event pruning also requires its rollout gate; archive mode does not pause that policy.`;
-    case 'retention_shortened': return 'The new limit applies to rows created from now on. Existing rows keep their previous rule unless you also approve applying it to existing data.';
+    case 'retention_shortened': {
+      const labels = (Array.isArray(risk.keys) ? risk.keys : []).map(k => store.rowOf(k)?.label).filter(Boolean).join(', ');
+      return (labels ? labels + ': ' : '') + 'The new limit applies to rows created from now on. Existing rows keep their previous rule unless you also approve applying it to existing data.';
+    }
     case 'blob_expiry_off': return blobOffText((impact && impact.storage) || store.state.storage) + ' Figures are estimates. Turning expiry back on later does not delete kept files.';
     case 'retention_apply_existing': return 'Existing rows older than the fixed cutoff become eligible at the next nightly sweep, not now. Pinned rows are kept. Deleted data cannot be restored by Undo; take a backup first (docs/DEPLOY.md, Backups).';
   }

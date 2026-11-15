@@ -282,9 +282,27 @@ try {
     await toastGone();
     const retentionPrep = { list: section('sec-retention_storage'), policy: () => into('.st-time') };
     await both('retention-available', retentionPrep);
-    const confirmShots = async (v, state) => {
+    const confirmShots = async (v, state, preview, rows) => {
       for (const [size, vp] of Object.entries(SIZES)) {
         await page.setViewportSize(vp);
+        const name = `${state} ${v} ${size}`;
+        const risks = preview.risks.filter(r => r.code === 'retention_shortened');
+        const cards = dialog.locator('[data-risk=retention_shortened]');
+        assert(risks.length === 2 && await cards.count() === 2, `${name}: shortening warnings must stay separate`);
+        for (const [i, risk] of risks.entries()) {
+          const card = cards.nth(i), copy = await card.locator('p').first().textContent();
+          for (const key of risk.keys) assert(copy.includes(rows.get(key).label), `${name}: ${key} warning missing setting label ${rows.get(key).label}: ${copy}`);
+          for (const key of ['retention.history', 'retention.ack_events'].filter(k => !risk.keys.includes(k))) assert(!copy.includes(rows.get(key).label), `${name}: ${key} label attached to the wrong warning`);
+          assert(await card.locator('.st-dim').textContent() === 'Hub: ' + risk.message, `${name}: Hub warning changed`);
+        }
+        const overflow = await dialog.evaluate(el => [el, ...el.querySelectorAll('.st-cf-in, .st-cf-risk')]
+          .filter(node => node.scrollWidth > node.clientWidth + 1)
+          .map(node => `${node.className}: ${node.scrollWidth} > ${node.clientWidth}`));
+        assert(overflow.length === 0, `${name}: confirmation contents scroll sideways: ${overflow.join(', ')}`);
+        // Show both labelled warnings together, including when the existing-
+        // data dialog needs a separate shot for its lower approval controls.
+        await cards.first().scrollIntoViewIfNeeded();
+        await shot(`prefs-${v}-${state}-warnings-${size}`);
         // The retrospective risk list is taller than a phone. Keep its
         // bounds, typed approval and final action in the confirmation shot.
         if (state === 'retention-existing-confirm') await dialog.locator('.st-cf-acts').scrollIntoViewIfNeeded();
@@ -348,7 +366,7 @@ try {
       if (v === 'policy') assert(await dialog.locator('[data-risk=archive_disabled]').count() === 1, 'archive exit risk missing');
       assert(!await page.locator('#st-cf-existing').isChecked(), `${v}: existing-data choice not opt-in`);
       assert(await page.evaluate(() => document.activeElement?.dataset.cf) === 'no', `${v}: retention Cancel not focused`);
-      await confirmShots(v, 'retention-confirm');
+      await confirmShots(v, 'retention-confirm', prospective.result, base.rows);
       await page.keyboard.press('Escape');
       await dialog.waitFor({ state: 'detached' });
       assert(patches.length === start && (await hubPrefs()).etag === base.etag, `${v}: cancelling retention preview wrote`);
@@ -369,7 +387,7 @@ try {
       assert(await dialog.locator('[data-cf=ok]').isEnabled(), `${v}: typed trim did not enable confirmation`);
       const stored = await page.evaluate(() => [location.href, JSON.stringify({ ...localStorage }), JSON.stringify({ ...sessionStorage }), document.cookie].join('\n'));
       assert(!stored.includes(existing.result.confirm_token) && !stored.includes(prospective.result.confirm_token), `${v}: retention token leaked to storage or URL`);
-      await confirmShots(v, 'retention-existing-confirm');
+      await confirmShots(v, 'retention-existing-confirm', existing.result, base.rows);
       await dialog.locator('[data-cf=ok]').click();
       await page.locator('.st-bar').waitFor({ state: 'detached' });
       assert(patches.length === start + 1, `${v}: retention confirmation did not send one PATCH`);
