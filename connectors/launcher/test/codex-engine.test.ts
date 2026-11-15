@@ -191,6 +191,478 @@ const active = { type: 'active', activeFlags: [] };
 const row = (patch: Partial<InflightRow> = {}): InflightRow => ({ attempt: 'c'.repeat(32), threadId: threadId, key: 'vn.seed', claim: '123456789012345678901234', deliveries: ['w1'],
   method: 'turn/steer', attemptTurnId: 'active', priorTurnId: null, acceptedAt: 0, state: 'pending', ...patch });
 
+// Current settlement is a Go codex/settle operation, rather than a hook receipt.
+type RecoveryHarness = Awaited<ReturnType<typeof harness>>;
+const receiptSettles = (h: RecoveryHarness) => h.records().filter(r => !r.ack && r.argv.includes('settle') && r.argv.includes('--receipt-key'));
+const claimReservations = (h: RecoveryHarness): Record<string, string[]> => Object.fromEntries(Object.entries(JSON.parse(readFileSync(h.plan.claims, 'utf8')) as Record<string, string[]>).filter(([, ids]) => ids.length > 0));
+const deliveryGuards = (h: RecoveryHarness) => h.records().filter(r => !r.ack && r.argv.includes('guard'));
+
+// F2 synthetic native state transition; this is not evidence about the xpp incident.
+test('F2 terminal-only completion drains queued wake_idle exactly once after an authoritative idle read', async t => {
+  let h: Awaited<ReturnType<typeof harness>>;
+  const notices: string[] = [], order: string[] = [];
+  const reads: { status: unknown; terminal: unknown }[] = [];
+  let atInput: { rows: InflightRow[]; claims: Record<string, string[]>; receipts: number; attempt?: string } | undefined;
+  h = await harness(t, { status: active, wrap: rpc => ({ ...rpc,
+    onNotification(fn) { rpc.onNotification((method, params) => {
+      const p = params as { status?: { type?: string } };
+      notices.push(method === 'thread/status/changed' ? `status:${p.status?.type}` : method);
+      fn(method, params);
+    }); },
+    async call<T>(method: AllowedMethod, params: unknown, ms: number): Promise<T> {
+      if (method === 'turn/start') {
+        order.push('input');
+        const rows = h.rows();
+        atInput = { rows, claims: claimReservations(h),
+          receipts: receiptSettles(h).length,
+          attempt: rows[0] && existsSync(h.plan.trace + '.pending') ? JSON.parse(readFileSync(h.plan.trace + '.pending', 'utf8')).attempt : undefined };
+      }
+      const result = await rpc.call<T>(method, params, ms);
+      if (method === 'thread/read') {
+        const thread = (result as { thread: { status: unknown; turns: { status: string }[] } }).thread;
+        reads.push({ status: thread.status, terminal: thread.turns.at(-1)?.status }); order.push('read');
+      }
+      return result;
+    },
+  }) });
+  assert.equal(h.engine.subscribed(), true); assert.deepEqual(h.engine.liveness(), { live: true });
+  await h.wake([{ id: 'i1', priority: 'wake_idle' }]);
+  assert.equal(h.sends().length, 0); assert.deepEqual(h.rows(), []);
+  assert.deepEqual(claimReservations(h), {});
+  assert.ok(!existsSync(h.plan.claims + '.accepted'), 'queued input has no display proof');
+  const opens = h.opens, resumes = h.fake.requests.filter(r => r.method === 'thread/resume').length;
+  const readBase = reads.length, noticeBase = notices.length; order.length = 0;
+  h.fake.completeTurnOnly(threadId, 'active', { type: 'idle' });
+  await h.sync();
+  assert.deepEqual(notices.slice(noticeBase), ['turn/completed'], 'no idle status notice supplies the recovery trigger');
+  await h.tick(25);
+  await eventually(() => h.sends().length === 1, 'F2 existing wake_idle must start without another delivery or idle notice');
+  assert.ok(reads.slice(readBase).some(r => (r.status as { type: string }).type === 'idle' && r.terminal === 'completed'),
+    'engine, rather than the harness barrier, reads authoritative idle with terminal history');
+  assert.ok(order.indexOf('read') >= 0 && order.indexOf('read') < order.indexOf('input'));
+  assert.equal(h.sends()[0].method, 'turn/start');
+  const input = h.sends()[0].params as { clientUserMessageId: string; additionalContext: Record<string, unknown> };
+  assert.deepEqual(Object.keys(input.additionalContext), ['vecnet_i1']);
+  assert.ok(atInput); assert.equal(atInput.rows.length, 1); assert.equal(atInput.rows[0].state, 'sending');
+  assert.equal(atInput.rows[0].key, input.clientUserMessageId); assert.equal(atInput.attempt, atInput.rows[0].attempt);
+  assert.deepEqual(atInput.rows[0].owner, ownerOf(h.binding));
+  assert.deepEqual(atInput.claims, { [atInput.rows[0].claim]: ['i1'] });
+  assert.equal(atInput.receipts, 0, 'claim and durable attempt precede RPC and receipt publication');
+  await h.sync();
+  const publications = receiptSettles(h);
+  assert.equal(publications.length, 1);
+  const args = publications[0].argv;
+  assert.equal(args[args.indexOf('--claim') + 1], atInput.rows[0].claim);
+  assert.equal(args[args.indexOf('--receipt-key') + 1], input.clientUserMessageId);
+  assert.equal(args[args.indexOf('--delivery-ids') + 1], 'i1');
+  assert.equal(args[args.indexOf('--attempt') + 1], atInput.attempt);
+  assert.equal(JSON.parse(readFileSync(h.plan.claims + '.accepted', 'utf8'))[receiptSettles(h)[0].argv[receiptSettles(h)[0].argv.indexOf('--claim') + 1]], true);
+  assert.deepEqual(h.rows(), []); assert.deepEqual(h.kv.keys('releasing:'), []);
+  const repeatBase = reads.length;
+  for (let i = 0; i < 3; i++) h.fake.notifySubscribers(threadId, 'turn/completed', {
+    threadId: threadId, turn: { id: 'active', status: 'completed' },
+  });
+  await h.sync(); await h.tick(1000);
+  assert.equal(h.sends().length, 1, 'repeated completion cannot start or steer the displayed delivery again');
+  assert.equal(deliveryGuards(h).length, 1);
+  assert.equal(receiptSettles(h).length, 1);
+  assert.ok(reads.length - repeatBase <= 3, 'repeat burst permits at most one status probe per completion');
+  assert.equal(h.releases().length, 0); assert.equal(h.plan.events.length, 1);
+  assert.equal(h.opens, opens); assert.equal(h.fake.requests.filter(r => r.method === 'thread/resume').length, resumes);
+  assert.deepEqual(h.fake.replies, []);
+});
+
+for (const [name, nextStatus, request] of [
+  ['waitingOnApproval', { type: 'active', activeFlags: ['waitingOnApproval'] }, 'item/commandExecution/requestApproval'],
+  ['waitingOnUserInput', { type: 'active', activeFlags: ['waitingOnUserInput'] }, 'item/tool/requestUserInput'],
+  ['systemError', { type: 'systemError' }, undefined],
+  ['notLoaded', { type: 'notLoaded' }, undefined],
+] as const) test(`F2 terminal-only completion does not assume ${name} is idle`, async t => {
+  let loads = 0;
+  const h = await harness(t, { status: active, binding: { ensureLoaded: async () => { loads++; return true; } } });
+  await h.wake([{ id: 'i1', priority: 'wake_idle' }]);
+  const opens = h.opens, resumes = h.fake.requests.filter(r => r.method === 'thread/resume').length;
+  if (request) h.fake.serverRequest(threadId, request, { threadId: threadId });
+  // Native thread/read now carries the actual gate; cached active receives no status change.
+  h.fake.completeTurnOnly(threadId, 'active', nextStatus);
+  await h.sync(); await h.tick(1000);
+  h.fake.notifySubscribers(threadId, 'turn/completed', { threadId: threadId, turn: { id: 'active', status: 'completed' } });
+  await h.sync(); await h.tick(1000);
+  assert.equal(h.sends().length, 0); assert.deepEqual(h.rows(), []);
+  assert.ok(deliveryGuards(h).length === 0, 'gated backlog is never claimed');
+  assert.deepEqual(claimReservations(h), {});
+  assert.ok(!existsSync(h.plan.claims + '.accepted'));
+  assert.equal(h.releases().length, 0); assert.deepEqual(h.fake.replies, []);
+  assert.equal(loads, 0); assert.equal(h.opens, opens);
+  assert.equal(h.fake.requests.filter(r => r.method === 'thread/resume').length, resumes);
+  assert.equal(h.plan.events.length, 1);
+});
+
+test('F2 terminal-only completion queued before stop cannot restart delivery after shutdown', async t => {
+  const h = await harness(t, { status: active });
+  await h.wake([{ id: 'i1', priority: 'wake_idle' }]);
+  h.fake.completeTurnOnly(threadId, 'active', { type: 'idle' });
+  await h.sync(); // Process the completion, but leave any newly armed fake-clock timer pending.
+  await h.engine.stop();
+  const requests = h.fake.requests.length, hooks = h.hooks().length;
+  await h.tick(2 * minute);
+  assert.equal(h.engine.subscribed(), false); assert.equal(h.sends().length, 0);
+  assert.equal(h.fake.requests.length, requests); assert.equal(h.hooks().length, hooks);
+  assert.equal(h.releases().length, 0); assert.deepEqual(h.rows(), []);
+  assert.deepEqual(claimReservations(h), {});
+  assert.equal(h.plan.events.length, 1); assert.deepEqual(h.fake.replies, []);
+});
+
+test('F2 stale terminal-only completion cannot idle a newer running turn', async t => {
+  const h = await harness(t, { status: active });
+  await h.wake([{ id: 'i1', priority: 'wake_idle' }]);
+  h.fake.completeTurnOnly(threadId, 'active', active);
+  h.fake.setThread({ id: threadId, status: active, activeTurnId: 'new-active' });
+  await h.sync(); await h.tick(25);
+  h.fake.notifySubscribers(threadId, 'turn/completed', { threadId: threadId, turn: { id: 'active', status: 'completed' } });
+  await h.sync(); await h.tick(1000);
+  assert.equal(h.sends().length, 0, 'authoritative newer active turn still excludes wake_idle');
+  assert.equal(h.engine.subscribed(), true); assert.deepEqual(h.engine.liveness(), { live: true });
+  assert.ok(deliveryGuards(h).length === 0);
+  assert.deepEqual(h.rows(), []); assert.equal(h.releases().length, 0);
+  assert.equal(h.plan.events.length, 1); assert.deepEqual(h.fake.replies, []);
+});
+
+// Observation retries never retry a rejected input request.
+for (const failedPass of [1, 2]) test(`F2-I1 ${failedPass === 1 ? 'initial completion read fails' : 'gated idle read with duplicates then trailing read fails'} recovers queued wake_idle exactly once without a later notice`, async t => {
+  let h: Awaited<ReturnType<typeof harness>>, observing = false, reads = 0, failures = 0, inFlight = 0, maximum = 0;
+  const notices: string[] = [], outcomes: string[] = [];
+  let atInputNotices: string[] = [];
+  h = await harness(t, { status: active, wrap: rpc => ({ ...rpc,
+    onNotification(fn) { rpc.onNotification((method, params) => { if (observing) notices.push(method); fn(method, params); }); },
+    async call<T>(method: AllowedMethod, params: unknown, ms: number): Promise<T> {
+      if (observing && method === 'turn/start') { atInputNotices = [...notices]; outcomes.push('input'); }
+      if (!observing || method !== 'thread/read') return rpc.call<T>(method, params, ms);
+      reads++; inFlight++; maximum = Math.max(maximum, inFlight);
+      try {
+        const result = await rpc.call<T>(method, params, ms);
+        // Fail only this engine-owned response; the harness has independent barrier reads.
+        if (reads === failedPass) throw new CodexRpcError(-32603, 'temporary completion read failure');
+        outcomes.push((result as { thread: { status: { type: string } } }).thread.status.type);
+        return result;
+      } catch (error) { failures++; outcomes.push('failed'); throw error; }
+      finally { inFlight--; }
+    },
+  }) });
+  await h.wake([{ id: 'i1', priority: 'wake_idle' }]);
+  assert.equal(h.sends().length, 0); assert.deepEqual(h.rows(), []);
+  const opens = h.opens, resumes = h.fake.requests.filter(r => r.method === 'thread/resume').length;
+  const gate = failedPass === 2 ? h.fake.gateNextRead() : undefined;
+  observing = true;
+  try {
+    h.fake.completeTurnOnly(threadId, 'active', { type: 'idle' });
+    if (gate) {
+      await eventually(() => gate.entered, 'successful idle read is blocked on the wire');
+      for (let i = 0; i < 4; i++) h.fake.notifySubscribers(threadId, 'turn/completed', { threadId: threadId, turn: { id: 'active', status: 'completed' } });
+      await eventually(() => notices.length === 5, 'finite duplicates reached the blocked engine');
+      assert.equal(reads, 1); assert.equal(inFlight, 1); assert.equal(h.sends().length, 0);
+      assert.ok(deliveryGuards(h).length === 0);
+      gate.release();
+    }
+    await eventually(() => failures === 1, 'one temporary RPC error leaves the connection open');
+    await h.sync();
+    assert.deepEqual(outcomes, failedPass === 1 ? ['failed'] : ['idle', 'failed']);
+    assert.equal(h.opens, opens); assert.equal(h.engine.state(), 'ready');
+    assert.equal(h.sends().length, 0, 'failed observation does not directly send input');
+    // Advance a finite fake-clock retry budget without a new notice or delivery.
+    for (const ms of [1000, 2000, 4000, 8000, 15000]) { await h.tick(ms); if (h.sends().length) break; }
+    assert.equal(h.sends().length, 1, 'F2-I1 failed completion observation must retry and drain the existing wake_idle');
+    assert.ok(reads >= 2); assert.equal(failures, 1); assert.equal(maximum, 1);
+    assert.deepEqual(atInputNotices, Array(failedPass === 1 ? 1 : 5).fill('turn/completed'));
+    assert.ok(outcomes.lastIndexOf('idle') >= 0 && outcomes.lastIndexOf('idle') < outcomes.indexOf('input'));
+    if (failedPass === 1) assert.ok(outcomes.lastIndexOf('idle') > outcomes.indexOf('failed'), 'initial failure needs a successful observation retry');
+    await h.tick(2 * minute);
+    assert.equal(h.sends().length, 1); assert.equal(h.sends()[0].method, 'turn/start');
+    assert.equal(deliveryGuards(h).length, 1);
+    const input = h.sends()[0].params as { clientUserMessageId: string };
+    const receipts = receiptSettles(h);
+    assert.equal(receipts.length, 1); assert.ok(receipts[0].argv.includes(input.clientUserMessageId));
+    assert.equal(receipts[0].argv[receipts[0].argv.indexOf('--delivery-ids') + 1], 'i1');
+    assert.equal(JSON.parse(readFileSync(h.plan.claims + '.accepted', 'utf8'))[receiptSettles(h)[0].argv[receiptSettles(h)[0].argv.indexOf('--claim') + 1]], true);
+    assert.equal(Object.values(claimReservations(h)).flat().join(','), 'i1');
+    assert.deepEqual(h.rows(), []); assert.deepEqual(h.kv.keys('releasing:'), []);
+    assert.equal(h.releases().length, 0); assert.equal(h.plan.events.length, 1); assert.equal(h.opens, opens);
+    assert.equal(h.fake.requests.filter(r => r.method === 'thread/resume').length, resumes);
+  } finally { gate?.release(); }
+});
+
+test('F2-M1 blockedreadstop closes the RPC and finishes before opening the response gate', async t => {
+  let lateNotice!: (method: string, params: unknown) => void, closes = 0, closed = false;
+  const h = await harness(t, { status: active, wrap: rpc => {
+    rpc.onClose(() => { closed = true; });
+    return { ...rpc, close() { closes++; rpc.close(); },
+      onNotification(fn) { lateNotice = fn; rpc.onNotification(fn); } };
+  } });
+  await h.wake([{ id: 'i1', priority: 'wake_idle' }]);
+  const gate = h.fake.gateNextRead();
+  let stopped: Promise<void> | undefined;
+  try {
+    h.fake.completeTurnOnly(threadId, 'active', { type: 'idle' });
+    await eventually(() => gate.entered, 'completion RPC is pending before stop');
+    stopped = h.engine.stop();
+    assert.equal(await Promise.race([stopped.then(() => true), delay(1000).then(() => false)]), true,
+      'stop must cancel the pending read instead of waiting for its five-second deadline');
+    assert.ok(closes >= 1); assert.equal(closed, true); assert.equal(gate.released, false);
+    const requests = h.fake.requests.length, hooks = h.hooks().length, opens = h.opens;
+    let arms = 0;
+    const timer = h.clock.timer;
+    h.clock.timer = (ms, fn) => { arms++; return timer(ms, fn); };
+    gate.release(); // Try the captured response after client-side cancellation.
+    lateNotice('turn/completed', { threadId: threadId, turn: { id: 'active', status: 'completed' } });
+    await h.tick(2 * minute);
+    assert.equal(arms, 0, 'late response and duplicate cannot arm recovery after stop');
+    assert.equal(h.fake.requests.length, requests); assert.equal(h.hooks().length, hooks); assert.equal(h.opens, opens);
+    assert.equal(h.engine.subscribed(), false); assert.equal(h.sends().length, 0);
+    assert.deepEqual(h.rows(), []); assert.deepEqual(h.kv.keys('releasing:'), []);
+    assert.deepEqual(claimReservations(h), {});
+    assert.ok(!existsSync(h.plan.claims + '.accepted')); assert.equal(h.releases().length, 0);
+  } finally { gate.release(); await stopped; }
+});
+
+test('F2-M2 finite burst has at most one completion read in flight and one trailing read', async t => {
+  let observing = false, reads = 0, inFlight = 0, maximum = 0, notices = 0;
+  const h = await harness(t, { status: active, wrap: rpc => ({ ...rpc,
+    onNotification(fn) { rpc.onNotification((method, params) => { if (observing && method === 'turn/completed') notices++; fn(method, params); }); },
+    async call<T>(method: AllowedMethod, params: unknown, ms: number): Promise<T> {
+      if (!observing || method !== 'thread/read') return rpc.call<T>(method, params, ms);
+      reads++; inFlight++; maximum = Math.max(maximum, inFlight);
+      try { return await rpc.call<T>(method, params, ms); } finally { inFlight--; }
+    },
+  }) });
+  await h.wake([{ id: 'i1', priority: 'wake_idle' }]);
+  const gate = h.fake.gateNextRead(); observing = true;
+  try {
+    h.fake.completeTurnOnly(threadId, 'active', { type: 'idle' });
+    await eventually(() => gate.entered, 'first completion read is gated');
+    for (let i = 0; i < 8; i++) h.fake.notifySubscribers(threadId, 'turn/completed', { threadId: threadId, turn: { id: 'active', status: 'completed' } });
+    await eventually(() => notices === 9, 'the entire finite burst arrived while blocked');
+    assert.equal(reads, 1); assert.equal(inFlight, 1); assert.equal(maximum, 1);
+    assert.equal(h.sends().length, 0); assert.ok(deliveryGuards(h).length === 0);
+    gate.release(); await h.sync(); await h.tick(25); await h.tick(2 * minute);
+    assert.equal(maximum, 1); assert.equal(inFlight, 0); assert.ok(reads >= 1 && reads <= 2, 'one first read plus at most one trailing read');
+    assert.equal(h.sends().length, 1); assert.equal(h.sends()[0].method, 'turn/start');
+    assert.equal(deliveryGuards(h).length, 1);
+    assert.equal(receiptSettles(h).length, 1);
+    assert.equal(h.plan.events.length, 1); assert.equal(h.releases().length, 0);
+  } finally { gate.release(); }
+});
+
+for (const newer of ['started', 'waiting', 'unload', 'archive'] as const) test(`F2-M2 newer ${newer} invalidates a captured idle completion read`, async t => {
+  let lastNotice = '';
+  const h = await harness(t, { status: active, wrap: rpc => ({ ...rpc,
+    onNotification(fn) { rpc.onNotification((method, params) => { fn(method, params); lastNotice = method; }); },
+  }) });
+  await h.wake([{ id: 'i1', priority: 'wake_idle' }]);
+  const gate = h.fake.gateNextRead();
+  try {
+    h.fake.completeTurnOnly(threadId, 'active', { type: 'idle' });
+    await eventually(() => gate.entered, 'old idle response was captured before newer activity');
+    const method = newer === 'started' ? 'turn/started' : newer === 'unload' ? 'thread/closed' : newer === 'archive' ? 'thread/archived' : 'thread/status/changed';
+    if (newer === 'waiting') h.fake.setThread({ id: threadId, status: { type: 'active', activeFlags: ['waitingOnApproval'] } });
+    else h.fake.notifySubscribers(threadId, method, { threadId: threadId, turn: { id: 'new-active', status: 'inProgress' } });
+    await eventually(() => lastNotice === method, 'newer invalidation reached the engine before releasing old idle');
+    gate.release(); await h.sync(); await h.tick(25); await h.tick(2 * minute);
+    assert.equal(h.sends().length, 0, 'captured idle cannot erase newer activity or liveness gates');
+    assert.ok(deliveryGuards(h).length === 0);
+    assert.deepEqual(h.rows(), []); assert.deepEqual(claimReservations(h), {});
+    assert.ok(!existsSync(h.plan.claims + '.accepted')); assert.equal(h.releases().length, 0);
+    if (newer !== 'started') assert.equal(h.engine.liveness().live, false);
+  } finally { gate.release(); }
+});
+
+// Completion reconciliation must never opt a launcher binding into loading.
+// Mutating reconcile(false) to reconcile() must invoke this otherwise idle hook.
+test('F2 launcher-origin terminal-only notLoaded discovery never calls ensureLoaded or resumes', async t => {
+  let loads = 0;
+  const h = await harness(t, { status: active, binding: { origin: 'launcher', ensureLoaded: async () => { loads++; return true; } } });
+  await h.wake([{ id: 'i1', priority: 'wake_idle' }]);
+  await h.tick(minute);
+  const resumes = h.fake.requests.filter(r => r.method === 'thread/resume').length;
+  h.fake.completeTurnOnly(threadId, 'active', { type: 'notLoaded' }); await h.sync(); await h.tick(25);
+  assert.equal(loads, 0, 'completion observation cannot authorize the launcher cold-load hook');
+  assert.equal(h.fake.requests.filter(r => r.method === 'thread/resume').length, resumes);
+  assert.equal(h.sends().length, 0); assert.deepEqual(h.rows(), []);
+});
+
+test('F2 long-turn terminal-only idle starts retained wake_idle before idle dormancy', async t => {
+  let observing = false, reads = 0;
+  const notices: string[] = [];
+  const h = await harness(t, { status: active, binding: { idleDormantMs: minute, expiresAt: hour }, wrap: rpc => ({ ...rpc,
+    onNotification(fn) { rpc.onNotification((m, p) => { if (observing) notices.push(m); fn(m, p); }); },
+    async call<T>(m: AllowedMethod, p: unknown, ms: number): Promise<T> {
+      const result = await rpc.call<T>(m, p, ms);
+      if (observing && m === 'thread/read') {
+        reads++;
+        assert.deepEqual((result as { thread: { status: unknown } }).thread.status, { type: 'idle' });
+      }
+      return result;
+    },
+  }) });
+  await h.wake([{ id: 'i1', priority: 'wake_idle' }]); await h.tick(2 * minute);
+  assert.deepEqual(h.engine.liveness(), { live: true }); assert.equal(h.engine.subscribed(), true);
+  assert.equal(h.sends().length, 0); assert.deepEqual(h.rows(), []);
+  observing = true;
+  h.fake.completeTurnOnly(threadId, 'active', { type: 'idle' }); await h.sync();
+  assert.deepEqual(notices, ['turn/completed']); assert.ok(reads >= 1, 'fresh completion has an authoritative idle read');
+  assert.deepEqual(h.engine.liveness(), { live: true }, 'the active interval does not count as idle age');
+  await h.tick(25); observing = false;
+  assert.equal(h.sends().length, 1); assert.equal(h.sends()[0].method, 'turn/start');
+  await h.tick(2 * minute);
+  assert.equal(h.sends().length, 1); assert.equal(deliveryGuards(h).length, 1); assert.equal(receiptSettles(h).length, 1);
+  assert.deepEqual(h.rows(), []); assert.equal(h.releases().length, 0); assert.equal(h.plan.events.length, 1);
+});
+
+test('F2 unchanged idle observations during failed settlement retain idle age and original proof', async t => {
+  let observing = false, reads = 0;
+  const h = await harness(t, { status: active, binding: { idleDormantMs: minute, expiresAt: hour }, wrap: rpc => ({ ...rpc,
+    async call<T>(m: AllowedMethod, p: unknown, ms: number): Promise<T> {
+      const result = await rpc.call<T>(m, p, ms);
+      if (observing && m === 'thread/read') reads++;
+      return result;
+    },
+  }) });
+  h.fake.withholdNextItem(); await h.wake();
+  const original = structuredClone(h.rows()[0]); assert.ok(original);
+  h.plan.settleFailure = true; h.save();
+  h.fake.recordLater(original.key, h.clock.now()); await h.tick(0);
+  assert.deepEqual(h.rows(), [original]); assert.equal(receiptSettles(h).length, 1);
+  await h.wake([{ id: 'i1', priority: 'wake_idle' }]);
+  observing = true;
+  h.fake.completeTurnOnly(threadId, 'active', { type: 'idle' }); await h.sync();
+  assert.ok(reads >= 1, 'the terminal notice supplies the authoritative idle checkpoint');
+  assert.deepEqual(h.engine.liveness(), { live: true });
+  for (let i = 0; i < 120; i++) {
+    await h.tick(1000);
+    assert.deepEqual(h.rows(), [original], 'failed durable acceptance retains original owner, attempt, claim and key');
+    assert.equal(h.sends().length, 1, 'unsettled proof cannot authorize a fresh wake_idle');
+  }
+  assert.ok(reads > 1, 'settlement observation retries run without any new native activity');
+  assert.deepEqual(h.engine.liveness(), { live: false, reason: 'idle_stale' });
+  assert.equal(h.engine.subscribed(), false); assert.equal(h.releases().length, 0);
+  const proof = receiptSettles(h)[0].argv;
+  assert.ok(receiptSettles(h).length > 1);
+  for (const r of receiptSettles(h)) assert.deepEqual(r.argv, proof);
+  assert.equal(h.plan.events.length, 2);
+  // Current source retains failed settlement in the original inflight row.
+  // Its existing explicit recovery trigger can confirm proof after retirement.
+  h.plan.settleFailure = false; h.save(); h.engine.start(); await h.sync(); await h.tick(25);
+  assert.deepEqual(h.rows(), []); assert.equal(h.releases().length, 0);
+  assert.deepEqual(h.engine.liveness(), { live: false, reason: 'idle_stale' });
+  assert.equal(h.sends().length, 1, 'proof confirmation cannot revive an idle-stale wake_idle');
+  for (const r of receiptSettles(h)) assert.deepEqual(r.argv, proof);
+});
+
+test('F2 terminal-only failed settlement retries original proof before draining retained wake_idle', async t => {
+  const h = await harness(t, { status: active });
+  h.fake.withholdNextItem(); await h.wake();
+  const original = structuredClone(h.rows()[0]); assert.ok(original);
+  h.plan.settleFailure = true; h.save();
+  h.fake.recordLater(original.key, h.clock.now()); await h.tick(0);
+  await h.wake([{ id: 'i1', priority: 'wake_idle' }]);
+  h.fake.completeTurnOnly(threadId, 'active', { type: 'idle' }); await h.sync();
+  assert.deepEqual(h.rows(), [original]); assert.equal(h.sends().length, 1);
+  const proof = receiptSettles(h)[0].argv;
+  h.plan.settleFailure = false; h.save();
+  await h.tick(1000); await h.tick(25);
+  assert.equal(h.sends().length, 2); assert.equal(h.sends()[1].method, 'turn/start');
+  assert.deepEqual(Object.keys((h.sends()[1].params as { additionalContext: object }).additionalContext), ['vecnet_i1']);
+  const confirmations = receiptSettles(h).filter(r => r.argv.includes(original.key));
+  assert.ok(confirmations.length >= 2);
+  for (const r of confirmations) assert.deepEqual(r.argv, proof);
+  assert.deepEqual(h.rows(), []); assert.equal(h.releases().length, 0);
+  await h.tick(2 * minute); assert.equal(h.sends().length, 2); assert.equal(h.plan.events.length, 2);
+});
+
+for (const invalidation of ['owner', 'generation', 'expiry', 'over_limit'] as const) test(`F2 captured idle read is fenced by ${invalidation}`, async t => {
+  const h = await harness(t, { status: active });
+  await h.wake([{ id: 'i1', priority: 'wake_idle' }]);
+  const gate = h.fake.gateNextRead();
+  try {
+    h.fake.completeTurnOnly(threadId, 'active', { type: 'idle' });
+    await eventually(() => gate.entered, 'completion read is captured');
+    if (invalidation === 'owner') { h.plan.owner = { ...h.plan.owner!, generation: 'b'.repeat(32) }; h.save(); }
+    if (invalidation === 'generation') h.binding.generation = 'b'.repeat(32);
+    if (invalidation === 'expiry') h.binding.expiresAt = h.clock.now();
+    if (invalidation === 'over_limit') h.engine.setOverLimit(true);
+    gate.release(); await h.sync(); await h.tick(2 * minute);
+    assert.equal(h.engine.liveness().live, false); assert.equal(h.sends().length, 0);
+    assert.deepEqual(h.rows(), []); assert.equal(deliveryGuards(h).length, 0); assert.equal(h.releases().length, 0);
+  } finally { gate.release(); }
+});
+
+// Seven consecutive observation errors exercise the capped 1/2/4/8/15/15/15 cadence.
+test('F2 failed completion reads use capped backoff and duplicates cannot bypass it', async t => {
+  let h: RecoveryHarness, observing = false, reads = 0;
+  h = await harness(t, { status: active, wrap: rpc => ({ ...rpc,
+    async call<T>(m: AllowedMethod, p: unknown, ms: number): Promise<T> {
+      const fail = observing && m === 'thread/read' && ++reads <= 7;
+      const result = await rpc.call<T>(m, p, ms);
+      if (fail) throw new CodexRpcError(-32603, 'synthetic read failure');
+      return result;
+    },
+  }) });
+  await h.wake([{ id: 'i1', priority: 'wake_idle' }]); observing = true;
+  h.fake.completeTurnOnly(threadId, 'active', { type: 'idle' }); await h.sync();
+  assert.equal(reads, 1, 'terminal notice attempts an observation');
+  for (const [i, ms] of [1000, 2000, 4000, 8000, 15000, 15000, 15000].entries()) {
+    for (let j = 0; j < 4; j++) h.fake.notifySubscribers(threadId, 'turn/completed', { threadId, turn: { id: 'active', status: 'completed' } });
+    await h.sync(); assert.equal(reads, i + 1, 'duplicates coalesce into the existing retry');
+    await h.tick(ms - 50); assert.equal(reads, i + 1, 'observation waits for its backoff');
+    await h.tick(50); assert.equal(reads, i + 2, 'one read at the bounded deadline');
+    if (i < 6) assert.equal(h.sends().length, 0);
+  }
+  await h.tick(25); assert.equal(h.sends().length, 1); assert.equal(h.sends()[0].method, 'turn/start');
+  assert.deepEqual(h.rows(), []); assert.equal(receiptSettles(h).length, 1); assert.equal(h.releases().length, 0);
+});
+
+test('F2 terminal-only completion racing a definite mismatch retries the retained claim on idle', async t => {
+  let h: RecoveryHarness, rejected = 0;
+  h = await harness(t, { status: active, wrap: rpc => ({ ...rpc,
+    async call<T>(method: AllowedMethod, params: unknown, ms: number): Promise<T> {
+      try { return await rpc.call<T>(method, params, ms); }
+      catch (e) {
+        if (method === 'turn/steer' && ++rejected === 2) {
+          h.fake.completeTurnOnly(threadId, 'active', { type: 'idle' });
+          // Deliver the terminal notice while the row is still sending; the
+          // definite rejection moves it to waitingRetry only after this await.
+          await rpc.call('thread/read', { threadId }, ms);
+        }
+        throw e;
+      }
+    },
+  }) });
+  for (let i = 0; i < 2; i++) h.fake.failNext('turn/steer', { code: -32600, message: 'expectedTurnId mismatch' });
+  await h.wake(); await h.tick(25);
+  assert.deepEqual(h.sends().map(r => r.method), ['turn/steer', 'turn/steer', 'turn/start']);
+  const keys = h.sends().map(r => (r.params as { clientUserMessageId: string }).clientUserMessageId);
+  assert.equal(new Set(keys).size, 1, 'the known rejected attempt retains its original batch key');
+  assert.deepEqual(h.rows(), []); assert.equal(receiptSettles(h).length, 1); assert.equal(h.releases().length, 0);
+  assert.equal(h.plan.events.length, 1);
+});
+
+test('F2 failed-read retry timer cannot revive replaced ownership', async t => {
+  let observing = false, reads = 0;
+  const h = await harness(t, { status: active, wrap: rpc => ({ ...rpc,
+    async call<T>(method: AllowedMethod, params: unknown, ms: number): Promise<T> {
+      const result = await rpc.call<T>(method, params, ms);
+      if (observing && method === 'thread/read' && ++reads === 1) throw new CodexRpcError(-32603, 'synthetic read failure');
+      return result;
+    },
+  }) });
+  await h.wake([{ id: 'i1', priority: 'wake_idle' }]); observing = true;
+  h.fake.completeTurnOnly(threadId, 'active', { type: 'idle' }); await h.sync(); assert.equal(reads, 1);
+  h.plan.owner = { ...h.plan.owner!, generation: 'b'.repeat(32) }; h.save();
+  await h.tick(2 * minute);
+  assert.equal(reads, 1, 'retry rechecks authority before issuing another status read');
+  assert.deepEqual(h.engine.liveness(), { live: false, reason: 'ownership_changed' });
+  assert.equal(h.sends().length, 0); assert.equal(deliveryGuards(h).length, 0); assert.deepEqual(h.rows(), []);
+});
+
 // Round-three probes, exercised through the fake wire and real hook children.
 for (const failures of [1, 2]) test(`hand2 wire mismatch ${failures} preserves the claim and bounds recovery`, async t => {
   let h: Awaited<ReturnType<typeof harness>>;
