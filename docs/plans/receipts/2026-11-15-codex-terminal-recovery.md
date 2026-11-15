@@ -8,8 +8,8 @@ than being treated as proof of idle or permission to send input.
 
 - Base: `4adae810180f02970ea46c4920a46668dc6d82a7`, branch `fix/issue-61-terminal-recovery`.
 - Historical reference only: `8e69ff5bb3f7aff4d7a6a90bd35823cd3c4461aa`.
-- Engine blob: `a05397fd3254c11af481fa292c1e598e74324710`.
-- Engine-test blob: `d250987ed6d7be27bc08321a8ad26504cc9dc397`.
+- Engine blob: `31a3f5ca103f9486343c1fb4b4cb379f0bca459e`.
+- Engine-test blob: `6d6ab21012f9ded4d7817f3bc03c46a7af88c358`.
 - Fake-app-server blob: `d521e3a1f394c4082ddd6ef813f16e70928646eb`.
 
 The historical branch was not merged. Public Engine/Binding interfaces, durable
@@ -72,13 +72,53 @@ bash .superpowers/sdd/issue-61-terminal-recovery/bin/gate.sh task1-ln-check-fina
 ## Limits and handoff
 
 The tests cover synthetic ET1–ET3 and RF1–RF4, including 26 named F2 cases in the
-final engine suite. Current failed settlement remains in its original inflight
-row; completion retries use existing proof/settle operations. After idle
-retirement, the regression uses the existing explicit recovery trigger to confirm
-proof without reviving stale input; no historical settlement scheduler is added.
+initial engine suite. Fix round 1 below supersedes the initial settlement
+adaptation: original proof is now retried automatically after idle retirement,
+without reviving stale input or importing historical schemas.
 
 Independent task/final source review, fresh controller integration/E2E gates,
 merge/push and artifact-preserving cleanup remain controller-owned. No deployment,
 real service, session, private state or real message was used. The roughly
 eleven-message incident and F1 generic refusal classification remain open; this
 receipt does not close all of #61 or claim an installed-release fix.
+
+## Fix round 1 — controller R5 / TR61-01 and TR61-02
+
+Base `ae754d3ee29ef5476d778d799b5c0292f2307e78`. The independent review
+accepted both findings as Important; initial passing gates above are historical
+for this revision. Current executable blob pins above include these fixes.
+
+A central proof barrier now protects push, awaited checkpoints, transmit and the
+post-guard boundary. Receipt arrival during awaited I/O blocks fresh input even
+before its queued settlement operation runs; ordinary pending attempts without
+proof retain their prior admission behavior. Failed proof settlement retains
+original owner, attempt, claim, client key and full delivery set.
+
+One coalesced 1/2/4/8/15-second capped proof-only retry confirms that exact proof
+through current Go cleanup operations. It is independent of status observation,
+subscription and expiry; the Go cleanup contract allows exact-owner confirmation
+after expiry. Replacement owner/generation, altered attempts/deliveries, and stop
+retain proof rather than authorize new input. Retirement still cancels loaded
+observations and new delivery. Cleanup never reads, loads or resumes a thread;
+only live, successfully verified admission may be armed after confirmation.
+
+RED `fix1-red-both.log`: all three selected cases fail against unchanged source;
+the gap takes a new claim (3 vs expected 2), and retirement leaves the original
+row after finite timer advances. RED `fix1-red-boundaries.log`: expiry and
+unloaded cleanup fail; owner/generation/stop are passing controls. Wrapper and
+build-box exits are 1/1 for both gates. `fix1-green-focused-final.log` passes all
+36 selected recovery/current-contract cases, exits 0/0. This includes the restored
+timer-driven retirement oracle and eight new interleaving/lifecycle cases.
+
+Fresh `fix1-engine-rpc.log` passes 185/185, and `fix1-ln-check.log` passes strict
+TypeScript plus 2,176/2,176 launcher/hub-client tests across 950 top-level cases.
+Both wrapper/build-box exits are 0/0; neither has skips or cancellations.
+Full commands, raw log/exit paths and source commit are in the appended task report.
+
+Fresh `fix1-ln-e2e.log`: 16/16 synthetic launcher E2E cases pass, no skips or
+cancellations, wrapper/build-box exits 0/0. The remote checkout emitted Git
+build-metadata diagnostics because .git is not copied; Go build and E2E succeeded.
+Commands: gate `fix1-engine-rpc` with both complete engine/RPC test files, gate
+`fix1-ln-check just ln-check`, and gate `fix1-ln-e2e just ln-e2e`. Independent
+controller re-review remains required; no merge, deployment or incident/F1
+acceptance is claimed.

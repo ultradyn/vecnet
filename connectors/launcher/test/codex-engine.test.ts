@@ -548,9 +548,12 @@ test('F2 unchanged idle observations during failed settlement retain idle age an
   assert.ok(receiptSettles(h).length > 1);
   for (const r of receiptSettles(h)) assert.deepEqual(r.argv, proof);
   assert.equal(h.plan.events.length, 2);
-  // Current source retains failed settlement in the original inflight row.
-  // Its existing explicit recovery trigger can confirm proof after retirement.
-  h.plan.settleFailure = false; h.save(); h.engine.start(); await h.sync(); await h.tick(25);
+  const retiredReads = reads, resumes = h.fake.requests.filter(r => r.method === 'thread/resume').length;
+  h.plan.settleFailure = false; h.save();
+  for (let i = 0; i < 20 && h.rows().length; i++) await h.tick(1000);
+  assert.equal(reads, retiredReads, 'proof-only retry never observes the retired thread');
+  assert.equal(h.fake.requests.filter(r => r.method === 'thread/resume').length, resumes);
+  assert.equal(h.engine.subscribed(), false);
   assert.deepEqual(h.rows(), []); assert.equal(h.releases().length, 0);
   assert.deepEqual(h.engine.liveness(), { live: false, reason: 'idle_stale' });
   assert.equal(h.sends().length, 1, 'proof confirmation cannot revive an idle-stale wake_idle');
@@ -661,6 +664,87 @@ test('F2 failed-read retry timer cannot revive replaced ownership', async t => {
   assert.equal(reads, 1, 'retry rechecks authority before issuing another status read');
   assert.deepEqual(h.engine.liveness(), { live: false, reason: 'ownership_changed' });
   assert.equal(h.sends().length, 0); assert.equal(deliveryGuards(h).length, 0); assert.deepEqual(h.rows(), []);
+});
+
+for (const watchTrigger of [false, true]) test(`F2 fix1 TR61-01 outstanding gap and watch ${watchTrigger} cannot bypass original proof`, async t => {
+  let h: RecoveryHarness, atInputProofs = 0;
+  h = await harness(t, { status: active, wrap: rpc => ({ ...rpc,
+    async call<T>(method: AllowedMethod, params: unknown, ms: number): Promise<T> {
+      if (method === 'turn/start') { atInputProofs = receiptSettles(h).length; assert.deepEqual(h.rows().filter(r => r.state === 'pending'), []); }
+      return rpc.call<T>(method, params, ms);
+    },
+  }) });
+  h.fake.withholdNextItem(); await h.wake(); h.deps.minGapMs = 5000;
+  const original = structuredClone(h.rows()[0]); assert.ok(original);
+  h.plan.settleFailure = true; h.save(); h.fake.recordLater(original.key, h.clock.now()); await h.tick(0);
+  // wake's normal two-second tick leaves the production five-second gap armed.
+  await h.wake([{ id: 'i1', priority: 'wake_idle' }]);
+  const claims = h.hooks().filter(r => r.argv.includes('--event')).length, guards = deliveryGuards(h).length;
+  h.fake.completeTurnOnly(threadId, 'active', { type: 'idle' }); await h.sync();
+  const proof = receiptSettles(h)[0].argv;
+  await h.tick(6000);
+  assert.equal(h.hooks().filter(r => r.argv.includes('--event')).length, claims, 'gap cannot acquire a new claim before proof confirmation');
+  assert.equal(deliveryGuards(h).length, guards); assert.equal(h.sends().length, 1); assert.deepEqual(h.rows(), [original]);
+  if (watchTrigger) {
+    await h.wake([{ id: 'i2', priority: 'wake_idle' }]);
+    assert.equal(h.hooks().filter(r => r.argv.includes('--event')).length, claims, 'independent watch cannot bypass proof');
+    assert.equal(deliveryGuards(h).length, guards); assert.equal(h.sends().length, 1);
+  }
+  h.plan.settleFailure = false; h.save();
+  for (let i = 0; i < 20 && h.sends().length === 1; i++) await h.tick(1000);
+  assert.equal(h.sends().length, 2); assert.equal(h.sends()[1].method, 'turn/start');
+  assert.deepEqual(Object.keys((h.sends()[1].params as { additionalContext: object }).additionalContext), watchTrigger ? ['vecnet_i1', 'vecnet_i2'] : ['vecnet_i1']);
+  assert.ok(atInputProofs >= 2, 'original proof confirmation precedes the queued turn');
+  for (const r of receiptSettles(h).filter(r => r.argv.includes(original.key))) assert.deepEqual(r.argv, proof);
+  assert.deepEqual(h.rows(), []); assert.equal(h.releases().length, 0);
+  await h.tick(2 * minute); assert.equal(h.sends().length, 2);
+});
+
+for (const boundary of ['expiry', 'owner', 'generation', 'stop', 'unloaded'] as const) test(`F2 fix1 TR61-02 proof-only cleanup boundary ${boundary}`, async t => {
+  let loads = 0;
+  const h = await harness(t, { status: active, binding: { origin: 'launcher', ensureLoaded: async () => { loads++; return true; } } });
+  h.fake.withholdNextItem(); await h.wake();
+  const original = structuredClone(h.rows()[0]); assert.ok(original);
+  h.plan.settleFailure = true; h.save(); h.fake.recordLater(original.key, h.clock.now()); await h.tick(0);
+  h.fake.completeTurnOnly(threadId, 'active', boundary === 'unloaded' ? { type: 'notLoaded' } : { type: 'idle' }); await h.sync();
+  const proof = receiptSettles(h)[0].argv;
+  if (boundary === 'expiry') { h.binding.expiresAt = h.clock.now(); h.save(); }
+  if (boundary === 'owner') { h.plan.owner = { ...h.plan.owner!, generation: 'b'.repeat(32) }; h.save(); }
+  if (boundary === 'generation') h.binding.generation = 'b'.repeat(32);
+  if (boundary === 'stop') await h.engine.stop();
+  h.plan.settleFailure = false; h.save();
+  const before = receiptSettles(h).length, resumes = h.fake.requests.filter(r => r.method === 'thread/resume').length;
+  for (let i = 0; i < 20; i++) await h.tick(1000);
+  if (boundary === 'expiry' || boundary === 'unloaded') assert.deepEqual(h.rows(), [], 'exact-owner cleanup succeeds independently of delivery eligibility');
+  else assert.deepEqual(h.rows(), [original], 'invalidated or stopped engines retain original proof');
+  if (boundary === 'stop' || boundary === 'generation') assert.equal(receiptSettles(h).length, before);
+  for (const r of receiptSettles(h)) assert.deepEqual(r.argv, proof);
+  assert.equal(loads, 0); assert.equal(h.fake.requests.filter(r => r.method === 'thread/resume').length, resumes);
+  assert.equal(h.sends().length, 1); assert.equal(h.releases().length, 0);
+});
+
+test('F2 fix1 TR61-01 receipt during an awaited checkpoint blocks fresh admission', async t => {
+  let h: RecoveryHarness, armed = false, key = '';
+  h = await harness(t, { status: active, wrap: rpc => ({ ...rpc,
+    async call<T>(method: AllowedMethod, params: unknown, ms: number): Promise<T> {
+      const result = await rpc.call<T>(method, params, ms);
+      if (armed && method === 'thread/turns/list' && (params as { limit?: number }).limit === 1) {
+        armed = false; h.fake.recordLater(key, h.clock.now()); h.clock.advance(0);
+        await rpc.call('thread/read', { threadId }, ms);
+      }
+      return result;
+    },
+  }) });
+  h.fake.withholdNextItem(); await h.wake(); key = h.rows()[0].key;
+  h.fake.setThread({ id: threadId, status: { type: 'idle' } }); await h.sync(); await h.tick(25);
+  h.plan.settleFailure = true; h.save();
+  const claims = h.hooks().filter(r => r.argv.includes('--event')).length;
+  armed = true; await h.wake([{ id: 'i1', priority: 'wake_idle' }]);
+  assert.equal(armed, false); assert.equal(h.sends().length, 1);
+  assert.equal(h.hooks().filter(r => r.argv.includes('--event')).length, claims, 'proof received during latest() blocks claim creation');
+  h.plan.settleFailure = false; h.save();
+  for (let i = 0; i < 20 && h.sends().length === 1; i++) await h.tick(1000);
+  assert.equal(h.sends().length, 2); assert.deepEqual(h.rows(), []); assert.equal(h.releases().length, 0);
 });
 
 // Round-three probes, exercised through the fake wire and real hook children.

@@ -81,6 +81,8 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
   let completionPending = false, completionAgain = false, completionNeeded = false, completionEpoch = 0;
   let completionProbe: CodexRpc | undefined, completionRetry: { cancel(): void } | undefined, completionRetryIndex = 0;
   const completionRows = new Set<string>();
+  const settlementProofs = new Map<string, InflightRow>();
+  let settlementRetry: { cancel(): void } | undefined, settlementRetryIndex = 0;
   const children = new Set<ChildProcess>();
   const unresolvedLogged = new Set<string>(), pendingLogged = new Set<string>();
   const receipts = new Set<string>(), waitingRetry = new Map<string, Batch>(), waitForIdle = new Set<string>();
@@ -123,12 +125,58 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     return kv.keys('inflight:').map(parseRow).filter((r): r is InflightRow => r !== undefined);
   }
   const write = (r: InflightRow) => kv.set('inflight:' + r.key, JSON.stringify(r));
+  function proofBlocksDelivery(): boolean {
+    // A received item can arrive during an awaited checkpoint/claim, before
+    // its queued clear runs. Ordinary accepted rows without proof still admit.
+    return settlementProofs.size > 0 || rows().some(r => receipts.has(r.key) && r.state !== 'sending');
+  }
+  function canRetrySettlement(): boolean {
+    // Expiry, retirement and subscription state restrict delivery, not exact
+    // proof cleanup. Go settle revalidates the original owner under its lock.
+    return running && !ownershipChanged && !identityChanged && sameOwner(ownerOf(b), owner);
+  }
+  function scheduleSettlementRetry() {
+    if (!canRetrySettlement() || !settlementProofs.size || settlementRetry) return;
+    const ms = [1000, 2000, 4000, 8000, 15000][Math.min(settlementRetryIndex++, 4)];
+    settlementRetry = clock.timer(ms, () => {
+      settlementRetry = undefined;
+      enqueue(async () => {
+        if (!canRetrySettlement()) return;
+        for (const proof of [...settlementProofs.values()]) {
+          if (!canRetrySettlement()) return;
+          const current = parseRow('inflight:' + proof.key);
+          if (!current || current.attempt !== proof.attempt || current.claim !== proof.claim || !sameOwner(current.owner, owner) ||
+              JSON.stringify(current.deliveries) !== JSON.stringify(proof.deliveries)) {
+            quarantine('inflight:' + proof.key); return;
+          }
+          try { await clear(proof); }
+          catch { log.warn('codex_receipt_settlement_failed', { threadId: b.threadId }); }
+        }
+        scheduleSettlementRetry();
+        // Cleanup never loads, resumes or revives a dormant delivery lane.
+        if (running && !proofBlocksDelivery()) {
+          await verifyAdmission();
+          if (liveness().live) { await verifyWatch(); arm(0); }
+        }
+      });
+    });
+  }
   async function clear(r: InflightRow, outcome: 'accepted' | 'released' = 'accepted') {
-    // Keep recovery evidence until durable outcome persistence succeeds.
-    if (outcome === 'accepted') await runHook(['settle', '--outcome', 'accepted', ...ownerArgs(owner), '--claim', r.claim, '--attempt', r.attempt!,
-      '--receipt-key', r.key, '--delivery-ids', r.deliveries.join(',')], true, 'codex');
+    // Preserve the original proof before fallible durable confirmation. This
+    // obligation is independent of loaded-thread observation and idle age.
+    if (outcome === 'accepted') {
+      receipts.add(r.key);
+      if (!settlementProofs.has(r.key)) settlementProofs.set(r.key, { ...r, owner: { ...owner }, deliveries: [...r.deliveries] });
+      const proof = settlementProofs.get(r.key)!;
+      try {
+        await runHook(['settle', '--outcome', 'accepted', ...ownerArgs(proof.owner!), '--claim', proof.claim, '--attempt', proof.attempt!,
+          '--receipt-key', proof.key, '--delivery-ids', proof.deliveries.join(',')], true, 'codex');
+      } catch (e) { scheduleSettlementRetry(); throw e; }
+    }
     kv.delete('inflight:' + r.key); kv.delete('releasing:' + r.claim); kv.delete('diagnostic:unresolved:' + r.key);
     waitingRetry.delete(r.key); waitForIdle.delete(r.key); receipts.delete(r.key); unresolvedLogged.delete(r.key); pendingLogged.delete(r.key);
+    settlementProofs.delete(r.key);
+    if (!settlementProofs.size) { settlementRetry?.cancel(); settlementRetry = undefined; settlementRetryIndex = 0; }
   }
   function reason(requireSubscription = true): DormantReason | undefined {
     if (ownershipChanged || !sameOwner(ownerOf(b), owner)) return 'ownership_changed';
@@ -569,7 +617,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
   async function transmit(r: InflightRow, batch: Batch) {
     let mismatches = 0, fallback = false;
     while (running && rpc) {
-      if (!liveness().live) {
+      if (!liveness().live || proofBlocksDelivery()) {
         waitingRetry.set(r.key, batch);
         // An idle claim can contain wake_idle. Deferral must preserve its
         // eligibility even if a waiting flag subsequently clears to active.
@@ -583,7 +631,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
       let guard;
       try { guard = await acquireGuard(d.vecnetBin, env, owner, r.claim, r.attempt, clock); }
       catch { ownershipChanged = true; watch?.kill(); log.warn('codex_binding_ownership_changed', { threadId: b.threadId }); return; }
-      if (!running || !liveness().live || !guard.valid()) { await guard.finish('rejected'); await releaseInflight(r); return; }
+      if (!running || !liveness().live || proofBlocksDelivery() || !guard.valid()) { await guard.finish('rejected'); await releaseInflight(r); return; }
       write(r);
       try {
         lastPush = clock.now();
@@ -633,7 +681,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     waitingRetry.set(r.key, batch);
   }
   async function push() {
-    if (connectionState !== 'ready' || !liveness().live) return;
+    if (connectionState !== 'ready' || !liveness().live || proofBlocksDelivery()) return;
     const wait = Math.max(lastPush + (d.minGapMs ?? 5000), resumeAt + 2000) - clock.now();
     if (wait > 0) {
       if (!gap) gap = clock.timer(wait, () => { gap = undefined; enqueue(push); });
@@ -653,7 +701,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
           scheduleHistoryRetry(); return;
         }
         historyRetry?.cancel(); historyRetry = undefined; historyRetryIndex = 0;
-        if (!liveness().live) return;
+        if (!liveness().live || proofBlocksDelivery()) return;
         if (state === 'turn_running' && turn?.status !== 'inProgress') return;
         r.method = state === 'idle' ? 'turn/start' : 'turn/steer';
         r.attemptTurnId = state === 'idle' ? null : turn!.id; r.priorTurnId = state === 'idle' ? turn?.id ?? null : null;
@@ -674,7 +722,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
       scheduleHistoryRetry(); return;
     }
     historyRetry?.cancel(); historyRetry = undefined; historyRetryIndex = 0;
-    if (!liveness().live || (action === 'steer' && (turn?.status !== 'inProgress' || typeof turn.id !== 'string'))) return;
+    if (!liveness().live || proofBlocksDelivery() || (action === 'steer' && (turn?.status !== 'inProgress' || typeof turn.id !== 'string'))) return;
     if (!verifyOwner(env, owner, d.euid, clock.now())) { ownershipChanged = true; watch?.kill(); return; }
     const nonce = randomBytes(12).toString('hex');
     kv.set('claiming:' + nonce, JSON.stringify({ owner, threadId: b.threadId, at: clock.now() }));
@@ -799,7 +847,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     start() { if (running) { enqueue(async () => { await recover(); arm(0); }); return; }
       cancelCompletionRecovery(); completionRows.clear();
       completionPending = false;
-      running = true; reconnect = undefined; gap = undefined; claimRecovery = undefined; warmCheck = undefined; historyRetry = undefined; historyRetryIndex = 0; watchStopped = undefined; watchVerified = false; heartbeat();
+      running = true; reconnect = undefined; gap = undefined; claimRecovery = undefined; warmCheck = undefined; historyRetry = undefined; historyRetryIndex = 0; watchStopped = undefined; watchVerified = false; heartbeat(); scheduleSettlementRetry();
       // Unsent claims need only Go, including when Codex is unreachable or
       // refused by the version gate. Release them before any RPC recovery.
       enqueue(async () => { await recoverClaims(); await connect(); }); },
@@ -807,6 +855,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
       if (!running) return;
       running = false; debounce?.cancel(); gap?.cancel(); reconnect?.cancel(); minute?.cancel(); watchRetry?.cancel(); claimRecovery?.cancel(); warmCheck?.cancel(); historyRetry?.cancel();
       cancelCompletionRecovery();
+      settlementRetry?.cancel(); settlementRetry = undefined; settlementRetryIndex = 0;
       // close() rejects the pending status RPC before stop drains the lane.
       completionProbe?.close();
       const child = watch; watch = undefined;
