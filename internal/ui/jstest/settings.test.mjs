@@ -623,7 +623,7 @@ test('List search and the All / Customised / Flags filter', async () => {
   store.edit('rates.sends_per_minute', '61');
   assert.deepEqual(visibleRows(store).map(r => r.key), ['agents.default_max_depth', 'rates.sends_per_minute']);
   store.setFilter({ only: 'all', q: 'PRESENCE' });
-  assert.deepEqual(visibleRows(store).map(r => r.key), ['presence.default_ttl', 'presence.session_ttl']);
+  assert.deepEqual(visibleRows(store).map(r => r.key), ['presence.default_ttl', 'presence.send_warning_after', 'presence.session_ttl']);
   store.setFilter({ q: 'nothing like this' });
   assert.deepEqual(visibleRows(store), []);
 });
@@ -1503,5 +1503,85 @@ test('busy and failed settings refresh retain the last event retention report', 
       store.destroy(); pending.resolve(reportedReply(true)); await work;
       assert.equal(st.eventRetentionEnabled, false, op);
     }
+  });
+});
+
+// Context R8/R9 use the same mounted DOM rather than source-text assertions.
+async function withMountedSettings(hub, run) {
+  const prev = { document: globalThis.document, window: globalThis.window, CSS: globalThis.CSS, location: globalThis.location };
+  const body = new StEl('body'), root = new StEl('div');
+  globalThis.document = { body, activeElement: body, hidden: false, createElement: tag => new StEl(tag), getElementById: () => null, addEventListener() {}, removeEventListener() {} };
+  globalThis.window = { localStorage: memStorage(), addEventListener() {}, removeEventListener() {} };
+  globalThis.CSS = { escape: s => String(s).replace(/[^a-zA-Z0-9_-]/g, ch => '\\' + ch) };
+  globalThis.location = { host: 'hub.test' };
+  const field = fk => walkSt(root, e => e.attrs['data-fk'] === fk)[0];
+  const click = fk => {
+    const el = field(fk); assert.ok(el, 'mounted control: ' + fk);
+    for (const fn of el.on.click || []) fn();
+  };
+  const input = (fk, value) => {
+    const el = field(fk); assert.ok(el, 'mounted input: ' + fk);
+    el.value = value; for (const fn of el.on.input || []) fn({ target: el });
+  };
+  const off = mountSettings(root, { api: hub.api, toast() {}, store: { onConn: () => () => {} },
+    appearance: { get: () => ({ theme: 'system', density: 'comfortable' }), subscribe: () => () => {} } });
+  try { await flush(); await run({ root, field, click, input }); }
+  finally { off(); for (const [key, value] of Object.entries(prev)) globalThis[key] = value; }
+}
+
+test('send warning threshold edits in List and Policy with wire bounds, zero disable and saved provenance', async t => {
+  for (const view of ['list', 'policy']) await t.test(view, async () => {
+    const hub = fakeHub();
+    await withMountedSettings(hub, async ({ root, field, click, input }) => {
+      const key = 'presence.send_warning_after', fk = 'st-presence-send-warning-after';
+      click('view-' + view);
+      if (view === 'policy') {
+        assert.match(root.textContent, /Warn on successful sends/);
+        assert.match(root.textContent, /0 disables the warning/);
+        assert.match(root.textContent, /open streams count as active/);
+        click('tok-' + key);
+      }
+      const descriptor = hub.preferences.find(r => r.key === key);
+      assert.deepEqual([descriptor.type, descriptor.default, descriptor.min, descriptor.max, descriptor.disabled_value], ['duration', 3600, 60, 31536000, 0]);
+      assert.equal(field(fk).value, '1h'); assert.equal(field(fk).disabled, false);
+      const rowEl = () => walkSt(root, e => e.attrs['data-row'] === key)[0];
+      assert.ok(walkSt(rowEl(), e => e.className === 'st-src s-default').length);
+      input(fk, '30s'); click('save'); await flush();
+      assert.match(root.textContent, /between 1 min and 365 d/);
+      assert.equal(hub.calls.filter(c => c.op !== 'get').length, 0, 'out-of-range editor cannot write');
+      input(fk, '2h');
+      assert.ok(walkSt(rowEl(), e => e.className === 'st-src s-edited').length);
+      click('save'); await flush();
+      assert.equal(field(fk).value, '2h');
+      assert.ok(walkSt(rowEl(), e => e.className === 'st-src s-stored').length);
+      input(fk, '0'); click('save'); await flush();
+      assert.equal(field(fk).value, '0', 'zero saves without confirmation');
+      assert.equal(hub.preferences.find(r => r.key === key).value, 0);
+      assert.deepEqual(hub.calls.filter(c => c.op === 'patch').map(c => [c.patch, c.tag]), [
+        [{ set: { [key]: 7200 }, reset: [] }, '"prefs-3-g1"'],
+        [{ set: { [key]: 0 }, reset: [] }, '"prefs-4-g1"'],
+      ]);
+      assert.equal(hub.calls.filter(c => c.op === 'preview').length, 0, 'send advisories do not shorten presence TTLs');
+      click('view-' + (view === 'list' ? 'policy' : 'list'));
+      if (view === 'list') click('tok-' + key);
+      assert.equal(field(fk).value, '0', 'both views share the saved threshold');
+    });
+  });
+});
+
+test('archive-on pill keeps acknowledged-event policy independent of a disabled pruning gate', async () => {
+  const hub = fakeHub({ preferences: rows({ installed: true }), runtime: retentionRuntime(false) });
+  await withMountedSettings(hub, async ({ root, click }) => {
+    click('view-policy');
+    const lane = key => walkSt(root, e => e.attrs['data-row'] === key)[0];
+    const mechanics = () => walkSt(lane('retention.ack_events'), e => e.attrs.role === 'radio').map(e => [e.attrs['aria-label'], e.attrs['aria-checked'], e.disabled, e.style.left]);
+    const before = mechanics();
+    click('st-retention-archive-mode');
+    assert.match(root.textContent, /History kept; acknowledged-event policy unchanged/);
+    assert.ok(lane('retention.history').className.includes('is-paused'));
+    assert.ok(!lane('retention.ack_events').className.includes('is-paused'));
+    assert.deepEqual(mechanics(), before, 'archive changes neither ack track nor its zero stop');
+    assert.ok(walkSt(lane('retention.ack_events'), e => e.attrs['data-event-retention'] === 'disabled').length);
+    assert.equal(hub.calls.filter(c => c.op !== 'get').length, 0, 'archive pill stages only a draft');
   });
 });

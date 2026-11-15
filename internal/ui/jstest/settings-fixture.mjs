@@ -18,6 +18,7 @@ export function rows({ installed = false } = {}) {
     g({ ...n('retention.archive_mode', 'bool', false, undefined, undefined, 'retention_storage', 'Archive mode', { danger: ['archive_disabled'] }), unit: '' }, 'DB retention adapter is not installed.'),
     g({ ...n('blobs.expiry', 'enum', '1d', undefined, undefined, 'files', 'Attachment expiry', { danger: ['blob_expiry_off'], allowed_values: ['1h', '6h', '12h', '1d', '7d', '30d', 'off'] }) }, 'R2 expiry adapter is not installed.'),
     n('events.refresh_interval', 'duration', 1800, 60, 86400, 'notifications_presence', 'Events refresh interval'),
+    n('presence.send_warning_after', 'duration', 3600, 60, 31536000, 'notifications_presence', 'Warn when recipient unseen for', { disabled_value: 0, description: 'Warn on successful sends when an agent was last seen longer ago than this interval; open streams count as active. Zero disables the warning.' }),
     n('presence.default_ttl', 'duration', 3600, 60, 86400, 'notifications_presence', 'Default presence TTL', { danger: ['presence_shortened'] }),
     n('presence.session_ttl', 'duration', 900, 60, 86400, 'notifications_presence', 'Session presence TTL', { danger: ['presence_shortened'] }),
     n('agents.default_max_depth', 'int', 32, 1, 64, 'agents_defaults', 'Default maximum depth'),
@@ -49,7 +50,7 @@ export function fakeHub({ preferences = rows(), revision = 3, storage = null, ru
     for (const row of hub.preferences) {
       const v = after(row.key);
       if (v === row.value) continue;
-      if (row.key.startsWith('presence.') && v < row.value) out.push({ code: 'presence_shortened', keys: [row.key], message: 'Shorter presence TTL may release held wakes.' });
+      if (['presence.default_ttl', 'presence.grokbot_ttl', 'presence.session_ttl', 'presence.launcher_ttl'].includes(row.key) && v < row.value) out.push({ code: 'presence_shortened', keys: [row.key], message: 'Shorter presence TTL may release held wakes.' });
       if (row.key === 'retention.archive_mode' && row.value === true && v === false) out.push({ code: 'archive_disabled', keys: [row.key], message: 'Disabling archive protection permits future history expiry.' });
       if (row.key === 'blobs.expiry' && v === 'off') out.push({ code: 'blob_expiry_off', keys: [row.key], message: 'New attachments have no disaster expiry; retained and reserved storage incurs cost within the verified finite quota.' });
     }

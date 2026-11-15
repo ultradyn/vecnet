@@ -330,7 +330,7 @@ function archivePill(store) {
     'aria-label': 'Archive mode', 'aria-describedby': lock ? sid(row.key) + '-al' : null,
   },
   h('span', { class: 'st-inf', 'aria-hidden': 'true', text: '∞' }),
-  h('span', {}, h('b', { text: `Archive mode ${on ? 'on' : 'off'}` }), h('small', { text: on ? 'History kept; acknowledged events still prune' : 'History follows its retention' })),
+  h('span', {}, h('b', { text: `Archive mode ${on ? 'on' : 'off'}` }), h('small', { text: on ? 'History kept; acknowledged-event policy unchanged' : 'History follows its retention' })),
   chip(src), lockChip(lock));
 }
 
@@ -411,7 +411,7 @@ function policyBody(store, focusFor) {
       para(store, 1, 'Files', off
         ? ['New attachments ', t('blobs.expiry'), ' expire. Each peer may change its avatar ', t('rates.avatar_changes_per_hour'), ', and legacy file read links last ', t('files.read_token_ttl'), '.']
         : ['New attachments expire after ', t('blobs.expiry'), '. Each peer may change its avatar ', t('rates.avatar_changes_per_hour'), ', and legacy file read links last ', t('files.read_token_ttl'), '.']),
-      para(store, 2, 'Notifications & presence', ['MCP clients re-read their Events every ', t('events.refresh_interval'), '. Never-reported presence is already unknown. Reports turn unknown when older than their TTL: other kinds ', t('presence.default_ttl'), ', sessions ', t('presence.session_ttl'), ', launchers ', t('presence.launcher_ttl'), '. Grok override value ', t('presence.grokbot_ttl'), '; see its current policy below.']),
+      para(store, 2, 'Notifications & presence', ['MCP clients re-read their Events every ', t('events.refresh_interval'), '. Warn on successful sends when the recipient was last seen longer ago than ', t('presence.send_warning_after'), ' (0 disables the warning); open streams count as active. Never-reported presence is already unknown. Reports turn unknown when older than their TTL: other kinds ', t('presence.default_ttl'), ', sessions ', t('presence.session_ttl'), ', launchers ', t('presence.launcher_ttl'), '. Grok override value ', t('presence.grokbot_ttl'), '; see its current policy below.']),
       grokPolicy(store),
       para(store, 3, 'Agents defaults', ['A new message may nest ', t('agents.default_max_depth'), ' deep and lives ', t('agents.default_ttl'), ', within a cap of ', t('agents.max_expiry'), '. A new thread gets a budget of ', t('agents.thread_budget'), '. A newly created agent may send ', t('rates.sends_per_minute'), ' and start threads at ', t('rates.threads_per_hour'), '. Provisioning policies without their own limits create up to ', t('provisioning.creates_per_hour'), ' and hold ', t('provisioning.max_peers'), '. Anonymous clients get bursts of ', t('rates.anonymous_burst'), ', refilled every ', t('rates.anonymous_refill'), '. Message text past ', t('agents.text_cap'), ' spills to an attachment.']),
       para(store, 4, 'Automatic archiving', ['Archive idle agents after ', t('agents.auto_archive_after'), ' (0 disables). Include every eligible agent kind: ', t('agents.auto_archive_all_kinds'), '. Archive threads when ', t('threads.auto_archive_share'), ' of their agents are archived (0 disables). Agent archive revokes credentials; thread archive only tidies the operator view.']),
