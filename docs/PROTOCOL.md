@@ -422,7 +422,8 @@ in section 2.12 is unchanged.
 
 | Method and path | Query parameters | Response |
 |---|---|---|
-| `GET /v1/admin/inbox` | `limit`, `before=<dly_id>`, `unread=1` | `{now, me, approvals, dead_letters, attention, deliveries, unread, unread_by_thread, next_before}` |
+| `GET /v1/admin/inbox` | `limit`, `before=<dly_id>`, `unread=1` | `{now, me, approvals, dead_letters, attention, deliveries, unread, unread_by_thread, unread_by_sender, next_before}` |
+| `POST /v1/admin/inbox/read` | optional body `{"sender"?: "peer_…", "until"?: RFC 3339, "before_seq"?: decimal string}` | `{marked, more, until, before_seq}`: marks read the operator's unread deliveries as `unread` counts them (an open approval stays: it needs an answer), only `sender`'s when given, created at or before `until` (now when omitted), with delivery event sequence at most `before_seq` (the current recipient delivery high-water when omitted), oldest first, at most 500 per call, each through the receipt path (senders see `read` receipts). `more` means unread within both bounds remain: call again with **both** answered `until` and `before_seq`, so arrivals after the first snapshot stay unread even when timestamps tie or the clock moves backwards. `before_seq` is a nonnegative int64 encoded as a decimal string (not a JSON number). Unknown sender 404 `not_found`; a non-`peer_` sender, bad `until` or malformed/negative/overflowing `before_seq` 422 `invalid_value`; unknown fields 400 `invalid_body` (2026-11-15) |
 | `POST /v1/admin/threads/{id}/read` | none; no request body | `{marked}`: number of deliveries marked read for the operator |
 | `GET /v1/admin/threads` | `participant=<peer_id>`, `exclude_participant=<peer_id>`, `archived=true\|false`, `q`, `limit`, `cursor` | `{threads: [ThreadRow…], next}` |
 | `POST /v1/admin/threads/{id}/archive`, `…/unarchive` | none; no body | 204 (including repeated requests); unknown thread 404 `unknown_thread` |
@@ -489,6 +490,10 @@ countdowns. View types are defined in `internal/opapi`:
   always sum to `unread`; like `unread`, it ignores `limit`, `before` and
   `unread=1`. The web sidebar shows it per Your Threads row. It changes
   exactly when `unread` does, so the `inbox` tag keeps it fresh.
+  `unread_by_sender` (2026-11-15) is the same split by the Message's
+  sender (a peer id, source id, or `hub`), from the same query, so it too
+  sums to `unread`; an agent's web peer page offers to mark that peer's
+  messages read (source senders are cleared by the inbox-wide action).
 - `ThreadRow` keeps the section 2.8 `ThreadSummary` under the named `thread`
   field, alongside `created_by`, `created_at`, `last_message_at`, nullable
   `archived_at` and `archived_by` (`"operator"`, `"hub"`, or null), and nullable

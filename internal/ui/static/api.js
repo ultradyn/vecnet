@@ -434,6 +434,27 @@ export function createApi({ secret, fetch = globalThis.fetch, onUnauthorized = (
     messages: (id, { after, limit } = {}) => get('/v1/threads/' + seg(id) + '/messages' + query({ after, limit })),
     matrix: (id, { after, limit } = {}) => get('/v1/admin/threads/' + seg(id) + '/deliveries' + query({ after, limit })),
     readThread: id => post('/v1/admin/threads/' + seg(id) + '/read'),
+    // Bulk read (POST /v1/admin/inbox/read): one call marks at most 500;
+    // markAllRead pages with the first call's until and before_seq, so
+    // a message arriving meanwhile stays unread. onPage(total) reports
+    // progress. Resolves to the number marked; read_all_limit carries marked
+    // if the safety bound is reached with more still unread.
+    markAllRead: async ({ sender, onPage, signal } = {}) => {
+      let until, beforeSeq, total = 0;
+      for (let i = 0; i < 200; i++) {
+        const body = {};
+        if (sender) body.sender = sender;
+        if (until) body.until = until;
+        if (beforeSeq !== undefined) body.before_seq = beforeSeq;
+        const r = await post('/v1/admin/inbox/read', { body, signal });
+        total += (r && r.marked) || 0;
+        until = r && r.until;
+        beforeSeq = r && r.before_seq;
+        if (onPage) onPage(total);
+        if (!r || !r.more) return total;
+      }
+      throw Object.assign(new Error('Bulk read batch limit reached'), { code: 'read_all_limit', marked: total });
+    },
     // One delivery's receipt (PROTOCOL §2.5): the thread view posts 'read'.
     receipt: (deliveryId, state) => post('/v1/receipts', { body: { delivery_id: deliveryId, state } }),
     // signal lets a sign-out end a parked long-poll at once.

@@ -1,6 +1,8 @@
 package httpapi
 
 import (
+	"bytes"
+	"io"
 	"net/http"
 	"strconv"
 
@@ -13,6 +15,7 @@ import (
 func (s *server) opRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/admin/inbox", s.opInbox)
 	mux.HandleFunc("POST /v1/admin/threads/{id}/read", s.opMarkThreadRead)
+	mux.HandleFunc("POST /v1/admin/inbox/read", s.opMarkAllRead)
 	mux.HandleFunc("GET /v1/admin/thread-stats", s.opThreadStats)
 	mux.HandleFunc("POST /v1/admin/threads/{id}/archive", s.opArchiveThread(true))
 	mux.HandleFunc("POST /v1/admin/threads/{id}/unarchive", s.opArchiveThread(false))
@@ -62,6 +65,46 @@ func (s *server) opMarkThreadRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	value, err := s.op.MarkThreadRead(r.Context(), callerFrom(r.Context()), r.PathValue("id"))
+	opResult(w, value, err)
+}
+
+// opMarkAllRead is POST /v1/admin/inbox/read {"sender"?, "until"?, "before_seq"?}:
+// 200 {marked, more, until, before_seq}. Echo both bounds while more.
+func (s *server) opMarkAllRead(w http.ResponseWriter, r *http.Request) {
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	var q opapi.ReadAllQuery
+	if len(bytes.TrimSpace(raw)) > 0 {
+		top, err := decodeObject(raw, []string{"sender", "until", "before_seq"}, nil)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		if q.Sender, err = stringField(top, "sender"); err != nil {
+			writeError(w, err)
+			return
+		}
+		if q.Until, err = stringField(top, "until"); err != nil {
+			writeError(w, err)
+			return
+		}
+		if q.BeforeSeq, err = stringField(top, "before_seq"); err != nil {
+			writeError(w, err)
+			return
+		}
+		if _, has := top["before_seq"]; has && q.BeforeSeq == "" {
+			writeError(w, opInvalid("before_seq", "before_seq must be a nonnegative decimal integer string"))
+			return
+		}
+		if _, has := top["sender"]; has && !ids.Is(ids.Peer, q.Sender) {
+			writeError(w, opInvalid("sender", "sender must be a peer_ id"))
+			return
+		}
+	}
+	value, err := s.op.MarkAllRead(r.Context(), callerFrom(r.Context()), q)
 	opResult(w, value, err)
 }
 

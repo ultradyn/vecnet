@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 
 	"github.com/XertroV/vecnet/internal/auth"
 	"github.com/XertroV/vecnet/internal/envelope"
@@ -48,22 +49,26 @@ func (r *Reader) Inbox(ctx context.Context, c auth.Caller, q opapi.InboxQuery) (
 	// receipt followed: answering must not raise the unread count.
 	const unread = ` AND d.read_at IS NULL AND NOT EXISTS (
   SELECT 1 FROM approvals a WHERE a.msg_id = d.msg_id AND a.decided_by = d.recipient)`
-	// One grouped read gives both the total and its per-thread split, so the
-	// two always agree (the web sidebar's per-thread counts sum to the badge).
+	// One grouped read gives the total and its per-thread and per-sender
+	// splits, so they always agree (the web sidebar's per-thread counts sum
+	// to the badge; the peer page's per-sender count is what Mark all from
+	// it read would clear).
 	byThread, err := r.Hub.DB.QueryContext(ctx,
-		`SELECT d.thr_id, count(*) FROM deliveries d WHERE `+visible+unread+` GROUP BY d.thr_id`, c.PeerID, out.Now)
+		`SELECT d.thr_id, m.sender, count(*) FROM deliveries d JOIN messages m ON m.msg_id = d.msg_id WHERE `+visible+unread+` GROUP BY d.thr_id, m.sender`, c.PeerID, out.Now)
 	if err != nil {
 		return out, fmt.Errorf("opview: inbox unread: %w", err)
 	}
 	defer byThread.Close()
 	out.UnreadByThread = map[string]int{}
+	out.UnreadBySender = map[string]int{}
 	for byThread.Next() {
-		var thr string
+		var thr, sender string
 		var n int
-		if err := byThread.Scan(&thr, &n); err != nil {
+		if err := byThread.Scan(&thr, &sender, &n); err != nil {
 			return out, fmt.Errorf("opview: inbox unread: %w", err)
 		}
-		out.UnreadByThread[thr] = n
+		out.UnreadByThread[thr] += n
+		out.UnreadBySender[sender] += n
 		out.Unread += n
 	}
 	if err := byThread.Err(); err != nil {
@@ -212,6 +217,113 @@ func (r *Reader) inboxApprovals(ctx context.Context, peer, now string) ([]opapi.
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("opview: inbox approvals: %w", err)
+	}
+	return out, nil
+}
+
+// ReadAllBatch is how many deliveries one MarkAllRead call marks at most;
+// each is its own receipt transaction, so a bounded call keeps the single
+// writer free for other requests between batches. A variable so tests can
+// page with a small one.
+var ReadAllBatch = 500
+
+// MarkAllRead marks read the operator's unread deliveries, as the inbox
+// counts them (Inbox's visible and unread rules: not superseded, not an
+// open approval, which needs an answer, not one the operator answered),
+// created at or before q.Until (now when empty), at or below the immutable
+// BeforeSeq delivery event high-water (captured when empty), oldest first, at most
+// ReadAllBatch per call. With q.Sender, only that peer's messages: thread
+// spam from one agent. Each goes through the normal receipt path, so its
+// sender sees a read receipt and the sidebar counts follow. An unknown
+// sender is 404 not_found; malformed bounds are 422 invalid_value.
+func (r *Reader) MarkAllRead(ctx context.Context, c auth.Caller, q opapi.ReadAllQuery) (opapi.ReadAllResult, error) {
+	now := envelope.FormatTime(r.Hub.Now())
+	out := opapi.ReadAllResult{Until: now}
+	if q.Until != "" {
+		at, err := envelope.ParseTime(q.Until)
+		if err != nil {
+			e := hub.E(http.StatusUnprocessableEntity, "invalid_value", "until must be an RFC 3339 time")
+			e.Details["field"] = "until"
+			return out, e
+		}
+		out.Until = envelope.FormatTime(at)
+	}
+	var beforeSeq int64
+	if q.BeforeSeq == "" {
+		if err := r.Hub.DB.QueryRowContext(ctx, `SELECT COALESCE(MAX(event_seq), 0) FROM deliveries WHERE recipient = ?`, c.PeerID).Scan(&beforeSeq); err != nil {
+			return out, fmt.Errorf("opview: read all high-water: %w", err)
+		}
+	} else {
+		var err error
+		beforeSeq, err = strconv.ParseInt(q.BeforeSeq, 10, 64)
+		valid := err == nil && beforeSeq >= 0
+		for _, ch := range q.BeforeSeq {
+			valid = valid && ch >= '0' && ch <= '9'
+		}
+		if !valid {
+			e := hub.E(http.StatusUnprocessableEntity, "invalid_value", "before_seq must be a nonnegative decimal integer string")
+			e.Details["field"] = "before_seq"
+			return out, e
+		}
+	}
+	out.BeforeSeq = strconv.FormatInt(beforeSeq, 10)
+	args := []any{c.PeerID, now}
+	where := `d.recipient = ? AND d.state != 'superseded' AND d.read_at IS NULL
+  AND NOT EXISTS (SELECT 1 FROM approvals a WHERE a.msg_id = d.msg_id AND a.closed_at IS NULL AND a.expires_at > ?)
+  AND NOT EXISTS (SELECT 1 FROM approvals a WHERE a.msg_id = d.msg_id AND a.decided_by = d.recipient)
+  AND d.created_at <= ? AND d.event_seq <= ?`
+	args = append(args, out.Until, beforeSeq)
+	if q.Sender != "" {
+		var one int
+		err := r.Hub.DB.QueryRowContext(ctx, `SELECT 1 FROM peers WHERE peer_id = ?`, q.Sender).Scan(&one)
+		if errors.Is(err, sql.ErrNoRows) {
+			e := hub.E(http.StatusNotFound, "not_found", "no such peer")
+			e.Details["peer_id"] = q.Sender
+			return out, e
+		}
+		if err != nil {
+			return out, fmt.Errorf("opview: read all sender: %w", err)
+		}
+		where += ` AND EXISTS (SELECT 1 FROM messages m WHERE m.msg_id = d.msg_id AND m.sender = ?)`
+		args = append(args, q.Sender)
+	}
+	rows, err := r.Hub.DB.QueryContext(ctx,
+		`SELECT d.dly_id FROM deliveries d WHERE `+where+` ORDER BY d.created_at, d.dly_id LIMIT ?`, append(args, ReadAllBatch+1)...)
+	if err != nil {
+		return out, fmt.Errorf("opview: read all: %w", err)
+	}
+	// Close the cursor before ReceiptChanged opens its write transaction.
+	var unread []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return out, fmt.Errorf("opview: read all: %w", err)
+		}
+		unread = append(unread, id)
+	}
+	err = rows.Err()
+	closeErr := rows.Close()
+	if err != nil {
+		return out, fmt.Errorf("opview: read all: %w", err)
+	}
+	if closeErr != nil {
+		return out, fmt.Errorf("opview: close read all: %w", closeErr)
+	}
+	if len(unread) > ReadAllBatch {
+		unread, out.More = unread[:ReadAllBatch], true
+	}
+	for _, id := range unread {
+		if err := ctx.Err(); err != nil {
+			return out, err
+		}
+		changed, err := r.Hub.ReceiptChanged(ctx, c, id, "read", "")
+		if err != nil {
+			return out, err
+		}
+		if changed {
+			out.Marked++
+		}
 	}
 	return out, nil
 }

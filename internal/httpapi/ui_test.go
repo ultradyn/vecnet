@@ -57,7 +57,10 @@ import (
 // (add, edit, verify, new secret, remove) and read-on-open, measured at
 // 769,209 bytes after UI review fixes (master: 740,483). Next 16 KiB
 // boundary, with 839 bytes of headroom; all-files coverage kept.
-const uiMaxBytes = 752 << 10
+// Raised to 768 KiB on 2026-11-15 for bulk mark-read (inbox Mark all read,
+// per-agent and per-thread buttons), measured at 776,517 bytes after review
+// fixes (base: 769,209). Next 16 KiB boundary; all-files coverage kept.
+const uiMaxBytes = 768 << 10
 
 var (
 	scriptTag   = regexp.MustCompile(`(?is)<script\b([^>]*)>(.*?)</script>`)

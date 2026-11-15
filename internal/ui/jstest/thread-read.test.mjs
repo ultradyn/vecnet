@@ -327,10 +327,16 @@ test('enough: 60% of the message, or 60% of the view for a tall one', () => {
   assert.equal(enough(0, 0, 0), false);
 });
 
-test('opening a thread never calls the mark-all route', () => {
-  // The view posts only per-delivery receipts; POST /v1/admin/threads/:id/read is gone from it.
+test('opening a thread never calls the mark-all route; only the explicit button does', () => {
+  // Reading follows per-delivery receipts. POST /v1/admin/threads/:id/read
+  // is called in exactly one place: Mark thread read's confirmed click.
   const src = readFileSync(new URL('../static/thread.js', import.meta.url), 'utf8');
-  assert.doesNotMatch(src, /readThread/);
+  const calls = src.match(/api\.readThread\(/g) || [];
+  assert.equal(calls.length, 1, 'readThread is called from more than the button');
+  const at = src.indexOf('api.readThread(');
+  const handler = src.lastIndexOf("readBtn.addEventListener('click'", at);
+  assert.ok(handler > 0 && at - handler < 800, 'readThread is not inside the Mark thread read click handler');
+  assert.match(src.slice(handler, at), /if \(!readArmed\)/, 'the button marks read without a confirming second click');
   assert.doesNotMatch(src, /\/read['`]/);
   assert.match(src, /createReader\(/);
 });

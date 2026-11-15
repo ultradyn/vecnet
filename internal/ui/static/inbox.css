@@ -54,3 +54,8 @@
   /* the failure line wraps, so the delivery id and its copy button stay reachable */
   .va .item.dl .meta{white-space:normal;overflow-wrap:anywhere}
 }
+/* The inbox heading row: the title, then Mark all read at its right. */
+.ib-head{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.ib-head h1{margin-bottom:8px}
+.btn.read-all{min-height:32px;white-space:nowrap}
+.btn.read-all[aria-disabled=true]{opacity:.6;cursor:progress}
