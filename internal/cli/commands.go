@@ -1060,6 +1060,7 @@ func (a *app) send(req envelope.SendRequest, text string, o opts) error {
 		fmt.Fprint(a.stdout, " job "+resp.JobID)
 	}
 	fmt.Fprintln(a.stdout)
+	a.sendWarnings(raw)
 	return nil
 }
 

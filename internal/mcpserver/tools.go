@@ -925,7 +925,7 @@ func toolSpecs(defs schema) []toolSpec {
 		name: "vecnet_send",
 		description: "Write: send a message on the operator's bus to peers or groups, or into a thread. " +
 			"Give recipients (peer or group ids) to start a new thread, or thread_id to post into an existing one; one of the two is required. " +
-			"To answer a message, prefer vecnet_reply. " +
+			"To answer a message, prefer vecnet_reply. Rapid group thread creation returns advisory warnings; use replies for related work. " +
 			"Pass wake_idle for grokbot recipients. Requires priority and idempotency_key; repeating a key with the same body sends nothing.",
 		input: sendInput, annotations: writeAnnotations(true), precheck: hub.PrecheckSend, call: callSend,
 	}, {

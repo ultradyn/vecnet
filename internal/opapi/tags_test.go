@@ -127,7 +127,15 @@ func TestWireSlicesNeverNull(t *testing.T) {
 			if field.Type.Kind() != reflect.Slice {
 				continue
 			}
-			key := strings.Split(field.Tag.Get("json"), ",")[0]
+			tag := strings.Split(field.Tag.Get("json"), ",")
+			key := tag[0]
+			// Optional advisory collections preserve the hub's omission when
+			// empty. Required collections still use arrays, never null.
+			if len(tag) > 1 && tag[1] == "omitempty" {
+				if _, present := fields[key]; !present {
+					continue
+				}
+			}
 			if string(fields[key]) != "[]" {
 				t.Errorf("%s.%s = %s, want []", typ.Name(), field.Name, fields[key])
 			}

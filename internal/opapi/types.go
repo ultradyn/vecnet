@@ -537,6 +537,16 @@ type SendResult struct {
 	Deliveries []DeliveryRef `json:"deliveries"`
 	JobID      string        `json:"job_id,omitempty"`
 	Spilled    bool          `json:"spilled"`
+	Warnings   []SendWarning `json:"warnings,omitempty"`
+}
+
+// SendWarning mirrors advisory response metadata without importing the hub.
+type SendWarning struct {
+	Code          string `json:"code"`
+	Message       string `json:"message"`
+	GroupID       string `json:"group_id"`
+	WindowSeconds int    `json:"window_seconds"`
+	Threshold     int    `json:"threshold"`
 }
 
 // MarshalJSON keeps empty collections in SendResult non-null.
