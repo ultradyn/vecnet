@@ -200,7 +200,7 @@ func TestGrokImportedBarrierExcludesLegacyInFlight(t *testing.T) {
 				if r := f.row(id); !reflect.DeepEqual(r, original) {
 					t.Errorf("claim/follower row changed=%+v original=%+v", r, original)
 				}
-				if len(f.receiptsFor(f.b, id)) != 0 {
+				if len(f.receiptsFor(f.a, id)) != 0 {
 					t.Error("attachment fabricated receipt")
 				}
 			}
@@ -209,6 +209,13 @@ func TestGrokImportedBarrierExcludesLegacyInFlight(t *testing.T) {
 			}
 			unblock()
 			wg.Wait()
+			// Positive control for the same sender-log oracle used while blocked:
+			// normal legacy settlement now produces one accepted receipt per POST.
+			for _, id := range ids {
+				if rs := f.receiptsFor(f.a, id); len(rs) != 1 || rs[0].State != "accepted" || rs[0].By != "hub" {
+					t.Errorf("legacy settlement sender receipts=%+v for %s", rs, id)
+				}
+			}
 		})
 	}
 }
@@ -290,7 +297,7 @@ func TestGrokKnownNoninvocationExpiredLease(t *testing.T) {
 			if err := f.env.Hub.CancelUninvokedGrokbotPOST(f.ctx, settled, f.env.Now.Now()); err != nil {
 				t.Fatal(err)
 			}
-			if len(f.receiptsFor(f.b, d.DeliveryID)) != 0 {
+			if len(f.receiptsFor(f.a, d.DeliveryID)) != 0 {
 				t.Error("noninvocation fabricated receipt")
 			}
 			if len(f.rcv.Hits()) != 0 || len(t1PushRows(t, f)) != 0 {
@@ -304,5 +311,80 @@ func TestGrokKnownNoninvocationExpiredLease(t *testing.T) {
 				t.Errorf("exact reservation set count=%d want=%d", f.routeRuns(), wantRuns)
 			}
 		})
+	}
+}
+
+// First-cover evidence outlives an inactive coordinator. Explicitly retrying
+// that retained delivery must not require an unrelated arrival to reopen work.
+func TestGrokCoveredRetryAfterCoordinatorCleanup(t *testing.T) {
+	f := drainFixture(t, func(n int, h hit) reply {
+		if n == 1 {
+			return reply{Status: http.StatusBadRequest, Body: `{"success":false,"error":"synthetic terminal refusal"}`}
+		}
+		return started(n, h)
+	})
+	var calls atomic.Int32
+	f.w.Client = &http.Client{Transport: t1RoundTrip(func(req *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return http.DefaultTransport.RoundTrip(req)
+	})}
+	first := f.send(f.aSec, f.msg("wake")).Deliveries[0].DeliveryID
+	follower := f.send(f.aSec, f.msg("wake")).Deliveries[0].DeliveryID
+	if n := f.step(); n != 1 || calls.Load() != 1 || len(f.rcv.Hits()) != 1 || f.row(first).State != "accepted" || f.row(follower).Attempt != 0 {
+		t.Fatalf("initial representative claims=%d calls=%d hits=%d first=%+v follower=%+v", n, calls.Load(), len(f.rcv.Hits()), f.row(first), f.row(follower))
+	}
+	coverage := func() string {
+		t.Helper()
+		var value string
+		if err := f.env.Hub.DB.QueryRow(`SELECT json_array(route_id,delivery_id,recipient,first_covered_at) FROM grokbot_covers WHERE route_id=? AND delivery_id=? AND recipient=?`, f.route, follower, f.b).Scan(&value); err != nil {
+			t.Fatal(err)
+		}
+		var n int
+		if err := f.env.Hub.DB.QueryRow(`SELECT count(*) FROM grokbot_covers WHERE route_id=?`, f.route).Scan(&n); err != nil || n != 1 {
+			t.Fatalf("coverage population=%d err=%v", n, err)
+		}
+		return value
+	}
+	originalCover := coverage()
+	advanceGroup(t, f) // The accepted representative's successful cover expires.
+	if n := f.step(); n != 1 || calls.Load() != 2 || len(f.rcv.Hits()) != 2 || f.row(follower).State != "dead_letter" {
+		t.Fatalf("covered follower terminal claims=%d calls=%d hits=%d row=%+v", n, calls.Load(), len(f.rcv.Hits()), f.row(follower))
+	}
+	if coverage() != originalCover {
+		t.Fatal("later representative changed first-cover evidence")
+	}
+	advanceGroup(t, f) // Its finite failure deadline also expires.
+	if n := f.step(); n != 0 || calls.Load() != 2 || len(f.rcv.Hits()) != 2 {
+		t.Fatalf("cleanup claims=%d calls=%d hits=%d", n, calls.Load(), len(f.rcv.Hits()))
+	}
+	assertAbsent := func() {
+		t.Helper()
+		var n int
+		if err := f.env.Hub.DB.QueryRow(`SELECT (SELECT count(*) FROM grokbot_wakes WHERE route_id=?1 AND recipient=?2)+(SELECT count(*) FROM grokbot_legacy_claims WHERE route_id=?1 AND recipient=?2)`, f.route, f.b).Scan(&n); err != nil || n != 0 {
+			t.Fatalf("expected absent coordinator/imports, got %d err=%v", n, err)
+		}
+	}
+	assertAbsent()
+	if coverage() != originalCover {
+		t.Fatal("cleanup erased historical coverage")
+	}
+	if err := f.env.Hub.RetryDeadLetter(f.ctx, follower); err != nil {
+		t.Fatal(err)
+	}
+	assertAbsent() // Existing retry API requeues without creating a coordinator.
+	if r := f.row(follower); r.State != "queued" || r.Attempt != 1 {
+		t.Fatalf("explicit retry row=%+v", r)
+	}
+	if n := f.step(); n != 1 || calls.Load() != 3 || len(f.rcv.Hits()) != 3 {
+		t.Fatalf("covered retry after cleanup claims=%d client entries=%d receiver POSTs=%d, want 1/3/3", n, calls.Load(), len(f.rcv.Hits()))
+	}
+	if r := f.row(follower); r.State != "accepted" || r.Attempt != 2 {
+		t.Fatalf("retried follower result=%+v", r)
+	}
+	if coverage() != originalCover {
+		t.Fatal("retry rewrote first-cover identity/time")
+	}
+	if n := f.step(); n != 0 || calls.Load() != 3 || len(f.rcv.Hits()) != 3 {
+		t.Fatalf("post-retry duplicate claims=%d calls=%d hits=%d", n, calls.Load(), len(f.rcv.Hits()))
 	}
 }

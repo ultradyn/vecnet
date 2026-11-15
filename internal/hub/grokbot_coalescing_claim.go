@@ -32,6 +32,7 @@ func coverGrokbotFollowers(ctx context.Context, tx *sql.Tx, route, recipient, re
 // Candidate discovery includes held opted-in arrivals for attachment, but only
 // actual representatives pass the original cross-route thread-order predicate.
 // The anti-join prevents repeatedly materializing annotated active followers.
+// A missing coordinator is inactive; historical coverage alone cannot gate work.
 const grokCandidateQuery = `SELECT d.dly_id,d.recipient,d.thr_id,d.route_id,r.url,r.kind,d.attempt,
  r.grokbot_transport,d.held,coalesce(d.next_attempt_at,''),d.event_seq
  FROM deliveries d INDEXED BY deliveries_grok_cursor JOIN routes r ON r.route_id=d.route_id
@@ -40,7 +41,7 @@ const grokCandidateQuery = `SELECT d.dly_id,d.recipient,d.thr_id,d.route_id,r.ur
  AND r.verified_at IS NOT NULL AND d.expires_at>?1
  AND (d.event_seq,d.dly_id)>(?2,?3)
  AND ((r.kind='grokbot' AND r.grokbot_transport='recipient_drain_v1'
-       AND NOT ((w.lease_until>?1 OR w.retry_at>?1 OR w.cover_until>?1
+       AND NOT ((coalesce(w.lease_until>?1 OR w.retry_at>?1 OR w.cover_until>?1,0)
                  OR EXISTS(SELECT 1 FROM grokbot_legacy_claims l WHERE l.route_id=d.route_id AND l.recipient=d.recipient AND l.lease_until>?1))
                 AND EXISTS(SELECT 1 FROM grokbot_covers c WHERE c.route_id=d.route_id AND c.delivery_id=d.dly_id)))
       OR ((r.kind!='grokbot' OR r.grokbot_transport!='recipient_drain_v1') AND d.held=0 AND (d.next_attempt_at IS NULL OR d.next_attempt_at<=?1)))
