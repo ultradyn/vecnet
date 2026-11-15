@@ -148,11 +148,35 @@ try {
     assert(Number(pill(ui, trace.thread_id)) === before + 1 && pill(ui, zero) === '1', `rise ${JSON.stringify(ui.rows)}`);
     const risen = hub.unread;
 
+    // No reflow: every row has one box read or unread, so a row going read
+    // moves nothing: not the rows under it, not a row's left edge or width.
+    // Measured in one page task on the live rows, keyed by thread, after
+    // fonts and frames. Text widths are left out: a relative time ticking
+    // from "now" to "1m" between the two reads is not a reflow.
+    const boxes = () => page.evaluate(async () => {
+      await document.fonts.ready;
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      const out = {};
+      for (const a of document.querySelectorAll('#threads a[href^="#thread/"], #others a[href^="#thread/"]')) {
+        const r = a.getBoundingClientRect(), pp = a.querySelector('.pp').getBoundingClientRect();
+        out[a.getAttribute('href')] = { unread: a.classList.contains('unread'), box: [r.left, r.top + document.querySelector('nav.side').scrollTop, r.width, r.height, pp.left, pp.top - r.top].map(v => Math.round(v * 10) / 10) };
+      }
+      return { rows: out };
+    });
+    const heights = Object.values((await boxes()).rows);
+    assert(heights.some(r => r.unread) && heights.some(r => !r.unread), 'want read and unread rows to compare');
+    assert(new Set(heights.map(r => r.box[3])).size === 1, `rows differ in height read vs unread: ${JSON.stringify(heights)}`);
+
     // Drop: open the long thread from the sidebar; its three messages are all
     // on screen, so each is read by its own receipt a second later.
+    const opened = await boxes();
+    assert(opened.rows[`#thread/${long.thread_id}`]?.unread, 'the long thread is not unread before opening');
     await mineList.locator(`a[href="#thread/${long.thread_id}"]`).click();
     await page.locator('#view .msg', { hasText: 'Backup job scheduled.' }).waitFor();
     ({ ui, hub } = await agrees('after opening a thread', u => pill(u, long.thread_id) === ''));
+    const read = await boxes();
+    const moved = Object.keys(opened.rows).filter(k => read.rows[k] && JSON.stringify(read.rows[k].box) !== JSON.stringify(opened.rows[k].box));
+    assert(!moved.length, `rows moved when a thread went read: ${moved.map(k => k + ' ' + JSON.stringify(opened.rows[k].box) + ' -> ' + JSON.stringify(read.rows[k].box)).join('; ')}`);
     assert(hub.unread === risen - 3 && ui.badge === String(risen - 3), `drop by 3: ${hub.unread} from ${risen}`);
     assert(await mineList.locator(`a.on[href="#thread/${long.thread_id}"] .ur`).count() === 0, 'the open row still has a pill');
 
@@ -184,7 +208,7 @@ try {
     const final = ui.rows.reduce((n, r) => n + (Number(r.ur) || 0), 0);
     assert(String(final) === ui.badge || (final === 0 && ui.badge === ''), `final sum ${final} badge ${ui.badge}`);
   });
-  console.log('Sidebar unread passed: per-thread counts match the hub and sum to the badge; zero shows nothing; they rise on delivery and drop on read from the sidebar, the inbox, a receipt and another tab; the pill fits at 1440, 1000 and 390 px');
+  console.log('Sidebar unread passed: per-thread counts match the hub and sum to the badge; zero shows nothing; a row is one height read or unread and reading moves no row; they rise on delivery and drop on read from the sidebar, the inbox, a receipt and another tab; the pill fits at 1440, 1000 and 390 px');
 } finally {
   await cleanBuild();
 }

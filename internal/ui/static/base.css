@@ -110,6 +110,9 @@ span,b,time,code,a{unicode-bidi:isolate}
    filled, so the two never read as one another. It takes the message count's
    place (still in the row's tip), so a narrow sidebar keeps the title. */
 .va .nav.rows .nums{display:flex;align-items:baseline;gap:6px}
+/* The count takes the pill's box (15px line, 1px clear border), so a row is
+   one height read or unread: reading a thread never moves the rows below. */
+.va .nav.rows .cnt{line-height:15px;border-block:1px solid transparent}
 .va .nav.rows a.unread .cnt{display:none}
 .va .nav.rows .ur{font:600 10.5px/15px var(--mono);color:var(--wake);background:#fbbf241a;border:1px solid #fbbf2466;border-radius:9px;padding:0 5px;flex:none}
 .va .nav.rows a.unread .tt.un{color:var(--muted)}
