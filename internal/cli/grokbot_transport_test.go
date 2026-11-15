@@ -138,18 +138,56 @@ func TestAgentTransportBindingsClosedAndExplicit(t *testing.T) {
 			return specs
 		})
 		u := agentOperator(t, h.srv.URL)
-		code, _, _ := u.run("agent", "add", "--kind", "grokbot", "--name", "Old", "--url", routineURL, "--key-file", "unused", "--grokbot-transport", "recipient_drain_v1")
+		key := "crsr_SYNTHETIC_old_registry_canary"
+		keyFile := writeModeFile(t, "synthetic-key", key, 0600)
+		args := []string{"agent", "add", "--kind", "grokbot", "--name", "Old", "--url", routineURL, "--key-file", keyFile, "--skip-mcp", "--request-id", "old-registry-transport"}
+		code, out, errs := u.run(append(args, "--grokbot-transport", "recipient_drain_v1")...)
 		if code == 0 || len(h.posts()) != 0 {
 			t.Fatal("explicit selection silently ignored by old registry")
 		}
+		if !strings.Contains(out+errs, "--grokbot-transport is not a field of kind grokbot") {
+			t.Fatal("old registry refusal did not identify the unsupported transport field")
+		}
+		if strings.Contains(out+errs, key) {
+			t.Fatal("old registry refusal echoed the synthetic key")
+		}
+		t.Run("omission submits with same registry and key", func(t *testing.T) {
+			code, out, errs := u.run(args...)
+			if code != 0 || len(h.posts()) != 1 {
+				t.Fatal("omission did not reach mock submit with the same registry and key")
+			}
+			inputs := h.posts()[0]["inputs"].(map[string]any)
+			if inputs["webhook_key"] != key {
+				t.Fatal("omission control did not read the valid key fixture")
+			}
+			if _, present := inputs["grokbot_transport"]; present {
+				t.Fatal("omission control submitted a transport selection")
+			}
+			if strings.Contains(out+errs, key) {
+				t.Fatal("omission control echoed the synthetic key")
+			}
+		})
 	})
 	t.Run("invalid and nonGrok refuse locally", func(t *testing.T) {
 		h := newAgentHub(t, func() []onboarding.KindSpec { return onboarding.Specs() })
 		u := agentOperator(t, h.srv.URL)
-		for _, args := range [][]string{{"agent", "add", "--kind", "session", "--name", "Other", "--grokbot-transport", "delivery_v1"}, {"agent", "add", "--kind", "grokbot", "--name", "Invalid", "--url", routineURL, "--key-file", "unused", "--grokbot-transport", "unknown-secret-canary"}, {"route", "add", "--owner", "peer_other", "--url", "https://example.com", "--grokbot-transport", "delivery_v1"}, {"route", "update", "route_other", "--grokbot-transport", "unknown-secret-canary"}} {
-			code, out, errs := u.run(args...)
-			if code == 0 || strings.Contains(out+errs, "unknown-secret-canary") {
+		key := "crsr_SYNTHETIC_invalid_transport_canary"
+		keyFile := writeModeFile(t, "synthetic-key", key, 0600)
+		for _, tc := range []struct {
+			args       []string
+			diagnostic string
+		}{
+			{args: []string{"agent", "add", "--kind", "session", "--name", "Other", "--grokbot-transport", "delivery_v1"}},
+			{args: []string{"agent", "add", "--kind", "grokbot", "--name", "Invalid", "--url", routineURL, "--key-file", keyFile, "--grokbot-transport", "unknown-secret-canary"}, diagnostic: "agent add: --grokbot-transport is not an allowed value"},
+			{args: []string{"route", "add", "--owner", "peer_other", "--url", "https://example.com", "--grokbot-transport", "delivery_v1"}},
+			{args: []string{"route", "update", "route_other", "--grokbot-transport", "unknown-secret-canary"}},
+		} {
+			code, out, errs := u.run(tc.args...)
+			if code == 0 || strings.Contains(out+errs, "unknown-secret-canary") || strings.Contains(out+errs, key) {
 				t.Fatal("invalid selection accepted/echoed")
+			}
+			if tc.diagnostic != "" && !strings.Contains(out+errs, tc.diagnostic) {
+				t.Fatal("invalid selection refusal did not identify transport validation")
 			}
 		}
 		if len(h.posts()) != 0 || len(h.paths("/v1/admin/routes/route_other")) != 0 {
