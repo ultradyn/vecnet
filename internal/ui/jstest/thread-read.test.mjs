@@ -334,3 +334,83 @@ test('opening a thread never calls the mark-all route', () => {
   assert.doesNotMatch(src, /\/read['`]/);
   assert.match(src, /createReader\(/);
 });
+
+test('a thread opened with its first message unread reads that message at once, and only that one', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const api = fakeApi(), seenIds = [];
+  const reader = createReader({ api, active: () => true, onSeen: id => seenIds.push(id) });
+  // An agent's new thread: nothing read yet.
+  const { messages, matrix } = history(0, 3);
+  const unread = unreadOf(messages, matrix, { me: OP });
+  reader.setUnread(unread);
+  reader.readOnOpen('msg_1');
+  await settle();
+  // No dwell, no batch wait: the receipt is already out.
+  assert.deepEqual(api.posts, [['dly_msg_1', 'read']]);
+  assert.deepEqual(seenIds, ['msg_1']);
+  assert.ok(reader.seen('msg_1') && !reader.seen('msg_2') && !reader.seen('msg_3'));
+  // The rest still follow the dwell rule; msg_1 is never receipted again.
+  reader.readOnOpen('msg_1');
+  reader.view('msg_1', visible);
+  reader.view('msg_2', visible);
+  await run(t, DWELL_MS + BATCH_MS);
+  assert.deepEqual(api.posts, [['dly_msg_1', 'read'], ['dly_msg_2', 'read']]);
+  assert.deepEqual(api.markAll, []);
+});
+
+test('read on open waits for an active page, and drops a message read elsewhere meanwhile', async t => {
+  const { api, reader, state, seenIds } = (() => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const api = fakeApi(), seenIds = [], state = { active: false };
+    const reader = createReader({ api, active: () => state.active, onSeen: id => seenIds.push(id) });
+    const { messages, matrix } = history(0, 3);
+    reader.setUnread(unreadOf(messages, matrix, { me: OP }));
+    return { api, reader, state, seenIds };
+  })();
+  reader.readOnOpen('msg_1');
+  await run(t, 10 * DWELL_MS);
+  assert.deepEqual(api.posts, [], 'read while unfocused');
+  // Focus returns: read at once, not after a dwell.
+  state.active = true;
+  reader.activeChanged();
+  await settle();
+  assert.deepEqual(api.posts, [['dly_msg_1', 'read']]);
+  assert.deepEqual(seenIds, ['msg_1']);
+
+  // A second thread: msg_1 is read in another tab before focus returns.
+  const other = createReader({ api: fakeApi(), active: () => state.active });
+  const fresh = history(0, 3);
+  other.setUnread(unreadOf(fresh.messages, fresh.matrix, { me: OP }));
+  state.active = false;
+  other.readOnOpen('msg_1');
+  const later = history(1, 3);
+  other.setUnread(unreadOf(later.messages, later.matrix, { me: OP }));
+  state.active = true;
+  other.activeChanged();
+  await run(t, DWELL_MS + BATCH_MS);
+  assert.ok(!other.seen('msg_1'));
+  // Not unread at all (a read thread, or a message that is not mine): no-op.
+  const quiet = fakeApi();
+  const idle = createReader({ api: quiet, active: () => true });
+  const done = history(3, 3);
+  idle.setUnread(unreadOf(done.messages, done.matrix, { me: OP }));
+  idle.readOnOpen('msg_1');
+  await run(t, DWELL_MS + BATCH_MS);
+  assert.deepEqual(quiet.posts, []);
+  // A destroyed reader reads nothing on return.
+  const left = fakeApi();
+  const gone = createReader({ api: left, active: () => state.active });
+  gone.setUnread(unreadOf(fresh.messages, fresh.matrix, { me: OP }));
+  state.active = false;
+  gone.readOnOpen('msg_1');
+  gone.destroy();
+  state.active = true;
+  gone.activeChanged();
+  await run(t, DWELL_MS + BATCH_MS);
+  assert.deepEqual(left.posts, []);
+});
+
+test('the view reads on open only a first message that is unread', () => {
+  const src = readFileSync(new URL('../static/thread.js', import.meta.url), 'utf8');
+  assert.match(src, /unread\[0\]\.message_id === all\[0\]\.message_id\) reader\.readOnOpen\(all\[0\]\.message_id\)/);
+});

@@ -80,6 +80,13 @@ try {
     // One non-waiting read: count-then-textContent races the pill's removal and
     // textContent would then wait its full timeout for an element that is gone.
     const pill = async () => (await row.locator('.ur').allTextContents())[0] ?? '';
+    const pillIs2 = async (r, want) => {
+      const deadline = Date.now() + 30000;
+      for (let got = (await r.locator('.ur').allTextContents())[0] ?? ''; got !== want; got = (await r.locator('.ur').allTextContents())[0] ?? '') {
+        assert(Date.now() < deadline, `the sidebar pill shows '${got}', want '${want}'`);
+        await page.waitForTimeout(100);
+      }
+    };
     const pillIs = async (want, why) => {
       const deadline = Date.now() + 30000;
       for (let got = await pill(); got !== want; got = await pill()) {
@@ -226,11 +233,48 @@ try {
     assert(v.msgs.every(m => !m.unread), 'an unread bar with nothing unread');
     await shot('tu-none');
 
+    // An agent's new thread (its first message unread): opening it reads
+    // that message at once, with no dwell, and only that one; the second
+    // follows the usual rule (a second on screen, then the batch). Unfocused
+    // it waits; the receipt goes out as focus returns.
+    const sentAt = new Map();
+    page.on('request', req => {
+      if (req.method() === 'POST' && new URL(req.url()).pathname === '/v1/receipts') sentAt.set(req.postDataJSON().delivery_id, Date.now());
+    });
+    const spam = await send('codex', { thread_title: 'Agent status ping', recipients: [demo.operator_peer], content: { text: 'Status: all green.' } });
+    const tail = await send('codex', { thread_id: spam.thread_id, content: { text: 'Details: nothing to do.' } });
+    const spamDly = spam.deliveries.find(d => d.recipient === demo.operator_peer).delivery_id;
+    const tailDly = tail.deliveries.find(d => d.recipient === demo.operator_peer).delivery_id;
+    const spamRow = page.locator(`#threads a[href="#thread/${spam.thread_id}"]`);
+    await spamRow.locator('.ur', { hasText: '2' }).waitFor();
+    await focus(false);
+    await spamRow.click();
+    await page.locator(`[id="m-${tail.message_id}"]`).waitFor();
+    await quiet();
+    await page.waitForTimeout(500);
+    assert(!receipts.some(r => r.delivery_id === spamDly), 'read on open while unfocused');
+    await focus(true);
+    const t0 = Date.now();
+    for (; !receipts.some(r => r.delivery_id === spamDly); ) {
+      assert(Date.now() - t0 < 5000, 'the first message was not read on focus');
+      await page.waitForTimeout(20);
+    }
+    // Well inside the 1 s dwell plus the 500 ms batch the rule would need.
+    assert(Date.now() - t0 < 900, `read on open took ${Date.now() - t0} ms`);
+    await page.locator(`[id="m-${spam.message_id}"]:not(.unread)`).waitFor();
+    // The second, on screen too, is read by the dwell: a second later.
+    for (; !sentAt.has(tailDly); ) {
+      assert(Date.now() - t0 < 10000, 'the second message was never read');
+      await page.waitForTimeout(50);
+    }
+    assert(sentAt.get(tailDly) - sentAt.get(spamDly) >= 900, `the second message was read on open too: ${sentAt.get(tailDly) - sentAt.get(spamDly)} ms after the first`);
+    await pillIs2(spamRow, '');
+
     assert(countRequests(markAll) === 0, `the view posted mark-all ${countRequests(markAll)} times`);
     const once = receipts.filter(r => r.delivery_id !== awayDly).map(r => r.delivery_id);
     assert(new Set(once).size === once.length, 'a delivery was receipted twice');
   });
-  console.log('Thread unread passed: opens at the first unread under New (desktop and phone), nothing read unfocused, partial reading by dwell and scroll, sidebar count follows, watched arrival read with New kept, away arrival under New, one quiet retry, nothing unread opens at the bottom, never mark-all');
+  console.log('Thread unread passed: opens at the first unread under New (desktop and phone), nothing read unfocused, partial reading by dwell and scroll, sidebar count follows, watched arrival read with New kept, away arrival under New, one quiet retry, nothing unread opens at the bottom, a new thread\'s first message read on open (after focus, without the dwell, only it), never mark-all');
 } finally {
   await cleanBuild();
 }
