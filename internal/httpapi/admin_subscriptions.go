@@ -20,6 +20,12 @@ func (s *server) adminListSubscriptions(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, list)
 }
 
+// adminRemoveSubscription is DELETE /v1/admin/subscriptions/{id}: 204;
+// removes the exact subscription and its queued callbacks. Unknown IDs are 404.
+func (s *server) adminRemoveSubscription(w http.ResponseWriter, r *http.Request) {
+	s.subscriptionAction(w, r, events.NewStore(s.Hub).Remove)
+}
+
 // adminPauseSubscription is POST /v1/admin/subscriptions/{id}/pause: 204; the
 // operator's stop for one subscription, which a re-subscribe does not lift. An
 // unknown id is 404 not_found.

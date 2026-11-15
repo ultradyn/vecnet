@@ -376,7 +376,7 @@ Admin endpoints require the operator credential [T17]. Each mirrors a CLI comman
 | `POST /v1/admin/notices/{id}/clear` | `notice clear ID \| --kind K`: no body, 204; unknown id 404 `not_found` | §21.2 |
 | `GET /v1/admin/audit` | audit log | [T11] |
 | `GET /v1/admin/counters` | delivery and loop counters | [T17] |
-| `GET /v1/admin/subscriptions`, `POST …/{id}/pause`, `POST …/{id}/resume` | `subscriptions list\|pause\|resume`: dot subscription health (section 13.4); pause stops one subscription until resume, and a re-subscribe does not lift it | [T02, T19] |
+| `GET /v1/admin/subscriptions`, `POST …/{id}/pause`, `POST …/{id}/resume`, `DELETE …/{id}` | `subscriptions list\|pause\|resume`: dot subscription health (section 13.4); pause stops one subscription until resume, and a re-subscribe does not lift it. Operator-only DELETE takes no body; removes the exact subscription, its outbox and refresh schedule atomically, audits `subscription_remove` with its ID only, and returns 204 (404 `not_found` when already absent). An in-flight callback may finish. Messages, peer credentials and other subscriptions are retained; an active client can subscribe again with a fresh ID. Emits the existing `operator_view` subscription change; clients invalidate `subs` as well as other operator views. The web peer page offers removal with exact-ID confirmation and visible error recovery | [T02, T19] |
 
 **Principals.** `vecnet principal add --name <n>` creates a principal and prints its `prn_` id and credential. `vecnet peer add … --principal <prn_>` enrols a peer under it. `peer add` without `--principal` creates an implicit single-peer principal with the peer's display name. Only the operator reassigns a peer, with `vecnet peer move <peer> --principal <prn_>` [R10] or, for a dot, by issuing the link code whose consumption moves it (section 4.5). Kind `operator` carries the operator powers of section 16, so `peer add --kind operator` is accepted only under the operator principal (otherwise 422 `invalid_value`).
 
@@ -542,14 +542,14 @@ unknown event types or undecodable data invalidate nothing:
 | `thread_updated` | `threads`, `thread:<thread_id>` |
 | `presence`, `directory_updated` | `peers` |
 | `approval_expired` | `inbox`, `thread:<thread_id>` |
-| `operator_view` | `inbox`, `threads`, `peers`, plus `thread:<thread_id>` when non-empty |
+| `operator_view` | `inbox`, `threads`, `peers`, plus `subs` when `reason` is `subscription` and `thread:<thread_id>` when non-empty |
 
 `operator_view` is appended only to enabled operator peers, in the transaction
 that changes a view. Its data is `{reason, thread_id}`: `reason` is `sent`,
 `read`, `presence`, `dead_letter`, `subscription`, `archive`, or `reaction` (§17.3); `thread_id` is a `thr_`
 id or `null`. It fires for a new operator send (including approval responses),
 a newly read operator delivery, a changed effective operator presence, a
-dead-letter retry or discard, a subscription pause or resume, or a thread archive
+dead-letter retry or discard, a subscription pause, resume or removal, or a thread archive
 state change. A thread-archive batch emits one `archive` invalidation per enabled
 operator with `thread_id:null`. Idempotent
 sends, repeated reads, unchanged presence heartbeats, and unchanged

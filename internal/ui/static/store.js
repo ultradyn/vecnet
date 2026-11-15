@@ -24,6 +24,7 @@ export function tagsFor(ev) {
   if (type === 'operator_view') {
     if (!isObject(data) || typeof data.reason !== 'string' || !(data.thread_id === null || typeof data.thread_id === 'string')) return [];
     const tags = ['inbox', 'threads', 'peers'];
+    if (data.reason === 'subscription') tags.push('subs');
     return data.thread_id ? [...tags, 'thread:' + data.thread_id] : tags;
   }
   const known = type === 'presence' || type === 'directory_updated' || Object.hasOwn(THREAD_TAGS, type);
