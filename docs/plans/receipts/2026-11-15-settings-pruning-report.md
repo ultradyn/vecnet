@@ -70,3 +70,15 @@ A final-review package assembly attempt also stopped before worker launch when
 a broad credential-pattern check matched a synthetic fixture Authorization
 expression. The controller verified the exact code expression, retained the
 failed attempt and launched the corrected package; no private value was present.
+
+## Integration lifecycle
+
+Merged and pushed at `4e433e37`, with all nine executable/test blobs identical
+to the reviewed source. Only the Settings gate-report item is complete in
+[GitHub #51](https://github.com/ultradyn/vecnet/issues/51#issuecomment-6894275147);
+the issue remains open. All 314 operational workspace files were copied and
+hash-verified outside the worktree before removing the owned worktree and
+merged branch; a post-cleanup manifest recheck also verifies314/314. Archive:
+`.scratch/vecnet/issue-loop/2026-11-15/issue-51-settings-evidence`. Seven launched
+workers exited0; the two disclosed prelaunch failures remain historical exit1.
+No installed release or pruning activation is implied.
