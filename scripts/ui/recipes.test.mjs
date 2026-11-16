@@ -17,7 +17,7 @@ test('ui-shots propagates screen failure even when the last glob entry is a help
     await mkdir(join(dir, 'scripts/ui'), { recursive: true });
     await mkdir(join(dir, 'bin'));
     await writeFile(join(dir, 'scripts/ui/reap-demos.sh'), 'echo reap >> "$CALL_LOG"\n');
-    for (const name of ['ansi.mjs', 'lib.mjs', 'smoke.mjs', 'tmux.mjs', 'recipes.test.mjs', 'shots-index.mjs']) {
+    for (const name of ['ansi.mjs', 'lib.mjs', 'smoke.mjs', 'tmux.mjs', 'recipes.test.mjs', 'shots-index.mjs', 'shot-paths.mjs']) {
       await writeFile(join(dir, 'scripts/ui', name), '');
     }
     // The recipe's leading `node --test …` unit step is logged as "unit" and passes; screens get CHECK_STATUS.
@@ -52,6 +52,7 @@ test('ui-shots checks the completed configured output for extra and missing PNGs
     await writeFile(join(dir, 'docs/plans/shots/oui/README.md'), '[expected.png](expected.png)\n');
     await writeFile(join(dir, 'docs/plans/shots/oui/expected.png'), '');
     await copyFile(new URL('shots-index.mjs', import.meta.url), join(dir, 'scripts/ui/shots-index.mjs'));
+    await copyFile(new URL('shot-paths.mjs', import.meta.url), join(dir, 'scripts/ui/shot-paths.mjs'));
     await writeFile(join(dir, 'bin/build2'), `#!/usr/bin/env bash
 printf '%s\\n' "$2" >> "$CALL_LOG"
 if [[ "$2" == scripts/ui/shots-index.mjs ]]; then exec "$NODE" "$2"; fi
@@ -77,5 +78,62 @@ fi
         assert.match(result.stderr, scenario === 'duplicate' ? /more than once/ : scenario === 'extra' ? /late\.png/ : /expected\.png/);
       }
     }
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('ui-shots validates ignored default captures after all screens and skips the path helper', async () => {
+  const justfile = await readFile(new URL('../../justfile', import.meta.url), 'utf8');
+  const body = justfile.match(/^ui-shots:\n((?:[ \t].*\n|\n)+)/m)?.[1];
+  assert.ok(body, 'ui-shots recipe exists');
+  const dir = await mkdtemp(join(tmpdir(), 'vecnet-ui-default-'));
+  try {
+    await mkdir(join(dir, 'scripts/ui'), { recursive: true });
+    await mkdir(join(dir, 'docs/plans/shots/oui'), { recursive: true });
+    await mkdir(join(dir, 'bin'));
+    await writeFile(join(dir, 'scripts/ui/reap-demos.sh'), 'echo reap >> "$CALL_LOG"\n');
+    for (const name of ['shell.mjs', 'smoke.mjs']) await writeFile(join(dir, 'scripts/ui', name), '');
+    for (const name of ['lib.mjs', 'shots-index.mjs', 'shot-paths.mjs']) {
+      await copyFile(new URL(name, import.meta.url), join(dir, 'scripts/ui', name));
+    }
+    await writeFile(join(dir, 'docs/plans/shots/oui/README.md'), '[expected.png](expected.png)\n');
+    await writeFile(join(dir, 'docs/plans/shots/oui/expected.png'), 'historical image');
+    await writeFile(join(dir, 'bin/build2'), `#!/usr/bin/env bash
+if [[ "$2" == --test ]]; then echo unit >> "$CALL_LOG"; exit 0; fi
+printf '%s\\n' "$2" >> "$CALL_LOG"
+if [[ "$2" == scripts/ui/shots-index.mjs ]]; then exec "$NODE" "$2"; fi
+if [[ "$2" == scripts/ui/shell.mjs ]]; then
+  "$NODE" --input-type=module -e 'import { shotPath } from "./scripts/ui/lib.mjs"; import { writeFile } from "node:fs/promises"; await writeFile(await shotPath("expected"), "generated image");'
+fi
+if [[ "$2" == scripts/ui/smoke.mjs && "$SCENARIO" == extra ]]; then touch .scratch/evidence/ui/late.png; fi
+`, { mode: 0o700 });
+    for (const scenario of ['complete', 'extra']) {
+      await writeFile(join(dir, 'calls'), '');
+      const env = { ...process.env, PATH: `${join(dir, 'bin')}:${process.env.PATH}`, CALL_LOG: join(dir, 'calls'), NODE: process.execPath, SCENARIO: scenario };
+      delete env.SHOTS_DIR;
+      const result = spawnSync('bash', ['-c', body.replace(/^ {4}/gm, '')], { cwd: dir, encoding: 'utf8', env });
+      assert.equal(await readFile(join(dir, 'calls'), 'utf8'), 'reap\nunit\nscripts/ui/shell.mjs\nscripts/ui/smoke.mjs\nscripts/ui/shots-index.mjs\n');
+      if (scenario === 'complete') assert.equal(result.status, 0, result.stderr);
+      else { assert.notEqual(result.status, 0); assert.match(result.stderr, /late\.png/); }
+      assert.equal(await readFile(join(dir, 'docs/plans/shots/oui/expected.png'), 'utf8'), 'historical image');
+    }
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('evidence recipes forward paths and publisher arguments without shell expansion', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'vecnet-evidence-recipes-'));
+  try {
+    await copyFile(new URL('../../justfile', import.meta.url), join(dir, 'justfile'));
+    await mkdir(join(dir, 'bin'));
+    await writeFile(join(dir, 'bin/node'), `#!/usr/bin/env bash
+exec "$NODE" -e 'process.stdout.write(JSON.stringify(process.argv.slice(1)))' -- "$@"
+`, { mode: 0o700 });
+    const env = { ...process.env, PATH: `${join(dir, 'bin')}:${process.env.PATH}`, NODE: process.execPath };
+    const args = ['captures with spaces', '--receipt', 'docs/plans/receipt $(literal).json', '--dry-run'];
+    const publish = spawnSync('just', ['evidence-publish', ...args], { cwd: dir, env, encoding: 'utf8' });
+    assert.equal(publish.status, 0, publish.stderr);
+    assert.deepEqual(JSON.parse(publish.stdout), ['scripts/evidence/publish.mjs', ...args]);
+    const check = spawnSync('just', ['check-evidence'], { cwd: dir, env, encoding: 'utf8' });
+    assert.equal(check.status, 0, check.stderr);
+    assert.deepEqual(JSON.parse(check.stdout), ['scripts/evidence/check.mjs']);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
