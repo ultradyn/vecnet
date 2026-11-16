@@ -3,7 +3,7 @@ import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import childProcess from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, copyFileSync, linkSync, existsSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, linkSync, existsSync, readFileSync, statSync, lstatSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -25,9 +25,9 @@ import { fixtureSpawn } from './fixtures/connector-process.mjs';
 
 const windows = process.platform === 'win32';
 function sandbox(t: { after(fn: () => void): void }) {
-  const dir = mkdtempSync(join(tmpdir(), 'vecnet-native-'));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  makePrivateDirectory(dir); return dir;
+  const root = mkdtempSync(join(tmpdir(), 'vecnet-native-')), dir = join(root, 'private');
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  makePrivateDirectory(dir); return realpathSync.native(dir);
 }
 
 test('Windows DACL reads enforce private ownership for credentials and bindings; no chmod bypass', { skip: !windows }, async t => {
@@ -227,7 +227,18 @@ test('Windows custom CODEX_HOME finds the native install under USERPROFILE witho
   const architecture = process.arch === 'arm64' ? 'aarch64' : 'x86_64';
   const binDir = join(user, '.codex', 'packages', 'app-server-daemon', 'releases', `0.169.0-${architecture}-pc-windows-msvc`, 'bin');
   makePrivateDirectory(binDir);
-  const executable = join(binDir, 'codex.exe'); copyFileSync(process.execPath, executable);
+  const executable = join(binDir, 'codex.exe');
+  assert.throws(() => lstatSync(executable), { code: 'ENOENT' });
+  writePrivate(executable, '');
+  localPlatform('check-private', executable);
+  const seed = statSync(executable, { bigint: true }), bytes = readFileSync(process.execPath);
+  assert.equal(seed.size, 0n);
+  // Retain the native TokenUser owner and DACL while populating the real Node.
+  writeFileSync(executable, bytes, { flag: 'r+' });
+  const populated = statSync(executable, { bigint: true });
+  assert.equal(populated.dev, seed.dev); assert.equal(populated.ino, seed.ino);
+  assert.equal(populated.size, BigInt(bytes.length)); assert.deepEqual(readFileSync(executable), bytes);
+  localPlatform('check-private', executable);
   assert.equal(nativeCodexBinary(custom, { HOME: selected, USERPROFILE: user, PATH: '', SystemRoot: process.env.SystemRoot,
     VECNET_BIN: process.env.VECNET_BIN }), executable);
 });

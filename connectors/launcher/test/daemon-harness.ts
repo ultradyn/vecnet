@@ -19,6 +19,7 @@ import type { Ledger } from '../src/ledger.ts';
 import { createFakeBackend } from './fake-backend.ts';
 import type { FakeBackend } from './fake-backend.ts';
 import { launchDelivery, threadDelivery } from './fixtures.ts';
+import { makePrivateDirectory } from './fixtures/platform.ts';
 
 // The fixture Delivery is addressed to …8A and sent by …8C.
 export const LAUNCHER = 'peer_01JD3Q2K8M4N6P8R0T2V4X6Z8A';
@@ -102,7 +103,12 @@ export interface Harness {
 
 export async function harness(t: TestContext, opts: { cfg?: Record<string, unknown>; peers?: DirectoryEntry[]; backend?: FakeBackend;
   beforeRecordRef?: (jobId: string) => void; env?: NodeJS.ProcessEnv } = {}): Promise<Harness> {
-  const dir = mkdtempSync(join(tmpdir(), 'launcher-daemon-'));
+  const root = mkdtempSync(join(tmpdir(), 'launcher-daemon-')), dir = join(root, 'private');
+  let daemon: Awaited<ReturnType<typeof startDaemon>> | undefined;
+  t.after(async () => {
+    try { await daemon?.stop(); } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+  makePrivateDirectory(dir);
   // The Codex connector reads its bindings from this environment: never the real one.
   const env = opts.env ?? { VECNET_CODEX_BINDINGS: join(dir, 'codex-bindings.json') };
   const clock = fakeClock(T0), log = memoryLog();
@@ -123,12 +129,12 @@ export async function harness(t: TestContext, opts: { cfg?: Record<string, unkno
   const client: HubApi & { me(): Promise<unknown> } = { ...createHubClient({ baseUrl: hub.url, credential: hub.bearer }), me: async () => ({ kind: 'peer', peer_id: LAUNCHER }) };
   const counter = { n: 0 };
   let stream = memoryStream(counter);
-  let daemon = await startDaemon({ cfg, hub: client, stream, clock, log, env, backends: new Map([['fake', backend]]), beforeRecordRef: opts.beforeRecordRef });
+  daemon = await startDaemon({ cfg, hub: client, stream, clock, log, env, backends: new Map([['fake', backend]]), beforeRecordRef: opts.beforeRecordRef });
   const bodies = (path: string) => hub.requests.filter(r => r.path === path && r.method === 'POST').map(r => r.body);
   const sends = () => bodies('/v1/messages') as SendRequest[];
   const h: Harness = {
     hub, clock, log, backend, cfg, dir, launches: () => launches,
-    get stream() { return stream; }, get daemon() { return daemon; },
+    get stream() { return stream; }, get daemon() { return daemon!; },
     sends,
     statuses: jobId => sends().filter(s => s.job_status && (jobId === undefined || s.job_status.job_id === jobId)).map(s => s.job_status!),
     receipts: () => bodies('/v1/receipts') as ReceiptBody[],
@@ -141,17 +147,12 @@ export async function harness(t: TestContext, opts: { cfg?: Record<string, unkno
     },
     push: (type, data) => stream.push(type, data),
     async restart(o = {}) {
-      daemon.crash();
+      daemon!.crash();
       stream = memoryStream(counter);
       daemon = await startDaemon({ cfg, hub: o.me ? { ...client, me: o.me } as HubApi : client, stream, clock, log, env, backends: o.backends ?? new Map([['fake', backend]]),
         beforeRecordRef: o.beforeRecordRef, acceptCursorGap: o.acceptCursorGap });
     },
   };
-  t.after(async () => {
-    await daemon.stop();
-    await hub.close();
-    rmSync(dir, { recursive: true, force: true });
-  });
   return h;
 }
 

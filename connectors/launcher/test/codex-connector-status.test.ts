@@ -3,17 +3,17 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtempSync, writeFileSync, rmSync, readFileSync, existsSync, renameSync, statSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, existsSync, renameSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openStatusPublisher } from '../src/codex/connector-status.ts';
 
 const moduleUrl = new URL('../src/codex/connector-status.ts', import.meta.url).href;
 test('readiness lock excludes another process and releases on process death', async t => {
-  const dir = mkdtempSync(join(tmpdir(), 'vn-cs-')), path = join(dir, 'bindings');
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const root = mkdtempSync(join(tmpdir(), 'vn-cs-')), dir = join(root, 'private'), path = join(dir, 'bindings');
+  t.after(() => rmSync(root, { recursive: true, force: true }));
   makePrivateDirectory(dir);
-  writeFileSync(path, '{}', { mode: 0o600 });
+  writePrivate(path, '{}');
   const child = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', '--input-type=module', '-e', `
     import { openStatusPublisher } from ${JSON.stringify(moduleUrl)};
     const publisher = await openStatusPublisher(process.argv[1], (process.geteuid?.() ?? -1));
@@ -42,21 +42,21 @@ test('readiness lock excludes another process and releases on process death', as
 });
 
 test('stop never deletes a replacement status file owned by someone else', async t => {
-  const dir = mkdtempSync(join(tmpdir(), 'vn-cs-')), path = join(dir, 'bindings');
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const root = mkdtempSync(join(tmpdir(), 'vn-cs-')), dir = join(root, 'private'), path = join(dir, 'bindings');
+  t.after(() => rmSync(root, { recursive: true, force: true }));
   makePrivateDirectory(dir);
-  writeFileSync(path, '{}', { mode: 0o600 });
+  writePrivate(path, '{}');
   const publisher = await openStatusPublisher(path, (process.geteuid?.() ?? -1)); assert.ok(publisher);
   publisher.publish(0, []);
-  writeFileSync(path + '.replacement', 'replacement', { mode: 0o600 });
+  writePrivate(path + '.replacement', 'replacement');
   renameSync(path + '.replacement', path + '.status.json');
   await publisher.close(); await publisher.close();
   assert.equal(readFileSync(path + '.status.json', 'utf8'), 'replacement');
 });
 
 test('startup publishes empty readiness before the authority directory exists', async t => {
-  const dir = mkdtempSync(join(tmpdir(), 'vn-cs-'));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const root = mkdtempSync(join(tmpdir(), 'vn-cs-')), dir = join(root, 'private');
+  t.after(() => rmSync(root, { recursive: true, force: true }));
   makePrivateDirectory(dir);
   const path = join(dir, 'state', 'codex', 'bindings.json');
   const publisher = await openStatusPublisher(path, (process.geteuid?.() ?? -1));
