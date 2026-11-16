@@ -250,10 +250,26 @@ test('packed npm installation runs both commands and exchanges messages through 
     env: { ...env, VECNET_CONFIG: operatorConfig },
   }));
   const launcherEnv = { ...env, VECNET_CONFIG: path.join(temporary, 'launcher.toml') };
+  // Hosted toolcaches may have writable ancestors. Install a byte-identical
+  // real Node in our private fixture rather than weakening executable checks.
+  const nodeDir = path.join(temporary, 'private node');
+  mustRun(cli, ['local-platform', 'mkdir-private', nodeDir]);
+  const node = path.join(nodeDir, windows ? 'node.exe' : 'node');
+  // Create a fresh file so Windows inherits the private directory's DACL
+  // instead of copying any toolcache security attributes along with Node.
+  await writeFile(node, await readFile(process.execPath), { flag: 'wx', mode: 0o500 });
+  mustRun(cli, ['local-platform', 'check-private', node]);
+  assert.deepEqual(await readFile(node), await readFile(process.execPath), 'private Node preserves the actual executable bytes');
+  const nodeProbe = JSON.parse(execFileSync(node, ['-e',
+    'console.log(JSON.stringify({execPath:process.execPath,version:process.version}))'], {
+    cwd: temporary, env: launcherEnv, encoding: 'utf8', timeout: 10_000, windowsHide: true,
+  }));
+  assert.equal(nodeProbe.execPath, node);
+  assert.equal(nodeProbe.version, process.version, 'private executable runs the real Node runtime');
   const managerDir = path.join(temporary, 'fake-manager'), managerLog = path.join(temporary, 'manager.log');
   await mkdir(managerDir, { mode: 0o700 });
   if (!windows) await writeFile(path.join(managerDir, 'systemctl'), '#!/bin/sh\nprintf \'%s\\n\' "$*" >> "$LAUNCHER_MANAGER_LOG"\n', { mode: 0o700 });
-  launcherEnv.PATH = managerDir + path.delimiter + path.dirname(process.execPath) + path.delimiter + env.PATH;
+  launcherEnv.PATH = managerDir + path.delimiter + nodeDir + path.delimiter + env.PATH;
   launcherEnv.LAUNCHER_MANAGER_LOG = managerLog;
   launcherEnv.VECNET_BIN = path.join(installedRoot, 'native', process.platform + '-' + process.arch, 'vecnet' + (windows ? '.exe' : ''));
   const repo = path.join(temporary, 'launcher repo with spaces');
@@ -261,10 +277,27 @@ test('packed npm installation runs both commands and exchanges messages through 
   execFileSync('git', ['-C', repo, '-c', 'user.name=Package test', '-c', 'user.email=package@example.invalid', 'commit', '--allow-empty', '-qm', 'initial'], { cwd: temporary, env: launcherEnv });
   mustRun(cli, ['enrol', '--hub', base, '--token', '-', '--profile', 'packed-launcher'], { env: launcherEnv, input: added.enrol_token + '\n' });
   mustRun(cli, ['--net', 'packed-launcher', 'launcher', 'setup', '--project', 'packed', '--repo', repo, '--base-ref', 'HEAD', '--write'], { env: launcherEnv });
-  const installArgs = ['--net', 'packed-launcher', 'launcher', 'install', '--node', process.execPath];
+  const installArgs = ['--net', 'packed-launcher', 'launcher', 'install', '--node', node];
   const plan = JSON.parse(mustRun(cli, installArgs, { env: launcherEnv }));
+  assert.equal(plan.runtime.node, node, 'preview pins the private Node through the real ancestry checks');
   assert.equal(plan.runtime.source, installedRoot, 'installed executable discovers its own package outside the checkout');
   await assert.rejects(readFile(managerLog), { code: 'ENOENT' }, 'preview must not touch the manager');
+  if (!windows) {
+    // Model the hosted toolcache permission failure without relying on /opt
+    // or changing any shared directory. Safe executable bytes are insufficient
+    // when an ancestor can be replaced by another user/group member.
+    const writable = path.join(temporary, 'writable toolcache');
+    const unsafeBin = path.join(writable, 'bin');
+    await mkdir(unsafeBin, { recursive: true, mode: 0o700 });
+    const unsafeNode = path.join(unsafeBin, 'node');
+    await copyFile(node, unsafeNode);
+    await chmod(writable, 0o770);
+    const refused = run(cli, [...installArgs.slice(0, -1), unsafeNode, '--write'], { env: launcherEnv });
+    assert.equal(refused.status, 1, 'install rejects a real Node below writable ancestry');
+    assert.ok(refused.stderr.includes(`launcher directory ${writable}: unsafe writable launcher path`), refused.stderr);
+    await assert.rejects(readFile(managerLog), { code: 'ENOENT' }, 'unsafe Node must not touch the manager');
+    await assert.rejects(readFile(plan.unit_path), { code: 'ENOENT' }, 'unsafe Node must not publish a unit');
+  }
   let taskName;
   if (windows) {
     taskName = JSON.parse(plan.unit).name;
@@ -277,6 +310,7 @@ test('packed npm installation runs both commands and exchanges messages through 
   }
   const writeArgs = [...installArgs, '--write', ...(windows ? [] : ['--enable', '--start'])];
   const installed = JSON.parse(mustRun(cli, writeArgs, { env: launcherEnv }));
+  assert.equal(installed.runtime.node, node);
   assert.ok(installed.runtime.entry.startsWith(launcherEnv.XDG_DATA_HOME + path.sep));
   if (windows) {
     const state = JSON.parse(mustRun(cli, ['--net', 'packed-launcher', 'launcher', 'status'], { env: launcherEnv }));
@@ -288,18 +322,21 @@ test('packed npm installation runs both commands and exchanges messages through 
   const unit = await readFile(installed.unit_path, 'utf8');
   if (windows) {
     const task = JSON.parse(unit);
-    assert.equal(task.executable, process.execPath);
+    assert.equal(task.executable, node);
     assert.ok(task.args.includes(installed.runtime.entry), 'task executes the private installed snapshot');
     assert.equal(task.environment.VECNET_BIN, launcherEnv.VECNET_BIN);
-  } else assert.ok(unit.includes(installed.runtime.entry), 'service executes the private installed snapshot');
-  // A developer may keep the Node toolchain in the checkout. Only that
-  // explicitly selected executable and PATH may refer there, never runtime code.
+  } else {
+    assert.ok(unit.includes(node), 'service executes the private Node');
+    assert.ok(unit.includes(installed.runtime.entry), 'service executes the private installed snapshot');
+  }
+  // A developer's inherited PATH may contain a toolchain in the checkout;
+  // runtime code must still come only from the installed package.
   const escaped = value => windows ? JSON.stringify(value).slice(1, -1) : value;
-  const runtimeUnit = [process.execPath, launcherEnv.PATH].reduce((text, tool) => text.replaceAll(escaped(tool), '<trusted-tool>'), unit);
+  const runtimeUnit = [node, launcherEnv.PATH].reduce((text, tool) => text.replaceAll(escaped(tool), '<trusted-tool>'), unit);
   assert.ok(!runtimeUnit.includes(escaped(root)), 'manager runtime must not reference the source checkout');
   const builtins = JSON.parse(await readFile(path.join(installedRoot, 'BUILD_INFO.json'), 'utf8')).launcher.backends;
   for (const id of ['t3', 'paseo', 'codex-app-server', 'acp']) assert.ok(builtins.includes(id));
-  const graph = execFileSync(process.execPath, ['--disable-warning=ExperimentalWarning', '--input-type=module', '-e',
+  const graph = execFileSync(node, ['--disable-warning=ExperimentalWarning', '--input-type=module', '-e',
     'import {pathToFileURL} from "node:url"; import path from "node:path"; const ids=JSON.parse(process.argv[2]); for (const id of ids) { const m=await import(pathToFileURL(path.join(process.argv[1],"connectors/launcher/src/backends",id,"index.ts"))); const plugin=m.default ?? Object.values(m).find(p=>p?.id===id); if(plugin?.id!==id) throw new Error("wrong backend"); } console.log(JSON.stringify(ids));',
     installed.runtime.snapshot, JSON.stringify(builtins)], { cwd: temporary, env: launcherEnv, encoding: 'utf8', timeout: 10000, windowsHide: true });
   assert.deepEqual(JSON.parse(graph), builtins);
