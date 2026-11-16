@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -130,7 +131,7 @@ func newAppHookFixture(t *testing.T) *appHookFixture {
 	})
 	f.env["CODEX_HOME"] = filepath.Join(filepath.Dir(f.path), "codex")
 	f.env["VECNET_CODEX_BINDINGS"] = filepath.Join(f.env["HOME"], ".local", "state", "vecnet", "codex", "bindings.json")
-	if err := os.MkdirAll(filepath.Dir(f.env["VECNET_CODEX_BINDINGS"]), 0700); err != nil {
+	if err := cliFixtureMkdirAll(filepath.Dir(f.env["VECNET_CODEX_BINDINGS"]), 0700); err != nil {
 		t.Fatal(err)
 	}
 	raw, err := os.ReadFile(f.env["VECNET_CONFIG"])
@@ -146,7 +147,7 @@ func newAppHookFixture(t *testing.T) *appHookFixture {
 			break
 		}
 	}
-	if err := os.MkdirAll(f.env["CODEX_HOME"], 0700); err != nil {
+	if err := cliFixtureMkdirAll(f.env["CODEX_HOME"], 0700); err != nil {
 		t.Fatal(err)
 	}
 	home, err := canonicalCodexPath(f.env["CODEX_HOME"])
@@ -162,7 +163,7 @@ func newAppHookFixture(t *testing.T) *appHookFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(f.env["VECNET_CODEX_BINDINGS"], authority, 0600); err != nil {
+	if err := cliFixtureWriteFile(f.env["VECNET_CODEX_BINDINGS"], authority, 0600); err != nil {
 		t.Fatal(err)
 	}
 	seedHook(t, f.path, "e1.0")
@@ -171,7 +172,7 @@ func newAppHookFixture(t *testing.T) *appHookFixture {
 }
 func (f *appHookFixture) seed(t *testing.T, raw string) {
 	t.Helper()
-	if err := os.WriteFile(f.path, []byte(raw), 0600); err != nil {
+	if err := cliFixtureWriteFile(f.path, []byte(raw), 0600); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -404,7 +405,7 @@ func TestHookAppServerHostileIsInert(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if value+"\n" != string(want) {
+	if value+"\n" != strings.ReplaceAll(string(want), "\r\n", "\n") {
 		t.Fatalf("golden mismatch\ngot: %s\nwant: %s", value, want)
 	}
 }
@@ -416,7 +417,7 @@ func TestHookAppServerEntryCap(t *testing.T) {
 		t.Fatal(e)
 	}
 	raw = bytes.ReplaceAll(raw, []byte("profiles.p]"), []byte("profiles."+profile+"]"))
-	if e = os.WriteFile(f.env["VECNET_CONFIG"], raw, 0600); e != nil {
+	if e = cliFixtureWriteFile(f.env["VECNET_CONFIG"], raw, 0600); e != nil {
 		t.Fatal(e)
 	}
 	f.env["VECNET_PROFILE"] = profile
@@ -444,7 +445,11 @@ func TestHookAppServerPointerWhenTooBig(t *testing.T) {
 	f := newAppHookFixture(t)
 	f.add(t, "wake", "text", strings.Repeat("\"", 32))
 	// Basenames are capped at 32 runes; escaping maximizes their byte cost.
-	config := filepath.Join(filepath.Dir(f.env["VECNET_CONFIG"]), strings.Repeat("\"", 32))
+	basename := strings.Repeat("\"", 32)
+	if runtime.GOOS == "windows" {
+		basename = strings.Repeat("&", 32)
+	} // Legal filename, same five-byte HTML escaping cost.
+	config := filepath.Join(filepath.Dir(f.env["VECNET_CONFIG"]), basename)
 	if e := os.Rename(f.env["VECNET_CONFIG"], config); e != nil {
 		t.Fatal(e)
 	}
@@ -736,7 +741,7 @@ func (f *appHookFixture) updateOwner(t *testing.T, change func(*codexBinding)) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(f.env["VECNET_CODEX_BINDINGS"], raw, 0600); err != nil {
+	if err := cliFixtureWriteFile(f.env["VECNET_CODEX_BINDINGS"], raw, 0600); err != nil {
 		t.Fatal(err)
 	}
 }

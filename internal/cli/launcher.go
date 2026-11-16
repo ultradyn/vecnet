@@ -7,11 +7,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/XertroV/vecnet/internal/platform"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -33,7 +35,8 @@ func (a *app) launcherPaths() (launcherPaths, error) {
 	if err != nil {
 		return launcherPaths{}, err
 	}
-	if a.getenv("HOME") == "" {
+	home := platform.Home(a.getenv)
+	if home == "" {
 		return launcherPaths{}, usageErr("launcher requires HOME")
 	}
 	h := sha256.Sum256([]byte(config + "\x00" + name))
@@ -46,7 +49,7 @@ func (a *app) launcherPaths() (launcherPaths, error) {
 		if s := a.getenv(key); s != "" {
 			return s
 		}
-		return filepath.Join(a.getenv("HOME"), fallback)
+		return filepath.Join(home, fallback)
 	}
 	data, err := filepath.Abs(filepath.Join(base("XDG_DATA_HOME", ".local/share"), "vecnet-launcher"))
 	if err != nil {
@@ -57,6 +60,9 @@ func (a *app) launcherPaths() (launcherPaths, error) {
 		return launcherPaths{}, err
 	}
 	unit := filepath.Join(base("XDG_CONFIG_HOME", ".config"), "systemd", "user", "vecnet-launcher-"+id+".service")
+	if runtime.GOOS == "windows" {
+		unit = filepath.Join(dir, "vecnet-launcher-"+id+".task.json")
+	}
 	unit, err = filepath.Abs(unit)
 	return launcherPaths{filepath.Join(dir, "config.json"), filepath.Join(dir, "credential"), state, data, filepath.Join(dir, "install.json"), unit, name}, err
 }
@@ -97,6 +103,9 @@ func (a *app) cmdLauncher(args []string) error {
 		var m launcherInstall
 		if err := launcherReadJSON(p.Manifest, &m); err != nil {
 			return usageErr("launcher is not installed; run launcher install --write")
+		}
+		if runtime.GOOS == "windows" {
+			return a.launcherWindowsCheck(p, m)
 		}
 		return a.launcherRun(m.Node, "--disable-warning=ExperimentalWarning", m.Entry, "check", "--config", p.Config)
 	}
@@ -206,7 +215,7 @@ func (a *app) launcherSetup(p launcherPaths, o opts) error {
 		home = a.getenv("CODEX_HOME")
 	}
 	if home == "" {
-		home = filepath.Join(a.getenv("HOME"), ".codex")
+		home = filepath.Join(platform.Home(a.getenv), ".codex")
 	}
 	if backendID == "codex-app-server" {
 		home, err = launcherDir(home, "--codex-home")
@@ -313,13 +322,23 @@ func (a *app) launcherSetup(p launcherPaths, o opts) error {
 			return e
 		}
 	}
-	if err = os.MkdirAll(filepath.Dir(p.Config), 0o700); err != nil {
+	if err = platform.MkdirAll(filepath.Dir(p.Config), 0o700); err != nil {
 		return err
 	}
-	if err = os.MkdirAll(p.Data, 0o700); err != nil {
+	if err = platform.MkdirAll(p.Data, 0o700); err != nil {
 		return err
 	}
-	unlock, err := lockPath(a.ctx, p.Config+".lock")
+	setupRoot, err := launcherOpenDir(filepath.Dir(p.Config), filepath.Dir(p.Config), false)
+	if err != nil {
+		return err
+	}
+	defer setupRoot.Close()
+	setupLock, err := setupRoot.OpenFile(filepath.Base(p.Config)+".lock", os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return err
+	}
+	defer setupLock.Close()
+	unlock, err := platform.Lock(a.localRegistryContext(), setupLock)
 	if err != nil {
 		return err
 	}
@@ -332,12 +351,10 @@ func (a *app) launcherSetup(p launcherPaths, o opts) error {
 			}
 		}
 	}
-	if err = writeFileAtomic(p.Credential, []byte(profile.Secret+"\n")); err != nil {
+	if err = launcherSetupWrite(p, config, []byte(profile.Secret+"\n")); err != nil {
 		return err
 	}
-	if err = launcherJSON(p.Config, config); err != nil {
-		return err
-	}
+
 	return a.emitValue(map[string]any{"write": true, "profile": p.Name, "peer_id": me.PeerID, "config_path": p.Config, "credential_file": p.Credential, "next": "vecnet --net " + p.Name + " launcher install --write"})
 }
 
@@ -349,6 +366,11 @@ func (a *app) launcherRun(bin string, args ...string) error {
 		}
 		bin = resolved
 	}
+	release, err := launcherPinExecutable(bin)
+	if err != nil {
+		return err
+	}
+	defer release()
 	cmd := exec.CommandContext(a.ctx, bin, args...)
 	cmd.Stdin = a.stdin
 	cmd.Stdout = a.stdout
@@ -373,6 +395,9 @@ func (a *app) launcherStatus(p launcherPaths) error {
 		installed = true
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
+	}
+	if runtime.GOOS == "windows" {
+		return a.launcherWindowsStatus(p, configured, installed, m)
 	}
 	active, enabled := "unknown", "unknown"
 	if installed {

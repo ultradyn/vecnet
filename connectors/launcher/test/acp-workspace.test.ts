@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, writeFile, readFile, symlink } from 'node:fs/promises';
+import { mkdir, writeFile, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { execFile } from 'node:child_process';
 import type { PluginContext } from '../src/backend.ts';
 import { allocate, workspaceRoot } from '../src/backends/acp/workspace.ts';
 import type { AcpLaunchSpec } from '../src/backends/acp/workspace.ts';
+import { symlink } from './fixtures/platform.ts';
 import { acpTestDir } from './fixtures/acp-test-root.ts';
 
 const base = 'a'.repeat(40);
@@ -83,6 +84,7 @@ test('scratch flag, not alias spelling, gates temp and ordinary modes; canonical
   assert.equal(ordinary.path, repo);
   const scratch = { ...spec, workspaceMode: 'temp', project: { alias: 'any-scratch-name', repoRoot: '', baseRef: '', scratch: true } } as AcpLaunchSpec;
   const temp = await allocate(scratch, root, ctx); assert.equal(temp.path, join(root, 'job_scratch'));
+  if (process.platform === 'win32') return; // Unix /tmp policy, not Windows temp semantics.
   await assert.rejects(allocate({ ...scratch, jobId: 'job_forbidden' }, '/tmp/acp-must-not-create-this-root', ctx), /tmp/);
   const link = join(dir, 'to-system-temp'); await symlink('/tmp', link);
   await assert.rejects(allocate({ ...scratch, jobId: 'job_forbidden' }, join(link, 'acp-must-not-create-this-root'), ctx), /tmp/);

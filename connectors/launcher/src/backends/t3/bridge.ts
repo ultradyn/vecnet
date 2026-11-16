@@ -67,7 +67,7 @@ export class Bridge {
     const json = JSON.stringify(args);
     // Linux limits each argv entry by bytes. Escaping control characters and
     // quotes can double (or sextuple) the input, so check the actual argument.
-    if (json.length > 120_000 || Buffer.byteLength(json, 'utf8') > 120_000) throw new Error('input_too_large');
+    if (json.length > (process.platform === 'win32' ? 12_000 : 120_000) || Buffer.byteLength(json, 'utf8') > 120_000) throw new Error('input_too_large');
     return this.exec(['call', tool, '--json', json], signal, timeoutMs);
   }
 }

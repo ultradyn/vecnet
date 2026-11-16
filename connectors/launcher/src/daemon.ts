@@ -1,6 +1,6 @@
-import { mkdir, open } from 'node:fs/promises';
+import { mkdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { createHubClient } from '../../hub-client/src/client.ts';
 import { HubError } from '../../hub-client/src/errors.ts';
 import { ID } from '../../hub-client/src/ids.ts';
@@ -30,6 +30,8 @@ import type { PresenceSnapshot } from './presence.ts';
 import { reattachAll, retryPending } from './reattach.ts';
 import type { ReattachOutcome } from './reattach.ts';
 import { redactingLog } from './redact.ts';
+import { userHome } from '../../hub-client/src/platform.ts';
+import { localPlatform, readPrivateFile } from './private-files.ts';
 import { createLane } from './session.ts';
 import type { SessionLane } from './session.ts';
 import { sweep } from './sweep.ts';
@@ -92,14 +94,17 @@ export function stderrLog(): Log {
 }
 /** The credential, from a regular file readable only by its owner (mode 0600). */
 export async function readCredential(path: string): Promise<string> {
-  const file = await open(path, 'r');
-  try {
-    const stat = await file.stat();
-    if (!stat.isFile() || (stat.mode & 0o7777) !== 0o600) throw new DaemonError('credential_mode', 'credential must be a regular file with mode 0600');
-    const credential = (await file.readFile('utf8')).trim();
-    if (!credential || /\s/.test(credential)) throw new DaemonError('credential_malformed', 'credential file is malformed');
-    return credential;
-  } finally { await file.close(); }
+  let text: string;
+  try { text = await readPrivateFile(path, { exactMode: 0o600 }); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw error;
+    throw new DaemonError('credential_mode', process.platform === 'win32'
+      ? 'credential must be an owner-private regular file (native CLI security check required)'
+      : 'credential must be a regular file with mode 0600');
+  }
+  const credential = text.trim();
+  if (!credential || /\s/.test(credential)) throw new DaemonError('credential_malformed', 'credential file is malformed');
+  return credential;
 }
 
 /** GET /v1/peers/me (PROTOCOL 2.10): the identity this credential proves. */
@@ -169,7 +174,8 @@ export async function startDaemon(o: { cfg: LauncherConfig; hub?: HubApi; stream
   };
 
   // 2. The ledger.
-  await mkdir(cfg.state_dir, { recursive: true, mode: 0o700 });
+  if (process.platform === 'win32') localPlatform('mkdir-private', cfg.state_dir, { env: { ...process.env, ...o.env } });
+  else await mkdir(cfg.state_dir, { recursive: true, mode: 0o700 });
   const ledger = openLedger(join(cfg.state_dir, 'ledger.sqlite'), clock);
   const daemonKv = ledger.kv('daemon');
   try {
@@ -237,7 +243,7 @@ export async function startDaemon(o: { cfg: LauncherConfig; hub?: HubApi; stream
     try { await dir.refresh(); directoryLoaded = true; } catch { log.warn('directory unavailable at startup; refreshing on demand'); }
     const outbox = createOutbox({ ledger, hub, clock, log });
     const jobs = createJobReporter({ ledger, outbox });
-    const home = homedir();
+    const home = (userHome(o.env ?? process.env) ?? homedir());
     const bridge = createParentBridge({ ledger, outbox, clock, log, cfg, self, home, dir, route: (p, job) => routeApproval(p, job, dir, cfg, home) });
 
     const lanes = new Map<string, SessionLane>();
@@ -272,7 +278,7 @@ export async function startDaemon(o: { cfg: LauncherConfig; hub?: HubApi; stream
     // The launcher, never the agent, pushes the launch branch, and only that branch.
     async function deliver(job: JobRow, r: SettleResult): Promise<{ pushed: boolean }> {
       const branch = r.branch ?? job.branch;
-      if (branch !== `launch/${job.jobId}` || !job.workspace || !job.workspace.startsWith('/')) return { pushed: false };
+      if (branch !== `launch/${job.jobId}` || !job.workspace || !isAbsolute(job.workspace)) return { pushed: false };
       try {
         // The agent can edit the workspace's hooks and config: run none of them,
         // and push to the remote configured in the operator's own checkout.
@@ -510,6 +516,14 @@ export async function startDaemon(o: { cfg: LauncherConfig; hub?: HubApi; stream
 
     // Exact-root bindings retain the current generation-fenced connector.
     const codex = startCodexConnector({ kv: ledger.kv('codex'), clock, log, env: o.env ?? process.env });
+    // A dead connector must fail the embedded service as well, not leave a
+    // healthy-looking launcher process that can never publish readiness again.
+    void codex.stopped.then(outcome => {
+      if (outcome.reason === 'stopped' || dead) return;
+      log.error('codex connector stopped', { reason: outcome.reason });
+      process.exitCode = 1;
+      void stop();
+    });
 
     function halt() {
       dead = true;

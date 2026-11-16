@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -32,12 +34,12 @@ func settingsFixture(t *testing.T, name string) []byte {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return b
+	return []byte(strings.ReplaceAll(string(b), "\r\n", "\n"))
 }
 func installFile(t *testing.T, body []byte, mode os.FileMode) string {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), "settings.local.json")
-	if err := os.WriteFile(p, body, mode); err != nil {
+	if err := cliFixtureWriteFile(p, body, mode); err != nil {
 		t.Fatal(err)
 	}
 	return p
@@ -101,7 +103,7 @@ func TestHookInstallRefusesFlagProfiles(t *testing.T) {
 				u := installUser(t)
 				u.env["VECNET_PROFILE"] = profile
 				body := fmt.Sprintf("[profiles.%s]\nhub = \"http://127.0.0.1:1\"\nsecret = \"vn_peer_unused\"\n", profile)
-				if err := os.WriteFile(u.conf, []byte(body), 0600); err != nil {
+				if err := cliFixtureWriteFile(u.conf, []byte(body), 0600); err != nil {
 					t.Fatal(err)
 				}
 				path := filepath.Join(t.TempDir(), "settings.local.json")
@@ -192,10 +194,7 @@ func TestHookInstallWriteMergesPreservingHooks(t *testing.T) {
 			t.Fatalf("%s commands=%v", event, got)
 		}
 	}
-	st, err := os.Stat(path)
-	if err != nil || st.Mode().Perm() != 0640 {
-		t.Fatalf("mode=%v err=%v", st, err)
-	}
+	cliFixtureRequireMode(t, path, 0640)
 }
 
 func TestHookInstallPreservesOrderAndLayout(t *testing.T) {
@@ -470,20 +469,24 @@ func TestHookInstallDefaultsToLocalAtGitRoot(t *testing.T) {
 	defer foreignUnchanged()
 	isolateGitEnv(t) // the caller's overrides must not reach git init or the installer
 	u := installUser(t)
-	root := filepath.Join(t.TempDir(), "repo with trailing space ")
+	name := "repo with trailing space "
+	if runtime.GOOS == "windows" {
+		name = "repo with interior space"
+	}
+	root := filepath.Join(t.TempDir(), name)
 	cmd := exec.Command("git", "init", root)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v %s", err, out)
 	}
 	sub := filepath.Join(root, "sub")
-	if err := os.Mkdir(sub, 0755); err != nil {
+	if err := cliFixtureMkdir(sub, 0755); err != nil {
 		t.Fatal(err)
 	}
 	shared := filepath.Join(root, ".claude", "settings.json")
-	if err := os.MkdirAll(filepath.Dir(shared), 0755); err != nil {
+	if err := cliFixtureMkdirAll(filepath.Dir(shared), 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(shared, []byte(`{"env":{"KEEP":"yes"}}`), 0644); err != nil {
+	if err := cliFixtureWriteFile(shared, []byte(`{"env":{"KEEP":"yes"}}`), 0644); err != nil {
 		t.Fatal(err)
 	}
 	t.Chdir(sub)
@@ -492,10 +495,7 @@ func TestHookInstallDefaultsToLocalAtGitRoot(t *testing.T) {
 	if got := settingsCommands(t, readSettings(t, path), "UserPromptSubmit"); !reflect.DeepEqual(got, []string{"vecnet hook --profile p --event user-prompt"}) {
 		t.Fatalf("default profile=%v", got)
 	}
-	st, err := os.Stat(path)
-	if err != nil || st.Mode().Perm() != 0644 {
-		t.Fatalf("mode=%v err=%v", st, err)
-	}
+	cliFixtureRequireMode(t, path, 0644)
 	if !strings.Contains(errs, path) || !strings.Contains(errs, "git") {
 		t.Fatalf("target reason=%q", errs)
 	}
@@ -514,7 +514,7 @@ func TestHookInstallKeepsSymlink(t *testing.T) {
 	u := installUser(t)
 	real := installFile(t, []byte("{}\n"), 0640)
 	link := filepath.Join(filepath.Dir(real), "linked.json")
-	if err := os.Symlink(filepath.Base(real), link); err != nil {
+	if err := cliFixtureSymlink(t, filepath.Base(real), link); err != nil {
 		t.Fatal(err)
 	}
 	installRun(t, u, "--profile", "p", "--write", "--settings", link)
@@ -530,10 +530,7 @@ func TestHookInstallKeepsSymlink(t *testing.T) {
 			t.Fatalf("missing %s", event)
 		}
 	}
-	st, err = os.Stat(real)
-	if err != nil || st.Mode().Perm() != 0640 {
-		t.Fatalf("target mode=%v %v", st, err)
-	}
+	cliFixtureRequireMode(t, real, 0640)
 }
 
 func TestHookInstallPreservesMixedGroupAndQuotedBinary(t *testing.T) {
@@ -594,7 +591,9 @@ func TestHookInstallPreservesMixedGroupAndQuotedBinary(t *testing.T) {
 			t.Fatalf("foreign handler %d changed", i)
 		}
 	}
-	want := map[string]any{"type": "command", "command": "'/opt/it'\"'\"'s tools/vecnet' hook --profile p --event user-prompt --auto-ack", "timeout": float64(5)}
+	wantCommand := "'/opt/it'\"'\"'s tools/vecnet' hook --profile p --event user-prompt --auto-ack"
+
+	want := map[string]any{"type": "command", "command": wantCommand, "timeout": float64(5)}
 	if !reflect.DeepEqual(handlers[1], want) {
 		t.Fatalf("replacement=%v want=%v", handlers[1], want)
 	}
@@ -632,7 +631,7 @@ func TestHookInstallFallbackToCwd(t *testing.T) {
 		t.Fatalf("init disposable ancestor repository: %v: %s", err, out)
 	}
 	root := filepath.Join(parent, "cwd")
-	if err := os.Mkdir(root, 0755); err != nil {
+	if err := cliFixtureMkdir(root, 0755); err != nil {
 		t.Fatal(err)
 	}
 	t.Chdir(root)
@@ -654,10 +653,7 @@ func TestHookInstallFallbackToCwd(t *testing.T) {
 	if !strings.Contains(errs, "not in a git repository; using "+root) || !strings.Contains(errs, path) {
 		t.Fatalf("missing fallback reason: %q", errs)
 	}
-	st, err := os.Stat(filepath.Dir(path))
-	if err != nil || st.Mode().Perm() != 0755 {
-		t.Fatalf("directory mode=%v err=%v", st, err)
-	}
+	cliFixtureRequireMode(t, filepath.Dir(path), 0755)
 }
 
 func hookInstallExtraFlagSeed(t *testing.T, command string) []byte {
@@ -703,9 +699,7 @@ func TestHookInstallRefusesDuplicateKeys(t *testing.T) {
 			if got := string(readSettings(t, path)); got != body {
 				t.Errorf("invalid settings changed: %q", got)
 			}
-			if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0640 {
-				t.Errorf("invalid settings mode changed: %v %v", info, err)
-			}
+			cliFixtureRequireMode(t, path, 0640)
 		})
 	}
 }
@@ -787,9 +781,7 @@ func TestHookInstallPreservesForeignCommands(t *testing.T) {
 				if string(readSettings(t, path)) != string(body) || !strings.Contains(errs, "unchanged "+path) {
 					t.Fatalf("repeat install changed settings: %s", errs)
 				}
-				if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0640 {
-					t.Fatalf("settings mode changed: %v %v", info, err)
-				}
+				cliFixtureRequireMode(t, path, 0640)
 			}
 		})
 	}
@@ -861,31 +853,34 @@ func TestHookInstallDefaultRefusesSymlinkRedirect(t *testing.T) {
 			var target, link string
 			switch mode {
 			case "to-shared":
-				if err := os.MkdirAll(claude, 0755); err != nil {
+				if err := cliFixtureMkdirAll(claude, 0755); err != nil {
 					t.Fatal(err)
 				}
 				target, link = filepath.Join(claude, "settings.json"), local
-				if err := os.Symlink("settings.json", link); err != nil {
+				if err := cliFixtureSymlink(t, "settings.json", link); err != nil {
 					t.Fatal(err)
 				}
 			case "to-global":
-				if err := os.MkdirAll(claude, 0755); err != nil {
+				if err := cliFixtureMkdirAll(claude, 0755); err != nil {
 					t.Fatal(err)
 				}
 				target, link = filepath.Join(u.env["HOME"], ".claude", "settings.json"), local
-				if err := os.Symlink(target, link); err != nil {
+				if err := cliFixtureSymlink(t, target, link); err != nil {
 					t.Fatal(err)
 				}
 			case "parent-dir":
 				target, link = filepath.Join(u.env["HOME"], ".claude", "settings.local.json"), claude
-				if err := os.Symlink(filepath.Dir(target), link); err != nil {
+				if err := cliFixtureMkdirAll(filepath.Dir(target), 0755); err != nil {
+					t.Fatal(err)
+				}
+				if err := cliFixtureSymlink(t, filepath.Dir(target), link); err != nil {
 					t.Fatal(err)
 				}
 			}
-			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+			if err := cliFixtureMkdirAll(filepath.Dir(target), 0755); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(target, body, 0644); err != nil {
+			if err := cliFixtureWriteFile(target, body, 0644); err != nil {
 				t.Fatal(err)
 			}
 			before, err := os.Readlink(link)
@@ -894,7 +889,11 @@ func TestHookInstallDefaultRefusesSymlinkRedirect(t *testing.T) {
 			}
 			t.Chdir(root)
 			code, out, errs := u.run("hook", "install", "--bin", "vecnet", "--profile", "p", "--write")
-			if code == 0 || out != "" || !strings.Contains(errs, "--settings") {
+			refused := strings.Contains(errs, "--settings")
+			if runtime.GOOS == "windows" {
+				refused = refused || strings.Contains(errs, "reparse point refused")
+			}
+			if code == 0 || out != "" || !refused {
 				t.Fatalf("redirected default accepted: exit=%d stdout=%q stderr=%q", code, out, errs)
 			}
 			if got := readSettings(t, target); string(got) != string(body) {
@@ -923,9 +922,7 @@ func fakeClaude(t *testing.T, exitCode int) string {
 	dir := t.TempDir()
 	log := filepath.Join(dir, "claude.log")
 	script := fmt.Sprintf("#!/bin/sh\nprintf 'cwd=%%s argv=%%s\\n' \"$(pwd -P)\" \"$*\" >> '%s'\nexit %d\n", log, exitCode)
-	if err := os.WriteFile(filepath.Join(dir, "claude"), []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	cliFixtureProgram(t, dir, "claude", script, cliFixtureProgramSpec{Kind: "claude", Log: log, Exit: exitCode})
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	return log
 }
@@ -972,7 +969,11 @@ func TestHookInstallMCPPrintsRegistration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(errs, "claude mcp add --scope local vecnet-p --env VECNET_CONFIG="+abs+" -- vecnet --net p mcp") {
+	quoted := abs
+	if runtime.GOOS == "windows" {
+		quoted = "'" + strings.ReplaceAll(abs, "'", `'"'"'`) + "'"
+	}
+	if !strings.Contains(errs, "claude mcp add --scope local vecnet-p --env VECNET_CONFIG="+quoted+" -- vecnet --net p mcp") {
 		t.Fatalf("registration with config=%q", errs)
 	}
 	if !strings.Contains(errs, "profile(s) q") || !strings.Contains(errs, "every session there also sees each registered vecnet MCP server's tools") {
@@ -1106,7 +1107,11 @@ func codexInstallRepo(t *testing.T) (*user, string) {
 	t.Helper()
 	isolateGitEnv(t)
 	u := installUser(t)
-	root := filepath.Join(t.TempDir(), "codex repo ")
+	name := "codex repo "
+	if runtime.GOOS == "windows" {
+		name = "codex repo with spaces"
+	}
+	root := filepath.Join(t.TempDir(), name)
 	gitT(t, "init", "--quiet", root)
 	t.Chdir(root)
 	return u, root
@@ -1161,7 +1166,7 @@ func TestHookInstallCodexPrintsStanza(t *testing.T) {
 func TestHookInstallCodexDefaultTarget(t *testing.T) {
 	u, root := codexInstallRepo(t)
 	sub := filepath.Join(root, "sub")
-	if err := os.Mkdir(sub, 0755); err != nil {
+	if err := cliFixtureMkdir(sub, 0755); err != nil {
 		t.Fatal(err)
 	}
 	t.Chdir(sub)
@@ -1199,10 +1204,10 @@ func TestHookInstallCodexDefaultTarget(t *testing.T) {
 func TestHookInstallCodexRefusesTrackedDefault(t *testing.T) {
 	u, root := codexInstallRepo(t)
 	path := filepath.Join(root, ".codex", "hooks.json")
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+	if err := cliFixtureMkdirAll(filepath.Dir(path), 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, []byte("{}\n"), 0640); err != nil {
+	if err := cliFixtureWriteFile(path, []byte("{}\n"), 0640); err != nil {
 		t.Fatal(err)
 	}
 	gitT(t, "add", "--", ".codex/hooks.json")
@@ -1221,9 +1226,7 @@ func TestHookInstallCodexRefusesTrackedDefault(t *testing.T) {
 	if len(settingsCommands(t, readSettings(t, path), "SessionStart")) != 1 {
 		t.Fatal("explicit settings did not override guard")
 	}
-	if st, err := os.Stat(path); err != nil || st.Mode().Perm() != 0640 {
-		t.Fatalf("mode=%v err=%v", st, err)
-	}
+	cliFixtureRequireMode(t, path, 0640)
 }
 
 func TestHookInstallCodexRefusesSymlinkDefault(t *testing.T) {
@@ -1231,23 +1234,27 @@ func TestHookInstallCodexRefusesSymlinkDefault(t *testing.T) {
 		t.Run(fmt.Sprint(fileLink), func(t *testing.T) {
 			u, root := codexInstallRepo(t)
 			target := filepath.Join(t.TempDir(), "hooks.json")
-			if err := os.WriteFile(target, []byte("{}\n"), 0640); err != nil {
+			if err := cliFixtureWriteFile(target, []byte("{}\n"), 0640); err != nil {
 				t.Fatal(err)
 			}
 			link := filepath.Join(root, ".codex")
 			to := filepath.Dir(target)
 			if fileLink {
-				if err := os.Mkdir(link, 0755); err != nil {
+				if err := cliFixtureMkdir(link, 0755); err != nil {
 					t.Fatal(err)
 				}
 				link = filepath.Join(link, "hooks.json")
 				to = target
 			}
-			if err := os.Symlink(to, link); err != nil {
+			if err := cliFixtureSymlink(t, to, link); err != nil {
 				t.Fatal(err)
 			}
 			code, out, errs := u.run("hook", "install", "--client", "codex", "--profile", "p", "--write")
-			if code != 1 || out != "" || !strings.Contains(errs, "the project .codex/hooks.json") {
+			refused := strings.Contains(errs, "the project .codex/hooks.json")
+			if runtime.GOOS == "windows" {
+				refused = refused || strings.Contains(errs, "reparse point refused")
+			}
+			if code != 1 || out != "" || !refused {
 				t.Fatalf("exit=%d out=%q errs=%q", code, out, errs)
 			}
 			if got, err := os.Readlink(link); err != nil || got != to {
@@ -1295,7 +1302,7 @@ func TestHookInstallCodexPreservesForeign(t *testing.T) {
 }
 `
 	path := filepath.Join(t.TempDir(), "hooks.json")
-	if err := os.WriteFile(path, []byte(before), 0640); err != nil {
+	if err := cliFixtureWriteFile(path, []byte(before), 0640); err != nil {
 		t.Fatal(err)
 	}
 	installRun(t, u, "--client", "codex", "--profile", "p", "--write", "--settings", path)
@@ -1360,9 +1367,7 @@ func TestHookInstallCodexRejectsMCP(t *testing.T) {
 	binDir := t.TempDir()
 	marker := filepath.Join(binDir, "client-ran")
 	for _, client := range []string{"claude", "codex"} {
-		if err := os.WriteFile(filepath.Join(binDir, client), []byte("#!/bin/sh\n: > '"+marker+"'\nexit 99\n"), 0755); err != nil {
-			t.Fatal(err)
-		}
+		cliFixtureProgram(t, binDir, client, "#!/bin/sh\n: > '"+marker+"'\nexit 99\n", cliFixtureProgramSpec{Kind: "never-run", Marker: marker, Exit: 99})
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	path := filepath.Join(root, "absent", "hooks.json")
@@ -1414,9 +1419,11 @@ func TestHookInstallCodexRefusesUnknownTrackingStatus(t *testing.T) {
 			// Git's process boundary: successful discovery, then tracked (0)
 			// or unknown (2/128) status, all of which must refuse writes.
 			stub := "#!/bin/sh\ncase \"$3\" in\nrev-parse) printf '%s\\n' \"$2\";;\nls-files) exit " + exit + ";;\n*) exit 99;;\nesac\n"
-			if err := os.WriteFile(filepath.Join(binDir, "git"), []byte(stub), 0755); err != nil {
+			status, err := strconv.Atoi(exit)
+			if err != nil {
 				t.Fatal(err)
 			}
+			cliFixtureProgram(t, binDir, "git", stub, cliFixtureProgramSpec{Kind: "git-tracking", Exit: status})
 			t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 			path := filepath.Join(root, ".codex", "hooks.json")
 			code, out, errs := u.run("hook", "install", "--client", "codex", "--profile", "p", "--write")
@@ -1445,26 +1452,33 @@ func TestHookInstallCodexRefusesFailedDiscovery(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			u, root := codexInstallRepo(t)
 			path := filepath.Join(root, ".codex", "hooks.json")
-			if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			if err := cliFixtureMkdirAll(filepath.Dir(path), 0755); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(path, []byte("{}\n"), 0644); err != nil {
+			if err := cliFixtureWriteFile(path, []byte("{}\n"), 0644); err != nil {
 				t.Fatal(err)
 			}
 			gitT(t, "add", "--", ".codex/hooks.json")
 			gitT(t, "-c", "commit.gpgsign=false", "-c", "user.name=test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "tracked hooks")
 			binDir := t.TempDir()
 			if stub != "" {
-				if err := os.WriteFile(filepath.Join(binDir, "git"), []byte(stub), 0755); err != nil {
+				kind, status := "git-failure", 1
+				if name == "empty" {
+					status = 0
+				}
+				if name == "timeout" {
+					kind = "git-timeout"
+				}
+				cliFixtureProgram(t, binDir, "git", stub, cliFixtureProgramSpec{Kind: kind, Exit: status})
+			}
+			if runtime.GOOS != "windows" {
+				sleep, err := exec.LookPath("sleep")
+				if err != nil {
 					t.Fatal(err)
 				}
-			}
-			sleep, err := exec.LookPath("sleep")
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Symlink(sleep, filepath.Join(binDir, "sleep")); err != nil {
-				t.Fatal(err)
+				if err := cliFixtureSymlink(t, sleep, filepath.Join(binDir, "sleep")); err != nil {
+					t.Fatal(err)
+				}
 			}
 			t.Setenv("PATH", binDir)
 			code, out, errs := u.run("hook", "install", "--client", "codex", "--profile", "p", "--write")

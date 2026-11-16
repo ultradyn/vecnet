@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -22,6 +23,7 @@ import (
 	"github.com/XertroV/vecnet/internal/cli"
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/onboarding"
+	"github.com/XertroV/vecnet/internal/platform"
 	"github.com/XertroV/vecnet/internal/testhub"
 )
 
@@ -915,11 +917,11 @@ func TestAgentCLIRelocationRequestID(t *testing.T) {
 
 		u := newUser(t)
 		u.env["VECNET_PROFILE"] = "p"
-		if err := os.MkdirAll(filepath.Dir(u.conf), 0o700); err != nil {
+		if err := cliFixtureMkdirAll(filepath.Dir(u.conf), 0o700); err != nil {
 			t.Fatal(err)
 		}
 		cfg := fmt.Sprintf("[profiles.p]\nhub = %q\nsecret = %q\nhub_pubkey = %q\n", front.URL, origin.OperatorSecret, key.Pubkey())
-		if err := os.WriteFile(u.conf, []byte(cfg), 0o600); err != nil {
+		if err := cliFixtureWriteFile(u.conf, []byte(cfg), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		code, out, errs := u.run("agent", "add", "--kind", "session", "--open-name")
@@ -1079,7 +1081,7 @@ func TestAgentCLIRecoveryProfile(t *testing.T) {
 
 func writeAgentProfiles(t *testing.T, u *user, operator string, profiles map[string]string) {
 	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(u.conf), 0o700); err != nil {
+	if err := cliFixtureMkdirAll(filepath.Dir(u.conf), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	var b strings.Builder
@@ -1094,7 +1096,7 @@ func writeAgentProfiles(t *testing.T, u *user, operator string, profiles map[str
 	for _, name := range names {
 		fmt.Fprintf(&b, "[profiles.%s]\nhub = %q\nsecret = %q\nhub_pubkey = \"ed25519:test\"\n", tomlProfileKey(name), profiles[name], "vn_operator_test")
 	}
-	if err := os.WriteFile(u.conf, []byte(b.String()), 0o600); err != nil {
+	if err := cliFixtureWriteFile(u.conf, []byte(b.String()), 0o600); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -1127,7 +1129,7 @@ func shellSplit(t *testing.T, cmdline string) []string {
 		t.Fatal("recovery command was empty")
 	}
 	script := "set -- " + cmdline + "\nprintf '%s\\0' \"$@\""
-	out, err := exec.Command("sh", "-c", script).CombinedOutput()
+	out, err := exec.Command(cliFixtureShell(t), "-c", script).CombinedOutput()
 	if err != nil {
 		t.Fatalf("recovery command is not safe shell: %v\n%s", err, out)
 	}
@@ -1413,7 +1415,11 @@ func TestAgentCLIKeyFileBoundary(t *testing.T) {
 		if code != 0 {
 			t.Fatalf("0644 key: exit %d %s", code, errs)
 		}
-		if !strings.Contains(errs, "0600") && !strings.Contains(errs, "600") {
+		warned := strings.Contains(errs, "0600") || strings.Contains(errs, "600")
+		if runtime.GOOS == "windows" {
+			warned = strings.Contains(errs, "warning") && strings.Contains(errs, "Windows permissions") && strings.Contains(errs, "readable by others")
+		}
+		if !warned {
 			t.Fatalf("mode warning missing: %s", errs)
 		}
 		if strings.Contains(out+errs, secret) {
@@ -1609,11 +1615,11 @@ func agentOperator(t *testing.T, hubURL string) *user {
 	t.Helper()
 	u := newUser(t)
 	u.env["VECNET_PROFILE"] = "p"
-	if err := os.MkdirAll(filepath.Dir(u.conf), 0o700); err != nil {
+	if err := cliFixtureMkdirAll(filepath.Dir(u.conf), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	body := "[profiles.p]\nhub = \"" + hubURL + "\"\nsecret = \"vn_operator_test\"\nhub_pubkey = \"ed25519:test\"\n"
-	if err := os.WriteFile(u.conf, []byte(body), 0o600); err != nil {
+	if err := cliFixtureWriteFile(u.conf, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return u
@@ -1631,8 +1637,16 @@ func mustRead(t *testing.T, path string) string {
 func writeModeFile(t *testing.T, name, body string, mode os.FileMode) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), name)
-	if err := os.WriteFile(path, []byte(body), mode); err != nil {
+	if err := cliFixtureWriteFile(path, []byte(body), mode); err != nil {
 		t.Fatal(err)
+	}
+	if err := cliFixtureChmod(path, mode); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS == "windows" && mode&0077 != 0 {
+		if err := platform.CheckPath(path, false, true); err == nil {
+			t.Fatal("public-read DACL fixture is still private")
+		}
 	}
 	return path
 }

@@ -25,6 +25,7 @@ import (
 	"github.com/XertroV/vecnet/internal/httpapi"
 	"github.com/XertroV/vecnet/internal/hub"
 	"github.com/XertroV/vecnet/internal/opseed"
+	"github.com/XertroV/vecnet/internal/platform"
 	"github.com/XertroV/vecnet/internal/prefs"
 	"github.com/XertroV/vecnet/internal/store"
 )
@@ -450,10 +451,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, out io.Writer) err
 	if err != nil {
 		return err
 	}
-	if err = os.WriteFile(saved+".tmp", append(raw, '\n'), 0600); err != nil {
-		return err
-	}
-	if err = os.Rename(saved+".tmp", saved); err != nil {
+	if err = writeDemoManifest(saved, append(raw, '\n')); err != nil {
 		return err
 	}
 	stack := httpapi.NewStack(h)
@@ -493,4 +491,26 @@ func run(ctx context.Context, args []string, stdin io.Reader, out io.Writer) err
 		return err
 	}
 	return nil
+}
+
+// Publish a new private inode rather than inheriting an existing file's mode
+// or Windows ACL. The temporary file is private before credential bytes exist,
+// and replacement is atomic on both platforms.
+func writeDemoManifest(path string, data []byte) error {
+	f, err := platform.CreateTemp(filepath.Dir(path), ".demo-manifest-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	defer f.Close()
+	if _, err := f.Write(data); err != nil {
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return platform.Replace(f.Name(), path)
 }

@@ -10,7 +10,7 @@ import (
 func TestCodexStrictStateRefusesAmbiguousClaims(t *testing.T) {
 	for _, raw := range []string{`{"claims":[{"Accepted":true,"accepted":false}]}`, `{"claims":[{"Accepted":null}]}`, `{"caller":"one","Caller":"two"}`, `{"Claims":[],"Claimſ":[]}`} {
 		path := filepath.Join(t.TempDir(), "state.json")
-		if err := os.WriteFile(path, []byte(raw), 0600); err != nil {
+		if err := cliFixtureWriteFile(path, []byte(raw), 0600); err != nil {
 			t.Fatal(err)
 		}
 		called := false
@@ -24,7 +24,7 @@ func TestCodexStrictStateRefusesAmbiguousClaims(t *testing.T) {
 
 func TestCodexStrictStateMigratesLegacyBinding(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
-	if err := os.WriteFile(path, []byte(`{"shown":null,"session":"legacy-root","session_how":"rebind"}`), 0600); err != nil {
+	if err := cliFixtureWriteFile(path, []byte(`{"shown":null,"session":"legacy-root","session_how":"rebind"}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if err := codexUpdateState(t.Context(), path, false, func(s *hookState) error { s.AppCursor = "e1.0"; return nil }); err != nil {
@@ -44,7 +44,7 @@ func TestCodexStrictStatePreservesMalformedLegacyBinding(t *testing.T) {
 	} {
 		t.Run(raw, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "state.json")
-			if err := os.WriteFile(path, []byte(raw), 0600); err != nil {
+			if err := cliFixtureWriteFile(path, []byte(raw), 0600); err != nil {
 				t.Fatal(err)
 			}
 			called := false
@@ -72,11 +72,11 @@ func TestCodexStrictStateInitializesMissingState(t *testing.T) {
 
 func TestCodexStrictStatePreservesUnchangedSidecar(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
-	if err := os.WriteFile(path, []byte(`{"shown":null}`), 0600); err != nil {
+	if err := cliFixtureWriteFile(path, []byte(`{"shown":null}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	original := []byte("{\n  \"session\": \"S1\", \"operator_annotation\": \"keep\"\n}\n")
-	if err := os.WriteFile(bindingPath(path), original, 0600); err != nil {
+	if err := cliFixtureWriteFile(bindingPath(path), original, 0600); err != nil {
 		t.Fatal(err)
 	}
 	if err := codexUpdateState(t.Context(), path, false, func(s *hookState) error { s.AppCursor = "e1.0"; return nil }); err != nil {
@@ -91,7 +91,7 @@ func TestCodexStrictStatePreservesUnchangedSidecar(t *testing.T) {
 func TestCodexDurableWriteReplacesPrivateSnapshot(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "state.json")
-	if err := os.WriteFile(path, []byte("old"), 0644); err != nil {
+	if err := cliFixtureWriteFile(path, []byte("old"), 0644); err != nil {
 		t.Fatal(err)
 	}
 	if err := writeCodexDurable(path, []byte("new")); err != nil {
@@ -101,10 +101,7 @@ func TestCodexDurableWriteReplacesPrivateSnapshot(t *testing.T) {
 	if err != nil || string(raw) != "new" {
 		t.Fatalf("snapshot not replaced: %s %v", raw, err)
 	}
-	info, err := os.Stat(path)
-	if err != nil || info.Mode().Perm() != 0600 {
-		t.Fatalf("snapshot not private: %v %v", info, err)
-	}
+	cliFixtureRequireMode(t, path, 0600)
 	entries, err := os.ReadDir(dir)
 	if err != nil || len(entries) != 1 {
 		t.Fatalf("temporary file left behind: %v %v", entries, err)
@@ -114,7 +111,7 @@ func TestCodexDurableWriteReplacesPrivateSnapshot(t *testing.T) {
 func TestCodexDurableWriteCleansUpFailedRename(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "state.json")
-	if err := os.Mkdir(path, 0700); err != nil {
+	if err := cliFixtureMkdir(path, 0700); err != nil {
 		t.Fatal(err)
 	}
 	if err := writeCodexDurable(path, []byte("new")); err == nil {

@@ -31,6 +31,31 @@ const guardAt = "2030-01-02T03:04:05.006Z"
 const guardSecret = "vecnet_synthetic_reference_guard_only"
 const guardWhsec = "whsec_YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFh"
 
+func TestReferenceGuardFixtureChecksums(t *testing.T) {
+	const dir = "testdata/reference_guard/"
+	manifest, err := os.ReadFile(dir + "SHA256SUMS")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(manifest)), "\n")
+	if len(lines) == 0 || lines[0] == "" {
+		t.Fatal("empty fixture checksum manifest")
+	}
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) != 2 || strings.ContainsAny(fields[1], "/\\") {
+			t.Fatalf("invalid fixture checksum entry: %q", line)
+		}
+		data, err := os.ReadFile(dir + fields[1])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := fmt.Sprintf("%x", sha256.Sum256(data)); got != fields[0] {
+			t.Errorf("fixture %s checksum = %s, want %s (checkout must preserve LF)", fields[1], got, fields[0])
+		}
+	}
+}
+
 type guardFixture struct{ Name, Owner, Type, At, Data, SHA256 string }
 
 func guardFixtures(t *testing.T) []guardFixture {

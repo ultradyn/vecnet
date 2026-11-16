@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/XertroV/vecnet/connectors"
+	"github.com/XertroV/vecnet/internal/platform"
 )
 
 // Options permits isolated installation and capability checks. A nil Getenv uses
@@ -29,10 +30,13 @@ type Options struct {
 	Home, Binary, Node, Version string
 	Getenv                      func(string) string
 	Run                         func(context.Context, string, ...string) ([]byte, error)
+	// Preview performs capability, ownership and conflict checks without writes or activation.
+	Preview bool
 }
 
 // Result describes successfully activated software, not delivery readiness.
-// Release and Unit are absolute filesystem paths. Changed reports activation.
+// Release and Unit are absolute filesystem paths (Unit is a task definition on
+// Windows). Changed reports activation, or a proposed change during Preview.
 type Result struct {
 	Version, Release, Unit string
 	BinarySHA256           string
@@ -59,12 +63,20 @@ type manifest struct {
 func (m manifest) result(changed bool) Result {
 	return Result{Version: m.Version, Release: m.Release, Unit: m.Unit, Changed: changed}
 }
-func root(home string) string     { return filepath.Join(home, ".local/share/vecnet-codex") }
-func unitPath(home string) string { return filepath.Join(home, ".config/systemd/user", unitName) }
-func sum(b []byte) string         { h := sha256.Sum256(b); return hex.EncodeToString(h[:]) }
-func unsafeString(s string) bool  { return strings.ContainsAny(s, "\x00\r\n") }
+func root(home string) string { return filepath.Join(home, ".local/share/vecnet-codex") }
+func unitPath(home string) string {
+	if runtime.GOOS == "windows" {
+		return filepath.Join(root(home), "delivery-task.json")
+	}
+	return filepath.Join(home, ".config/systemd/user", unitName)
+}
+func sum(b []byte) string        { h := sha256.Sum256(b); return hex.EncodeToString(h[:]) }
+func unsafeString(s string) bool { return strings.ContainsAny(s, "\x00\r\n") }
 
 func homePath(home string) (string, error) {
+	if runtime.GOOS == "windows" {
+		return windowsHome(home)
+	}
 	if home == "" || !filepath.IsAbs(home) || unsafeString(home) {
 		return "", errors.New("runtime requires an absolute HOME")
 	}
@@ -88,6 +100,9 @@ func homePath(home string) (string, error) {
 // Read inspects the last successfully activated manifest without installing,
 // executing processes, acquiring locks or creating files. Missing is os.ErrNotExist.
 func Read(home string) (Result, error) {
+	if runtime.GOOS == "windows" {
+		return readWindows(home)
+	}
 	h, e := homePath(home)
 	if e != nil {
 		return Result{}, e
@@ -163,12 +178,16 @@ func Installed(home string) bool {
 }
 
 // Ensure stages immutable content-addressed software and reconciles its user
-// systemd unit. Capability and conflict checks precede every installation write.
+// systemd unit or Windows per-user logon task. Capability and conflict checks
+// precede every installation write.
 // The applied manifest advances only after activation succeeds; pending metadata
 // authorizes retrying a unit written before an interrupted or failed activation.
 func Ensure(ctx context.Context, o Options) (Result, error) {
 	if e := ctx.Err(); e != nil {
 		return Result{}, e
+	}
+	if runtime.GOOS == "windows" {
+		return ensureWindows(ctx, o)
 	}
 	if runtime.GOOS != "linux" {
 		return Result{}, errors.New("managed delivery activation requires Linux user systemd")
@@ -177,7 +196,7 @@ func Ensure(ctx context.Context, o Options) (Result, error) {
 		o.Getenv = os.Getenv
 	}
 	if o.Home == "" {
-		o.Home = o.Getenv("HOME")
+		o.Home = platform.Home(o.Getenv)
 	}
 	home, e := homePath(o.Home)
 	if e != nil {
@@ -234,6 +253,9 @@ func Ensure(ctx context.Context, o Options) (Result, error) {
 	}
 	if e = ctx.Err(); e != nil {
 		return Result{}, e
+	}
+	if o.Preview {
+		return previewLinux(ctx, o, binary)
 	}
 	if e = mkdirSafe(home, root(home), 0700); e != nil {
 		return Result{}, e
@@ -362,7 +384,8 @@ func releaseDigest(version string, files map[string][]byte) string {
 }
 
 func distribution(binary []byte) (map[string][]byte, error) {
-	files := map[string][]byte{"vecnet": binary}
+	files := map[string][]byte{platform.Exe("vecnet"): binary}
+	addPlatformAssets(files)
 	for _, source := range []struct {
 		files  fs.FS
 		prefix string
@@ -419,7 +442,7 @@ func runner(o Options) func(context.Context, string, ...string) ([]byte, error) 
 		return c.CombinedOutput()
 	}
 }
-func capabilities(ctx context.Context, o Options) error {
+func nodeCapabilities(ctx context.Context, o Options) error {
 	b, e := o.Run(ctx, o.Node, "--version")
 	if e != nil {
 		return errors.New("Node version probe failed; Node >=22.18 required")
@@ -438,7 +461,13 @@ func capabilities(ctx context.Context, o Options) error {
 	if _, e = o.Run(ctx, o.Node, "--disable-warning=ExperimentalWarning", "--experimental-strip-types", "--input-type=module", "--eval", script); e != nil {
 		return errors.New("Node requires built-in SQLite and TypeScript support")
 	}
-	if _, e = o.Run(ctx, "systemctl", "--user", "show-environment"); e != nil {
+	return nil
+}
+func capabilities(ctx context.Context, o Options) error {
+	if e := nodeCapabilities(ctx, o); e != nil {
+		return e
+	}
+	if _, e := o.Run(ctx, "systemctl", "--user", "show-environment"); e != nil {
 		return errors.New("Linux user systemd manager unavailable; setup pending")
 	}
 	return nil
@@ -589,4 +618,43 @@ func legacyUnit(home string, b []byte) bool {
 	base := filepath.Base(release)
 	_, e := hex.DecodeString(base)
 	return node != "" && filepath.IsAbs(node) && len(base) == 20 && e == nil && filepath.Dir(release) == root(home) && filepath.Base(bin) == "vecnet" && text == string(makeUnit(home, node, release, false))
+}
+
+// Preview checks installation prerequisites and reports the proposed software
+// paths without locks, directory creation, service mutation or authority changes.
+func Preview(ctx context.Context, o Options) (Result, error) {
+	o.Preview = true
+	return Ensure(ctx, o)
+}
+
+func previewLinux(ctx context.Context, o Options, binary []byte) (Result, error) {
+	state, e := serviceState(ctx, o)
+	if e != nil {
+		return Result{}, e
+	}
+	old, e := optionalManifest(o.Home, manifestName)
+	if e != nil {
+		return Result{}, e
+	}
+	pending, e := optionalManifest(o.Home, pendingName)
+	if e != nil {
+		return Result{}, e
+	}
+	current, e := readUnit(o.Home)
+	if e != nil {
+		return Result{}, e
+	}
+	if e = acceptUnit(o.Home, current, old, pending); e != nil {
+		return Result{}, e
+	}
+	files, e := distribution(binary)
+	if e != nil {
+		return Result{}, e
+	}
+	release := filepath.Join(root(o.Home), releaseDigest(o.Version, files))
+	desired := manifest{Schema: 1, Version: o.Version, Release: release, Unit: unitPath(o.Home), Node: o.Node, UnitHash: sum(makeUnit(o.Home, o.Node, release, true))}
+	valid := verifyRelease(ctx, release, files) == nil
+	r := desired.result(!valid || old == nil || *old != desired || pending != nil || sum(current) != desired.UnitHash || state["ActiveState"] != "active" || state["UnitFileState"] != "enabled")
+	r.BinarySHA256 = sum(binary)
+	return r, nil
 }

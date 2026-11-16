@@ -3,6 +3,8 @@ name: Release
 on:
   push:
     tags: ['v*']
+    branches: [master]
+  pull_request:
   # Builds and tests only; publishing always requires a pushed version tag.
   workflow_dispatch:
 
@@ -38,19 +40,27 @@ jobs:
         id: package
         run: node scripts/npm/release.mjs info
       - name: Verify tag matches a version on master
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         run: node scripts/npm/release.mjs check-tag "$GITHUB_REF_NAME"
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.27.1'
+          go-version: '1.27.4'
           cache-dependency-path: go.sum
       - name: Pin npm for repeatable packaging and OIDC support
         run: npm install --global npm@12.0.1 --ignore-scripts --no-audit --no-fund
-      - name: Test release guards
-        run: node --test --test-concurrency=2 scripts/npm/release.test.mjs
+      - name: Test release guards and cross-platform wrappers
+        run: node --test --test-concurrency=2 scripts/npm/release.test.mjs scripts/npm/npm-command.test.mjs scripts/npm/wrapper.test.mjs scripts/npm/verify-artifact.test.mjs
       - name: Test Go packages
         run: go test -mod=readonly -p 2 -timeout=20m ./...
-      - name: Build and pack both Linux architectures
+      - name: Build native binaries for connector tests
+        run: go build -mod=readonly -p 2 -o bin/ ./cmd/vecnet ./cmd/vecnet-hub
+      - name: Test Node connectors
+        env:
+          VECNET_BIN: ${{ github.workspace }}/bin/vecnet
+        run: node --disable-warning=ExperimentalWarning --test --test-concurrency=2 "connectors/hub-client/test/*.test.ts" "connectors/launcher/test/*.test.ts" "connectors/launcher/test/backends/*.test.ts"
+      - name: Test Node connectors against a real hub
+        run: node --disable-warning=ExperimentalWarning --test --test-concurrency=1 "connectors/launcher/test/e2e/*.test.ts"
+      - name: Build and pack Linux and Windows on x64 and ARM64
         run: |
           node scripts/npm/build.mjs
           npm pack ./dist/npm --pack-destination ./dist
@@ -86,13 +96,64 @@ jobs:
           name: npm-release
           path: dist
       - name: Verify the artifact checksum
-        working-directory: dist
-        run: sha256sum --check SHA256SUMS
+        run: node scripts/npm/verify-artifact.mjs
       - name: Test the same packed package on native ARM64
         run: node --test --test-concurrency=2 scripts/npm/package.test.mjs
 
+  test-windows:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2025
+            arch: x64
+          - runner: windows-11-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - name: Preserve LF asset bytes for packed-source verification
+        shell: pwsh
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          architecture: ${{ matrix.arch }}
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.4'
+          cache-dependency-path: go.sum
+      - name: Pin npm to the packaging version
+        run: npm install --global npm@12.0.1 --ignore-scripts --no-audit --no-fund
+      - name: Test release guards and cross-platform wrappers
+        run: node --test --test-concurrency=2 scripts/npm/release.test.mjs scripts/npm/npm-command.test.mjs scripts/npm/wrapper.test.mjs scripts/npm/verify-artifact.test.mjs
+      - name: Test the full Go suite on Windows
+        run: go test -mod=readonly -p 2 -timeout=20m ./...
+      - name: Build native binaries for connector tests
+        run: go build -mod=readonly -p 2 -o bin/ ./cmd/vecnet ./cmd/vecnet-hub
+      - name: Test Node connectors on Windows
+        env:
+          VECNET_BIN: ${{ github.workspace }}/bin/vecnet.exe
+        run: node --disable-warning=ExperimentalWarning --test --test-concurrency=2 "connectors/hub-client/test/*.test.ts" "connectors/launcher/test/*.test.ts" "connectors/launcher/test/backends/*.test.ts"
+      - name: Test Node connectors against a real hub on Windows
+        env:
+          VECNET_BIN: ${{ github.workspace }}/bin/vecnet.exe
+        run: node --disable-warning=ExperimentalWarning --test --test-concurrency=1 "connectors/launcher/test/e2e/*.test.ts"
+      - uses: actions/download-artifact@v5
+        with:
+          name: npm-release
+          path: dist
+      - name: Verify the identical packed artifact checksum
+        run: node scripts/npm/verify-artifact.mjs
+      - name: Test the same packed package on native Windows
+        run: node --test --test-concurrency=2 scripts/npm/package.test.mjs
+
   publish:
-    needs: [build, test-arm64]
+    needs: [build, test-arm64, test-windows]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -113,8 +174,7 @@ jobs:
           name: npm-release
           path: dist
       - name: Verify the tested artifact checksum
-        working-directory: dist
-        run: sha256sum --check SHA256SUMS
+        run: node scripts/npm/verify-artifact.mjs
       - name: Publish the tested tarball through OIDC
         env:
           # npm provenance requires a public source repository.

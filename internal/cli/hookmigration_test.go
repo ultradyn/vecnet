@@ -21,7 +21,7 @@ func migrationRun(t *testing.T, args ...string) (string, string, error) {
 func TestCodexHookMigrationOwnedAndCustom(t *testing.T) {
 	src := []byte(`{"number":1e400,"literal":"\u0061","hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"/old/vecnet hook --profile p --event user-prompt --mcp vecnet-p","timeout":5},{"type":"command","command":"vecnet hook --profile q --event user-prompt --auto-ack","timeout":5},{"type":"command","command":"vecnet hook --profile p --event user-prompt && custom","timeout":5},{"type":"command","command":"vecnet hook --profile p --event user-prompt","timeout":99}]},{"matcher":"custom","hooks":[{"type":"command","command":"vecnet hook --profile p --event user-prompt","timeout":5}]}]}}`)
 	path := filepath.Join(t.TempDir(), "hooks.json")
-	if err := os.WriteFile(path, src, 0640); err != nil {
+	if err := cliFixtureWriteFile(path, src, 0640); err != nil {
 		t.Fatal(err)
 	}
 	out, _, err := migrationRun(t, "--settings", path, "--dry-run")
@@ -63,13 +63,13 @@ func TestCodexHookMigrationOwnedAndCustom(t *testing.T) {
 		t.Fatalf("backups=%v", backups)
 	}
 	// Rollback refuses drift, even though the backup itself remains valid.
-	if err := os.WriteFile(path, append(got, ' '), 0640); err != nil {
+	if err := cliFixtureWriteFile(path, append(got, ' '), 0640); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := migrationRun(t, "--settings", path, "--rollback", backups[0], "--write"); err == nil || !strings.Contains(err.Error(), "drift") {
 		t.Fatalf("rollback drift: %v", err)
 	}
-	if err := os.WriteFile(path, got, 0640); err != nil {
+	if err := cliFixtureWriteFile(path, got, 0640); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := migrationRun(t, "--settings", path, "--rollback", backups[0], "--write"); err != nil {
@@ -79,10 +79,7 @@ func TestCodexHookMigrationOwnedAndCustom(t *testing.T) {
 	if !bytes.Equal(src, restored) {
 		t.Fatalf("restore=%s", restored)
 	}
-	info, _ := os.Stat(path)
-	if info.Mode().Perm() != 0640 {
-		t.Fatal(info.Mode())
-	}
+	cliFixtureRequireMode(t, path, 0640)
 }
 
 func TestCodexHookMigrationRollbackNewFile(t *testing.T) {
@@ -111,7 +108,7 @@ func TestCodexHookMigrationRollbackNewFile(t *testing.T) {
 func TestCodexHookMigrationRefusesMalformedJSON(t *testing.T) {
 	for _, src := range []string{`{"hooks":{},"hooks":{}}`, `{"hooks":[]}`, `{"hooks":{"PostToolUse":{}}}`} {
 		path := filepath.Join(t.TempDir(), "hooks.json")
-		_ = os.WriteFile(path, []byte(src), 0600)
+		_ = cliFixtureWriteFile(path, []byte(src), 0600)
 		if _, _, err := migrationRun(t, "--settings", path, "--write"); err == nil {
 			t.Fatal("accepted", src)
 		}

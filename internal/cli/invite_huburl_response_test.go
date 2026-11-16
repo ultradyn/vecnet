@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -131,7 +132,7 @@ func newInviteURLResponseFixture(t *testing.T, verb, received, profileHub string
 	var baseEnv func(string) string
 	f.config, baseEnv = pinTestEnv(t, f.configBody)
 	bin := filepath.Join(filepath.Dir(f.config), "bin")
-	if err := os.MkdirAll(bin, 0o700); err != nil {
+	if err := cliFixtureMkdirAll(bin, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	f.clipboard = filepath.Join(filepath.Dir(f.config), "clipboard.txt")
@@ -141,9 +142,11 @@ func newInviteURLResponseFixture(t *testing.T, verb, received, profileHub string
 	// Invitation blocks end in a newline; read/printf preserves their bytes.
 	script := "#!/bin/sh\nprintf 'called\\n' >> " + quote(f.clipboardCalls) + "\n" +
 		"while IFS= read -r line; do printf '%s\\n' \"$line\"; done > " + quote(f.clipboard) + "\n"
-	if err := os.WriteFile(filepath.Join(bin, "wl-copy"), []byte(script), 0o700); err != nil {
-		t.Fatal(err)
+	tool := "wl-copy"
+	if runtime.GOOS == "windows" {
+		tool = "clip.exe"
 	}
+	cliFixtureProgram(t, bin, tool, script, cliFixtureProgramSpec{Kind: "clipboard", Log: f.clipboard, Calls: f.clipboardCalls})
 	f.getenv = func(k string) string {
 		switch k {
 		case "PATH":
@@ -328,7 +331,11 @@ func TestInviteHubURLResponsePreservesSafeOutput(t *testing.T) {
 						if f.pathLookups.Load() != 1 || string(pinRead(t, f.clipboardCalls)) != "called\n" || string(pinRead(t, f.clipboard)) != block {
 							t.Error("--copy did not invoke exactly the fixture tool with the full paste block")
 						}
-						if !strings.Contains(errs, "copied to the clipboard (wl-copy)\n") {
+						tool := "wl-copy"
+						if runtime.GOOS == "windows" {
+							tool = "clip.exe"
+						}
+						if !strings.Contains(errs, "copied to the clipboard ("+tool+")\n") {
 							t.Error("--copy did not report the fixture clipboard tool")
 						}
 					} else {

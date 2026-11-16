@@ -18,7 +18,7 @@ func TestSetOperatorProfileRewritesOneLine(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
 	original := "# keep me\n# operator_profile = \"nope\"\noperator_profile = \"operator\"\n\n[profiles.operator]\nhub = \"http://127.0.0.1:45752\"\nsecret = \"vn_operator_LOCALSECRET\"\n\n[profiles.peer]\nhub = \"http://127.0.0.1:45752\"\nsecret = \"vn_peer_SECRET\"\n\n[profiles.fly]\nhub = \"https://vecnet.fly.dev\"\nsecret = \"vn_operator_FLYSECRET\"\n"
-	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+	if err := cliFixtureWriteFile(path, []byte(original), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := setOperatorProfile(path, "fly"); err != nil {
@@ -46,7 +46,7 @@ func TestSetOperatorProfileRewritesOneLine(t *testing.T) {
 
 	crlf := filepath.Join(dir, "crlf.toml")
 	body := "peer = 1\r\n"
-	if err := os.WriteFile(crlf, []byte(body), 0o600); err != nil {
+	if err := cliFixtureWriteFile(crlf, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := setOperatorProfile(crlf, "operator"); err == nil {
@@ -87,7 +87,7 @@ func TestChooseTUIProfile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
 	original := "# keep\n\n[profiles.operator]\nhub = \"http://127.0.0.1:45752\"\nsecret = \"vn_operator_LOCALSECRET\"\n\n[profiles.peer]\nsecret = \"vn_peer_SECRET\"\nhub = \"http://127.0.0.1:45752\"\n\n[profiles.fly]\nhub = \"https://vecnet.fly.dev\"\nsecret = \"vn_operator_FLYSECRET\"\n"
-	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+	if err := cliFixtureWriteFile(path, []byte(original), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	getenv := func(k string) string {
@@ -143,13 +143,13 @@ func TestChooseTUIProfile(t *testing.T) {
 		if string(got) != want {
 			t.Fatalf("y rewrite\n got %q\nwant %q", got, want)
 		}
-		if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+		if err := cliFixtureWriteFile(path, []byte(original), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	})
 	t.Run("set operator_profile skips the picker", func(t *testing.T) {
 		body := "operator_profile = \"peer\"\n" + original
-		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		if err := cliFixtureWriteFile(path, []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		a := &app{ctx: context.Background(), stdin: strings.NewReader(""), stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{}, getenv: getenv}
@@ -161,7 +161,7 @@ func TestChooseTUIProfile(t *testing.T) {
 		if err := a.chooseTUIProfile(false); err != nil || called || a.net != "" {
 			t.Fatalf("skip: called %v net %q err %v", called, a.net, err)
 		}
-		if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+		if err := cliFixtureWriteFile(path, []byte(original), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -192,7 +192,7 @@ func TestChooseTUIProfile(t *testing.T) {
 	})
 	t.Run("no operator profile", func(t *testing.T) {
 		only := filepath.Join(dir, "peer.toml")
-		if err := os.WriteFile(only, []byte("secret = \"vn_peer_SECRET\"\n[profiles.peer]\nhub = \"http://127.0.0.1:1\"\nsecret = \"vn_peer_SECRET\"\n"), 0o600); err != nil {
+		if err := cliFixtureWriteFile(only, []byte("secret = \"vn_peer_SECRET\"\n[profiles.peer]\nhub = \"http://127.0.0.1:1\"\nsecret = \"vn_peer_SECRET\"\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		env := func(k string) string {
@@ -216,7 +216,7 @@ func TestChooseTUIProfileRedactsMalformedConfigError(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
 	original := "operator_profile = \"fly\"\n\n[profiles.fly]\nhub = \"https://hub.example\"\nsecret = \"vn_operator_OK\"\n"
-	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+	if err := cliFixtureWriteFile(path, []byte(original), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	const secret = "vn_operator_SUPERSECRETCREDENTIAL99"
@@ -242,7 +242,7 @@ func TestChooseTUIProfileRedactsMalformedConfigError(t *testing.T) {
 	stderr := &bytes.Buffer{}
 	a := &app{ctx: context.Background(), stdin: strings.NewReader(""), stdout: stdout, stderr: stderr, getenv: getenv}
 	pickOperator = func(context.Context, []tui.ProfileChoice, io.Reader, io.Writer) (tui.PickResult, error) {
-		if err := os.WriteFile(path, []byte(malformed), 0o600); err != nil {
+		if err := cliFixtureWriteFile(path, []byte(malformed), 0o600); err != nil {
 			return tui.PickResult{}, err
 		}
 		return tui.PickResult{Name: "fly", MakeDefault: true}, nil

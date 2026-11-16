@@ -24,7 +24,7 @@ async function eventually(fn: () => boolean, what: string) {
   assert.ok(fn(), what);
 }
 
-test('standalone delivery runner shuts down cleanly and recovers durable codex state on restart', async t => {
+test('standalone delivery runner shuts down cleanly and recovers durable codex state on restart', { skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const home = mkdtempSync(join(tmpdir(), 'vn-runner-'));
   const state = join(home, '.local', 'state', 'vecnet', 'codex'), db = join(state, 'delivery.sqlite');
   const authority = join(state, 'bindings.json'), status = authority + '.status.json', bin = join(home, 'vecnet'), trace = join(home, 'calls');
@@ -64,7 +64,7 @@ test('standalone delivery runner shuts down cleanly and recovers durable codex s
 });
 
 for (const unsafe of ['directory-symlink', 'database-symlink', 'wal-symlink', 'database-mode', 'directory-mode', 'relative-binary']) {
-  test(`standalone runner refuses ${unsafe} without modifying the target`, async t => {
+  test(`standalone runner refuses ${unsafe} without modifying the target`, { skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
     const home = mkdtempSync(join(tmpdir(), 'vn-runner-refuse-'));
     t.after(() => rmSync(home, { recursive: true, force: true }));
     const state = join(home, '.local', 'state', 'vecnet', 'codex'), target = join(home, 'do-not-touch');

@@ -1,5 +1,6 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { userHome } from '../../backend.ts';
 import type { PluginContext } from '../../backend.ts';
 import { parseWait } from './transcript.ts';
 
@@ -18,12 +19,12 @@ export class Bridge {
   readonly ctx: PluginContext;
   constructor(config: PaseoConfig, ctx: PluginContext) { this.config = config; this.ctx = ctx; }
   async raw(args: string[], options: { signal?: AbortSignal; env?: Record<string, string>; cwd?: string; timeoutMs?: number } = {}) {
-    const bin = this.config.bridge_bin.startsWith('~/') ? join(homedir(), this.config.bridge_bin.slice(2)) : this.config.bridge_bin;
+    const bin = this.config.bridge_bin.match(/^~[\\/]/) ? join(userHome(process.env) ?? homedir(), this.config.bridge_bin.slice(2)) : this.config.bridge_bin;
     const argv = [bin, '--json', ...args];
     const timeoutMs = options.timeoutMs ?? (['launch', 'doctor', 'settle'].includes(args[0]) ? 300_000 : 90_000);
     try {
-      return await this.ctx.exec(options.cwd ? ['env', '-C', options.cwd, ...argv] : argv,
-        { timeoutMs, signal: options.signal, env: options.env });
+      return await this.ctx.exec(argv,
+        { timeoutMs, signal: options.signal, env: options.env, cwd: options.cwd });
     } catch {
       if (options.signal?.aborted) throw options.signal.reason;
       // Never propagate an exec exception: it can quote argv, including --text.

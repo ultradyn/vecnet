@@ -144,11 +144,11 @@ func TestSendReceiptMissingNameAndHostileLabel(t *testing.T) {
 			u := profileUser(t, srv.URL, "synthetic-secret")
 			// A stale cache must not fabricate a current/send-time receipt name.
 			cachePath := filepath.Join(u.env["XDG_CACHE_HOME"], "vecnet", "peers.json")
-			if err := os.MkdirAll(filepath.Dir(cachePath), 0700); err != nil {
+			if err := cliFixtureMkdirAll(filepath.Dir(cachePath), 0700); err != nil {
 				t.Fatal(err)
 			}
 			cached, _ := json.Marshal(map[string]string{peer: "StaleCacheName"})
-			if err := os.WriteFile(cachePath, cached, 0600); err != nil {
+			if err := cliFixtureWriteFile(cachePath, cached, 0600); err != nil {
 				t.Fatal(err)
 			}
 			out := u.mustRun("send", peer, "legacy or hostile label", "--hold")
@@ -378,10 +378,10 @@ func TestInboxProjectionMalformedPageNeverAcknowledges(t *testing.T) {
 			defer srv.Close()
 			u := profileUser(t, srv.URL, "synthetic-secret")
 			cachePath := filepath.Join(u.env["XDG_CACHE_HOME"], "vecnet", "messages.json")
-			if err := os.MkdirAll(filepath.Dir(cachePath), 0700); err != nil {
+			if err := cliFixtureMkdirAll(filepath.Dir(cachePath), 0700); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(cachePath, []byte(`{"msg_cached":"thr_cached"}`), 0600); err != nil {
+			if err := cliFixtureWriteFile(cachePath, []byte(`{"msg_cached":"thr_cached"}`), 0600); err != nil {
 				t.Fatal(err)
 			}
 			code, out, stderr := u.run(mode.args...)

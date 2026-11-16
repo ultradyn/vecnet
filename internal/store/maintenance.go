@@ -8,7 +8,6 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"syscall"
 	"time"
 )
 
@@ -86,10 +85,7 @@ func maintenanceStats(ctx context.Context, c *sql.Conn, path string, o Maintenan
 	if o.AvailableBytes != nil {
 		s.AvailableBytes, err = o.AvailableBytes(ctx)
 	} else {
-		var st syscall.Statfs_t
-		if err = syscall.Statfs(filepath.Dir(path), &st); err == nil {
-			s.AvailableBytes = int64(st.Bavail) * int64(st.Bsize)
-		}
+		s.AvailableBytes, err = availableDiskBytes(filepath.Dir(path))
 	}
 	if err != nil {
 		return s, errors.New("maintenance: capacity_probe")

@@ -1,4 +1,4 @@
-//go:build !linux && !darwin && !dragonfly && !freebsd && !netbsd && !openbsd
+//go:build !windows && !linux && !darwin && !dragonfly && !freebsd && !netbsd && !openbsd
 
 package cli
 

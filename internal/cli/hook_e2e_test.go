@@ -26,7 +26,7 @@ func hookUser(t *testing.T, hub, secret string) *user {
 	u := profileUser(t, hub, secret)
 	// Legacy-hook admission canonicalizes the shared per-user authority even
 	// for Claude fixtures. Never fall back to the build-box user's HOME.
-	if err := os.MkdirAll(u.env["HOME"], 0700); err != nil {
+	if err := cliFixtureMkdirAll(u.env["HOME"], 0700); err != nil {
 		t.Fatal(err)
 	}
 	u.env["XDG_CONFIG_HOME"] = filepath.Join(filepath.Dir(u.conf), "xdg")

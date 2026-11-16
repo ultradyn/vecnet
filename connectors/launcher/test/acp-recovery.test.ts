@@ -102,6 +102,9 @@ test('I2 real lane drains delayed authoritative process exit after lost state, f
   let releaseClose: (() => void) | undefined, closeHeld = false;
   const mocked = t.mock.method(childProcess, 'spawn', (...args: Parameters<typeof childProcess.spawn>) => {
     const child = originalSpawn(...args);
+    // taskkill is an implementation detail on Windows, not the ACP process
+    // whose authoritative close this test intentionally delays.
+    if (args[0] !== process.execPath) return child;
     const emit = child.emit;
     child.emit = function (name: string | symbol, ...values: any[]): boolean {
       if (name === 'close') { closeHeld = true; releaseClose = () => { Reflect.apply(emit, child, [name, ...values]); }; return true; }
@@ -127,7 +130,7 @@ test('I2 real lane drains delayed authoritative process exit after lost state, f
   await new Promise(resolve => setTimeout(resolve, 30));
   assert.equal(f.job().terminal, null, 'lost state alone must not fabricate process exit');
   releaseClose!(); releaseClose = undefined;
-  await new Promise(resolve => setTimeout(resolve, 60));
+  await until(() => observed.some(e => e.type === 'process_exited'), 'authoritative process exit delivered');
   assert.equal(observed.filter(e => e.type === 'process_exited').length, 1, 'iterator must deliver one authoritative exit after the earlier lost state');
   await until(() => f.job().terminal === 'failed', 'terminal lane failure');
   assert.equal(f.ledger.counts().open, 0); assert.equal(f.ledger.inputs(f.job().jobId, ['failed']).length, 1);

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, realpathSync } from 'node:fs';
-import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import type { Clock, Log } from '../../../hub-client/src/ports.ts';
 import type { KeyValue } from '../backend.ts';
 import { redactingLog } from '../redact.ts';
@@ -14,11 +14,16 @@ import { openStatusPublisher } from './connector-status.ts';
 import type { StatusPublisher } from './connector-status.ts';
 import { createRuntimeStatusReporter, runtimeStatusPost } from './runtime-status.ts';
 import type { RuntimeStatusPost } from './runtime-status.ts';
+import { userHome } from '../../../hub-client/src/platform.ts';
+import { localPlatform } from '../private-files.ts';
 
 export const CODEX_MAX_KEPT_LOADED = 8;
 export const CODEX_RELOAD_MS = 10_000;
 export type LauncherBinding = Omit<Binding, 'origin'> & { ensureLoaded: () => Promise<boolean> };
+export type CodexConnectorOutcome = { reason: 'stopped' | 'status_lock_lost' };
 export interface CodexConnector {
+  /** Settles only after engines, reports, recovery, and the publisher are fenced/closed. */
+  readonly stopped: Promise<CodexConnectorOutcome>;
   stop(): Promise<void>;
   /** Attach launcher lifecycle only to a complete, matching authoritative binding. */
   addLauncherBinding(b: LauncherBinding): void;
@@ -29,9 +34,10 @@ export interface CodexConnector {
 /** One authority for the OS user, independent of profiles, configs, and XDG.
  * An override may only name this same canonical path. Unknown HOME fails closed. */
 export function codexBindingsPath(env: NodeJS.ProcessEnv): string | undefined {
-  if (!env.HOME || !isAbsolute(env.HOME)) return;
+  const selectedHome = userHome(env);
+  if (!selectedHome) return;
   try {
-    const home = realpathSync(env.HOME);
+    const home = realpathSync(selectedHome);
     const expected = canonicalPath(join(home, '.local', 'state', 'vecnet', 'codex', 'bindings.json'));
     if (env.VECNET_CODEX_BINDINGS && canonicalPath(env.VECNET_CODEX_BINDINGS) !== expected) return;
     return expected;
@@ -43,8 +49,22 @@ export function codexBindingsPath(env: NodeJS.ProcessEnv): string | undefined {
 export function codexRecoveryPath(env: NodeJS.ProcessEnv): string {
   const unsafe = () => new Error('unsafe state path');
   const uid = process.geteuid?.();
-  if (uid === undefined || !env.HOME || !isAbsolute(env.HOME)) throw unsafe();
-  const home = realpathSync(env.HOME);
+  const selectedHome = userHome(env);
+  if (!selectedHome || process.platform !== 'win32' && uid === undefined) throw unsafe();
+  const home = realpathSync(selectedHome);
+  if (process.platform === 'win32') {
+    const state = join(home, '.local', 'state', 'vecnet', 'codex');
+    localPlatform('mkdir-private', state, { env });
+    const database = join(state, 'delivery.sqlite');
+    for (const file of [database, database + '-wal', database + '-shm', database + '-journal']) {
+      try {
+        const st = lstatSync(file);
+        if (!st.isFile() || st.isSymbolicLink() || st.nlink !== 1) throw unsafe();
+        localPlatform('check-private', file, { env });
+      } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw unsafe(); }
+    }
+    return database; // SQLite and sidecars inherit the protected directory DACL.
+  }
   const checkDir = (path: string, privateDir: boolean) => {
     const st = lstatSync(path);
     if (!st.isDirectory() || st.isSymbolicLink() || st.uid !== uid || (st.mode & (privateDir ? 0o077 : 0o022)) !== 0) throw unsafe();
@@ -131,12 +151,17 @@ const fingerprint = (b: Binding) => b.origin + ':' + bindingFingerprint(b);
 export function startCodexConnector(o: { kv?: KeyValue; clock: Clock; log: Log; env: NodeJS.ProcessEnv; openRpc?: typeof openCodexRpc; postRuntimeStatus?: RuntimeStatusPost }): CodexConnector {
   const log = redactingLog(o.log), { clock } = o;
   const euid = process.geteuid?.() ?? -1;
+  const recoveryEnv = { ...o.env };
   const env = Object.fromEntries(Object.entries(o.env).filter((e): e is [string, string] => typeof e[1] === 'string'));
   const reporter = createRuntimeStatusReporter({ clock, log, post: o.postRuntimeStatus ?? runtimeStatusPost(o.env.VECNET_BIN || 'vecnet', env) });
   const path = codexBindingsPath(o.env), limit = codexMaxBindings(o.env);
   const entries = new Map<string, Entry>(), registrations = new Map<string, Binding>();
   let stopped = false, stopping: Promise<void> | undefined, chain: Promise<void> = Promise.resolve(), timer: { cancel(): void } | undefined;
   let recovery: ReturnType<typeof openRecovery> | undefined;
+  let stopReason: CodexConnectorOutcome['reason'] = 'stopped';
+  let markStopped!: (outcome: CodexConnectorOutcome) => void;
+  const finished = new Promise<CodexConnectorOutcome>(resolve => { markStopped = resolve; });
+  let lostCleanup: Promise<unknown> | undefined;
   let publisher: StatusPublisher | undefined, duplicateLogged = false, lastFile = '';
   const overLogged = new Set<string>();
 
@@ -166,21 +191,31 @@ export function startCodexConnector(o: { kv?: KeyValue; clock: Clock; log: Log; 
     else if (s.state === 'invalid') log.warn('codex_bindings_invalid', { reason: s.reason });
   }
   async function reload() {
-    const s = readBindings(path, euid);
+    const s = readBindings(path, euid, env);
     fileChanged(s);
     if (!publisher && path !== undefined) {
-      try { codexRecoveryPath(o.env); }
+      try { codexRecoveryPath(recoveryEnv); }
       catch { log.warn('codex_recovery_refused'); return; }
-      publisher = openStatusPublisher(path, euid);
+      publisher = await openStatusPublisher(path, euid, { env, onLost() {
+        // Loss of the singleton is fatal: fence synchronously, then notify the
+        // host only after cleanup. A running-but-dead service cannot be restarted
+        // by Task Scheduler/systemd; never silently return to the reload loop.
+        stopReason = 'status_lock_lost';
+        log.warn('codex_status_lock_lost');
+        stopped = true; timer?.cancel();
+        reporter.fence(); // Abort even an offline shutdown already in progress.
+        lostCleanup = Promise.allSettled([...entries.keys()].map(retire));
+        void stopConnector().catch(() => { log.warn('codex_connector_cleanup_failed'); });
+      } });
       if (!publisher) {
         if (!duplicateLogged) { duplicateLogged = true; log.warn('codex_connector_duplicate'); }
         return;
       }
       duplicateLogged = false;
     }
-    if (!publisher) return;
+    if (!publisher || !publisher.valid() || stopped) return;
     if (!recovery) {
-      try { recovery = openRecovery(codexRecoveryPath(o.env), clock, o.kv); }
+      try { recovery = openRecovery(codexRecoveryPath(recoveryEnv), clock, o.kv); }
       catch { log.warn('codex_recovery_refused'); publisher.publish(clock.now(), []); return; }
     }
     const listed = s.state === 'ok' ? s.bindings : [];
@@ -223,6 +258,7 @@ export function startCodexConnector(o: { kv?: KeyValue; clock: Clock; log: Log; 
         e.over = isOver; e.expired = expired; e.engine.setOverLimit(isOver);
       }
     }
+    if (stopped || !publisher.valid()) return;
     publisher.publish(clock.now(), entries.values());
     reporter.sync(entries.values());
   }
@@ -232,19 +268,24 @@ export function startCodexConnector(o: { kv?: KeyValue; clock: Clock; log: Log; 
   }
   void serial(reload).then(schedule);
 
+  function stopConnector(): Promise<void> {
+    if (stopping) return stopping;
+    stopped = true; timer?.cancel();
+    stopping = (async () => {
+      await chain;
+      await lostCleanup;
+      // Keep the singleton on normal shutdown while bounded offline reports run.
+      await reporter.stop();
+      await Promise.allSettled([...entries.keys()].map(retire));
+      try { recovery?.close(); }
+      finally { recovery = undefined; await publisher?.close(); publisher = undefined; }
+    })().finally(() => { markStopped({ reason: stopReason }); });
+    return stopping;
+  }
+
   return {
-    stop() {
-      stopping ??= (async () => {
-        stopped = true; timer?.cancel();
-        await chain;
-        // Keep the singleton lock while bounded best-effort offline reports run.
-        await reporter.stop();
-        await Promise.allSettled([...entries.keys()].map(retire));
-        try { recovery?.close(); }
-        finally { publisher?.close(); publisher = undefined; }
-      })();
-      return stopping;
-    },
+    stopped: finished,
+    stop: stopConnector,
     addLauncherBinding(input) {
       void serial(async () => {
         const b = parseBinding({ config_path: input.configPath, generation: input.generation, profile: input.profile,
@@ -252,7 +293,7 @@ export function startCodexConnector(o: { kv?: KeyValue; clock: Clock; log: Log; 
           created_at: Number.isFinite(input.createdAt) ? new Date(input.createdAt).toISOString() : '',
           expires_at: Number.isFinite(input.expiresAt) ? new Date(input.expiresAt).toISOString() : '',
           attended: input.attended, idle_dormant_hours: input.idleDormantMs === undefined ? undefined : input.idleDormantMs / 3_600_000 });
-        const s = readBindings(path, euid);
+        const s = readBindings(path, euid, env);
         const authority = b && s.state === 'ok' ? s.bindings.find(row => bindingFingerprint(row) === bindingFingerprint(b)) : undefined;
         if (!b || !authority || clock.now() >= b.expiresAt || typeof input.ensureLoaded !== 'function') {
           log.warn('codex_launcher_binding_unauthorized', { threadId: input.threadId });

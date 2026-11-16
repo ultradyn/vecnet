@@ -27,6 +27,7 @@ import (
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/opapi"
 	"github.com/XertroV/vecnet/internal/opclient"
+	"github.com/XertroV/vecnet/internal/platform"
 	"github.com/XertroV/vecnet/internal/tui/theme"
 )
 
@@ -789,7 +790,11 @@ func (s *chatScreen) commandAttach(m *Model, args []string) tea.Cmd {
 		return nil
 	}
 	path := strings.Join(args, " ")
-	if rest, ok := strings.CutPrefix(path, "~/"); ok {
+	rest, tilde := strings.CutPrefix(path, "~/")
+	if !tilde && filepath.Separator == '\\' {
+		rest, tilde = strings.CutPrefix(path, "~\\")
+	}
+	if tilde {
 		home, err := os.UserHomeDir()
 		if err != nil {
 			m.Toast("attach: cannot expand ~/: "+err.Error(), true)
@@ -1456,7 +1461,25 @@ func (s *chatScreen) onSaved(msg chatSavedMsg, m *Model) {
 // directory. A name with nothing left in it falls back to the blob's hash.
 func chatSaveName(name, sha string) string {
 	base := filepath.Base(Clean(name))
-	if base == "." || base == ".." || base == string(filepath.Separator) {
+	if base == string(filepath.Separator) {
+		base = ""
+	}
+	if filepath.Separator == '\\' {
+		// A peer's filename is not a Windows path or NTFS stream name.
+		// Preserve its usable text, but replace invalid characters and keep
+		// device names out of CreateFile's special namespace.
+		base = strings.Map(func(r rune) rune {
+			if strings.ContainsRune("<>:\"/\\|?*", r) {
+				return '_'
+			}
+			return r
+		}, base)
+		base = strings.TrimRight(base, ". ")
+		if base != "" && !filepath.IsLocal(base) {
+			base = "_" + base
+		}
+	}
+	if base == "" || base == "." || base == ".." {
 		return "blob-" + filepath.Base(Clean(sha[:min(len(sha), 16)]))
 	}
 	return base
@@ -1475,11 +1498,18 @@ func chatWrite(base string, data []byte) (string, error) {
 		if n > 0 {
 			name = fmt.Sprintf("%s (%d)%s", stem, n, ext)
 		}
-		f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		f, err := platform.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		if errors.Is(err, fs.ErrExist) {
 			continue
 		}
 		if err != nil {
+			// Windows reports access denied rather than ErrExist for some
+			// existing directories/reparse points under CREATE_NEW. Lstat
+			// also sees dangling links: treat any existing entry as a name
+			// collision, never follow it or weaken the exclusive open.
+			if _, statErr := os.Lstat(name); statErr == nil {
+				continue
+			}
 			return "", err
 		}
 		_, err = f.Write(data)

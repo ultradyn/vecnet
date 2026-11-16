@@ -446,9 +446,6 @@ func TestHookVecnetProfile(t *testing.T) {
 // After /clear the session id changes but the Claude Code process does
 // not: the binding follows it. Another live process is still foreign.
 func TestHookClearFollowsProcess(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("process identity is unknown outside Unix")
-	}
 	env, path, _ := sessionHub(t)
 	noVecnetProfile(env)
 	env["CLAUDE_PID"] = strconv.Itoa(os.Getpid())
@@ -473,9 +470,6 @@ func TestHookClearFollowsProcess(t *testing.T) {
 // A binding whose Claude Code process has exited is stale: the next
 // session binds it (claiming from its following run).
 func TestHookDeadSessionReleased(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("process identity is unknown outside Unix")
-	}
 	cmd := exec.Command(os.Args[0], "-test.run=^$")
 	if err := cmd.Run(); err != nil {
 		t.Fatal(err)
@@ -504,8 +498,8 @@ func TestHookDeadSessionReleased(t *testing.T) {
 }
 
 func TestProcStart(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("/proc start time is Linux-only")
+	if runtime.GOOS != "linux" && runtime.GOOS != "windows" {
+		t.Skip("process start identity requires Linux procfs or native Windows process times")
 	}
 	if a, b := procStart(os.Getpid()), procStart(os.Getpid()); a == "" || a != b {
 		t.Fatalf("start=%q/%q", a, b)
@@ -681,7 +675,7 @@ func oldWriter(t *testing.T, path string) {
 	}
 	old.Shown = append(old.Shown, "dly_old_watch")
 	raw, _ = json.Marshal(old)
-	if err := os.WriteFile(path, raw, 0o600); err != nil {
+	if err := cliFixtureWriteFile(path, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -747,9 +741,6 @@ func runHookEvent(t *testing.T, env map[string]string, extra map[string]string, 
 // Code process has provably exited and a user-prompt run binds it anew.
 // Nothing another live session's hook does unbinds or takes it.
 func TestHookBindingMovesOnlyExplicitly(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("process identity is unknown outside Unix")
-	}
 	host, _ := os.Hostname()
 	self := hookProc{PID: os.Getpid(), Start: procStart(os.Getpid()), Host: host}
 	other := strconv.Itoa(os.Getppid())
@@ -844,11 +835,11 @@ func TestHookSubagentSessionNeverBinds(t *testing.T) {
 func TestHookBindingMigrates(t *testing.T) {
 	env, path, _ := sessionHub(t)
 	noVecnetProfile(env)
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := cliFixtureMkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	legacy := `{"poll_cursor":"e1.0","shown":[],"session":"S1","session_at":"2026-11-04T09:46:00Z","session_how":"rebind"}`
-	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+	if err := cliFixtureWriteFile(path, []byte(legacy), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if out, _ := runHookAs(t, env, "S1", "p"); !strings.Contains(contextOf(t, out), "secret text") {

@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -52,7 +53,7 @@ func newBindFixture(t *testing.T) *bindFixture {
 	t.Cleanup(f.server.Close)
 	f.hub = f.server.URL
 	f.env = map[string]string{"HOME": d, "VECNET_CONFIG": filepath.Join(d, "v.toml"), "XDG_CONFIG_HOME": filepath.Join(d, "config"), "XDG_CACHE_HOME": filepath.Join(d, "cache"), "CODEX_HOME": f.home, "VECNET_CODEX_BINDINGS": f.path, "VECNET_PROFILE": "p"}
-	if err := os.Mkdir(f.home, 0700); err != nil {
+	if err := cliFixtureMkdir(f.home, 0700); err != nil {
 		t.Fatal(err)
 	}
 	f.config(f.hub + "/")
@@ -193,23 +194,41 @@ func TestCodexBindRejectsBadIds(t *testing.T) {
 func TestCodexBindFileMode(t *testing.T) {
 	f := newBindFixture(t)
 	f.bind("p", bindT1)
-	check := func(path string, want os.FileMode) {
-		t.Helper()
-		s, e := os.Stat(path)
-		if e != nil {
-			t.Fatal(e)
-		}
-		if s.Mode().Perm() != want {
-			t.Fatalf("%s: mode %o want %o", path, s.Mode().Perm(), want)
-		}
-	}
+	check := func(path string, want os.FileMode) { t.Helper(); cliFixtureRequireMode(t, path, want) }
 	check(f.path, 0600)
 	check(filepath.Dir(f.path), 0700)
-	if err := os.Chmod(f.path, 0644); err != nil {
+	if err := cliFixtureChmod(f.path, 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(filepath.Dir(f.path), 0755); err != nil {
+	if err := cliFixtureChmod(filepath.Dir(f.path), 0755); err != nil {
 		t.Fatal(err)
+	}
+	if runtime.GOOS == "windows" {
+		// Windows authority fails closed on any public DACL. Unlike owner-owned
+		// POSIX 0644 state, it must not be silently adopted and republished.
+		fileACL, err := cliFixturePermissions(f.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dirACL, err := cliFixturePermissions(filepath.Dir(f.path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.rejected("private state is accessible to another Windows user", "bind", "--thread", bindT1)
+		if after, err := cliFixturePermissions(f.path); err != nil || after != fileACL {
+			t.Fatalf("refusal changed file DACL: %v", err)
+		}
+		if after, err := cliFixturePermissions(filepath.Dir(f.path)); err != nil || after != dirACL {
+			t.Fatalf("refusal changed directory DACL: %v", err)
+		}
+		// Explicitly repair the fixture's DACL, then exercise the same private
+		// no-op bind again rather than treating refusal as the end of coverage.
+		if err := cliFixtureChmod(f.path, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := cliFixtureChmod(filepath.Dir(f.path), 0700); err != nil {
+			t.Fatal(err)
+		}
 	}
 	f.bind("p", bindT1)
 	check(f.path, 0600)
@@ -321,7 +340,7 @@ func TestCodexBindRecordsIdentity(t *testing.T) {
 func TestCodexBindCanonicalHome(t *testing.T) {
 	f := newBindFixture(t)
 	alias := filepath.Join(filepath.Dir(f.home), "alias")
-	if err := os.Symlink(f.home, alias); err != nil {
+	if err := cliFixtureSymlink(t, f.home, alias); err != nil {
 		t.Fatal(err)
 	}
 	f.bind("p0", bindID(0), "--codex-home", alias)
@@ -334,7 +353,7 @@ func TestCodexBindCanonicalHome(t *testing.T) {
 	f.rejected("binding limit 8", "--net", "p8", "bind", "--thread", bindID(8), "--codex-home", alias)
 	f.rejected("codex-home", "--net", "p8", "bind", "--thread", bindID(8), "--codex-home", filepath.Join(f.home, "missing"))
 	file := filepath.Join(filepath.Dir(f.home), "file")
-	if err := os.WriteFile(file, nil, 0600); err != nil {
+	if err := cliFixtureWriteFile(file, nil, 0600); err != nil {
 		t.Fatal(err)
 	}
 	f.rejected("directory", "--net", "p8", "bind", "--thread", bindID(8), "--codex-home", file)
@@ -356,7 +375,7 @@ func TestCodexBindLimit(t *testing.T) {
 			f.bind("p0", bindID(0))
 			f.bind("p0", bindID(0), "--renew", "--ttl", "2h")
 			other := filepath.Join(filepath.Dir(f.home), "other")
-			if err := os.Mkdir(other, 0700); err != nil {
+			if err := cliFixtureMkdir(other, 0700); err != nil {
 				t.Fatal(err)
 			}
 			f.bind("p8", bindID(8), "--codex-home", other)

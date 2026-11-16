@@ -18,6 +18,13 @@ async function prospective(path: string, depth = 0): Promise<string> {
         return prospective(isAbsolute(link) ? link : `${dirname(path)}/${link}`, depth + 1);
       }
     } catch (lookup) { if ((lookup as NodeJS.ErrnoException).code !== 'ENOENT') throw lookup; }
+    if (process.platform === 'win32') {
+      // Junctions have native Windows normalization (unlike POSIX symlink/..).
+      // Rebuild with the resolved parent to supply canonical cwd to ACP.
+      const parent = dirname(path);
+      if (parent === path) throw error;
+      return join(await prospective(parent, depth + 1), basename(path));
+    }
     const parent = dirname(path);
     if (parent === path) throw error;
     const candidate = join(await prospective(parent, depth + 1), basename(path));

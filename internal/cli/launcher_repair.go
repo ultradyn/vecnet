@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/XertroV/vecnet/internal/platform"
 	"io"
 	"io/fs"
 	"os"
@@ -63,6 +64,9 @@ func hasLauncherManagerKey(values map[string]string, key string) bool {
 }
 
 func (a *app) launcherManagerInspect(meta launcherManaged, recoveringActive bool) (launcherManagerState, error) {
+	if runtime.GOOS == "windows" {
+		return a.launcherWindowsManagerInspect(meta, recoveringActive)
+	}
 	raw, err := a.launcherManager("show", filepath.Base(meta.UnitPath), "--property=LoadState,ActiveState,SubState,UnitFileState,FragmentPath,DropInPaths,ExecStart")
 	if err != nil {
 		return launcherManagerState{}, err
@@ -97,6 +101,9 @@ func (a *app) launcherManagerInspect(meta launcherManaged, recoveringActive bool
 	return state, nil
 }
 func launcherManagerExec(state launcherManagerState, m launcherManaged) bool {
+	if runtime.GOOS == "windows" {
+		return launcherWindowsManagerExec(state, m)
+	}
 	// systemctl show prints a structured command record. Require one command
 	// and exact path/argv, rather than substring-matching an executable name.
 	if strings.Count(state.Exec, "argv[]=") != 1 || strings.Count(state.Exec, "path=") != 1 {
@@ -121,7 +128,7 @@ func launcherValidateMetadata(meta launcherManaged, artifactPath string) error {
 		return errors.New("incomplete managed launcher metadata; reinstall explicitly")
 	}
 	for _, path := range []string{meta.ConfigPath, meta.UnitPath, meta.ManifestPath, meta.DataPath, meta.VecnetConfig, meta.Home, meta.Node, meta.PublicBin, meta.Runtime.Snapshot, meta.Runtime.Entry, meta.Runtime.VecnetBin} {
-		if !localRegistryPath(path) || strings.ContainsAny(path, ";{}\"\\") {
+		if !localRegistryPath(path) || launcherUncertainManagedPath(path) {
 			return errors.New("unsafe or uncertain managed launcher path")
 		}
 	}
@@ -133,14 +140,14 @@ func launcherValidateMetadata(meta launcherManaged, artifactPath string) error {
 	idHash := launcherHash([]byte(meta.VecnetConfig + "\x00" + meta.Profile))
 	id := "p-" + idHash[:16]
 	dir := filepath.Join(filepath.Dir(meta.VecnetConfig), "launcher", id)
-	if artifactPath != filepath.Join(dir, "managed.json") || meta.ConfigPath != filepath.Join(dir, "config.json") || meta.ManifestPath != filepath.Join(dir, "install.json") || filepath.Base(meta.UnitPath) != "vecnet-launcher-"+id+".service" {
+	if artifactPath != filepath.Join(dir, "managed.json") || meta.ConfigPath != filepath.Join(dir, "config.json") || meta.ManifestPath != filepath.Join(dir, "install.json") || meta.UnitPath != launcherExpectedUnitPath(meta, id) {
 		return errors.New("managed launcher profile paths do not match exact identity")
 	}
 	digest := filepath.Base(meta.Runtime.Snapshot)
 	if !localRegistryHash(digest) || meta.Runtime.Snapshot != filepath.Join(meta.DataPath, "snapshots", digest) || meta.Runtime.Entry != filepath.Join(meta.Runtime.Snapshot, "connectors", "launcher", "src", "main.ts") {
 		return errors.New("managed launcher snapshot path changed")
 	}
-	if meta.Runtime.VecnetBin != meta.PublicBin && meta.Runtime.VecnetBin != filepath.Join(meta.DataPath, "bin", meta.BinarySHA256, "vecnet") {
+	if meta.Runtime.VecnetBin != meta.PublicBin && meta.Runtime.VecnetBin != filepath.Join(meta.DataPath, "bin", meta.BinarySHA256, platform.Exe("vecnet")) {
 		return errors.New("managed launcher binary path changed")
 	}
 	if meta.Runtime.Source != "embedded" && !localRegistryPath(meta.Runtime.Source) {
@@ -180,10 +187,10 @@ func launcherValidateNode(path string) error {
 	if err != nil {
 		return err
 	}
-	if err = launcherSafeInfo(info, false, false); err != nil {
+	if err = launcherCheckInfo(parent, filepath.Base(path), info, false, false); err != nil {
 		return fmt.Errorf("unsafe launcher Node executable: %w", err)
 	}
-	if info.Mode().Perm()&0o111 == 0 {
+	if !launcherExecutableInfo(path, info) {
 		return errors.New("launcher Node path is no longer executable")
 	}
 	file, err := parent.Open(filepath.Base(path))
@@ -248,10 +255,10 @@ func launcherValidateSoftware(meta launcherManaged) error {
 		if e != nil {
 			return e
 		}
-		if info.Mode().Perm()&0o111 == 0 {
+		if !launcherExecutableInfo(meta.Runtime.VecnetBin, info) {
 			return errors.New("launcher binary is not executable")
 		}
-		if meta.Runtime.VecnetBin != meta.PublicBin && info.Mode()&0o7777 != 0o500 {
+		if meta.Runtime.VecnetBin != meta.PublicBin && launcherPrivateBinaryMode(meta.Runtime.VecnetBin, info) != nil {
 			return errors.New("managed private binary requires mode0500")
 		}
 	}
@@ -275,8 +282,8 @@ type launcherRepairTarget struct {
 // If a package changes the pathname again during this repair, defer rather than
 // pairing one binary's embedded assets with another binary's on-disk bytes.
 func launcherCurrentBinary() ([]byte, error) {
-	if runtime.GOOS != "linux" {
-		return nil, errors.New("managed launcher repair requires Linux/systemd")
+	if runtime.GOOS != "linux" && runtime.GOOS != "windows" {
+		return nil, errors.New("managed launcher repair requires Linux/systemd or Windows Task Scheduler")
 	}
 	executable, err := os.Executable()
 	if err != nil {
@@ -291,7 +298,7 @@ func launcherCurrentBinary() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err = launcherSafeInfo(info, false, false); err != nil {
+	if err = launcherCheckInfo(parent, filepath.Base(executable), info, false, false); err != nil {
 		return nil, err
 	}
 	file, err := parent.Open(filepath.Base(executable))
@@ -303,7 +310,7 @@ func launcherCurrentBinary() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	running, err := os.Stat("/proc/self/exe")
+	running, err := launcherRunningExecutable()
 	if err != nil {
 		return nil, err
 	}
@@ -331,7 +338,7 @@ func launcherDesired(old launcherManaged) (launcherRepairTarget, error) {
 		target.Meta.Assets[name] = launcherHash(raw)
 	}
 	snapshot := filepath.Join(old.DataPath, "snapshots", digest)
-	target.Meta.Runtime = launcherInstall{Node: old.Node, Entry: filepath.Join(snapshot, "connectors", "launcher", "src", "main.ts"), VecnetBin: filepath.Join(old.DataPath, "bin", target.Meta.BinarySHA256, "vecnet"), Source: "embedded", Snapshot: snapshot}
+	target.Meta.Runtime = launcherInstall{Node: old.Node, Entry: filepath.Join(snapshot, "connectors", "launcher", "src", "main.ts"), VecnetBin: filepath.Join(old.DataPath, "bin", target.Meta.BinarySHA256, platform.Exe("vecnet")), Source: "embedded", Snapshot: snapshot}
 	target.Manifest = launcherManagedJSON(target.Meta.Runtime)
 	target.Meta.ManifestSHA256 = launcherHash(target.Manifest)
 	unit, err := launcherUnit(files["connectors/launcher/systemd/vecnet-launcher-profile.service.in"], target.Meta.Runtime, old.ConfigPath, old.VecnetConfig, old.Home, old.Path)
@@ -345,7 +352,7 @@ func launcherDesired(old launcherManaged) (launcherRepairTarget, error) {
 }
 
 // Immutable receipt files are published under the profile lock.
-func launcherImmutable(root *os.Root, name string, raw []byte, mode fs.FileMode) error {
+func launcherImmutable(root *launcherRoot, name string, raw []byte, mode fs.FileMode) error {
 	validate := func() error {
 		got, e := launcherReadOwned(root, name, true)
 		if e != nil {
@@ -355,7 +362,7 @@ func launcherImmutable(root *os.Root, name string, raw []byte, mode fs.FileMode)
 		if e != nil {
 			return e
 		}
-		if !bytes.Equal(got, raw) || info.Mode()&0o7777 != mode {
+		if !bytes.Equal(got, raw) || launcherCheckMode(root, name, info, mode) != nil {
 			return errors.New("immutable launcher file changed")
 		}
 		return nil
@@ -373,7 +380,7 @@ func launcherImmutable(root *os.Root, name string, raw []byte, mode fs.FileMode)
 	defer root.Remove(tmp)
 	_, err = f.Write(raw)
 	if err == nil {
-		err = f.Chmod(mode)
+		err = launcherSetMode(f, mode)
 	}
 	if err == nil {
 		err = f.Sync()
@@ -413,7 +420,13 @@ func launcherSyncSnapshot(path string) error {
 			dirs = append(dirs, name)
 			return nil
 		}
-		f, e := root.Open(name)
+		var f *os.File
+		var e error
+		if runtime.GOOS == "windows" {
+			f, e = root.OpenFile(name, os.O_RDWR, 0)
+		} else {
+			f, e = root.Open(name)
+		}
 		if e != nil {
 			return e
 		}
@@ -430,7 +443,7 @@ func launcherSyncSnapshot(path string) error {
 		if e != nil {
 			return e
 		}
-		e = f.Sync()
+		e = platform.SyncDir(f)
 		f.Close()
 		if e != nil {
 			return e
@@ -491,18 +504,18 @@ func launcherStageBinary(target launcherRepairTarget) error {
 		if e != nil {
 			return e
 		}
-		if len(entries) != 1 || entries[0].Name() != "vecnet" {
+		if len(entries) != 1 || entries[0].Name() != platform.Exe("vecnet") {
 			return errors.New("unexpected private CLI directory content")
 		}
-		raw, e := launcherReadOwned(dir, "vecnet", true)
+		raw, e := launcherReadOwned(dir, platform.Exe("vecnet"), true)
 		if e != nil {
 			return e
 		}
-		info, e := dir.Lstat("vecnet")
+		info, e := dir.Lstat(platform.Exe("vecnet"))
 		if e != nil {
 			return e
 		}
-		if !bytes.Equal(raw, target.Binary) || info.Mode()&0o7777 != 0o500 {
+		if !bytes.Equal(raw, target.Binary) || launcherCheckMode(dir, platform.Exe("vecnet"), info, 0o500) != nil {
 			return errors.New("immutable private CLI changed")
 		}
 		return nil
@@ -521,7 +534,7 @@ func launcherStageBinary(target launcherRepairTarget) error {
 	if err != nil {
 		return err
 	}
-	err = launcherDurableWrite(staging, "vecnet", target.Binary, 0o500)
+	err = launcherDurableWrite(staging, platform.Exe("vecnet"), target.Binary, 0o500)
 	staging.Close()
 	if err != nil {
 		return err
@@ -537,7 +550,7 @@ func launcherStageBinary(target launcherRepairTarget) error {
 	return launcherSyncDir(parent)
 }
 
-func launcherPublishCAS(root *os.Root, name string, old, new []byte) error {
+func launcherPublishCAS(root *launcherRoot, name string, old, new []byte) error {
 	current, err := launcherManagedRead(root, name)
 	if err != nil {
 		return err
@@ -572,7 +585,7 @@ func (a *app) repairLauncherArtifact(projectRoot string, artifact localArtifact)
 		return done, err
 	}
 	defer root.Close()
-	if _, err = launcherManagedRead(root, "install.json.lock"); err != nil {
+	if err = launcherValidateLock(root, "install.json.lock", false); err != nil {
 		return done, err
 	}
 	lock, err := root.OpenFile("install.json.lock", os.O_RDWR, 0)
@@ -584,7 +597,7 @@ func (a *app) repairLauncherArtifact(projectRoot string, artifact localArtifact)
 	if err != nil {
 		return done, err
 	}
-	if err = launcherSafeInfo(info, false, true); err != nil {
+	if err = launcherCheckFile(lock, false, true); err != nil {
 		return done, err
 	}
 	pinned, err := root.Lstat("install.json.lock")
@@ -832,11 +845,11 @@ func (a *app) repairLauncherArtifact(projectRoot string, artifact localArtifact)
 	if err = launcherPublishCAS(root, "install.json", intent.OldManifest, intent.NewManifest); err != nil {
 		return done, err
 	}
-	if _, err = a.launcherManager("daemon-reload"); err != nil {
+	if err = a.launcherManagerReload(meta, intent); err != nil {
 		return done, err
 	}
 	if intent.WasActive {
-		if _, err = a.launcherManager("restart", filepath.Base(meta.UnitPath)); err != nil {
+		if err = a.launcherManagerRestart(target.Meta); err != nil {
 			return done, err
 		}
 	}

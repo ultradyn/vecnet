@@ -1,6 +1,7 @@
 import { mkdir, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve, dirname, basename } from 'node:path';
+import { userHome } from '../../backend.ts';
 import type { LaunchSpec, PluginContext, ResolvedProject } from '../../backend.ts';
 
 export const workspaceModes = ['worktree', 'project-root', 'temp'] as const;
@@ -11,7 +12,7 @@ export type AcpResolvedProject = ResolvedProject & { scratch?: boolean };
 export type AcpLaunchSpec = Omit<LaunchSpec, 'project'> & { project: AcpResolvedProject; workspaceMode?: WorkspaceMode };
 export interface Workspace { mode: WorkspaceMode; path: string; repo?: string; branch?: string }
 export function workspaceRoot(configured?: string): string {
-  const root = configured ?? join(homedir(), '.cache', 'vecnet-launcher', 'workspaces');
+  const root = configured ?? join(userHome(process.env) ?? homedir(), '.cache', 'vecnet-launcher', 'workspaces');
   if (!isAbsolute(root)) throw new Error('acp_workspace_root_must_be_absolute');
   return resolve(root);
 }

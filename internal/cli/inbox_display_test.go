@@ -63,11 +63,11 @@ func TestInboxDisplayPreservesUnreadReplayMetadata(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err := os.WriteFile(f.path, raw, 0600); err != nil {
+				if err := cliFixtureWriteFile(f.path, raw, 0600); err != nil {
 					t.Fatal(err)
 				}
 				binding := []byte("{\n \"session\":\"fixture-owned\", \"future_field\":true\n}\n")
-				if err := os.WriteFile(bindingPath(f.path), binding, 0600); err != nil {
+				if err := cliFixtureWriteFile(bindingPath(f.path), binding, 0600); err != nil {
 					t.Fatal(err)
 				}
 				flags := []string{"inbox", "--since", "e1.0", "--limit", "1"}
@@ -121,7 +121,7 @@ func TestInboxExplicitReplayPreservesCursorsClaimsAndBinding(t *testing.T) {
 	before := readHookState(t, f.path)
 	// Keep an exact existing session sidecar; inbox proof must not rewrite it.
 	binding := []byte("{\n  \"session\":\"owned-session\", \"session_how\":\"declared\", \"future_field\":true\n}\n")
-	if err := os.WriteFile(bindingPath(f.path), binding, 0600); err != nil {
+	if err := cliFixtureWriteFile(bindingPath(f.path), binding, 0600); err != nil {
 		t.Fatal(err)
 	}
 	var fields map[string]json.RawMessage
@@ -133,7 +133,7 @@ func TestInboxExplicitReplayPreservesCursorsClaimsAndBinding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(f.path, legacy, 0600); err != nil {
+	if err := cliFixtureWriteFile(f.path, legacy, 0600); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 2; i++ {
@@ -283,7 +283,7 @@ func TestInboxDisplayPreservesUnknownOrForeignState(t *testing.T) {
 			if mutation == "corrupt" {
 				raw = []byte("not JSON")
 			}
-			if err := os.WriteFile(f.path, raw, 0600); err != nil {
+			if err := cliFixtureWriteFile(f.path, raw, 0600); err != nil {
 				t.Fatal(err)
 			}
 			if mutation == "absent" {
@@ -369,7 +369,7 @@ func TestInboxCommitFailureNeverRetriesOutputOrAcknowledges(t *testing.T) {
 			if err := os.Rename(f.path, f.path+".saved"); err != nil {
 				return 0, err
 			}
-			if err := os.Mkdir(f.path, 0700); err != nil {
+			if err := cliFixtureMkdir(f.path, 0700); err != nil {
 				return 0, err
 			}
 		}
@@ -497,7 +497,7 @@ func TestInboxDisplayPreservesMalformedBinding(t *testing.T) {
 			f.add(t, "wake_idle", "ordinary binding output", "")
 			f.run(t, "busy", "wake")
 			if sidecar {
-				if err := os.WriteFile(bindingPath(f.path), []byte(`{"session":17}`), 0600); err != nil {
+				if err := cliFixtureWriteFile(bindingPath(f.path), []byte(`{"session":17}`), 0600); err != nil {
 					t.Fatal(err)
 				}
 			} else {

@@ -1,5 +1,6 @@
 // Protocol fixture only. Never claims to be a real model or runtime canary.
 import { createInterface } from 'node:readline';
+import { isAbsolute } from 'node:path';
 import { appendFileSync } from 'node:fs';
 const scenario = process.argv[2] ?? 'normal';
 const log = process.argv[3];
@@ -74,7 +75,7 @@ lines.on('line', line => {
     initialized = true;
     result(m.id, { protocolVersion: scenario === 'v2' ? 2 : 1, agentCapabilities: {}, agentInfo: { name: 'fake-acp', version: 'fixture' }, authMethods: [] });
   } else if (m.method === 'session/new') {
-    if (!initialized || !m.params.cwd.startsWith('/') || !Array.isArray(m.params.mcpServers)) { error(m.id); return; }
+    if (!initialized || !isAbsolute(m.params.cwd) || !Array.isArray(m.params.mcpServers)) { error(m.id); return; }
     if (scenario === 'auth') { error(m.id, -32000); return; }
     if (scenario === 'new-exit') { process.exit(23); }
     session = true;

@@ -22,9 +22,9 @@ function disk() {
 }
 
 test('admit dedupes on delivery_id and survives reopen', t => {
-  const d = disk(); t.after(d.cleanup);
+  const d = disk();
   const clock = fakeClock(100);
-  let ledger = openLedger(d.path, clock); t.after(() => ledger.close());
+  let ledger = openLedger(d.path, clock); t.after(() => { ledger.close(); d.cleanup(); });
   const row = { deliveryId: 'dly_one', cursor: 'e1.1', threadId: 'thr_one', messageId: 'msg_one', sender: 'peer_one', delivery: delivery(), receivedAt: clock.now() };
   assert.equal(ledger.admit(row), true);
   ledger.setCursor('e1.1'); ledger.close(); ledger = openLedger(d.path, clock);
@@ -92,8 +92,8 @@ test('enqueue is idempotent on key', t => {
 });
 
 test('inputs, approvals, questions, references, counters, rate history and namespaced kv survive reopen', t => {
-  const d = disk(); t.after(d.cleanup); const clock = fakeClock(100);
-  let l = openLedger(d.path, clock); t.after(() => l.close()); l.createJob(jobRow());
+  const d = disk(); const clock = fakeClock(100);
+  let l = openLedger(d.path, clock); t.after(() => { l.close(); d.cleanup(); }); l.createJob(jobRow());
   const ref = {backend: 't3', host: 'host', id: 'session', extra: {tag: 'vl-job_one'}};
   l.updateJob('job_one', {sessionRef: ref, reattachPending: true, workspace: '/workspace', turnCursor: 'turn-cursor'});
   const input = {deliveryId: 'dly_input', jobId: 'job_one', messageId: 'msg_input', sender: 'peer_one', text: 'queued text', priority: 'wake_idle' as const, createdAt: 100};

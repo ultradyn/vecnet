@@ -1,6 +1,10 @@
 package cli
 
-import "context"
+import (
+	"context"
+
+	"github.com/XertroV/vecnet/internal/platform"
+)
 
 // lockLegacySource serializes on the exact legacy filename, without following
 // symlinks or accepting unsafe parent/lock ownership and permissions.
@@ -9,7 +13,7 @@ func (a *app) lockLegacySource(path string) (func(), error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return lockLegacySourceWith(ctx, a.getenv("HOME"), path)
+	return lockLegacySourceWith(ctx, platform.Home(a.getenv), path)
 }
 
 // archiveLegacySource retains the safe source parent and lock until the
@@ -19,7 +23,7 @@ func (a *app) archiveLegacySource(path string, expected []byte) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return archiveLegacySourceWith(ctx, a.getenv("HOME"), path, expected, func(ctx context.Context) error {
+	return archiveLegacySourceWith(ctx, platform.Home(a.getenv), path, expected, func(ctx context.Context) error {
 		worker := *a
 		worker.ctx = ctx
 		return worker.verifyLegacyRetired(path)

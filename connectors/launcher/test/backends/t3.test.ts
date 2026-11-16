@@ -51,7 +51,8 @@ async function fixture(t: TestContext) {
     log:{info(){},warn(){},error(){}},store:{get:k => store.get(k),set:(k,v) => {store.set(k,v);},delete:k => {store.delete(k);},keys:(prefix='') => [...store.keys()].filter(k => k.startsWith(prefix))},
     readSecretFile:async () => { throw new Error('plugin must not read credentials'); },
     exec:async (argv,opts) => new Promise((resolve,reject) => {
-      execFile(argv[0],argv.slice(1),{signal:opts.signal,timeout:opts.timeoutMs,maxBuffer:2*1024*1024,
+      const command = argv[0].endsWith('fake-t3-bridge.mjs') ? [process.execPath, ...argv] : argv;
+      execFile(command[0],command.slice(1),{signal:opts.signal,timeout:opts.timeoutMs,maxBuffer:2*1024*1024,
         env:{PATH:process.env.PATH,FAKE_T3_STATE:statePath,FAKE_T3_LOG:logPath,...opts.env,...env}},(err,stdout,stderr) => {
           if (err && typeof err.code !== 'number') {reject(err);return;}
           resolve({code:err?.code as number ?? 0,stdout,stderr});
@@ -276,7 +277,7 @@ test('capabilities presets exclude a disabled instance, a hidden model, a stale 
   f.config.presets={good,disabled:{...good,instance:'disabled'},hidden:{...good,model:'hidden'},stale:{...good,instance:'stale'},mode:{...good,instance:'limited',runtime_modes:['full-access']},option:{...good,options:[{id:'effort',value:'impossible'}]},missing:{...good,model:'absent'},readonly:{...good,runtime_modes:['read-only']}};
   await f.update(s => {const p=s.models[0];p.models.push({...p.models[0],id:'hidden',hidden:true});s.models.push({...p,providerInstanceId:'disabled',enabled:false},{...p,providerInstanceId:'stale',stale:true},{...p,providerInstanceId:'limited',runtimeModes:['auto']});});
   const b=await f.backend(); const c=await b.capabilities();
-  assert.deepEqual(c,{steer:true,queue:'native',interrupt:true,approvals:'ui-only',questions:'text-only',resume:'transcript',backgroundTasks:'opaque',attachments:false,workspace:'backend-worktree',branchName:'settable',maxInputBytes:60000,permissionModes:['ask','auto','full-access'],presets:[{id:'good',provider:'provider',model:'model'}]});
+  assert.deepEqual(c,{steer:true,queue:'native',interrupt:true,approvals:'ui-only',questions:'text-only',resume:'transcript',backgroundTasks:'opaque',attachments:false,workspace:'backend-worktree',branchName:'settable',maxInputBytes:process.platform === 'win32' ? 5_000 : 60_000,permissionModes:['ask','auto','full-access'],presets:[{id:'good',provider:'provider',model:'model'}]});
   await assert.rejects(b.launch(spec({preset:'option'}),f.hooks),/preset/);
   await assert.rejects(b.launch(spec({permissionMode:'read-only'}),f.hooks),/permission_mode/);
 });

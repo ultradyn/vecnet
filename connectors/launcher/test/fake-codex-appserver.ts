@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import type { Clock } from '../../hub-client/src/ports.ts';
 
 type Params = Record<string, unknown>;
-type ThreadInput = { id: string; status: unknown; activeTurnId?: string; approvalPolicy?: string; approvalsReviewer?: string };
+type ThreadInput = { id: string; status: unknown; activeTurnId?: string; approvalPolicy?: string; approvalsReviewer?: string; source?: string };
 type Item = { id: string; type: 'userMessage'; clientId?: string; content: unknown };
 type Turn = { id: string; status: string; items: Item[]; error: null };
 type Thread = ThreadInput & { turns: Turn[]; members: Set<number>; other: number; unload?: { cancel(): void } };
@@ -62,8 +62,8 @@ export async function startFakeCodexAppServer(o: { dir: string; clock?: Clock; u
   const targetDir = join(o.dir, 'd'), home = join(o.dir, 'home', 'app-server-control');
   await mkdir(targetDir, { recursive: true, mode: 0o700 }); await chmod(targetDir, 0o700);
   await mkdir(home, { recursive: true, mode: 0o700 });
-  const target = join(targetDir, randomBytes(8).toString('hex'));
-  const socketPath = join(home, 'app-server-control.sock');
+  const target = process.platform === 'win32' ? `\\\\.\\pipe\\vn-codex-${randomBytes(12).toString('hex')}` : join(targetDir, randomBytes(8).toString('hex'));
+  const socketPath = process.platform === 'win32' ? target : join(home, 'app-server-control.sock');
   const peers = new Map<number, Peer>(), threads = new Map<string, Thread>();
   const pending = new Map<number, { threadId: string; method: string; params: unknown }>();
   const failures = new Map<string, ({ code: number; message: string } | 'drop')[]>();
@@ -111,7 +111,7 @@ export async function startFakeCodexAppServer(o: { dir: string; clock?: Clock; u
     for (const t of threads.values()) if (t.members.delete(p.id)) schedule(t);
   }
   function snapshot(t: Thread, includeTurns = true) {
-    return { id: t.id, status: t.status, archived: false, turns: includeTurns ? t.turns : [] };
+    return { id: t.id, status: t.status, archived: false, ...(t.source ? { source: t.source } : {}), turns: includeTurns ? t.turns : [] };
   }
   function receipt(t: Thread, turn: Turn, item: Item) {
     turn.items.push(item); subscribers(t.id, 'item/started', { threadId: t.id, turnId: turn.id, item });
@@ -248,7 +248,7 @@ export async function startFakeCodexAppServer(o: { dir: string; clock?: Clock; u
     });
   });
   await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(target, resolve); });
-  try { await symlink(target, socketPath); }
+  try { if (process.platform !== 'win32') await symlink(target, socketPath); }
   catch (error) { await new Promise<void>(resolve => server.close(() => resolve())); throw error; }
   return {
     socketPath, requests, paths, replies, overrides,

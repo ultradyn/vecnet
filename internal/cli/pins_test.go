@@ -22,7 +22,7 @@ func pinTestEnv(t *testing.T, body string) (string, func(string) string) {
 	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
-	if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+	if err := cliFixtureWriteFile(path, []byte(body), 0600); err != nil {
 		t.Fatal(err)
 	}
 	env := map[string]string{"VECNET_CONFIG": path, "XDG_CONFIG_HOME": dir, "XDG_CACHE_HOME": filepath.Join(dir, "cache"), "HOME": dir, "VECNET_PROFILE": "p"}
@@ -100,10 +100,7 @@ func TestTOFUNeverWritesConfig(t *testing.T) {
 		t.Fatalf("bad pin: %+v", r)
 	}
 	for p, mode := range map[string]os.FileMode{pp: 0600, filepath.Dir(pp): 0700} {
-		info, e := os.Stat(p)
-		if e != nil || info.Mode().Perm() != mode {
-			t.Fatalf("permissions %s: %v %v", p, info, e)
-		}
+		cliFixtureRequireMode(t, p, mode)
 	}
 }
 func TestTOFUOldHub404(t *testing.T) {

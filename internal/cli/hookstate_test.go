@@ -17,7 +17,7 @@ import (
 func hookTestEnv(t *testing.T) map[string]string {
 	t.Helper()
 	d := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(d, "home"), 0700); err != nil {
+	if err := cliFixtureMkdirAll(filepath.Join(d, "home"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	// VECNET_PROFILE names profile p: these tests run without a terminal, so
@@ -111,26 +111,14 @@ func TestStateConcurrentWriters(t *testing.T) {
 	if len(s.Shown) != 200 {
 		t.Fatalf("stored %d ids, want 200", len(s.Shown))
 	}
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Mode().Perm() != 0o600 {
-		t.Errorf("file mode = %o", info.Mode().Perm())
-	}
-	info, err = os.Stat(filepath.Dir(path))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Mode().Perm() != 0o700 {
-		t.Errorf("directory mode = %o", info.Mode().Perm())
-	}
+	cliFixtureRequireMode(t, path, 0o600)
+	cliFixtureRequireMode(t, filepath.Dir(path), 0o700)
 }
 
 func TestStateBusyTimesOut(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "p.json")
 	raw := []byte(`{"shown":["before"]}`)
-	if err := os.WriteFile(path, raw, 0o600); err != nil {
+	if err := cliFixtureWriteFile(path, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	unlock, err := lockPath(context.Background(), path+".lock")
@@ -155,7 +143,7 @@ func TestStateCorruptReadsEmpty(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "p.json")
 	// A partially decoded corrupt object must not retain any of its fields.
 	for _, raw := range []string{"{not json", `{"poll_cursor":"bad","shown":["bad"],"last_post_tool_poll":42}`} {
-		if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		if err := cliFixtureWriteFile(path, []byte(raw), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		err := (stateFile{path: path}).update(context.Background(), func(s *hookState) error {

@@ -185,7 +185,7 @@ class T3Backend implements Backend {
     const catalog=await this.catalog();
     const valid=Object.entries(this.config.presets).filter(([,p]) => this.modes(p,catalog).length > 0);
     return {steer:true,queue:'native',interrupt:true,approvals:'ui-only',questions:'text-only',resume:'transcript',backgroundTasks:'opaque',
-      attachments:false,workspace:'backend-worktree',branchName:'settable',maxInputBytes:60_000,
+      attachments:false,workspace:'backend-worktree',branchName:'settable',maxInputBytes:process.platform === 'win32' ? 5_000 : 60_000,
       permissionModes:offeredModes.filter(mode => valid.some(([,p]) => this.modes(p,catalog).includes(mode))),
       presets:valid.map(([id,p]) => ({id,provider:p.instance,model:p.model}))};
   }

@@ -1,3 +1,4 @@
+import { writePrivate, makePublicReadable, makeOwnerPrivate } from './fixtures/platform.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -89,17 +90,17 @@ test('pluginContext: exec scrubs VECNET_* and *_API_KEY from the child env; reda
   t.after(() => new Promise<void>(resolve => server.close(() => resolve())));
   const port = (server.address() as { port: number }).port;
   const key = join(dir, 'route.key');
-  writeFileSync(key, 'route-key\n', { mode: 0o600 });
+  writePrivate(key, 'route-key\n');
   assert.deepEqual(await ctx.checkRoute({ base_url: `http://127.0.0.1:${port}/v1`, key_file: key }), { ok: true, models: ['model-a'] });
   assert.deepEqual(seen, ['/v1/models Bearer route-key']);
 
   const secret = join(dir, 'secret');
-  writeFileSync(secret, 'token-value');
-  chmodSync(secret, 0o644);
+  writePrivate(secret, 'token-value');
+  makePublicReadable(secret);
   await assert.rejects(ctx.readSecretFile(secret), /readable only by its owner/);
-  chmodSync(secret, 0o640);
+  if (process.platform !== 'win32') chmodSync(secret, 0o640);
   await assert.rejects(ctx.readSecretFile(secret), /readable only by its owner/);
-  chmodSync(secret, 0o600);
+  makeOwnerPrivate(secret);
   assert.equal(await ctx.readSecretFile(secret), 'token-value');
 
   ctx.store.set('k', 'v');

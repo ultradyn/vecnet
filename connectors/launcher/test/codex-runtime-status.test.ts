@@ -1,3 +1,4 @@
+import { nodeCommand } from './fixtures/platform.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fakeClock, memoryLog } from '../../hub-client/testing/fixtures.ts';
@@ -87,12 +88,12 @@ test('runtime reporter coalesces changes observed during an active report', asyn
 test('runtime POST helper pins owner/config, scrubs the environment and sends only status metadata', async t => {
   const dir = mkdtempSync(join(tmpdir(), 'vn-status-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const bin = join(dir, 'vecnet'), trace = join(dir, 'report.json');
-  writeFileSync(bin, `#!${process.execPath}\nconst fs = require('node:fs');
+  const trace = join(dir, 'report.json');
+  const bin = nodeCommand(join(dir, 'vecnet'), `const fs = require('node:fs');
 fs.writeFileSync(${JSON.stringify(trace)}, JSON.stringify({ args: process.argv.slice(2), env: process.env, body: JSON.parse(fs.readFileSync(0, 'utf8')) }));
-`, { mode: 0o700 });
+`);
   const e = entry(1); e.binding.as = 'peer_child';
-  const post = runtimeStatusPost(bin, { HOME: dir, PATH: '/usr/bin:/bin', VECNET_CONFIG: '/wrong/config',
+  const post = runtimeStatusPost(bin, { ...Object.fromEntries(Object.entries(process.env).filter((v): v is [string,string] => v[1] !== undefined)), HOME: dir, PATH: process.env.PATH || '', VECNET_CONFIG: '/wrong/config',
     CODEX_HOME: '/private/secret', VECNET_TOKEN: 'private', UNRELATED: 'private' });
   const snapshot = { ...e.engine.runtimeStatus(), thread_id: 'private', note: 'private' };
   assert.equal(await post(e.binding, snapshot, new AbortController().signal), true);
@@ -107,10 +108,26 @@ fs.writeFileSync(${JSON.stringify(trace)}, JSON.stringify({ args: process.argv.s
 test('runtime POST helper aborts a stuck child and treats failure as best effort', async t => {
   const dir = mkdtempSync(join(tmpdir(), 'vn-status-abort-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const bin = join(dir, 'vecnet');
-  writeFileSync(bin, '#!/bin/sh\nexec sleep 3600\n', { mode: 0o700 });
-  const post = runtimeStatusPost(bin, { HOME: dir, PATH: '/usr/bin:/bin' }), e = entry(1), controller = new AbortController();
+  const bin = nodeCommand(join(dir, 'vecnet'), 'setInterval(()=>{},1000);');
+  const post = runtimeStatusPost(bin, { ...Object.fromEntries(Object.entries(process.env).filter((v): v is [string,string] => v[1] !== undefined)), HOME: dir, PATH: process.env.PATH || '' }), e = entry(1), controller = new AbortController();
   const pending = post(e.binding, e.engine.runtimeStatus(), controller.signal); controller.abort();
   assert.equal(await pending, false);
   assert.equal(await runtimeStatusPost(join(dir, 'missing'), {})(e.binding, e.engine.runtimeStatus(), new AbortController().signal), false);
 });
+
+for (const duringStop of [false, true]) {
+  test(`runtime reporter fences all writes on singleton loss${duringStop ? ' during graceful stop' : ''}`, async () => {
+    const clock = fakeClock(), e = entry(1), calls: { snapshot: RuntimeSnapshot; signal: AbortSignal }[] = [];
+    const r = createRuntimeStatusReporter({ clock, log: memoryLog(), post: (_b, snapshot, signal) => new Promise(resolve => {
+      calls.push({ snapshot, signal });
+      signal.addEventListener('abort', () => resolve(false), { once: true });
+    }) });
+    r.sync([e]); await flush(); assert.equal(calls.length, 1);
+    const stopping = duringStop ? r.stop() : undefined;
+    r.fence(); // also before a queued offline post can invoke the adapter
+    await (stopping ?? r.stop());
+    assert.ok(calls.every(c => c.signal.aborted));
+    assert.equal(calls.some(c => c.snapshot.reason === 'stopped'), false, 'no offline write after singleton loss');
+    r.sync([e]); await flush(); assert.equal(calls.length, 1, 'fence cannot be reopened');
+  });
+}

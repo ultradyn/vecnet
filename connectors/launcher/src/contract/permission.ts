@@ -34,7 +34,7 @@ function canonical(path: string, depth = 0): string {
 }
 function within(root: string, path: string): boolean {
   const rel = relative(root,path);
-  return rel === '' || (!isAbsolute(rel) && rel !== '..' && !rel.startsWith('../'));
+  return rel === '' || (!isAbsolute(rel) && rel !== '..' && !rel.startsWith('../') && !rel.startsWith('..\\'));
 }
 function jsonBytes(x: unknown): number { return Buffer.byteLength(JSON.stringify(x)); }
 // JSON's escaping can make a truncated UTF-8 string larger than its byte slice.
@@ -59,7 +59,7 @@ export interface PermissionContext {
 export function canonicalPermission(draft: PermissionDraft, ctx: PermissionContext): LaunchPermission {
   const root = canonical(ctx.workspaceRoot);
   function path(p: string): string {
-    const expanded = p === '~' ? ctx.home : p.startsWith('~/') ? `${ctx.home}/${p.slice(2)}` : p;
+    const expanded = p === '~' ? ctx.home : (/^~[\\/]/.test(p)) ? `${ctx.home}/${p.slice(2)}` : p;
     return canonical(isAbsolute(expanded) ? expanded : `${root}/${expanded}`);
   }
   const paths = draft.paths?.map(p => { const full = path(p.path); return { ...p, path: full, in_workspace: within(root,full) }; });

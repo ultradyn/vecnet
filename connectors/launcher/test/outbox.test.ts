@@ -27,9 +27,9 @@ function response() { return { message_id: 'msg_sent', thread_id: 'thr_one', del
 function request(key: string): SendRequest { return { idempotency_key: key, priority: 'hold', content: { text: 'secret body' } }; }
 
 test('outbox sends in order, retries 503 then succeeds, keeps pending across a reopen', async t => {
-  const dir = mkdtempSync(join(tmpdir(), 'vl-outbox-')); t.after(() => rmSync(dir, {recursive: true, force: true}));
+  const dir = mkdtempSync(join(tmpdir(), 'vl-outbox-'));
   const path = join(dir, 'ledger.db'), clock = fakeClock(100), log = memoryLog();
-  let l = openLedger(path, clock); t.after(() => l.close());
+  let l = openLedger(path, clock); t.after(() => { l.close(); rmSync(dir, {recursive: true, force: true}); });
   l.enqueue('send', 'first', request('first'), 'first'); l.enqueue('receipt', 'second', {delivery_id: 'dly_two', state: 'processed'}, 'second');
   l.close(); l = openLedger(path, clock); assert.equal(l.pendingOutbox(10, 100).length, 2);
   const calls: string[] = [], sent: unknown[] = []; let active = 0, maximum = 0;
@@ -111,8 +111,8 @@ test('stale sequence recovery preserves queued status order without colliding wi
 });
 
 test('a deferred head survives reopening and prevents ready rows from overtaking it', async t => {
-  const dir = mkdtempSync(join(tmpdir(), 'vl-deferred-')); t.after(() => rmSync(dir, {recursive: true, force: true}));
-  const path = join(dir, 'ledger.db'), clock = fakeClock(); let l = openLedger(path, clock); t.after(() => l.close());
+  const dir = mkdtempSync(join(tmpdir(), 'vl-deferred-'));
+  const path = join(dir, 'ledger.db'), clock = fakeClock(); let l = openLedger(path, clock); t.after(() => { l.close(); rmSync(dir, {recursive: true, force: true}); });
   const first = l.enqueue('send', 'first', request('first'), 'first'); l.deferOutbox(first, 120000);
   l.enqueue('send', 'second', request('second'), 'second'); l.close(); l = openLedger(path, clock);
   const calls: string[] = [];

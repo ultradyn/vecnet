@@ -80,11 +80,14 @@ func TestLocalInspectionDoesNotObserveOrSchedulePendingSetup(t *testing.T) {
 func TestLocalRepairReportsLauncherUpgradePending(t *testing.T) {
 	a, root, home := localRegistryFixture(t)
 	unit := filepath.Join(home, ".config/systemd/user/vecnet-launcher.service")
-	if err := os.MkdirAll(filepath.Dir(unit), 0700); err != nil {
+	if err := cliFixtureMkdirAll(filepath.Dir(unit), 0700); err != nil {
 		t.Fatal(err)
 	}
 	before := []byte("[Service]\nExecStart=/private/old-launcher\n")
-	if err := os.WriteFile(unit, before, 0600); err != nil {
+	if runtime.GOOS == "windows" && strings.HasSuffix(unit, ".task.json") {
+		before = []byte(`{"schema":1,"managed_by":"unregistered fixture"}`)
+	}
+	if err := cliFixtureWriteFile(unit, before, 0600); err != nil {
 		t.Fatal(err)
 	}
 	started := 0
@@ -94,7 +97,7 @@ func TestLocalRepairReportsLauncherUpgradePending(t *testing.T) {
 		t.Fatalf("installed launcher was omitted from automatic maintenance: %d", started)
 	}
 	path := filepath.Join(root, "hooks.json")
-	if err := os.WriteFile(path, []byte(`{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"vecnet hook --profile p --event user-prompt","timeout":5}]}]}}`), 0600); err != nil {
+	if err := cliFixtureWriteFile(path, []byte(`{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"vecnet hook --profile p --event user-prompt","timeout":5}]}]}}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if err := a.registerLocalArtifact(path, "codex-hooks", "old", time.Now()); err != nil {
@@ -121,10 +124,10 @@ func TestLocalRepairPrefersStandaloneWithLeftoverLauncherUnit(t *testing.T) {
 	a, _, home := localRegistryFixture(t)
 	for _, name := range []string{"vecnet-launcher.service", "vecnet-codex-delivery.service"} {
 		path := filepath.Join(home, ".config/systemd/user", name)
-		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		if err := cliFixtureMkdirAll(filepath.Dir(path), 0700); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(path, []byte("[Service]\nExecStart=/private/old-runtime\n"), 0600); err != nil {
+		if err := cliFixtureWriteFile(path, []byte("[Service]\nExecStart=/private/old-runtime\n"), 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -145,11 +148,17 @@ func TestLocalRepairReportsUnregisteredProfileLauncher(t *testing.T) {
 		return ""
 	}
 	unit := filepath.Join(home, ".config/systemd/user/vecnet-launcher-p-0123456789abcdef.service")
-	if err := os.MkdirAll(filepath.Dir(unit), 0700); err != nil {
+	if runtime.GOOS == "windows" {
+		unit = filepath.Join(home, ".config", "vecnet", "launcher", "p-0123456789abcdef", "vecnet-launcher-p-0123456789abcdef.task.json")
+	}
+	if err := cliFixtureMkdirAll(filepath.Dir(unit), 0700); err != nil {
 		t.Fatal(err)
 	}
 	before := []byte("[Service]\nExecStart=/private/old-launcher\n")
-	if err := os.WriteFile(unit, before, 0600); err != nil {
+	if runtime.GOOS == "windows" {
+		before = []byte(`{"schema":1,"managed_by":"unregistered fixture"}`)
+	}
+	if err := cliFixtureWriteFile(unit, before, 0600); err != nil {
 		t.Fatal(err)
 	}
 	started := 0
@@ -167,18 +176,18 @@ func TestLocalRepairReportsUnregisteredProfileLauncher(t *testing.T) {
 }
 
 func TestLocalLauncherInspectionFailureRemainsPending(t *testing.T) {
-	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+	if runtime.GOOS != "windows" && os.Geteuid() == 0 {
 		t.Skip("root can read directories despite permission denial")
 	}
 	a, _, home := localRegistryFixture(t)
 	dir := filepath.Join(home, ".config/systemd/user")
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	if runtime.GOOS == "windows" {
+		dir = filepath.Join(home, ".config", "vecnet", "launcher")
+	}
+	if err := cliFixtureMkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(dir, 0000); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(dir, 0700) })
+	cliFixtureDenyDirectoryRead(t, dir)
 	if !localLauncherPresent(home) {
 		t.Fatal("uncertain launcher discovery did not schedule inspection")
 	}
@@ -223,7 +232,7 @@ func TestLocalRepairDoesNotAdvanceAppliedVersionOnRuntimeFailure(t *testing.T) {
 	a, root, _ := localRegistryFixture(t)
 	path := filepath.Join(root, "hooks.json")
 	raw := []byte(`{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"vecnet hook --profile p --event user-prompt","timeout":5}]}]}}`)
-	if err := os.WriteFile(path, raw, 0600); err != nil {
+	if err := cliFixtureWriteFile(path, raw, 0600); err != nil {
 		t.Fatal(err)
 	}
 	if err := a.registerLocalArtifact(path, "codex-hooks", "old", time.Now()); err != nil {
@@ -249,10 +258,10 @@ func TestLocalLegacyRetirementRejectsUnrecognizedEmptySchema(t *testing.T) {
 		t.Run(raw, func(t *testing.T) {
 			f := newBindFixture(t)
 			legacy := filepath.Join(filepath.Dir(f.env["VECNET_CONFIG"]), "codex/bindings.json")
-			if err := os.MkdirAll(filepath.Dir(legacy), 0700); err != nil {
+			if err := cliFixtureMkdirAll(filepath.Dir(legacy), 0700); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(legacy, []byte(raw), 0600); err != nil {
+			if err := cliFixtureWriteFile(legacy, []byte(raw), 0600); err != nil {
 				t.Fatal(err)
 			}
 			a := &app{ctx: context.Background(), stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{}, getenv: func(k string) string { return f.env[k] }}
@@ -310,7 +319,7 @@ func TestLocalRepairConcurrentAdoptionRemainsPending(t *testing.T) {
 	a, root, _ := localRegistryFixture(t)
 	for _, name := range []string{"x.json", "y.json"} {
 		path := filepath.Join(root, name)
-		if err := os.WriteFile(path, []byte(`{"hooks":{}}`), 0600); err != nil {
+		if err := cliFixtureWriteFile(path, []byte(`{"hooks":{}}`), 0600); err != nil {
 			t.Fatal(err)
 		}
 		version := localSoftwareVersion()
@@ -366,11 +375,11 @@ func TestLocalStartupObservesWithoutInstallingAndAdoptsLegacyHooks(t *testing.T)
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatal("observation installed hooks")
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+	if err := cliFixtureMkdirAll(filepath.Dir(path), 0700); err != nil {
 		t.Fatal(err)
 	}
 	raw := []byte(`{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"vecnet hook --profile old --event user-prompt","timeout":5}]}]}}`)
-	if err := os.WriteFile(path, raw, 0600); err != nil {
+	if err := cliFixtureWriteFile(path, raw, 0600); err != nil {
 		t.Fatal(err)
 	}
 	a.localStartup([]string{"peers"})
@@ -391,7 +400,7 @@ func TestManagedHookRepairRejectsConcurrentUserEdit(t *testing.T) {
 	path := filepath.Join(root, "hooks.json")
 	before := []byte(`{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"vecnet hook --profile old --event user-prompt","timeout":5}]}]}}`)
 	changed := []byte(`{"custom":"user removed managed hooks","hooks":{}}`)
-	if err := os.WriteFile(path, changed, 0600); err != nil {
+	if err := cliFixtureWriteFile(path, changed, 0600); err != nil {
 		t.Fatal(err)
 	}
 	err := a.installCodexHooksExpected(path, "vecnet", opts{vals: map[string][]string{"write": {}}}, hookDigest(before))
@@ -410,7 +419,7 @@ func TestManagedHookRepairRejectsConcurrentUserEdit(t *testing.T) {
 func TestLocalRepairPreservesConcurrentSamePathInstallation(t *testing.T) {
 	a, root, _ := localRegistryFixture(t)
 	path := filepath.Join(root, "hooks.json")
-	if err := os.WriteFile(path, []byte(`{"hooks":{}}`), 0600); err != nil {
+	if err := cliFixtureWriteFile(path, []byte(`{"hooks":{}}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if err := a.registerLocalArtifact(path, "codex-hooks", "newer", time.Now()); err != nil {
@@ -511,7 +520,7 @@ func TestLocalRepairCompletionRequiresInspectedGeneration(t *testing.T) {
 		t.Run(field, func(t *testing.T) {
 			a, root, _ := localRegistryFixture(t)
 			path := filepath.Join(root, "managed.json")
-			if err := os.WriteFile(path, []byte("old"), 0600); err != nil {
+			if err := cliFixtureWriteFile(path, []byte("old"), 0600); err != nil {
 				t.Fatal(err)
 			}
 			if err := a.registerLocalArtifact(path, "launcher-profile", "old", time.Now()); err != nil {

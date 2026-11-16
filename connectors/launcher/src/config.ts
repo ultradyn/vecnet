@@ -1,7 +1,8 @@
-import { open, readFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
 import type { PermissionMode } from './backend.ts';
 import { redactText } from './redact.ts';
+import { readPrivateFile } from './private-files.ts';
 
 export type ApprovalCategory = 'outside_workspace_writes' | 'privileged_exec' | 'unverifiable' | 'exec' | 'edit' | 'network' | 'mcp_tool' | 'other';
 export interface Ceiling { backends: string[]; permission_modes: PermissionMode[]; projects: string[]; max_sessions: number; max_open_sessions: number; launches_per_hour: number }
@@ -127,10 +128,9 @@ export async function loadConfig(path: string): Promise<LauncherConfig> {
   let raw: unknown;
   try { raw = JSON.parse(await readFile(path,'utf8')); } catch { throw new ConfigError('/','cannot read JSON config'); }
   const config = parseConfig(raw);
-  try {
-    const file = await open(config.hub.credential_file,'r');
-    try { const stat = await file.stat(); if (!stat.isFile() || (stat.mode & 0o7777) !== 0o600) throw new Error(); }
-    finally { await file.close(); }
-  } catch { throw new ConfigError('/hub/credential_file','credential must be a readable regular file with mode 0600'); }
+  try { await readPrivateFile(config.hub.credential_file, { exactMode: 0o600 }); }
+  catch { throw new ConfigError('/hub/credential_file', process.platform === 'win32'
+    ? 'credential must be a readable owner-private regular file (native CLI security check required)'
+    : 'credential must be a readable regular file with mode 0600'); }
   return config;
 }

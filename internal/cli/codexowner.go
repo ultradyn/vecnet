@@ -11,6 +11,8 @@ import (
 	"regexp"
 	"slices"
 	"time"
+
+	"github.com/XertroV/vecnet/internal/platform"
 )
 
 var codexGeneration = regexp.MustCompile(`^[0-9a-f]{32}$`)
@@ -20,7 +22,7 @@ func canonicalCodexPath(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.EvalSymlinks(p)
+	return platform.Canonical(p)
 }
 
 // Caller holds the authority's lock until all effects have completed. Every row

@@ -1,9 +1,10 @@
+import { writePrivate, makePublicReadable } from './fixtures/platform.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import type { BackendCapabilities, BackendHealth } from '../src/backend.ts';
@@ -262,7 +263,7 @@ test('main check prints health JSON and exits 1 when a backend is unhealthy', as
   const dir = mkdtempSync(join(tmpdir(), 'launcher-main-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const credential = join(dir, 'credential');
-  writeFileSync(credential, 'vn_test_secret\n', { mode: 0o600 });
+  writePrivate(credential, 'vn_test_secret\n');
   const sick = join(dir, 'sick-plugin.mjs');
   writeFileSync(sick, `export default { id: 'sick', configSchema: {}, async create() { return { id: 'sick',
     async capabilities() { return { presets: [{ id: 'p1', provider: 'x', model: 'y' }], permissionModes: ['ask'] }; },
@@ -288,7 +289,7 @@ test('main check prints health JSON and exits 1 when a backend is unhealthy', as
   assert.doesNotMatch(bad.stdout + bad.stderr, /vn_test_secret/);
 
   // A credential readable by others refuses to start, and usage errors exit 2.
-  writeFileSync(join(dir, 'loose'), 'x', { mode: 0o644 });
+  writePrivate(join(dir, 'loose'), 'x'); makePublicReadable(join(dir, 'loose'));
   writeFileSync(join(dir, 'loose.json'), JSON.stringify({ ...base, hub: { ...base.hub, credential_file: join(dir, 'loose') }, backends: [] }));
   const loose = await run(['check', '--config', join(dir, 'loose.json')]);
   assert.equal(loose.code, 2);
@@ -321,7 +322,7 @@ test('permission prompts are classified against the session worktree recorded at
   await until(() => h.sends().some(s => s.kind === 'approval_request'), 'approval_request');
   const permission = h.sends().find(s => s.kind === 'approval_request')!.metadata!['launch.permission'] as
     { workspace_root: string; outside_workspace: unknown; paths: Array<{ in_workspace: boolean }> };
-  assert.equal(permission.workspace_root, `/worktrees/${jobId}`);
+  assert.equal(permission.workspace_root, resolve(`/worktrees/${jobId}`));
   assert.equal(permission.outside_workspace, true);
   assert.equal(permission.paths[0].in_workspace, false);
 });

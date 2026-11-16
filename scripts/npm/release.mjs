@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { appendFile, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { npmInvocation } from './npm-command.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const registry = 'https://registry.npmjs.org/';
@@ -39,10 +40,11 @@ async function publish(info) {
     return;
   }
   if (response.status !== 404) throw new Error(`npm version lookup failed with HTTP ${response.status}`);
-  execFileSync('npm', [
+  const npm = npmInvocation([
     'publish', archive, '--ignore-scripts', '--access', 'public', '--tag', info.npmTag,
     '--registry', registry,
-  ], { cwd: root, stdio: 'inherit' });
+  ]);
+  execFileSync(npm.file, npm.args, { cwd: root, stdio: 'inherit', windowsHide: true });
   // npm can accept an upload before its asynchronous processing completes.
   // Do not report a successful release until the tested artifact is served.
   const deadline = Date.now() + 5 * 60_000;

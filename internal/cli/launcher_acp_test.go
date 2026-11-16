@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"github.com/XertroV/vecnet/internal/platform"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -13,7 +14,7 @@ import (
 
 func TestLauncherSetupACPUsesExplicitExecutableAndAskPolicy(t *testing.T) {
 	f := newLauncherFixture(t, "launcher")
-	command := filepath.Join(f.paths.State, "claude-agent-acp-0.101.0")
+	command := filepath.Join(f.paths.State, platform.Exe("claude-agent-acp-0.101.0"))
 	if err := os.MkdirAll(filepath.Dir(command), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +84,7 @@ func TestLauncherSetupACPRejectsUnsafeOrNativeOverrides(t *testing.T) {
 func newLauncherACPArgvFixture(t *testing.T) (launcherFixture, string, []string) {
 	t.Helper()
 	f := newLauncherFixture(t, "launcher")
-	command := filepath.Join(f.paths.State, "claude-agent-acp-0.101.0")
+	command := filepath.Join(f.paths.State, platform.Exe("claude-agent-acp-0.101.0"))
 	if err := os.MkdirAll(filepath.Dir(command), 0o700); err != nil {
 		t.Fatal(err)
 	}

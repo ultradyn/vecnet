@@ -754,3 +754,20 @@ func TestInterruptedRepairRestartsActiveOldProcess(t *testing.T) {
 		})
 	}
 }
+
+func TestPreviewChecksWithoutWrites(t *testing.T) {
+	o, h := fixture(t)
+	r, e := localruntime.Preview(context.Background(), o)
+	if e != nil || !r.Changed || r.Unit == "" {
+		t.Fatalf("preview: %+v %v", r, e)
+	}
+	entries, _ := os.ReadDir(o.Home)
+	if len(entries) != 0 {
+		t.Fatal("preview wrote HOME")
+	}
+	for _, c := range h.calls {
+		if strings.Contains(c, " restart ") || strings.Contains(c, " enable ") || strings.Contains(c, "daemon-reload") {
+			t.Fatal("preview changed service")
+		}
+	}
+}

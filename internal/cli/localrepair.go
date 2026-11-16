@@ -9,12 +9,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/XertroV/vecnet/internal/buildinfo"
 	"github.com/XertroV/vecnet/internal/localruntime"
+	"github.com/XertroV/vecnet/internal/platform"
 )
 
 var localVersionOnce sync.Once
@@ -80,7 +82,7 @@ func (a *app) localStartup(args []string) {
 	paths := []string{filepath.Join(p.Root, ".codex/hooks.json")}
 	codexHome := a.getenv("CODEX_HOME")
 	if codexHome == "" {
-		codexHome = filepath.Join(a.getenv("HOME"), ".codex")
+		codexHome = filepath.Join(platform.Home(a.getenv), ".codex")
 	}
 	paths = append(paths, filepath.Join(codexHome, "hooks.json"))
 	for _, path := range paths {
@@ -134,7 +136,7 @@ func (a *app) localStartup(args []string) {
 	// A new executable must refresh the service's private copy as well. It is
 	// safe to start repair without an owner; it cannot create one absent pending
 	// enrollment intent.
-	if ctx.Err() == nil && (localRuntimePresent(a.getenv("HOME")) || localLauncherPresent(a.getenv("HOME"))) {
+	if ctx.Err() == nil && (localRuntimePresent(platform.Home(a.getenv)) || localLauncherPresent(platform.Home(a.getenv))) {
 		managed = true
 	}
 	// The foreground reads bounded local metadata only. Complete file integrity
@@ -153,10 +155,10 @@ func (a *app) localStartup(args []string) {
 }
 func (a *app) scheduleLocalRepair() {
 	exe, err := os.Executable()
-	if err != nil || (strings.HasSuffix(exe, ".test") && a.localRepairStart == nil) {
+	if err != nil || ((strings.HasSuffix(exe, ".test") || strings.HasSuffix(exe, ".test.exe")) && a.localRepairStart == nil) {
 		return
 	}
-	ctx, cancel := context.WithTimeout(a.ctx, 10*time.Millisecond)
+	ctx, cancel := context.WithTimeout(a.ctx, localScheduleBudget())
 	defer cancel()
 	unlock, err := a.lockLocalState(ctx, "schedule")
 	if err != nil {
@@ -172,12 +174,13 @@ func (a *app) scheduleLocalRepair() {
 		}
 	}
 	cmd := exec.Command(exe, "repair", "--background")
-	for _, k := range []string{"HOME", "PATH", "XDG_CONFIG_HOME", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "VECNET_NODE", "CODEX_HOME"} {
+	for _, k := range []string{"HOME", "USERPROFILE", "SystemRoot", "LOCALAPPDATA", "APPDATA", "TEMP", "TMP", "PATH", "XDG_CONFIG_HOME", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "VECNET_NODE", "CODEX_HOME"} {
 		if v := a.getenv(k); v != "" {
 			cmd.Env = append(cmd.Env, k+"="+v)
 		}
 	}
 	cmd.Env = append(cmd.Env, "VECNET_LOCAL_MAINTENANCE=0")
+	platform.Background(cmd)
 	cmd.Stdin = nil
 	cmd.Stdout = nil
 	cmd.Stderr = nil
@@ -271,7 +274,7 @@ func (a *app) repairLocalProjectsAfterRuntime(runtimeErr error) error {
 				}
 				// Refuse symlink redirection on unattended repair. Explicit installer
 				// remains the deliberate adoption path for a user-selected new target.
-				resolved, e := filepath.EvalSymlinks(art.Path)
+				resolved, e := platform.Canonical(art.Path)
 				if e != nil || filepath.Clean(resolved) != filepath.Clean(art.Path) {
 					status = "deferred"
 					why = "managed hook path changed or is a symlink"
@@ -372,7 +375,7 @@ func (a *app) cmdLocalRepair(args []string) error {
 	var runtimeErr error
 	// A stopped legacy launcher may coexist with an installed standalone runtime.
 	// Ensure checks live service conflicts before upgrading the actual managed runtime.
-	if localRuntimePresent(a.getenv("HOME")) {
+	if localRuntimePresent(platform.Home(a.getenv)) {
 		runtimeErr = a.ensureLocalRuntime(a.ctx)
 		if runtimeErr == nil {
 			if config, err := configPath(a.getenv); err == nil {
@@ -384,7 +387,7 @@ func (a *app) cmdLocalRepair(args []string) error {
 		if runtimeErr != nil {
 			failures = append(failures, runtimeErr)
 		}
-	} else if localLegacyLauncherPresent(a.getenv("HOME")) {
+	} else if localLegacyLauncherPresent(platform.Home(a.getenv)) {
 		// The legacy launcher installer has no verified upgrade manifest. Never
 		// replace its custom configuration/unit with the standalone service or
 		// claim that repairing hooks updated its private connector and CLI.
@@ -402,7 +405,7 @@ func (a *app) cmdLocalRepair(args []string) error {
 		failures = append(failures, err)
 	}
 	result := localRepairReport{localSetupResult: localSetupResult{State: "ready"}, Version: localSoftwareVersion(), BinarySHA256: localBinarySHA256, AttemptedAt: time.Now().UTC()}
-	if installed, err := localruntime.Read(a.getenv("HOME")); err == nil {
+	if installed, err := localruntime.Read(platform.Home(a.getenv)); err == nil {
 		result.Runtime = &localRepairRuntime{Version: installed.Version, Release: installed.Release, Unit: installed.Unit}
 	}
 	if len(failures) > 0 {
@@ -485,6 +488,9 @@ func localLauncherPresent(home string) bool {
 	return err != nil || len(units) > 0
 }
 func localProfileLauncherUnits(home string) ([]string, error) {
+	if runtime.GOOS == "windows" {
+		return localWindowsProfileLauncherUnitsWith(home, func(string) string { return "" })
+	}
 	dir := filepath.Join(home, ".config/systemd/user")
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, os.ErrNotExist) {
@@ -509,9 +515,15 @@ func localLegacyLauncherPresent(home string) bool {
 // File presence schedules inspection, but never authorizes adopting an existing
 // launcher. Only installer metadata registered to a project permits repair.
 func (a *app) unregisteredLocalLaunchers() error {
-	units, err := localProfileLauncherUnits(a.getenv("HOME"))
-	if err != nil || len(units) == 0 {
+	units, err := localProfileLauncherUnits(platform.Home(a.getenv))
+	if runtime.GOOS == "windows" {
+		units, err = localWindowsProfileLauncherUnitsWith(platform.Home(a.getenv), a.getenv)
+	}
+	if err != nil {
 		return err
+	}
+	if runtime.GOOS != "windows" && len(units) == 0 {
+		return nil
 	}
 	projects, err := a.localProjects()
 	if err != nil {
@@ -529,6 +541,21 @@ func (a *app) unregisteredLocalLaunchers() error {
 			raw, e := readLocalHooks(artifact.Path)
 			if e == nil && json.Unmarshal(raw, &metadata) == nil {
 				registered[metadata.Unit] = true
+			}
+		}
+	}
+	if runtime.GOOS == "windows" {
+		tasks, e := localWindowsProfileLauncherTasks(a.localRegistryContext())
+		if e != nil {
+			return e
+		}
+		taskNames := map[string]bool{}
+		for unit := range registered {
+			taskNames[strings.TrimSuffix(filepath.Base(unit), ".task.json")] = true
+		}
+		for _, name := range tasks {
+			if !taskNames[name] {
+				return usageErr("Windows profile launcher task is not registered for verified upgrades; preserve it and run vecnet --net PROFILE launcher install --write with its intended service state")
 			}
 		}
 	}
@@ -618,4 +645,13 @@ func (a *app) finishLocalProjectRepair(root string, completed map[string]localAr
 		return nil
 	})
 	return why, err
+}
+
+// NTFS handle-based ACL validation is more expensive than flock: allow one
+// bounded local attempt without making contention queue foreground commands.
+func localScheduleBudget() time.Duration {
+	if runtime.GOOS == "windows" {
+		return 200 * time.Millisecond
+	}
+	return 10 * time.Millisecond
 }

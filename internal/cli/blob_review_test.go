@@ -94,7 +94,7 @@ func reviewArgs(t *testing.T, command string) []string {
 		return []string{"blob", "get", reviewSHA, "--blob-id", reviewID, "--out", filepath.Join(t.TempDir(), "saved"), "--json"}
 	}
 	path := filepath.Join(t.TempDir(), "attach.txt")
-	if err := os.WriteFile(path, []byte("abc"), 0600); err != nil {
+	if err := cliFixtureWriteFile(path, []byte("abc"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if command == "reply" {

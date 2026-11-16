@@ -12,7 +12,6 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -21,6 +20,7 @@ import (
 	"time"
 
 	"github.com/XertroV/vecnet/connectors"
+	"github.com/XertroV/vecnet/internal/platform"
 )
 
 // launcherInstall records only public paths, never the launcher credential.
@@ -36,8 +36,16 @@ func launcherExecutable(raw, searchPath string) (string, error) {
 	if raw == "" {
 		return "", usageErr("executable path is empty")
 	}
+	if runtime.GOOS == "windows" {
+		if ext := filepath.Ext(raw); ext != "" && !strings.EqualFold(ext, ".exe") {
+			return "", usageErr("launcher requires a native .exe executable, not a command wrapper")
+		}
+		if filepath.Ext(raw) == "" {
+			raw = platform.Exe(raw)
+		}
+	}
 	candidates := []string{raw}
-	if !strings.ContainsRune(raw, filepath.Separator) {
+	if !strings.ContainsAny(raw, `/\`) && filepath.VolumeName(raw) == "" {
 		candidates = nil
 		for _, dir := range filepath.SplitList(searchPath) {
 			if dir != "" {
@@ -55,7 +63,12 @@ func launcherExecutable(raw, searchPath string) (string, error) {
 			continue
 		}
 		st, err := os.Stat(p)
-		if err == nil && st.Mode().IsRegular() && st.Mode().Perm()&0o111 != 0 {
+		if err == nil && launcherExecutableInfo(p, st) {
+			release, e := launcherPinExecutable(p)
+			if e != nil {
+				return "", fmt.Errorf("unsafe launcher executable %s: %w", p, e)
+			}
+			release()
 			return p, nil
 		}
 	}
@@ -239,14 +252,18 @@ func launcherSafeInfo(info os.FileInfo, directory, managed bool) error {
 // Pin each directory while traversing from /. No component is followed through
 // a symlink or traversed below an untrusted writable parent. Existing unsafe
 // paths are refused, never repaired with chmod/chown.
-func launcherOpenDir(path, managed string, create bool) (*os.Root, error) {
+func launcherOpenDir(path, managed string, create bool) (*launcherRoot, error) {
 	if !filepath.IsAbs(path) {
 		return nil, usageErr("launcher path must be absolute")
 	}
-	root, err := os.OpenRoot(string(filepath.Separator))
+	if runtime.GOOS == "windows" {
+		return launcherWindowsOpenDir(path, managed, create)
+	}
+	rawRoot, err := os.OpenRoot(string(filepath.Separator))
 	if err != nil {
 		return nil, err
 	}
+	root := &launcherRoot{Root: rawRoot}
 	prefix := string(filepath.Separator)
 	for _, part := range strings.Split(strings.TrimPrefix(filepath.Clean(path), prefix), string(filepath.Separator)) {
 		if part == "" {
@@ -290,12 +307,12 @@ func launcherOpenDir(path, managed string, create bool) (*os.Root, error) {
 	return root, nil
 }
 
-func launcherReadOwned(root *os.Root, name string, managed bool) ([]byte, error) {
+func launcherReadOwned(root *launcherRoot, name string, managed bool) ([]byte, error) {
 	info, err := root.Lstat(name)
 	if err != nil {
 		return nil, err
 	}
-	if err = launcherSafeInfo(info, false, managed); err != nil {
+	if err = launcherCheckInfo(root, name, info, false, managed); err != nil {
 		return nil, err
 	}
 	file, err := root.Open(name)
@@ -310,15 +327,18 @@ func launcherReadOwned(root *os.Root, name string, managed bool) ([]byte, error)
 	if !os.SameFile(info, pinned) {
 		return nil, usageErr("launcher file changed during validation")
 	}
+	if err = launcherCheckFile(file, false, managed); err != nil {
+		return nil, err
+	}
 	return io.ReadAll(file)
 }
 
-func launcherValidateSnapshot(parent *os.Root, name string, files map[string][]byte) error {
+func launcherValidateSnapshot(parent *launcherRoot, name string, files map[string][]byte) error {
 	info, err := parent.Lstat(name)
 	if err != nil {
 		return err
 	}
-	if err = launcherSafeInfo(info, true, true); err != nil {
+	if err = launcherCheckInfo(parent, name, info, true, true); err != nil {
 		return err
 	}
 	root, err := parent.OpenRoot(name)
@@ -335,7 +355,7 @@ func launcherValidateSnapshot(parent *os.Root, name string, files map[string][]b
 		if err != nil {
 			return err
 		}
-		if err = launcherSafeInfo(info, entry.IsDir(), true); err != nil {
+		if err = launcherCheckInfo(root, path, info, entry.IsDir(), true); err != nil {
 			return err
 		}
 		if entry.IsDir() {
@@ -372,11 +392,16 @@ func launcherTempName(prefix string) string {
 	return prefix + hex.EncodeToString(value[:])
 }
 
-func launcherSnapshot(parent *os.Root, name string, files map[string][]byte) error {
+func launcherSnapshot(parent *launcherRoot, name string, files map[string][]byte) error {
 	if _, err := parent.Lstat(name); err == nil {
 		return launcherValidateSnapshot(parent, name, files)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
+	}
+	for path := range files {
+		if !fs.ValidPath(path) || !filepath.IsLocal(filepath.FromSlash(path)) || (runtime.GOOS == "windows" && strings.ContainsAny(path, `\:`)) {
+			return usageErr("invalid launcher asset path")
+		}
 	}
 	tmp := launcherTempName(".snapshot-")
 	if err := parent.Mkdir(tmp, 0o700); err != nil {
@@ -395,9 +420,13 @@ func launcherSnapshot(parent *os.Root, name string, files map[string][]byte) err
 		if err = root.MkdirAll(filepath.Dir(filepath.FromSlash(path)), 0o700); err != nil {
 			return err
 		}
-		if err = root.WriteFile(filepath.FromSlash(path), data, 0o600); err != nil {
+		if err = launcherDurableWrite(root, filepath.FromSlash(path), data, 0o600); err != nil {
 			return err
 		}
+	}
+	// Windows pins directories against rename while validation/writes run.
+	if err = root.Close(); err != nil {
+		return err
 	}
 	if err = parent.Rename(tmp, name); err != nil {
 		// Another profile may concurrently install the identical content hash.
@@ -409,25 +438,8 @@ func launcherSnapshot(parent *os.Root, name string, files map[string][]byte) err
 	return launcherValidateSnapshot(parent, name, files)
 }
 
-func launcherAtomicWrite(root *os.Root, name string, data []byte) error {
-	if _, err := launcherReadOwned(root, name, true); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	tmp := launcherTempName("." + name + "-")
-	file, err := root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return err
-	}
-	defer root.Remove(tmp)
-	_, err = file.Write(data)
-	closeErr := file.Close()
-	if err != nil {
-		return err
-	}
-	if closeErr != nil {
-		return closeErr
-	}
-	return root.Rename(tmp, name)
+func launcherAtomicWrite(root *launcherRoot, name string, data []byte) error {
+	return launcherDurableWrite(root, name, data, 0o600)
 }
 
 // systemd expands percent specifiers everywhere and dollars in ExecStart.
@@ -445,6 +457,9 @@ func launcherSystemdQuote(s string, command bool) (string, error) {
 }
 
 func launcherUnit(template []byte, m launcherInstall, config, vecnetConfig, home, path string) (string, error) {
+	if runtime.GOOS == "windows" {
+		return launcherWindowsUnit(m, config, vecnetConfig, home, path)
+	}
 	unit := string(template)
 	replacements := []string{}
 	for key, value := range map[string]string{"NODE": m.Node, "ENTRY": m.Entry, "CONFIG": config, "ENV_VECNET_BIN": "VECNET_BIN=" + m.VecnetBin, "ENV_VECNET_CONFIG": "VECNET_CONFIG=" + vecnetConfig, "ENV_HOME": "HOME=" + home, "ENV_PATH": "PATH=" + path} {
@@ -462,8 +477,8 @@ func launcherUnit(template []byte, m launcherInstall, config, vecnetConfig, home
 }
 
 func (a *app) launcherInstall(p launcherPaths, o opts) error {
-	if runtime.GOOS != "linux" {
-		return usageErr("launcher install requires Linux and systemd --user")
+	if runtime.GOOS != "linux" && runtime.GOOS != "windows" {
+		return usageErr("launcher install requires Linux/systemd or Windows Task Scheduler")
 	}
 	if (o.has("enable") || o.has("start")) && !o.has("write") {
 		return usageErr("--enable and --start require --write; omit them to preview installation")
@@ -476,9 +491,14 @@ func (a *app) launcherInstall(p launcherPaths, o opts) error {
 	if err := launcherReadJSON(p.Config, &config); err != nil {
 		return usageErr("launcher setup is missing or invalid; run launcher setup --write first")
 	}
-	st, err := os.Stat(config.Hub.Credential)
-	if err != nil || !st.Mode().IsRegular() || st.Mode()&0o7777 != 0o600 {
-		return usageErr("launcher credential must be a regular file with mode 0600")
+	credentialRoot, err := launcherOpenDir(filepath.Dir(config.Hub.Credential), filepath.Dir(config.Hub.Credential), false)
+	if err != nil {
+		return err
+	}
+	_, err = launcherManagedRead(credentialRoot, filepath.Base(config.Hub.Credential))
+	credentialRoot.Close()
+	if err != nil {
+		return fmt.Errorf("launcher credential must be an owner-private regular file (0600 on Unix): %w", err)
 	}
 	source, err := launcherSource(o.str("source"))
 	if err != nil {
@@ -490,7 +510,10 @@ func (a *app) launcherInstall(p launcherPaths, o opts) error {
 	}
 	searchPath := a.getenv("PATH")
 	if searchPath == "" {
-		searchPath = "/usr/local/bin:/usr/bin:/bin"
+		searchPath = launcherDefaultPath(a.getenv)
+	}
+	if searchPath == "" {
+		return usageErr("launcher requires PATH or an absolute SystemRoot")
 	}
 	node := o.str("node")
 	if node == "" {
@@ -499,12 +522,6 @@ func (a *app) launcherInstall(p launcherPaths, o opts) error {
 	node, err = launcherExecutable(node, searchPath)
 	if err != nil {
 		return err
-	}
-	ctx, cancel := context.WithTimeout(a.ctx, 5*time.Second)
-	defer cancel()
-	version, err := exec.CommandContext(ctx, node, "--version").Output()
-	if err != nil || !launcherNodeVersion(string(version)) {
-		return usageErr("launcher requires Node 22.18 or newer; pass --node /absolute/path/to/node")
 	}
 	bin := o.str("vecnet-bin")
 	if bin == "" {
@@ -520,6 +537,22 @@ func (a *app) launcherInstall(p launcherPaths, o opts) error {
 	if err != nil {
 		return err
 	}
+	releaseNode, err := launcherPinExecutable(node)
+	if err != nil {
+		return err
+	}
+	defer releaseNode()
+	releaseBin, err := launcherPinExecutable(bin)
+	if err != nil {
+		return err
+	}
+	defer releaseBin()
+	ctx, cancel := context.WithTimeout(a.ctx, 5*time.Second)
+	defer cancel()
+	version, err := launcherNodeOutput(ctx, node)
+	if err != nil || !launcherNodeVersion(string(version)) {
+		return usageErr("launcher requires Node 22.18 or newer; pass --node /absolute/path/to/node")
+	}
 	vecnetConfig, err := configPath(a.getenv)
 	if err != nil {
 		return err
@@ -530,7 +563,7 @@ func (a *app) launcherInstall(p launcherPaths, o opts) error {
 	}
 	snapshot := filepath.Join(p.Data, "snapshots", hash)
 	m := launcherInstall{node, filepath.Join(snapshot, "connectors", "launcher", "src", "main.ts"), bin, source, snapshot}
-	unit, err := launcherUnit(files["connectors/launcher/systemd/vecnet-launcher-profile.service.in"], m, p.Config, vecnetConfig, a.getenv("HOME"), searchPath)
+	unit, err := launcherUnit(files["connectors/launcher/systemd/vecnet-launcher-profile.service.in"], m, p.Config, vecnetConfig, platform.Home(a.getenv), searchPath)
 	if err != nil {
 		return err
 	}
@@ -554,7 +587,7 @@ func (a *app) launcherInstall(p launcherPaths, o opts) error {
 	}
 	defer snapshots.Close()
 	lockName := filepath.Base(p.Manifest) + ".lock"
-	if _, e := launcherReadOwned(manifestRoot, lockName, true); e != nil && !errors.Is(e, os.ErrNotExist) {
+	if e := launcherValidateLock(manifestRoot, lockName, true); e != nil {
 		return e
 	}
 	lock, err := manifestRoot.OpenFile(lockName, os.O_RDWR|os.O_CREATE, 0o600)
@@ -562,11 +595,7 @@ func (a *app) launcherInstall(p launcherPaths, o opts) error {
 		return err
 	}
 	defer lock.Close()
-	info, err := lock.Stat()
-	if err != nil {
-		return err
-	}
-	if err = launcherSafeInfo(info, false, true); err != nil {
+	if err = launcherCheckFile(lock, false, true); err != nil {
 		return err
 	}
 	for {
@@ -586,10 +615,14 @@ func (a *app) launcherInstall(p launcherPaths, o opts) error {
 	if _, e := launcherReadOwned(manifestRoot, filepath.Base(p.Manifest), true); e != nil && !errors.Is(e, os.ErrNotExist) {
 		return e
 	}
-	if existing, e := launcherReadOwned(unitRoot, filepath.Base(p.Unit), true); e == nil && !bytes.HasPrefix(existing, []byte("# Managed by vecnet launcher install.")) {
+	if existing, e := launcherReadOwned(unitRoot, filepath.Base(p.Unit), true); e == nil && !launcherManagedUnit(existing) {
 		return usageErr("launcher unit already exists and is not managed by vecnet; review it before installing")
 	} else if e != nil && !errors.Is(e, os.ErrNotExist) {
 		return e
+	}
+	applyManager, err := a.launcherPrepareManagerInstall(p, []byte(unit), o.has("enable"), o.has("start"))
+	if err != nil {
+		return err
 	}
 	if err = launcherSnapshot(snapshots, filepath.Base(snapshot), files); err != nil {
 		return err
@@ -604,20 +637,10 @@ func (a *app) launcherInstall(p launcherPaths, o opts) error {
 	if err = launcherAtomicWrite(manifestRoot, filepath.Base(p.Manifest), append(raw, '\n')); err != nil {
 		return err
 	}
-	if err = a.launcherRun("systemctl", "--user", "daemon-reload"); err != nil {
+	if err = applyManager(); err != nil {
 		return err
 	}
-	if o.has("enable") {
-		if err = a.launcherRun("systemctl", "--user", "enable", filepath.Base(p.Unit)); err != nil {
-			return err
-		}
-	}
-	// Restart also starts a stopped unit and adopts the new snapshot on upgrade.
-	if o.has("start") {
-		if err = a.launcherRun("systemctl", "--user", "restart", filepath.Base(p.Unit)); err != nil {
-			return err
-		}
-	}
+
 	if err = a.registerLauncherInstallation(p, m, []byte(unit), vecnetConfig, searchPath, !o.has("vecnet-bin") && a.getenv("VECNET_BIN") == "", !o.has("source")); err != nil {
 		return err
 	}

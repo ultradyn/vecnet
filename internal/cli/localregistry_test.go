@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -18,15 +19,15 @@ import (
 func localRegistryFixture(t *testing.T) (*app, string, string) {
 	t.Helper()
 	base := t.TempDir()
-	if err := os.Chmod(base, 0700); err != nil {
+	if err := cliFixtureChmod(base, 0700); err != nil {
 		t.Fatal(err)
 	}
 	root := filepath.Join(base, "project")
 	home := filepath.Join(base, "home")
-	if err := os.Mkdir(root, 0700); err != nil {
+	if err := cliFixtureMkdir(root, 0700); err != nil {
 		t.Fatal(err)
 	}
-	t.Chdir(root)
+	cliFixtureChdir(t, root)
 	return &app{ctx: context.Background(), getenv: func(k string) string {
 		if k == "HOME" {
 			return home
@@ -52,7 +53,7 @@ func TestLocalRegistryInspectionDoesNotCreateFiles(t *testing.T) {
 	if _, err := os.Stat(home); !os.IsNotExist(err) {
 		t.Fatalf("inspection created HOME: %v", err)
 	}
-	if err := a.cmdProjects([]string{"forget", "/missing"}); err != nil {
+	if err := a.cmdProjects([]string{"forget", filepath.Join(t.TempDir(), "missing")}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(home); !os.IsNotExist(err) {
@@ -80,10 +81,10 @@ func TestLocalRegistryObservationSeparatesAppliedState(t *testing.T) {
 		t.Fatal(err)
 	}
 	alias := filepath.Join(t.TempDir(), "alias")
-	if err := os.Symlink(root, alias); err != nil {
+	if err := cliFixtureSymlink(t, root, alias); err != nil {
 		t.Fatal(err)
 	}
-	t.Chdir(alias)
+	cliFixtureChdir(t, alias)
 	p, err = a.observeLocalProject("v2", now.Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
@@ -101,10 +102,7 @@ func TestLocalRegistryObservationSeparatesAppliedState(t *testing.T) {
 		}
 	}
 	for path, want := range map[string]os.FileMode{filepath.Dir(localRegistryInventory(home)): 0700, localRegistryInventory(home): 0600, filepath.Join(filepath.Dir(localRegistryInventory(home)), "inventory.lock"): 0600} {
-		info, err := os.Stat(path)
-		if err != nil || info.Mode().Perm() != want {
-			t.Fatalf("private %s: %v %v", path, info, err)
-		}
+		cliFixtureRequireMode(t, path, want)
 	}
 }
 func TestLocalRegistryGitWorktreesAndSubdirectories(t *testing.T) {
@@ -112,7 +110,7 @@ func TestLocalRegistryGitWorktreesAndSubdirectories(t *testing.T) {
 	git := func(args ...string) string {
 		t.Helper()
 		c := exec.Command("git", args...)
-		c.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null")
+		c.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull)
 		out, err := c.CombinedOutput()
 		if err != nil {
 			t.Fatalf("git %v: %s %v", args, out, err)
@@ -122,10 +120,10 @@ func TestLocalRegistryGitWorktreesAndSubdirectories(t *testing.T) {
 	git("init", root)
 	git("-C", root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-m", "fixture")
 	sub := filepath.Join(root, "sub")
-	if err := os.Mkdir(sub, 0700); err != nil {
+	if err := cliFixtureMkdir(sub, 0700); err != nil {
 		t.Fatal(err)
 	}
-	t.Chdir(sub)
+	cliFixtureChdir(t, sub)
 	first, err := a.observeLocalProject("v1", localRegistryNow())
 	if err != nil {
 		t.Fatal(err)
@@ -135,7 +133,7 @@ func TestLocalRegistryGitWorktreesAndSubdirectories(t *testing.T) {
 	}
 	other := filepath.Join(t.TempDir(), "worktree")
 	git("-C", root, "worktree", "add", "-b", "fixture", other)
-	t.Chdir(other)
+	cliFixtureChdir(t, other)
 	second, err := a.observeLocalProject("v1", localRegistryNow())
 	if err != nil {
 		t.Fatal(err)
@@ -156,7 +154,7 @@ func TestLocalRegistryArtifactsAndForgetPreserveFiles(t *testing.T) {
 	}
 	path := filepath.Join(t.TempDir(), "explicit-hooks.json")
 	body := []byte("{}\n")
-	if err := os.WriteFile(path, body, 0600); err != nil {
+	if err := cliFixtureWriteFile(path, body, 0600); err != nil {
 		t.Fatal(err)
 	}
 	if err := a.registerLocalArtifact(path, "codex-hooks", "v1", now); err != nil {
@@ -177,16 +175,18 @@ func TestLocalRegistryArtifactsAndForgetPreserveFiles(t *testing.T) {
 		t.Fatalf("artifact metadata: %+v", art)
 	}
 	authority := filepath.Join(home, ".local", "state", "vecnet", "codex", "bindings.json")
-	if err := os.MkdirAll(filepath.Dir(authority), 0700); err != nil {
+	if err := cliFixtureMkdirAll(filepath.Dir(authority), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(authority, []byte("authority sentinel"), 0600); err != nil {
+	if err := cliFixtureWriteFile(authority, []byte("authority sentinel"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(home); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.RemoveAll(root); err != nil {
 		t.Fatal(err)
 	}
-	t.Chdir(home)
 	if err := a.updateLocalProject(root, func(p *localProject) error { p.Status = "pending"; p.Error = "missing project"; return nil }); err != nil {
 		t.Fatal(err)
 	}
@@ -221,10 +221,10 @@ func TestLocalRegistryRejectsMalformedInventoryWithoutOverwrite(t *testing.T) {
 		t.Run(strconv.Itoa(i), func(t *testing.T) {
 			a, _, home := localRegistryFixture(t)
 			path := localRegistryInventory(home)
-			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			if err := cliFixtureMkdirAll(filepath.Dir(path), 0700); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(path, []byte(raw), 0600); err != nil {
+			if err := cliFixtureWriteFile(path, []byte(raw), 0600); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := a.localProjects(); err == nil {
@@ -272,7 +272,7 @@ func TestLocalRegistryRejectsUnsafeRowsAndUpdates(t *testing.T) {
 	rows := file["projects"].([]any)
 	rows[0].(map[string]any)["root"] = "../hostile"
 	raw, _ := json.Marshal(file)
-	if err := os.WriteFile(path, raw, 0600); err != nil {
+	if err := cliFixtureWriteFile(path, raw, 0600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := a.localProjects(); err == nil {
@@ -381,7 +381,7 @@ func TestLocalRegistryArtifactAdoptionPreservesAppliedVersion(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(t.TempDir(), "hooks.json")
-	if err := os.WriteFile(path, []byte("{}\n"), 0600); err != nil {
+	if err := cliFixtureWriteFile(path, []byte("{}\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if err := a.registerLocalArtifact(path, "codex-hooks", "v1", now); err != nil {
@@ -397,7 +397,7 @@ func TestLocalRegistryArtifactAdoptionPreservesAppliedVersion(t *testing.T) {
 	if art := rows[0].Artifacts[0]; art.Version != "v1" || !art.InstalledAt.Equal(now) {
 		t.Fatalf("adoption reset installation: %+v", art)
 	}
-	if err := os.WriteFile(path, []byte("{\"changed\":true}\n"), 0600); err != nil {
+	if err := cliFixtureWriteFile(path, []byte("{\"changed\":true}\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if err := a.registerLocalArtifact(path, "codex-hooks", "v2", now.Add(2*time.Hour)); err != nil {
@@ -415,7 +415,7 @@ func TestLocalRegistryArtifactAdoptionPreservesAppliedVersion(t *testing.T) {
 func TestLocalRegistrySavedProjectRootOverridesCWD(t *testing.T) {
 	a, root, _ := localRegistryFixture(t)
 	other := t.TempDir()
-	t.Chdir(other)
+	cliFixtureChdir(t, other)
 	a.localProjectRoot = root
 	p, err := a.observeLocalProject("v1", localRegistryNow())
 	if err != nil {
@@ -425,7 +425,7 @@ func TestLocalRegistrySavedProjectRootOverridesCWD(t *testing.T) {
 		t.Fatalf("used repair caller cwd: %+v", p)
 	}
 	path := filepath.Join(t.TempDir(), "hooks.json")
-	if err := os.WriteFile(path, []byte("{}\n"), 0600); err != nil {
+	if err := cliFixtureWriteFile(path, []byte("{}\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if err := a.registerLocalArtifactForProject(root, path, "codex-hooks", "v1", localRegistryNow()); err != nil {
@@ -453,7 +453,7 @@ func TestLocalRegistryStoredRootWinsOverRetargetedSymlink(t *testing.T) {
 				t.Fatal(err)
 			}
 			target := t.TempDir()
-			t.Chdir(target)
+			cliFixtureChdir(t, target)
 			if registeredTarget {
 				if _, err := a.observeLocalProject("v1", now); err != nil {
 					t.Fatal(err)
@@ -462,7 +462,7 @@ func TestLocalRegistryStoredRootWinsOverRetargetedSymlink(t *testing.T) {
 			if err := os.Rename(root, root+"-moved"); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.Symlink(target, root); err != nil {
+			if err := cliFixtureSymlink(t, target, root); err != nil {
 				t.Fatal(err)
 			}
 			if err := a.updateLocalProject(root, func(p *localProject) error { p.Status = "deferred"; p.Error = "original root retargeted"; return nil }); err != nil {
@@ -500,7 +500,7 @@ func TestLocalRegistryStoredRootWinsOverRetargetedSymlink(t *testing.T) {
 			if len(rows) != want || registeredTarget && rows[0].Root != target {
 				t.Fatalf("forgot wrong project: %+v", rows)
 			}
-			if st, err := os.Lstat(root); err != nil || st.Mode()&os.ModeSymlink == 0 {
+			if st, err := os.Lstat(root); err != nil || st.Mode()&(os.ModeSymlink|os.ModeIrregular) == 0 {
 				t.Fatalf("forget touched root symlink: %v %v", st, err)
 			}
 		})
@@ -512,13 +512,28 @@ func TestLocalRegistryStoredRootSurvivesUnresolvableFilesystem(t *testing.T) {
 	if _, err := a.observeLocalProject("v1", localRegistryNow()); err != nil {
 		t.Fatal(err)
 	}
-	t.Chdir(t.TempDir())
+	if err := os.Chdir(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Rename(root, root+"-moved"); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(root, root); err != nil {
-		t.Fatal(err)
-	} // EvalSymlinks must fail with ELOOP.
+	if runtime.GOOS == "windows" {
+		target := filepath.Join(t.TempDir(), "junction-target")
+		if err := cliFixtureMkdir(target, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := cliFixtureSymlink(t, target, root); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(target); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		if err := cliFixtureSymlink(t, root, root); err != nil {
+			t.Fatal(err)
+		}
+	} // EvalSymlinks fails for the loop/dangling reparse point.
 	if err := a.updateLocalProject(root, func(p *localProject) error { p.Status = "deferred"; p.Error = "unresolvable root"; return nil }); err != nil {
 		t.Fatal(err)
 	}
@@ -538,7 +553,7 @@ func TestLocalRegistryExplicitInstallAdvancesUnchangedArtifactVersion(t *testing
 		t.Fatal(err)
 	}
 	path := filepath.Join(t.TempDir(), "hooks.json")
-	if err := os.WriteFile(path, []byte("{}\n"), 0600); err != nil {
+	if err := cliFixtureWriteFile(path, []byte("{}\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if err := a.registerLocalArtifact(path, "codex-hooks", "v1", now); err != nil {
@@ -555,7 +570,7 @@ func TestLocalRegistryExplicitInstallAdvancesUnchangedArtifactVersion(t *testing
 	if art.Version != "v2" || !art.InstalledAt.Equal(now.Add(time.Hour)) {
 		t.Fatalf("explicit unchanged install retained stale version: %+v", art)
 	}
-	if err := os.WriteFile(path, []byte("{\"changed\":true}\n"), 0600); err != nil {
+	if err := cliFixtureWriteFile(path, []byte("{\"changed\":true}\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if err := a.registerLocalArtifact(path, "codex-hooks", "legacy", now.Add(2*time.Hour)); err != nil {

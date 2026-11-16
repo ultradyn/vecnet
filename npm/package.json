@@ -24,7 +24,8 @@
     "THIRD_PARTY_NOTICES.txt"
   ],
   "os": [
-    "linux"
+    "linux",
+    "win32"
   ],
   "cpu": [
     "x64",

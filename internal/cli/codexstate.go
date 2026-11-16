@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/XertroV/vecnet/internal/platform"
 )
 
 // Go accepts case-insensitive struct fields and null scalars. Neither is safe
@@ -52,10 +54,10 @@ func validateCodexStateJSON(raw []byte) error {
 // Sync ancestors too because the state directory may have just been created.
 func writeCodexDurable(path string, raw []byte) error {
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	if err := platform.MkdirAll(dir, 0700); err != nil {
 		return err
 	}
-	f, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*")
+	f, err := platform.CreateTemp(dir, "."+filepath.Base(path)+".*")
 	if err != nil {
 		return err
 	}
@@ -74,7 +76,7 @@ func writeCodexDurable(path string, raw []byte) error {
 	if closeErr != nil {
 		return closeErr
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := platform.Replace(tmp, path); err != nil {
 		return err
 	}
 	return syncCodexDirectories(dir)
@@ -86,7 +88,7 @@ func syncCodexDirectories(dir string) error {
 		if err != nil {
 			return err
 		}
-		err = f.Sync()
+		err = platform.SyncDir(f)
 		closeErr := f.Close()
 		if err != nil {
 			return err

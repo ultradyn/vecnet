@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/XertroV/vecnet/internal/localruntime"
+	"github.com/XertroV/vecnet/internal/platform"
 )
 
 type localEnrollment struct {
@@ -116,7 +117,7 @@ func (a *app) prepareLocalEnrollment(profile string) (*localEnrollment, error) {
 	}
 	home := a.getenv("CODEX_HOME")
 	if home == "" {
-		home = filepath.Join(a.getenv("HOME"), ".codex")
+		home = filepath.Join(platform.Home(a.getenv), ".codex")
 	}
 	home, err = canonicalCodexPath(home)
 	if err != nil {
@@ -175,10 +176,10 @@ func (a *app) ensureLocalRuntime(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if strings.HasSuffix(bin, ".test") {
+	if strings.HasSuffix(bin, ".test") || strings.HasSuffix(bin, ".test.exe") {
 		return usageErr("delivery runtime unavailable in test executable")
 	}
-	_, err = localruntime.Ensure(ctx, localruntime.Options{Home: a.getenv("HOME"), Binary: bin, Node: a.getenv("VECNET_NODE"), Version: localSoftwareVersion(), Getenv: a.getenv})
+	_, err = localruntime.Ensure(ctx, localruntime.Options{Home: platform.Home(a.getenv), Binary: bin, Node: a.getenv("VECNET_NODE"), Version: localSoftwareVersion(), Getenv: a.getenv})
 	return err
 }
 func (a *app) reconcileLocalEnrollment(r localEnrollment) localSetupResult {
@@ -343,7 +344,7 @@ func canonicalLocalSetupPath(path string) (string, error) {
 	}
 	tail := []string{}
 	for {
-		resolved, err := filepath.EvalSymlinks(path)
+		resolved, err := platform.Canonical(path)
 		if err == nil {
 			for i := len(tail) - 1; i >= 0; i-- {
 				resolved = filepath.Join(resolved, tail[i])

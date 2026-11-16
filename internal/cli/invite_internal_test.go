@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -85,7 +86,7 @@ func TestGuideGolden(t *testing.T) {
 		got := renderGuide(c.profile, lookup)
 		path := filepath.Join("testdata", c.file)
 		if *updateHookGolden { // the package's one -update flag (hook_test.go)
-			if err := os.WriteFile(path, []byte(got), 0o644); err != nil {
+			if err := cliFixtureWriteFile(path, []byte(strings.ReplaceAll(got, "\r\n", "\n")), 0o644); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -93,7 +94,7 @@ func TestGuideGolden(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got != string(want) {
+		if strings.ReplaceAll(got, "\r\n", "\n") != strings.ReplaceAll(string(want), "\r\n", "\n") {
 			t.Errorf("guide for %q differs from %s; rerun with -update and review the diff", c.profile, path)
 		}
 	}
@@ -142,7 +143,7 @@ func operatorDir(t *testing.T, env *testhub.Env) string {
 	t.Helper()
 	dir := t.TempDir()
 	conf := "[profiles.op]\nhub = \"" + env.URL + "\"\nsecret = \"" + env.OperatorSecret + "\"\n"
-	if err := os.WriteFile(filepath.Join(dir, "config.toml"), []byte(conf), 0o600); err != nil {
+	if err := cliFixtureWriteFile(filepath.Join(dir, "config.toml"), []byte(conf), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return dir
@@ -240,12 +241,14 @@ func TestPeerInviteCopy(t *testing.T) {
 	bin := t.TempDir()
 	clip := filepath.Join(t.TempDir(), "clip")
 	script := "#!/bin/sh\ncat > '" + clip + "'\n"
-	if err := os.WriteFile(filepath.Join(bin, "xclip"), []byte(script), 0o755); err != nil {
-		t.Fatal(err)
+	tool := "xclip"
+	if runtime.GOOS == "windows" {
+		tool = "clip.exe"
 	}
+	cliFixtureProgram(t, bin, tool, script, cliFixtureProgramSpec{Kind: "clipboard", Log: clip})
 	code, out, errs := cliRunEnv(t, opDir, "", map[string]string{"PATH": bin}, "--net", "op", "peer", "invite", "--name", "Clip", "--copy")
 	got, _ := os.ReadFile(clip)
-	if code != 0 || string(got) != out || !strings.Contains(out, "vecnet enrol") || !strings.Contains(errs, "copied to the clipboard (xclip)") {
+	if code != 0 || string(got) != out || !strings.Contains(out, "vecnet enrol") || !strings.Contains(errs, "copied to the clipboard ("+tool+")") {
 		t.Fatalf("--copy: %d clip=%q out=%q err=%q", code, got, out, errs)
 	}
 	code, out, errs = cliRunEnv(t, opDir, "", map[string]string{"PATH": t.TempDir()}, "--net", "op", "peer", "invite", "--name", "NoClip", "--copy")

@@ -8,7 +8,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"time"
+
+	"github.com/XertroV/vecnet/internal/platform"
 )
 
 // Setup selects an existing profile and an explicitly identified conversation.
@@ -134,8 +137,8 @@ func (a *app) codexSetupTarget(o opts) (profile, thread, home, config string, er
 	home = o.str("codex-home")
 	if !o.has("codex-home") {
 		home = a.getenv("CODEX_HOME")
-		if home == "" && a.getenv("HOME") != "" {
-			home = filepath.Join(a.getenv("HOME"), ".codex")
+		if home == "" && platform.Home(a.getenv) != "" {
+			home = filepath.Join(platform.Home(a.getenv), ".codex")
 		}
 	}
 	if !filepath.IsAbs(home) {
@@ -250,7 +253,7 @@ func (a *app) reportCodexSetup(profile, thread, home, config string, now time.Ti
 		r.Reason = "legacy connector activity is unknown; enrollment does not establish completed migration"
 	}
 	if r.Delivery != "ready" {
-		r.NextStep = "Enrollment automatically configures supported standalone delivery. Run vecnet repair to retry saved setup and upgrade managed software (Node >=22.18, Linux user systemd, same HOME). A supported app-server host must expose the exact live root; inspect the reason above and docs/connectors/codex-appserver.md, then rerun codex status. Review new or changed hooks in Codex /hooks when required by the host."
+		r.NextStep = "Enrollment automatically configures supported standalone delivery. Run vecnet repair to retry saved setup and upgrade managed software (Node >=22.18, Linux user systemd or Windows per-user scheduled tasks, same HOME). A supported app-server host must expose the exact live root; inspect the reason above and docs/connectors/codex-appserver.md, then rerun codex status. Review new or changed hooks in Codex /hooks when required by the host."
 		if len(legacy) > 0 {
 			r.NextStep = "Stop/replace all old connectors and preserve/review every legacy source before starting the standalone delivery service or current launcher; see the legacy_bindings paths and docs/connectors/codex-appserver.md."
 		}
@@ -320,7 +323,7 @@ func readPrivateCodexStatus(path string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !before.Mode().IsRegular() || before.Mode().Perm()&0077 != 0 || before.Size() > 1<<20 {
+	if !before.Mode().IsRegular() || runtime.GOOS != "windows" && before.Mode().Perm()&0077 != 0 || before.Size() > 1<<20 {
 		return nil, errors.New("unsafe or oversized Codex status/authority file")
 	}
 	raw, err := readCodexBindings(path)
@@ -331,7 +334,7 @@ func readPrivateCodexStatus(path string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !os.SameFile(before, after) || after.Mode().Perm()&0077 != 0 {
+	if !os.SameFile(before, after) || runtime.GOOS != "windows" && after.Mode().Perm()&0077 != 0 {
 		return nil, errors.New("Codex status/authority changed while reading")
 	}
 	return raw, nil
@@ -374,7 +377,7 @@ func (a *app) codexLegacyBindings(config string) ([]string, error) {
 	if xdg := a.getenv("XDG_CONFIG_HOME"); xdg != "" {
 		candidates = append(candidates, filepath.Join(xdg, "vecnet", "codex", "bindings.json"))
 	}
-	if home := a.getenv("HOME"); home != "" {
+	if home := platform.Home(a.getenv); home != "" {
 		candidates = append(candidates, filepath.Join(home, ".config", "vecnet", "codex", "bindings.json"))
 	}
 	seen := map[string]bool{}

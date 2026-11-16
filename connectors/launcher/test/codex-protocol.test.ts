@@ -1,13 +1,14 @@
 import test, { beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildTurnStart, buildTurnSteer, buildThreadResume, buildThreadUnsubscribe,
   buildTurnsPage, mapStatus, parseResumePolicy, CODEX_OPT_OUT_NOTIFICATIONS } from '../src/codex/protocol.ts';
 
 beforeEach(async t => {
   if (!('after' in t)) throw new Error('expected a test context');
-  const dir = await mkdtemp('/tmp/vn-protocol-');
+  const dir = await mkdtemp(join(tmpdir(), 'vn-protocol-'));
   const names = ['VECNET_CONFIG', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'CODEX_HOME', 'VECNET_CODEX_BINDINGS'];
   const saved = names.map(n => process.env[n]);
   names.forEach((n, i) => { process.env[n] = join(dir, String(i)); });

@@ -1,5 +1,9 @@
 import type { Log } from "../../hub-client/src/ports.ts";
 
+// Process utilities are part of the plugin boundary, not access to daemon internals.
+export { cliEnvironment, commandInvocation, terminateProcess, userHome } from '../../hub-client/src/platform.ts';
+export { localPlatform } from './private-files.ts';
+
 // The contract every plugin implements.
 
 export type BackendId = "t3" | "paseo" | "codex-app-server" | "acp" | "sandcastle" | (string & {});
@@ -167,7 +171,7 @@ export interface PluginContext {
   host: string;
   log: Logger;                                 // redacting logger; bodies and secrets never logged (§12)
   store: KeyValue;                             // namespaced to the plugin, in the ledger
-  exec: (argv: string[], opts: { env?: Record<string, string>; stdin?: string; timeoutMs: number; signal?: AbortSignal })
+  exec: (argv: string[], opts: { env?: Record<string, string>; cwd?: string; stdin?: string; timeoutMs: number; signal?: AbortSignal })
           => Promise<{ code: number; stdout: string; stderr: string }>;
   readSecretFile: (path: string) => Promise<string>;
   now: () => Date;

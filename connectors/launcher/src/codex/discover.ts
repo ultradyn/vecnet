@@ -6,11 +6,12 @@ export function socketPathFor(codexHome: string): string {
   return join(codexHome, 'app-server-control', 'app-server-control.sock');
 }
 export type SocketCheck = { ok: true; target: string } | {
-  ok: false; reason: 'missing' | 'not_symlink' | 'bad_dir_mode' | 'foreign_owner';
+  ok: false; reason: 'proxy_required' | 'missing' | 'not_symlink' | 'bad_dir_mode' | 'foreign_owner';
 };
 
 /** Inspect only the supplied rendezvous path; never start or probe a daemon. */
 export function verifySocket(path: string, euid: number): SocketCheck {
+  if (process.platform === 'win32') return { ok: false, reason: 'proxy_required' };
   try {
     if (!lstatSync(path).isSymbolicLink()) return { ok: false, reason: 'not_symlink' };
     // Resolve relative and chained symlinks before checking the actual socket's

@@ -347,11 +347,11 @@ func TestWatchPlainIgnoresShownState(t *testing.T) {
 			u.env["XDG_CONFIG_HOME"] = filepath.Join(filepath.Dir(u.conf), "xdg")
 			sent := sender.send(recipient, "already shown", "--hold")
 			path := filepath.Join(filepath.Dir(u.conf), "state", "p.json")
-			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			if err := cliFixtureMkdirAll(filepath.Dir(path), 0o700); err != nil {
 				t.Fatal(err)
 			}
 			raw, _ := json.Marshal(map[string]any{"shown": []string{sent.Deliveries[0].DeliveryID}})
-			if err := os.WriteFile(path, raw, 0o600); err != nil {
+			if err := cliFixtureWriteFile(path, raw, 0o600); err != nil {
 				t.Fatal(err)
 			}
 			out, stop := startWatch(t, u, args...)
@@ -406,11 +406,11 @@ func TestWatchMismatchedStateDefersUntilRepair(t *testing.T) {
 	t.Cleanup(srv.Close)
 	u := profileUser(t, srv.URL, "vn_peer_test")
 	state := filepath.Join(filepath.Dir(u.conf), "state", "p.json")
-	if err := os.MkdirAll(filepath.Dir(state), 0o700); err != nil {
+	if err := cliFixtureMkdirAll(filepath.Dir(state), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	stale := `{"hub":"http://other-hub.example","caller":"peer_OTHER","cred":"0123456789abcdef","poll_cursor":"e9.9","shown":["dly_X"],"displayed":["dly_X"]}`
-	if err := os.WriteFile(state, []byte(stale), 0o600); err != nil {
+	if err := cliFixtureWriteFile(state, []byte(stale), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	out, stop := startWatch(t, u, "watch", "--for-monitor")
@@ -439,7 +439,7 @@ func TestWatchMismatchedStateDefersUntilRepair(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(state+".repair", repaired, 0o600); err != nil {
+	if err := cliFixtureWriteFile(state+".repair", repaired, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Rename(state+".repair", state); err != nil {

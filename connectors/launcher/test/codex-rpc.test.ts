@@ -15,6 +15,7 @@ import type { AllowedMethod } from '../src/codex/protocol.ts';
 const roots = new WeakMap<TestContext, string>();
 beforeEach(async t => {
   if (!('after' in t)) throw new Error('expected a test context');
+  if (process.platform === 'win32') return;
   const dir = await mkdtemp('/tmp/vn-rpc-'); roots.set(t, dir);
   const names = ['VECNET_CONFIG', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'CODEX_HOME', 'VECNET_CODEX_BINDINGS'];
   const saved = names.map(n => process.env[n]);
@@ -24,7 +25,7 @@ beforeEach(async t => {
     await rm(dir, { recursive: true, force: true });
   });
 });
-const euid = process.geteuid!();
+const euid = (process.geteuid?.() ?? -1);
 async function setup(t: TestContext, version = '0.166.0') {
   const clock = fakeClock(), dir = roots.get(t)!;
   const fake = await startFakeCodexAppServer({ dir, clock }); t.after(() => fake.close()); fake.setVersion(version);
@@ -35,7 +36,7 @@ async function setup(t: TestContext, version = '0.166.0') {
 }
 const read = (rpc: Awaited<ReturnType<typeof openCodexRpc>>) => rpc.call<{ thread: { id: string } }>('thread/read', { threadId: 't' }, 1000);
 
-test('socketPathFor and verifySocket accept the fake layout', { timeout: 5000 }, async t => {
+test('socketPathFor and verifySocket accept the fake layout', { timeout: 5000, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const { fake, options } = await setup(t);
   assert.equal(socketPathFor(options.codexHome), fake.socketPath);
   assert.deepEqual(verifySocket(fake.socketPath, euid), { ok: true, target: await readlink(fake.socketPath) });
@@ -46,7 +47,7 @@ test('socketPathFor and verifySocket accept the fake layout', { timeout: 5000 },
   for (const bad of ['', '0.166.0', ' codex/0.166.0', 'codex/0.166', 'codex tui/0.166.0']) assert.equal(parseServerVersion(bad), null);
 });
 
-test('refuses a socket outside a 0700 euid directory', { timeout: 5000 }, async t => {
+test('refuses a socket outside a 0700 euid directory', { timeout: 5000, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const { fake } = await setup(t), target = await readlink(fake.socketPath);
   await chmod(dirname(target), 0o755);
   assert.deepEqual(verifySocket(fake.socketPath, euid), { ok: false, reason: 'bad_dir_mode' });
@@ -58,7 +59,7 @@ test('refuses a socket outside a 0700 euid directory', { timeout: 5000 }, async 
   assert.equal(verifySocket(link, euid).ok, false);
 });
 
-test('missing socket is unreachable and runs nothing', { timeout: 5000 }, async t => {
+test('missing socket is unreachable and runs nothing', { timeout: 5000, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   let spawns = 0;
   for (const name of ['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'execFileSync', 'fork'] as const) {
     t.mock.method(childProcess, name, () => { spawns++; throw new Error('must not spawn'); });
@@ -71,7 +72,7 @@ test('missing socket is unreachable and runs nothing', { timeout: 5000 }, async 
   assert.equal(spawns, 0);
 });
 
-test('connects with path / only', { timeout: 5000 }, async t => {
+test('connects with path / only', { timeout: 5000, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const { fake, open } = await setup(t), rpc = await open(); await read(rpc);
   assert.deepEqual(fake.paths, ['/']); assert.equal(rpc.version, '0.166.0');
   assert.deepEqual(fake.requests.slice(0, 2).map(r => r.method), ['initialize', 'initialized']);
@@ -81,14 +82,14 @@ test('connects with path / only', { timeout: 5000 }, async t => {
 });
 
 for (const version of ['0.167.0', '0.167.2']) {
-  test(`connects to re-verified ${version}`, { timeout: 5000 }, async t => {
+  test(`connects to re-verified ${version}`, { timeout: 5000, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
     const { open } = await setup(t, version), rpc = await open();
     assert.equal(rpc.version, version);
     assert.equal((await read(rpc)).thread.id, 't');
   });
 }
 
-test('version below the compatibility floor is refused', { timeout: 5000 }, async t => {
+test('version below the compatibility floor is refused', { timeout: 5000, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const { fake, open, log } = await setup(t, '0.165.0');
   await assert.rejects(open(), (e: any) => e instanceof CodexRpcError && e.code === -1 && e.message === 'refused_version' && !e.ambiguous);
   assert.deepEqual(fake.requests.map(r => r.method), ['initialize']);
@@ -96,7 +97,7 @@ test('version below the compatibility floor is refused', { timeout: 5000 }, asyn
   assert.equal(log.entries[0].msg, 'refused_version');
 });
 
-test('server requests are dropped without a reply', { timeout: 5000 }, async t => {
+test('server requests are dropped without a reply', { timeout: 5000, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const { fake, clock, log, open } = await setup(t), rpc = await open();
   await rpc.call('thread/resume', buildThreadResume('t'), 1000);
   // Mock client timers only after connecting; the server has its own controlled clock.
@@ -114,7 +115,7 @@ test('server requests are dropped without a reply', { timeout: 5000 }, async t =
   assert.doesNotMatch(log.text(), /DO-NOT-LOG|peer body/);
 });
 
-test('drop before reply is ambiguous', { timeout: 5000 }, async t => {
+test('drop before reply is ambiguous', { timeout: 5000, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const { fake, open } = await setup(t), rpc = await open();
   fake.failNext('turn/start', 'drop');
   const closed: string[] = []; rpc.onClose(why => closed.push(why));
@@ -125,7 +126,7 @@ test('drop before reply is ambiguous', { timeout: 5000 }, async t => {
   await assert.rejects(read(rpc), (e: any) => e instanceof CodexRpcError && e.ambiguous === false);
 });
 
-test('initialize opts out of delta notifications', { timeout: 5000 }, async t => {
+test('initialize opts out of delta notifications', { timeout: 5000, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const { fake, open } = await setup(t), rpc = await open();
   const notices: string[] = []; rpc.onNotification(method => notices.push(method));
   await rpc.call('thread/resume', buildThreadResume('t'), 1000);
@@ -136,7 +137,7 @@ test('initialize opts out of delta notifications', { timeout: 5000 }, async t =>
   assert.deepEqual(notices, ['item/completed']);
 });
 
-test('concurrent calls correlate replies and definite errors stay non-ambiguous', { timeout: 5000 }, async t => {
+test('concurrent calls correlate replies and definite errors stay non-ambiguous', { timeout: 5000, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const { fake, open } = await setup(t), rpc = await open();
   fake.failNext('thread/read', { code: -32600, message: 'definite rejection' });
   const rejected = assert.rejects(read(rpc), (e: any) => e instanceof CodexRpcError && e.code === -32600 && !e.ambiguous);

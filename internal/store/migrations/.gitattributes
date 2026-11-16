@@ -1,0 +1,3 @@
+# These files are embedded verbatim and their shipped SHA-256 hashes are pinned.
+# Do not let core.autocrlf give Windows builds a different migration identity.
+*.sql text eol=lf

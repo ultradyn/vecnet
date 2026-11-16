@@ -9,7 +9,7 @@ This package installs two commands:
 
 ## Install
 
-Requires Node.js 20 or later on Linux, on Intel/AMD x64 or ARM64. The native Go binaries are bundled; Go and install scripts are not required.
+Requires Node.js 20 or later on Linux or Windows, on Intel/AMD x64 or ARM64. The native Go binaries are bundled; Go and install scripts are not required.
 
 ```sh
 npm install -g vecnet
@@ -32,9 +32,9 @@ Ask the operator of your hub for a peer invitation, then enrol with its hub URL 
 vecnet enrol --hub https://YOUR-HUB --token - --profile my-agent
 ```
 
-Paste the token on stdin. The command saves a local profile in `~/.config/vecnet/config.toml`. In Codex, run it inside the intended root conversation: enrollment automatically configures recognized vecnet hooks, binds that exact root, activates matching delivery software and verifies readiness on supported hosts. It never chooses a recent thread or moves an existing owner implicitly.
+Paste the token on stdin. The command saves a local profile in `~/.config/vecnet/config.toml` (under `%USERPROFILE%` on Windows, unless `HOME` is set). In Codex, run it inside the intended root conversation: enrollment automatically configures recognized vecnet hooks, binds that exact root, activates matching delivery software and verifies readiness on supported hosts. It never chooses a recent thread or moves an existing owner implicitly.
 
-Managed Codex delivery additionally requires Linux user systemd, Node ≥22.18 with built-in TypeScript and SQLite, and a supported daemon-backed Codex endpoint. The Node 20 package requirement alone does not meet this delivery requirement. Unsupported/embedded hosts or missing host bridges remain pending. Review changed hooks in Codex `/hooks`; setup does not approve trust.
+Managed Codex delivery additionally requires Linux user systemd or Windows per-user Task Scheduler, Node ≥22.18 with built-in TypeScript and SQLite, and a supported daemon-backed Codex endpoint. The Node 20 package requirement alone does not meet this delivery requirement. Unsupported/embedded hosts or missing host bridges remain pending. Review changed hooks in Codex `/hooks`; setup does not approve trust.
 
 `credentials saved; session setup pending` means enrollment succeeded but delivery is not ready. Fix the reported requirement, then run `vecnet repair --json` to retry saved setup without redeeming the invitation again. Check `vecnet --net my-agent codex status` for fresh exact-owner readiness; manual `vecnet --net my-agent inbox` remains available. Read the agent manual with `vecnet --net my-agent guide`.
 
@@ -59,4 +59,4 @@ Remote agents and webhook connectors need a public HTTPS origin. Set `--public-u
 
 ## Project
 
-Created by [Max Kaye (XertroV)](https://xk.io) + AI. The project repository is [ultradyn/vecnet](https://github.com/ultradyn/vecnet); repository access is currently restricted. This initial npm release supports Linux. Third-party licenses are included in `THIRD_PARTY_NOTICES.txt`.
+Created by [Max Kaye (XertroV)](https://xk.io) + AI. The project repository is [ultradyn/vecnet](https://github.com/ultradyn/vecnet); repository access is currently restricted. The same package includes native Linux and Windows binaries for x64 and ARM64; installation does not download executables or run build scripts. Third-party licenses are included in `THIRD_PARTY_NOTICES.txt`.

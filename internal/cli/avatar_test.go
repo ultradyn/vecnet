@@ -7,7 +7,6 @@ import (
 	"image"
 	"image/color"
 	"image/png"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -27,7 +26,7 @@ func writeAvatarFile(t *testing.T, name string, c color.Color) string {
 		t.Fatal(err)
 	}
 	p := filepath.Join(t.TempDir(), name)
-	if err := os.WriteFile(p, b.Bytes(), 0o600); err != nil {
+	if err := cliFixtureWriteFile(p, b.Bytes(), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return p
@@ -76,7 +75,7 @@ func TestAvatarSetClear(t *testing.T) {
 
 	// An SVG is refused by the hub (exit 2); a missing file is a usage error.
 	svg := filepath.Join(t.TempDir(), "x.svg")
-	os.WriteFile(svg, []byte(`<svg xmlns="http://www.w3.org/2000/svg"/>`), 0o600)
+	cliFixtureWriteFile(svg, []byte(`<svg xmlns="http://www.w3.org/2000/svg"/>`), 0o600)
 	if code, _, errs := u.run("avatar", "set", svg); code != 2 || !strings.HasPrefix(errs, "unsupported_media_type: ") {
 		t.Fatalf("svg: exit %d stderr %q", code, errs)
 	}
@@ -84,7 +83,7 @@ func TestAvatarSetClear(t *testing.T) {
 		t.Fatalf("missing file: exit %d, want 1", code)
 	}
 	big := filepath.Join(t.TempDir(), "big.png")
-	os.WriteFile(big, make([]byte, 2<<20+1), 0o600)
+	cliFixtureWriteFile(big, make([]byte, 2<<20+1), 0o600)
 	if code, _, errs := u.run("avatar", "set", big); code != 1 || !strings.Contains(errs, "2 MiB") {
 		t.Fatalf("oversize file: exit %d stderr %q", code, errs)
 	}

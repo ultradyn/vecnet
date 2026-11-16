@@ -246,10 +246,7 @@ func inboxGolden(t *testing.T, name, got string) {
 		}
 		return
 	}
-	want, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read golden (run with UPDATE_GOLDEN=1 once the frame is right): %v", err)
-	}
+	want := readGolden(t, path)
 	if !bytes.Equal(want, []byte(got)) {
 		t.Errorf("frame differs from %s\n--- got ---\n%s\n--- want ---\n%s", path, got, want)
 	}

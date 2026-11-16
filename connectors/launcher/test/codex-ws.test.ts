@@ -5,6 +5,7 @@ import { createServer } from 'node:net';
 import type { Socket } from 'node:net';
 import { createHash } from 'node:crypto';
 import { mkdtemp, rm, lstat, stat } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fakeClock } from '../../hub-client/testing/fixtures.ts';
 import { connectUnixWebSocket } from '../src/codex/ws.ts';
@@ -16,7 +17,7 @@ const opts = { maxMessageBytes: 2 * 1024 * 1024, timeoutMs: 1500 };
 const roots = new WeakMap<TestContext, string>();
 beforeEach(async t => {
   if (!('after' in t)) throw new Error('expected a test context');
-  const dir = await mkdtemp('/tmp/vn-ws-');
+  const dir = await mkdtemp(join(tmpdir(), 'vn-ws-'));
   roots.set(t, dir);
   const names = ['VECNET_CONFIG', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'CODEX_HOME', 'VECNET_CODEX_BINDINGS'];
   const saved = names.map(name => process.env[name]);
@@ -43,7 +44,7 @@ function frame(op: number, text: string | Buffer, fin = true) {
   return Buffer.concat([head, data]);
 }
 async function wireServer(t: TestContext, handshake: 'good' | 'bad' | 'http' | 'silent' = 'good', initialFrames = Buffer.alloc(0)) {
-  const path = join(roots.get(t)!, 'raw.sock');
+  const path = process.platform === 'win32' ? `\\\\.\\pipe\\vn-ws-${process.pid}-${Math.random().toString(16).slice(2)}` : join(roots.get(t)!, 'raw.sock');
   const paths: string[] = [], keys: string[] = [];
   const frames = queue<{ op: number; data: Buffer; masked: boolean }>();
   let peer: Socket | undefined;
@@ -248,8 +249,10 @@ test('fake pages turns/list newest-first and records a withheld item later', { t
   assert.equal(page.data.find((x: any) => x.id === original).items[0].clientId, 'vn.later');
   assert.equal(page.data[0].items.length, 0);
   assert.ok(r.notices.some(x => x.method === 'item/started' && x.params.turnId === original && x.params.item.clientId === 'vn.later'));
-  assert.equal((await lstat(f.socketPath)).isSymbolicLink(), true);
-  assert.equal((await stat(join(roots.get(t)!, 'd'))).mode & 0o777, 0o700);
+  if (process.platform !== 'win32') {
+    assert.equal((await lstat(f.socketPath)).isSymbolicLink(), true);
+    assert.equal((await stat(join(roots.get(t)!, 'd'))).mode & 0o777, 0o700);
+  }
 });
 
 test('fake generated turn IDs skip seeded IDs and steer receipts stay in the new turn', { timeout: 5000 }, async t => {
@@ -330,7 +333,7 @@ test('handshake failures, cancellation and local close settle promptly', { timeo
   let closes = 0; c.onClose(() => closes++); const end = closed(c); ac.abort();
   assert.match(await end, /abort/i); c.close(); assert.equal(closes, 1);
   await assert.rejects(connectUnixWebSocket(s.path, { ...opts, signal: ac.signal }));
-  await assert.rejects(connectUnixWebSocket(join(roots.get(t)!, 'missing.sock'), opts), /socket/);
+  await assert.rejects(connectUnixWebSocket(process.platform === 'win32' ? `\\\\.\\pipe\\missing-${process.pid}` : join(roots.get(t)!, 'missing.sock'), opts), /socket/);
   const c2 = await connectUnixWebSocket(s.path, opts); const end2 = closed(c2); c2.close();
   assert.match(await end2, /local close/); assert.throws(() => c2.send('closed'), /closed/);
   assert.notEqual(s.keys[0], s.keys[1]);
