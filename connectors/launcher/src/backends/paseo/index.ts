@@ -72,8 +72,10 @@ class PaseoBackend implements Backend {
     const preset = this.config.presets[spec.preset];
     if (!preset || spec.permissionMode !== 'full-access' || !(await this.capabilities()).presets.some(p => p.id === spec.preset)) throw new Error('preset_not_allowed');
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(spec.jobId) || spec.tag !== `vl-${spec.jobId}`) throw new Error('invalid_paseo_job');
-    const workspace = resolve(this.config.workspace_root, spec.jobId), branch = `launch/${spec.jobId}`;
     await mkdir(this.config.workspace_root, { recursive: true });
+    // Resolve the trusted configured root before saving owned provenance;
+    // cleanup must still refuse aliases supplied later through session refs.
+    const workspace = resolve(await realpath(this.config.workspace_root), spec.jobId), branch = `launch/${spec.jobId}`;
     const base = await this.bridge.git(['-C', spec.project.repoRoot, 'rev-parse', '--verify', `${spec.project.baseRef}^{commit}`], signal);
     await this.bridge.git(['-C', spec.project.repoRoot, 'worktree', 'add', '-b', branch, workspace, spec.project.baseRef], signal);
     const ref: SessionRef = { backend: 'paseo', host: this.ctx.host, id: '', extra: { tag: spec.tag, workspace, branch, base, repoRoot: spec.project.repoRoot } };
@@ -87,7 +89,7 @@ class PaseoBackend implements Backend {
       const result = await this.bridge.json<{ agent_id: string | null; preset: string; mode: string | null }>([
         'launch', '--preset', preset.preset, ...(preset.service_tier ? ['--service-tier', preset.service_tier] : []),
         '--title', `${spec.tag} ${this.ctx.redact(spec.title)}`, '--message-file', prompt, '--cwd', workspace, '--no-worktree',
-      ], { env: { ...spec.env }, signal });
+      ], { env: { ...spec.env }, cwd: workspace, signal });
       if (!result.agent_id) throw new Error('launch_failed');
       ref.id = result.agent_id; ref.extra = { ...ref.extra, preset: result.preset, mode: result.mode }; this.save(ref);
       if (result.preset !== preset.preset || result.mode === null || !fullAccessModes.has(result.mode)) {
