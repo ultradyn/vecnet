@@ -524,7 +524,7 @@ func (a *app) unregisteredLocalLaunchers() error {
 	if err != nil {
 		return err
 	}
-	if runtime.GOOS != "windows" && len(units) == 0 {
+	if runtime.GOOS != "windows" && a.localLauncherTasks == nil && len(units) == 0 {
 		return nil
 	}
 	projects, err := a.localProjects()
@@ -546,8 +546,12 @@ func (a *app) unregisteredLocalLaunchers() error {
 			}
 		}
 	}
-	if runtime.GOOS == "windows" {
-		tasks, e := localWindowsProfileLauncherTasks(a.localRegistryContext())
+	if runtime.GOOS == "windows" || a.localLauncherTasks != nil {
+		inventory := a.localLauncherTasks
+		if inventory == nil {
+			inventory = localWindowsProfileLauncherTasks
+		}
+		tasks, e := inventory(a.localRegistryContext())
 		if e != nil {
 			return e
 		}
