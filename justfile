@@ -100,13 +100,16 @@ codex-appserver-smoke: build
 ui-shots:
     #!/usr/bin/env bash
     set -euo pipefail
+    SHOTS_DIR=$(node scripts/ui/capture-generation.mjs)
+    export SHOTS_DIR
     bash scripts/ui/reap-demos.sh
     build2 node --test --test-concurrency=2 scripts/ui/lib.test.mjs scripts/ui/closer.test.mjs
     for script in scripts/ui/*.mjs; do
-        case "$script" in */lib.mjs|*/tmux.mjs|*/ansi.mjs|*/shots-index.mjs|*/shot-paths.mjs|*.test.mjs) continue ;; esac
+        case "$script" in */lib.mjs|*/tmux.mjs|*/ansi.mjs|*/shots-index.mjs|*/shot-paths.mjs|*/capture-generation.mjs|*.test.mjs) continue ;; esac
         build2 node "$script"
     done
     build2 node scripts/ui/shots-index.mjs
+    printf 'captures: %s\n' "$SHOTS_DIR"
 
 # Publish ignored captures and emit a verified public receipt (docs/EVIDENCE.md).
 [positional-arguments]

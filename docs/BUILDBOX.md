@@ -13,8 +13,9 @@ Run tests and gates on a LAN build box instead of xsm. `just bb <command…>`, f
 just bb go test -count=1 ./...
 just bb CGO_ENABLED=1 CC=/usr/bin/gcc go test -race ./internal/hub/
 just bb build2 node --test --test-concurrency=2 internal/ui/jstest/
-BB_JOBS=2 just bb SHOTS_DIR=.scratch/evidence/ui just ui-shots
-BB_JOBS=2 just bb UI_CPU_THROTTLE=4 SHOTS_DIR=.scratch/evidence/repeat just ui-repeat 3 sidebar thread
+shots=".scratch/evidence/ui-$(date -u +%Y%m%dT%H%M%S)-$$"
+BB_JOBS=2 just bb "SHOTS_DIR=$shots" just ui-shots
+BB_JOBS=2 just bb UI_CPU_THROTTLE=4 "SHOTS_DIR=$shots-repeat" just ui-repeat 3 sidebar thread
 just bb just validate-protocol
 just bb bash -c '[ ! -f connectors/launcher/package.json ] || (just ln-setup && just ln-check)'
 ```
@@ -81,7 +82,7 @@ Use `BB_JOBS=<n>` to change the Go `-p` cap.
     ├── bb/       the wrapper's own scripts/bb (remote.sh, bootstrap.sh, bin/build2)
     ├── home/     lane HOME
     ├── tmp/      TMPDIR + TMUX_TMPDIR; demo builds, data dirs, tmux sockets
-    ├── shots/    remote SHOTS_DIR, emptied before each run
+    ├── shots/    unique remote capture generations (retained with the lane)
     └── owner     host:path of the worktree that owns the lane
 ```
 
@@ -98,8 +99,8 @@ Environment forwarded: `CGO_ENABLED CC CXX GOFLAGS GORACE GOEXPERIMENT GODEBUG U
 
 ## Coming back
 
-- **SHOTS_DIR**: a local path (relative paths resolve from the worktree root, as they would locally) becomes `<lane>/shots` on the box; afterwards its contents are copied to the local path. It is not emptied locally.
-- **Files the command wrote** (goldens with `UPDATE_GOLDEN=1`, a `go.sum`): pulled back when their content differs, unless the local copy changed during the run (it is then left alone, with a message). `BB_PULLBACK=0` turns this off. The shared screenshot helpers and index validator default to ignored `.scratch/evidence/ui`; `.scratch/` is excluded from automatic source-file pull-back, so pass `SHOTS_DIR=.scratch/evidence/ui` explicitly to retrieve captures. Box shots use the same Inter and JetBrains Mono as xsm, so layout and line breaks match. The pixels still differ, because the box has different font rasterisation and fallback fonts (DejaVu, where xsm has Noto). Keep historical committed PNGs; publish new captures with `just evidence-publish .scratch/evidence/ui` and commit a verified public receipt (see [the evidence guide](EVIDENCE.md)). `just check-evidence` rejects staged new or modified evidence media while allowing removals and application assets.
+- **SHOTS_DIR**: a new local path (relative to the worktree root or absolute) maps to a unique `<lane>/shots/capture-…` on the box. Existing local destinations are refused without deletion. After a successful command, rsync copies into fresh `.shots-transfer.*` staging beside the destination; only a successful transfer promotes it to the requested path and prints `captures: PATH`. Transfer failure returns nonzero; failed staging remains for inspection, with no completed destination. A failed remote command is not handed off. Remote generations remain until lane cleanup.
+- **Files the command wrote** (goldens with `UPDATE_GOLDEN=1`, a `go.sum`): pulled back when their content differs, unless the local copy changed during the run (it is then left alone, with a message). `BB_PULLBACK=0` turns this off. `just ui-shots` creates fresh ignored output by default; `.scratch/` is excluded from automatic source-file pull-back, so pass a new `SHOTS_DIR` explicitly as above to retrieve captures. Individual screen helpers and standalone index checks retain the `.scratch/evidence/ui` default. Box shots use the same Inter and JetBrains Mono as xsm, so layout and line breaks match. The pixels still differ, because the box has different font rasterisation and fallback fonts (DejaVu, where xsm has Noto). Keep historical committed PNGs; publish exactly the completed local `captures: PATH` with `just evidence-publish PATH` and commit a verified public receipt (see [the evidence guide](EVIDENCE.md)). `just check-evidence` rejects staged new or modified evidence media while allowing removals and application assets.
 
 ## First-run bootstrap
 

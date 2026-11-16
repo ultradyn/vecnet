@@ -35,15 +35,30 @@ Wrangler installation, credentials or network access.
 
 ## Capture and inspect locally
 
-Run these commands from the repository root. Capture to an ignored directory:
+Run these commands from the repository root, in the same shell. Choose a new
+ignored path for each capture and publish exactly that completed directory:
 
 ```sh
-BB_JOBS=2 just bb SHOTS_DIR=.scratch/evidence/ui just ui-shots
-node scripts/evidence/publish.mjs .scratch/evidence/ui --dry-run
+shots=".scratch/evidence/ui-$(date -u +%Y%m%dT%H%M%S)-$$"
+BB_JOBS=2 just bb "SHOTS_DIR=$shots" just ui-shots &&
+  node scripts/evidence/publish.mjs "$shots" --dry-run
 ```
 
-The screenshot helpers and index validator default to `.scratch/evidence/ui`;
-`SHOTS_DIR` overrides both.
+`just ui-shots` creates a fresh `.scratch/evidence/ui-<unique-suffix>` by default,
+then runs every screen and the final index check. An explicit `SHOTS_DIR` must not
+already exist; old files and historical media are never cleared or merged. Paths
+resolve from the repository root. On success the recipe prints `captures: PATH`.
+Individual screen helpers and standalone index checks still default to
+`.scratch/evidence/ui`; set `SHOTS_DIR` to the completed generation to check it.
+
+The build-box wrapper also requires a new local `SHOTS_DIR`. It captures in a
+unique remote directory and pulls into fresh local staging. Only a successful
+remote command and transfer promote staging to the requested local directory and
+print its `captures: PATH`. A failed capture or transfer returns nonzero and must
+not be published; partial transfer staging may remain as `.shots-transfer.*` in
+the destination's parent for inspection. Do not reuse a failed local capture
+directory: choose a new path. With a build box, pass `SHOTS_DIR` explicitly so
+the wrapper knows which completed output to retrieve.
 The publisher stages each run under `.scratch/evidence-publish/` relative to the
 working directory. Its printed run directory contains copied media under
 `media/<original-relative-path>`, with `index.html` and `manifest.json` at the run
@@ -62,7 +77,7 @@ modification; generated output and receipts must be outside it.
 ## Publish and retain the receipt
 
 ```sh
-node scripts/evidence/publish.mjs .scratch/evidence/ui \
+node scripts/evidence/publish.mjs "${shots:?complete the capture above first}" \
   --commit "$(git rev-parse HEAD)" \
   --receipt .scratch/evidence-publish/ui-receipt.json
 ```
@@ -70,7 +85,9 @@ node scripts/evidence/publish.mjs .scratch/evidence/ui \
 `just evidence-publish DIRECTORY ...` wraps this CLI. Omitting `--commit` uses `git rev-parse HEAD` in the current working
 directory. An explicit commit must be a full 40-character hexadecimal source SHA.
 It records provenance supplied by the caller; it does not prove that captures were
-generated from a clean checkout. `--public-url HTTPS_URL` overrides the public
+generated from a clean checkout. The publisher uploads any supplied media directory;
+capture freshness comes from the completed generation workflow above.
+`--public-url HTTPS_URL` overrides the public
 origin/base path for a separate deployment; credentials, query strings and fragments
 (including empty `?` and `#` delimiters) are rejected before any upload or public
 read. Percent-encoded path characters such as `%3F` and `%23` remain valid. This
@@ -118,7 +135,7 @@ staging directory to Git.
 ## Keep selected evidence and understand expiry
 
 ```sh
-node scripts/evidence/publish.mjs .scratch/evidence/ui --keep \
+node scripts/evidence/publish.mjs "${shots:?complete the capture above first}" --keep \
   --receipt .scratch/evidence-publish/kept-ui-receipt.json
 ```
 

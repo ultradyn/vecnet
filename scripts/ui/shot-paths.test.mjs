@@ -1,13 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { copyFile, mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
+const scratch = fileURLToPath(new URL('../../.superpowers/sdd/2026-11-16-public-evidence/scratch/', import.meta.url));
+
 async function fixture(t) {
-  const root = await mkdtemp(join(tmpdir(), 'vecnet-shot-paths-'));
+  await mkdir(scratch, { recursive: true });
+  const root = await mkdtemp(join(scratch, 'vecnet-shot-paths-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   await mkdir(join(root, 'scripts/ui'), { recursive: true });
   await mkdir(join(root, 'docs/plans/shots/oui'), { recursive: true });

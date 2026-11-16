@@ -1,9 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { copyFile, mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+
+const scratch = fileURLToPath(new URL('../../.superpowers/sdd/2026-11-16-public-evidence/scratch/', import.meta.url));
+await mkdir(scratch, { recursive: true });
 
 // Run the actual shebang recipe with a stub build2: no demo, browser or builds.
 // tmux.mjs sorts after the failing check and takes the helper-skip branch.
@@ -12,7 +15,7 @@ test('ui-shots propagates screen failure even when the last glob entry is a help
   const body = justfile.match(/^ui-shots:\n((?:[ \t].*\n|\n)+)/m)?.[1];
   assert.ok(body, 'ui-shots recipe exists');
   const script = body.replace(/^ {4}/gm, '');
-  const dir = await mkdtemp(join(tmpdir(), 'vecnet-ui-recipe-'));
+  const dir = await mkdtemp(join(scratch, 'vecnet-ui-recipe-'));
   try {
     await mkdir(join(dir, 'scripts/ui'), { recursive: true });
     await mkdir(join(dir, 'bin'));
@@ -20,6 +23,7 @@ test('ui-shots propagates screen failure even when the last glob entry is a help
     for (const name of ['ansi.mjs', 'lib.mjs', 'smoke.mjs', 'tmux.mjs', 'recipes.test.mjs', 'shots-index.mjs', 'shot-paths.mjs']) {
       await writeFile(join(dir, 'scripts/ui', name), '');
     }
+    for (const name of ['shot-paths.mjs', 'capture-generation.mjs']) await copyFile(new URL(name, import.meta.url), join(dir, 'scripts/ui', name));
     // The recipe's leading `node --test …` unit step is logged as "unit" and passes; screens get CHECK_STATUS.
     await writeFile(join(dir, 'bin/build2'), '#!/usr/bin/env bash\nif [[ "$2" == --test ]]; then echo unit >> "$CALL_LOG"; exit 0; fi\nprintf "%s\\n" "$2" >> "$CALL_LOG"\nexit "$CHECK_STATUS"\n', { mode: 0o700 });
     for (const status of [23, 0]) {
@@ -40,11 +44,10 @@ test('ui-shots checks the completed configured output for extra and missing PNGs
   const body = justfile.match(/^ui-shots:\n((?:[ \t].*\n|\n)+)/m)?.[1];
   assert.ok(body, 'ui-shots recipe exists');
   const script = body.replace(/^ {4}/gm, '');
-  const dir = await mkdtemp(join(tmpdir(), 'vecnet-ui-index-'));
+  const dir = await mkdtemp(join(scratch, 'vecnet-ui-index-'));
   try {
     await mkdir(join(dir, 'scripts/ui'), { recursive: true });
     await mkdir(join(dir, 'docs/plans/shots/oui'), { recursive: true });
-    await mkdir(join(dir, 'output'));
     await mkdir(join(dir, 'bin'));
     await writeFile(join(dir, 'scripts/ui/reap-demos.sh'), 'echo reap >> "$CALL_LOG"\n');
     for (const name of ['att-journey.mjs', 'shell.mjs', 'smoke.mjs']) await writeFile(join(dir, 'scripts/ui', name), '');
@@ -53,6 +56,7 @@ test('ui-shots checks the completed configured output for extra and missing PNGs
     await writeFile(join(dir, 'docs/plans/shots/oui/expected.png'), '');
     await copyFile(new URL('shots-index.mjs', import.meta.url), join(dir, 'scripts/ui/shots-index.mjs'));
     await copyFile(new URL('shot-paths.mjs', import.meta.url), join(dir, 'scripts/ui/shot-paths.mjs'));
+    await copyFile(new URL('capture-generation.mjs', import.meta.url), join(dir, 'scripts/ui/capture-generation.mjs'));
     await writeFile(join(dir, 'bin/build2'), `#!/usr/bin/env bash
 printf '%s\\n' "$2" >> "$CALL_LOG"
 if [[ "$2" == scripts/ui/shots-index.mjs ]]; then exec "$NODE" "$2"; fi
@@ -64,7 +68,6 @@ fi
     for (const scenario of ['extra', 'missing', 'duplicate', 'complete']) {
       await writeFile(join(dir, 'docs/plans/shots/oui/README.md'), '[expected.png](expected.png)\n'.repeat(scenario === 'duplicate' ? 2 : 1));
       await rm(join(dir, 'output'), { recursive: true, force: true });
-      await mkdir(join(dir, 'output'));
       await writeFile(join(dir, 'calls'), '');
       const result = spawnSync('bash', ['-c', script], {
         cwd: dir, encoding: 'utf8',
@@ -85,14 +88,14 @@ test('ui-shots validates ignored default captures after all screens and skips th
   const justfile = await readFile(new URL('../../justfile', import.meta.url), 'utf8');
   const body = justfile.match(/^ui-shots:\n((?:[ \t].*\n|\n)+)/m)?.[1];
   assert.ok(body, 'ui-shots recipe exists');
-  const dir = await mkdtemp(join(tmpdir(), 'vecnet-ui-default-'));
+  const dir = await mkdtemp(join(scratch, 'vecnet-ui-default-'));
   try {
     await mkdir(join(dir, 'scripts/ui'), { recursive: true });
     await mkdir(join(dir, 'docs/plans/shots/oui'), { recursive: true });
     await mkdir(join(dir, 'bin'));
     await writeFile(join(dir, 'scripts/ui/reap-demos.sh'), 'echo reap >> "$CALL_LOG"\n');
     for (const name of ['shell.mjs', 'smoke.mjs']) await writeFile(join(dir, 'scripts/ui', name), '');
-    for (const name of ['lib.mjs', 'shots-index.mjs', 'shot-paths.mjs']) {
+    for (const name of ['lib.mjs', 'shots-index.mjs', 'shot-paths.mjs', 'capture-generation.mjs']) {
       await copyFile(new URL(name, import.meta.url), join(dir, 'scripts/ui', name));
     }
     await writeFile(join(dir, 'docs/plans/shots/oui/README.md'), '[expected.png](expected.png)\n');
@@ -104,7 +107,7 @@ if [[ "$2" == scripts/ui/shots-index.mjs ]]; then exec "$NODE" "$2"; fi
 if [[ "$2" == scripts/ui/shell.mjs ]]; then
   "$NODE" --input-type=module -e 'import { shotPath } from "./scripts/ui/lib.mjs"; import { writeFile } from "node:fs/promises"; await writeFile(await shotPath("expected"), "generated image");'
 fi
-if [[ "$2" == scripts/ui/smoke.mjs && "$SCENARIO" == extra ]]; then touch .scratch/evidence/ui/late.png; fi
+if [[ "$2" == scripts/ui/smoke.mjs && "$SCENARIO" == extra ]]; then touch "$SHOTS_DIR/late.png"; fi
 `, { mode: 0o700 });
     for (const scenario of ['complete', 'extra']) {
       await writeFile(join(dir, 'calls'), '');
@@ -120,7 +123,7 @@ if [[ "$2" == scripts/ui/smoke.mjs && "$SCENARIO" == extra ]]; then touch .scrat
 });
 
 test('evidence recipes forward paths and publisher arguments without shell expansion', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'vecnet-evidence-recipes-'));
+  const dir = await mkdtemp(join(scratch, 'vecnet-evidence-recipes-'));
   try {
     await copyFile(new URL('../../justfile', import.meta.url), join(dir, 'justfile'));
     await mkdir(join(dir, 'bin'));

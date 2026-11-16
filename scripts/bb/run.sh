@@ -112,13 +112,14 @@ ssh "${ssh_opts[@]}" "$host" "for f in remote.sh bootstrap.sh; do [ -f '$RL/bb/'
   || die "preflight or bootstrap failed on $host (see above)" 78
 t1=$(now)
 
-# SHOTS_DIR: run against a fresh lane-local dir, then copy it to the
-# requested local path.
+# SHOTS_DIR names a new local destination. A unique remote path is left absent
+# so ui-shots can create its generation exclusively (screens create it as needed).
 local_shots=""
 if [[ -n ${env[SHOTS_DIR]:-} ]]; then
   local_shots=$(cd "$ROOT" && realpath -m -- "${env[SHOTS_DIR]}")
-  env[SHOTS_DIR]="$RL/shots"
-  ssh "${ssh_opts[@]}" "$host" "rm -rf -- '$RL/shots' && mkdir -p '$RL/shots'" </dev/null
+  [[ ! -e $local_shots && ! -L $local_shots ]] || die "capture destination already exists; choose a fresh SHOTS_DIR" 73
+  env[SHOTS_DIR]="$RL/shots/capture-$(date +%s%N)-$$"
+  ssh "${ssh_opts[@]}" "$host" "mkdir -p '$RL/shots'" </dev/null
 fi
 
 b64env=$(for k in "${!env[@]}"; do printf '%s=%s\0' "$k" "${env[$k]}"; done | base64 -w0)
@@ -134,10 +135,13 @@ set -e
 t2=$(now)
 ((rc == 255)) && say "ssh failed or the link dropped (status 255); the remote run was stopped"
 
-if [[ -n $local_shots ]]; then
-  mkdir -p "$local_shots"
-  rsync -rlt -e "ssh ${ssh_opts[*]}" "$host:$RL/shots/" "$local_shots/" || say "shots pull failed"
-  say "shots: $(find "$local_shots" -maxdepth 1 -name '*.png' | wc -l) PNG(s) in $local_shots"
+if [[ -n $local_shots ]] && ((rc == 0)); then
+  if bash "$SELF/shots-handoff.sh" "$local_shots" "$host:${env[SHOTS_DIR]}/" "ssh ${ssh_opts[*]}"; then
+    say "captures: $local_shots"
+  else
+    rc=$?
+    say "shots pull failed; no completed capture directory"
+  fi
 fi
 
 if [[ ${BB_PULLBACK:-1} == 1 ]] && ((rc != 255)); then

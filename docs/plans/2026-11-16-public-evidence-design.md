@@ -25,6 +25,12 @@ and make ordinary UI gates stop overwriting tracked evidence files.
   through the public HTTPS origin. The receipt names the gallery and manifest.
 - Shared screenshot helpers and the index validator default to
   `.scratch/evidence/ui`; `SHOTS_DIR` continues to override both.
+  `just ui-shots` creates a fresh `.scratch/evidence/ui-<unique-suffix>` by default;
+  explicit `SHOTS_DIR` must be absent and is exclusively created. The completed
+  directory is printed only after all screens and the final index check pass.
+  Build-box capture uses a unique remote directory and fresh local transfer
+  staging; transfer failure propagates and old destinations are never merged.
+  Publish exactly the successfully completed local directory.
 - `just evidence-publish DIRECTORY ...` invokes the publisher.
 - `just check-evidence` rejects additions or modifications to evidence media in
   `.scratch/`, `docs/plans/`, `docs/prototypes/` and `docs/design/`.
