@@ -4,6 +4,7 @@ package platform
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"os"
@@ -228,6 +229,45 @@ func MkdirAll(path string, mode os.FileMode) error {
 		return e
 	}
 	return dir.Close()
+}
+
+// MkdirTemp creates a new directory with an explicit TokenUser owner and
+// protected private DACL. Inheriting a parent's DACL alone does not set its owner.
+func MkdirTemp(dir, pattern string) (string, error) {
+	if strings.ContainsAny(pattern, `/\`) {
+		return "", errors.New("temporary directory pattern contains a separator")
+	}
+	if dir == "" {
+		dir = os.TempDir()
+	}
+	parent, err := OpenDir(dir)
+	if err != nil {
+		return "", err
+	}
+	defer parent.Close()
+	for range 100 {
+		name := pattern + rand.Text()
+		if i := strings.LastIndexByte(pattern, '*'); i >= 0 {
+			name = pattern[:i] + rand.Text() + pattern[i+1:]
+		}
+		f, err := openAt(parent, name, os.O_CREATE|os.O_EXCL, true, true)
+		if errors.Is(err, os.ErrExist) {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		err = CheckFile(f, true, true)
+		closeErr := f.Close()
+		if err != nil {
+			return "", err
+		}
+		if closeErr != nil {
+			return "", closeErr
+		}
+		return filepath.Join(dir, name), nil
+	}
+	return "", os.ErrExist
 }
 func OpenFile(path string, flags int, mode os.FileMode) (*os.File, error) {
 	dir, e := OpenDir(filepath.Dir(path))

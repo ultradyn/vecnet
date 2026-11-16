@@ -32,8 +32,13 @@ func codexBindingsPath(getenv func(string) string) (string, error) {
 		return "", err
 	}
 	path := filepath.Join(home, ".local", "state", "vecnet", "codex", "bindings.json")
-	if override := getenv("VECNET_CODEX_BINDINGS"); override != "" && filepath.Clean(override) != path {
-		return "", usageErr("VECNET_CODEX_BINDINGS cannot select a separate ownership authority; use a private HOME for fixtures")
+	if override := getenv("VECNET_CODEX_BINDINGS"); override != "" {
+		// HOME and its derived override can use different filesystem spellings
+		// (notably Windows 8.3 names), even before the authority exists.
+		canonical, err := canonicalLocalSetupPath(override)
+		if !filepath.IsAbs(override) || err != nil || canonical != path {
+			return "", usageErr("VECNET_CODEX_BINDINGS cannot select a separate ownership authority; use a private HOME for fixtures")
+		}
 	}
 	return path, nil
 }

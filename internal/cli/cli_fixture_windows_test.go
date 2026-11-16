@@ -24,6 +24,11 @@ func cliFixtureChmod(path string, mode os.FileMode) error {
 		access = "GRGX"
 	}
 	sddl := "D:P(A;OICI;" + access + ";;;" + user.User.Sid.String() + ")(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+	if mode&0200 == 0 {
+		// Elevated tokens also receive the Administrators allow ACE. Deny data
+		// writes/child creation explicitly, while retaining WRITE_DAC for cleanup.
+		sddl = "D:P(D;OICI;0x00000156;;;WD)" + sddl[len("D:P"):]
+	}
 	if mode&0077 != 0 {
 		sddl += "(A;OICI;GR;;;WD)"
 	}
@@ -89,4 +94,22 @@ func cliFixtureDenyDirectoryRead(t *testing.T, path string) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = windows.CloseHandle(h) })
+}
+
+func TestFixtureReadOnlyDirectoryDeniesElevatedWrites(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "private")
+	if err := cliFixtureMkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := cliFixtureChmod(dir, 0500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := cliFixtureChmod(dir, 0700); err != nil {
+			t.Error(err)
+		}
+	})
+	if err := os.WriteFile(filepath.Join(dir, "forbidden"), []byte("must not publish"), 0600); err == nil {
+		t.Fatal("read-only fixture allowed a child write")
+	}
 }

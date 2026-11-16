@@ -8,7 +8,6 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
-	"golang.org/x/sys/windows"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,6 +18,7 @@ import (
 	"unicode/utf16"
 
 	"github.com/XertroV/vecnet/internal/platform"
+	"golang.org/x/sys/windows"
 )
 
 type windowsTestHost struct {
@@ -95,7 +95,10 @@ func (h *windowsTestHost) run(ctx context.Context, name string, args ...string) 
 }
 func windowsFixture(t *testing.T) (Options, *windowsTestHost) {
 	t.Helper()
-	home := t.TempDir()
+	home, e := windowsHome(t.TempDir())
+	if e != nil {
+		t.Fatal(e)
+	}
 	bin := filepath.Join(t.TempDir(), "vecnet.exe")
 	f, e := platform.OpenFile(bin, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0700)
 	if e != nil {
@@ -567,8 +570,35 @@ func TestWindowsRuntimeRefusesUnsafeNodeBeforeAnyProbe(t *testing.T) {
 }
 
 func TestWindowsRuntimePinsInstalledNode(t *testing.T) {
-	node, e := exec.LookPath("node.exe")
+	source, e := exec.LookPath("node.exe")
 	if e != nil {
+		t.Fatal(e)
+	}
+	// A toolcache is not a trusted service namespace merely because Node runs
+	// from it. Preserve its actual bytes in an explicitly owned private fixture.
+	dir := filepath.Join(t.TempDir(), "private node")
+	if e = platform.MkdirAll(dir, 0700); e != nil {
+		t.Fatal(e)
+	}
+	raw, e := os.ReadFile(source)
+	if e != nil {
+		t.Fatal(e)
+	}
+	node := filepath.Join(dir, "node.exe")
+	f, e := platform.OpenFile(node, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0700)
+	if e != nil {
+		t.Fatal(e)
+	}
+	_, e = f.Write(raw)
+	closeErr := f.Close()
+	if e != nil || closeErr != nil {
+		t.Fatalf("copy Node: write=%v close=%v", e, closeErr)
+	}
+	copy, e := os.ReadFile(node)
+	if e != nil || sum(copy) != sum(raw) {
+		t.Fatalf("Node copy differs: %v", e)
+	}
+	if e = platform.CheckPath(node, false, true); e != nil {
 		t.Fatal(e)
 	}
 	release, e := pinWindowsExecutable(node)

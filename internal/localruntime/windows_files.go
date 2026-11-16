@@ -303,8 +303,8 @@ func stage(ctx context.Context, home, release string, files map[string][]byte, r
 	} else if !errors.Is(e, os.ErrNotExist) {
 		return false, e
 	}
-	// MkdirTemp inherits the already protected private runtime directory DACL.
-	tmp, e := os.MkdirTemp(root(home), ".release-*")
+	// Inherited DACLs do not establish TokenUser ownership on elevated tokens.
+	tmp, e := platform.MkdirTemp(root(home), ".release-*")
 	if e != nil {
 		return false, e
 	}
@@ -349,7 +349,7 @@ func stage(ctx context.Context, home, release string, files map[string][]byte, r
 		if e = mkdirSafe(home, backups, 0700); e != nil {
 			return false, e
 		}
-		backup, e := os.MkdirTemp(backups, filepath.Base(release)+"-")
+		backup, e := platform.MkdirTemp(backups, filepath.Base(release)+"-")
 		if e != nil {
 			return false, e
 		}
