@@ -152,7 +152,10 @@ func TestAutomaticEnrollmentReadyUsesSavedRootAndPreservesGeneration(t *testing.
 		t.Fatal(err)
 	}
 	f.now = time.Now().UTC()
-	project := t.TempDir()
+	project, err := canonicalCodexPath(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Chdir(project)
 	f.env["CODEX_THREAD_ID"] = bindT1
 	f.bind("p", bindT1)

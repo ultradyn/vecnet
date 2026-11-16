@@ -97,7 +97,9 @@ func (a *app) localStartup(args []string) {
 			continue
 		}
 		if raw, err := readLocalHooks(path); err == nil && hasOwnedCodexHooks(raw, localBinary()) {
-			_ = worker.registerLocalArtifact(path, "codex-hooks", "legacy", time.Now())
+			// Adoption belongs to the identity just observed. Rediscovering it
+			// runs Git twice inside the bounded foreground startup budget.
+			_ = worker.registerLocalArtifactForProject(p.Root, path, "codex-hooks", "legacy", time.Now())
 		}
 	}
 	projects, err := worker.localProjects()

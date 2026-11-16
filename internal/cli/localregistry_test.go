@@ -18,7 +18,10 @@ import (
 
 func localRegistryFixture(t *testing.T) (*app, string, string) {
 	t.Helper()
-	base := t.TempDir()
+	base, err := localRegistryCanonical(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := cliFixtureChmod(base, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -133,6 +136,10 @@ func TestLocalRegistryGitWorktreesAndSubdirectories(t *testing.T) {
 	}
 	other := filepath.Join(t.TempDir(), "worktree")
 	git("-C", root, "worktree", "add", "-b", "fixture", other)
+	other, err = localRegistryCanonical(other)
+	if err != nil {
+		t.Fatal(err)
+	}
 	cliFixtureChdir(t, other)
 	second, err := a.observeLocalProject("v1", localRegistryNow())
 	if err != nil {
@@ -155,6 +162,10 @@ func TestLocalRegistryArtifactsAndForgetPreserveFiles(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "explicit-hooks.json")
 	body := []byte("{}\n")
 	if err := cliFixtureWriteFile(path, body, 0600); err != nil {
+		t.Fatal(err)
+	}
+	path, err := localRegistryCanonical(path)
+	if err != nil {
 		t.Fatal(err)
 	}
 	if err := a.registerLocalArtifact(path, "codex-hooks", "v1", now); err != nil {
@@ -285,6 +296,7 @@ func TestLocalRegistryInterprocessUpdates(t *testing.T) {
 		t.Fatal(err)
 	}
 	const workers = 6
+	const concurrent = 2
 	cmds := make([]*exec.Cmd, workers)
 	outputs := make([]bytes.Buffer, workers)
 	for i := range cmds {
@@ -295,10 +307,15 @@ func TestLocalRegistryInterprocessUpdates(t *testing.T) {
 		if err := cmds[i].Start(); err != nil {
 			t.Fatal(err)
 		}
-	}
-	for i, cmd := range cmds {
-		if err := cmd.Wait(); err != nil {
-			t.Errorf("worker %d: %v: %s", i, err, outputs[i].String())
+		// Keep all six independent processes and 60 updates, with two writers
+		// contending at once. Six cold Windows writers exceeded the production
+		// two-second lock budget; the test must not change that user-facing cap.
+		if (i+1)%concurrent == 0 {
+			for j := i + 1 - concurrent; j <= i; j++ {
+				if err := cmds[j].Wait(); err != nil {
+					t.Errorf("worker %d: %v: %s", j, err, outputs[j].String())
+				}
+			}
 		}
 	}
 	rows, err := a.localProjects()
@@ -452,7 +469,10 @@ func TestLocalRegistryStoredRootWinsOverRetargetedSymlink(t *testing.T) {
 			if _, err := a.observeLocalProject("v1", now); err != nil {
 				t.Fatal(err)
 			}
-			target := t.TempDir()
+			target, err := localRegistryCanonical(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
 			cliFixtureChdir(t, target)
 			if registeredTarget {
 				if _, err := a.observeLocalProject("v1", now); err != nil {

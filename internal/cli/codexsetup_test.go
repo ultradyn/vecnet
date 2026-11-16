@@ -191,10 +191,20 @@ func TestCodexSetupStatusOtherNamespace(t *testing.T) {
 		t.Fatal(err)
 	}
 	other := file.Bindings[0]
-	other.ConfigPath = filepath.Join(t.TempDir(), "other.toml")
-	if err := cliFixtureWriteFile(other.ConfigPath, []byte("# another config namespace\n"), 0600); err != nil {
+	otherHome := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "other namespace alias")
+	if err := cliFixtureSymlink(t, otherHome, alias); err != nil {
 		t.Fatal(err)
 	}
+	other.ConfigPath = filepath.Join(alias, "other.toml")
+	if err := cliFixtureWriteFile(filepath.Join(otherHome, "other.toml"), []byte("# another config namespace\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := canonicalCodexPath(other.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other.ConfigPath = canonical
 	other.Caller = "peer_other"
 	other.ThreadID = bindT2
 	other.Generation = strings.Repeat("a", 32)
