@@ -30,7 +30,7 @@ async function eventually(fn: () => boolean, what: string, ms = 8000) {
   }
 }
 
-async function setup(t: TestContext, o: { threads?: { id: string; status?: unknown; approvalPolicy?: string }[]; maxBindings?: string; startAt?: number; unsubscribeDelayMs?: number; source?: string; blockHooks?: boolean } = {}) {
+async function setup(t: TestContext, o: { threads?: { id: string; status?: unknown; approvalPolicy?: string }[]; maxBindings?: string; startAt?: number; unsubscribeDelayMs?: number; source?: string; blockHooks?: boolean; holdReadyReport?: boolean } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'vn-cc-'));
   const fake = await startFakeCodexAppServer({ dir: join(dir, 'fake'), unsubscribeDelayMs: o.unsubscribeDelayMs });
   const home = join(dir, 'fake', 'home');
@@ -43,12 +43,27 @@ async function setup(t: TestContext, o: { threads?: { id: string; status?: unkno
   writeFileSync(trace, '');
   const configTrace = join(dir, 'config-trace.log'); writeFileSync(configTrace, '');
   const reportTrace = join(dir, 'report-trace.log'); writeFileSync(reportTrace, '');
+  const reports = () => readFileSync(reportTrace, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
+  const reportCaptured = join(dir, 'report-captured'), reportGate = join(dir, 'report-gate');
+  if (o.holdReadyReport) execFileSync('mkfifo', [reportGate]);
+  // Hold the first ready report after its body is captured, before the CLI exits.
+  // stop() must cancel this real child before sending the final offline report.
+  const holdReport = o.holdReadyReport ? `
+    case "$(tail -n 1 '${reportTrace}')" in
+      *'"delivery":"ready"'*)
+        if mkdir '${dir}/report-held' 2>/dev/null; then
+          : > '${reportCaptured}'
+          read released < '${reportGate}'
+        fi ;;
+    esac;` : '';
+  // Buffer each bounded metadata body through EOF and append its newline in the
+  // same printf: cancellation must not strand a body for the next report to join.
   // A shell stand-in for the Go CLI: watch idles until killed; hooks claim nothing.
   writeFileSync(join(bin, 'vecnet'), `#!/bin/sh
 printf '%s\\n' "$*" >> '${trace}'
 printf '%s\\n' "$VECNET_CONFIG" >> '${configTrace}'
 case " $* " in
-  *" codex report-status "*) cat >> '${reportTrace}'; printf '\\n' >> '${reportTrace}'; exit 0 ;;
+  *" codex report-status "*) report=$(cat); printf '%s\\n' "$report" >> '${reportTrace}'; ${holdReport} exit 0 ;;
   *" codex verify "*) echo '{"verified":true}'; exit 0 ;;
   *" codex guard "*) echo '{"ready":true}'; read outcome; exit 0 ;;
   *" watch "*) exec sleep 3600 ;;
@@ -135,12 +150,38 @@ esac
     assert.deepEqual(fake.replies, []);
     rmSync(dir, { recursive: true, force: true });
   });
-  return { dir, fake, home, env, kv, clock, log, bindingsPath, binding, writeBindings, start, resumed, unsubscribed, subscribed, logged, reload, ready, trace, configTrace, reportTrace };
+  return { dir, fake, home, env, kv, clock, log, bindingsPath, binding, writeBindings, start, resumed, unsubscribed, subscribed, logged, reload, ready, trace, configTrace, reportTrace, reports, reportCaptured };
 }
 
 test('only the singleton reports bound runtime status and shutdown offline, never removed owners', { skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
+  await t.test('runtime report capture preserves complete records when shutdown interrupts a reporting child', async t => {
+    const id = uuid(599), s = await setup(t, { threads: [{ id }], holdReadyReport: true });
+    s.writeBindings([s.binding(id, 1)]);
+    const c = s.start();
+    await eventually(() => s.subscribed(id), 'bound session ready');
+    await s.reload();
+    await eventually(() => existsSync(s.reportCaptured), 'ready report captured and child held');
+    const duringRaw = readFileSync(s.reportTrace, 'utf8');
+    const during = s.reports();
+    await c.stop();
+    assert.deepEqual(await c.stopped, { reason: 'stopped' });
+    assert.deepEqual(s.reports(), [
+      { state: 'offline', delivery: 'unavailable', reason: 'connecting' },
+      { state: 'idle', delivery: 'ready', version: '0.166.0' },
+      { state: 'offline', delivery: 'unavailable', reason: 'stopped', version: '0.166.0' },
+    ]);
+    assert.deepEqual(during, [
+      { state: 'offline', delivery: 'unavailable', reason: 'connecting' },
+      { state: 'idle', delivery: 'ready', version: '0.166.0' },
+    ]);
+    assert.ok(duringRaw.endsWith('\n'), 'the live ready report is already newline-framed');
+    const lines = readFileSync(s.reportTrace, 'utf8').split('\n');
+    assert.equal(lines.length, 4, 'three complete newline-framed reports');
+    assert.equal(lines.at(-1), '', 'the final offline report is newline-framed');
+  });
+
   const id = uuid(600), s = await setup(t, { threads: [{ id }] });
-  const reports = () => readFileSync(s.reportTrace, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
+  const reports = s.reports;
   s.writeBindings([s.binding(id, 1)]);
   const first = s.start();
   await eventually(() => s.subscribed(id), 'bound session ready');
