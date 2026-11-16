@@ -131,6 +131,8 @@ jobs:
         run: npm install --global npm@12.0.1 --ignore-scripts --no-audit --no-fund
       - name: Test release guards and cross-platform wrappers
         run: node --test --test-concurrency=2 scripts/npm/release.test.mjs scripts/npm/npm-command.test.mjs scripts/npm/wrapper.test.mjs scripts/npm/verify-artifact.test.mjs
+      - name: Test read-only Windows artifact evidence helper
+        run: .\scripts\windows\Get-ArtifactEvidence.Tests.ps1
       - name: Test the full Go suite on Windows
         run: go test -mod=readonly -p 2 -timeout=20m ./...
       - name: Build native binaries for connector tests
