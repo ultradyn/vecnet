@@ -36,10 +36,10 @@ func TestCodexLegacyHookReservesRecipient(t *testing.T) {
 				}
 				file := codexBindingsFile{Version: 1, Bindings: []codexBinding{{ConfigPath: env["VECNET_CONFIG"], Profile: "p", Hub: p.Hub, Caller: "peer_test", Generation: appHookGeneration, CodexHome: env["HOME"], ThreadID: bindT1, CreatedAt: expires.Add(-24 * time.Hour), ExpiresAt: expires}}}
 				raw, _ := json.Marshal(file)
-				if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+				if err := cliFixtureMkdirAll(filepath.Dir(path), 0700); err != nil {
 					t.Fatal(err)
 				}
-				if err := os.WriteFile(path, raw, 0600); err != nil {
+				if err := cliFixtureWriteFile(path, raw, 0600); err != nil {
 					t.Fatal(err)
 				}
 				out, _ := runHookAs(t, env, "unregistered", profile)
@@ -78,10 +78,10 @@ func TestCodexLegacyHookCorruptAuthorityFailsClosed(t *testing.T) {
 	seedHook(t, state, "e1.0")
 	before, _ := os.ReadFile(state)
 	path, _ := codexBindingsPath(func(k string) string { return env[k] })
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+	if err := cliFixtureMkdirAll(filepath.Dir(path), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, []byte("{corrupt"), 0600); err != nil {
+	if err := cliFixtureWriteFile(path, []byte("{corrupt"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	out, _ := runHookAs(t, env, "S1", "p")

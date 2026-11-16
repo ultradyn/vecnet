@@ -79,7 +79,7 @@
         "properties": {
           "path": {
             "type": "string",
-            "pattern": "^/"
+            "pattern": "^(?:/|[A-Za-z]:[\\\\/]|\\\\\\\\[^\\\\/]+[\\\\/][^\\\\/]+)"
           },
           "access": {
             "enum": [
@@ -167,7 +167,7 @@
     },
     "workspace_root": {
       "type": "string",
-      "pattern": "^/"
+      "pattern": "^(?:/|[A-Za-z]:[\\\\/]|\\\\\\\\[^\\\\/]+[\\\\/][^\\\\/]+)"
     },
     "outside_workspace": {
       "enum": [

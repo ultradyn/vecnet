@@ -3,7 +3,6 @@ package cli_test
 import (
 	"context"
 	"encoding/json"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -69,7 +68,7 @@ func TestRouteRotateKeyFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(t.TempDir(), "routine-key")
-	if err := os.WriteFile(path, []byte(next+"\n"), 0o600); err != nil {
+	if err := cliFixtureWriteFile(path, []byte(next+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	for _, args := range [][]string{{"route", "rotate", id, "--key-file", path}, {"--json", "route", "rotate", id, "--key-file", path}} {
@@ -100,7 +99,7 @@ func TestRouteKeyFileRejectsBearerPrefix(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(t.TempDir(), "routine-key")
-	if err := os.WriteFile(path, []byte("Bearer "+key+"\n"), 0o600); err != nil {
+	if err := cliFixtureWriteFile(path, []byte("Bearer "+key+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	for _, args := range [][]string{

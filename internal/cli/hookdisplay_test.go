@@ -42,7 +42,7 @@ func TestDisplayCommitFailureCannotRetryOutput(t *testing.T) {
 		if err := os.Remove(path); err != nil {
 			return err
 		}
-		return os.Mkdir(path, 0700) // fail the state rename after successful output
+		return cliFixtureMkdir(path, 0700) // fail the state rename after successful output
 	})
 	if !errors.Is(err, errWatchOutput) || called != 1 {
 		t.Fatalf("post-output failure was retryable: %v %d", err, called)
@@ -56,7 +56,7 @@ func TestDisplayCommitFailureCannotRetryOutput(t *testing.T) {
 func TestStrictStateDisplayPreservesUnknownFields(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	raw := []byte(`{"Hub":"http://hub","Caller":"peer_A","Shown":[],"Displayed":["prior"],"future":{"keep":true},"Replay":[{"id":"unread","after":"opaque","future_entry":{"keep":true}}]}`)
-	if err := os.WriteFile(path, raw, 0600); err != nil {
+	if err := cliFixtureWriteFile(path, raw, 0600); err != nil {
 		t.Fatal(err)
 	}
 	if err := codexUpdateState(context.Background(), path, false, func(s *hookState) error { s.recordDisplay("printed"); return nil }); err != nil {
@@ -92,7 +92,7 @@ func TestStrictStateMetadataIdentityEncoding(t *testing.T) {
 	} {
 		t.Run(raw, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "state.json")
-			if err := os.WriteFile(path, []byte(raw), 0600); err != nil {
+			if err := cliFixtureWriteFile(path, []byte(raw), 0600); err != nil {
 				t.Fatal(err)
 			}
 			if err := codexUpdateState(t.Context(), path, false, func(s *hookState) error { s.recordDisplay("printed"); return nil }); err != nil {

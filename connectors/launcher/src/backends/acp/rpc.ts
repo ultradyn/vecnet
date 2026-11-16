@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
+import { commandInvocation, terminateProcess } from '../../backend.ts';
 import type { PluginContext } from '../../backend.ts';
 
 export type RpcId = string | number;
@@ -38,7 +39,8 @@ export class AcpRpc {
 
   constructor(argv: string[], cwd: string, env: Record<string, string>, ctx: PluginContext) {
     this.ctx = ctx;
-    this.child = spawn(argv[0], argv.slice(1), { cwd, env, detached: process.platform !== 'win32', stdio: ['pipe', 'pipe', 'pipe'] });
+    const command = commandInvocation(argv, env, cwd);
+    this.child = spawn(command.file, command.args, { ...command, windowsHide: true, cwd, env, detached: process.platform !== 'win32', stdio: ['pipe', 'pipe', 'pipe'] });
     this.closed = new Promise(resolve => {
       this.child.once('close', code => {
         this.exited = true; this.fail();
@@ -57,10 +59,7 @@ export class AcpRpc {
   get alive(): boolean { return !this.dead && !this.exited; }
   private kill(signal: NodeJS.Signals): void {
     if (this.exited) return;
-    try {
-      if (process.platform !== 'win32' && this.child.pid) process.kill(-this.child.pid, signal);
-      else this.child.kill(signal);
-    } catch { /* A process that already exited is not a new ownership claim. */ }
+    terminateProcess(this.child, signal, true);
   }
   private fail(): void {
     if (this.dead) return;

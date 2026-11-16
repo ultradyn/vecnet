@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, realpath, rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, resolve, isAbsolute, relative } from 'node:path';
-import { definePlugin, MAX_TURN_INPUT_BYTES, OWNED_LAUNCH_REFUSAL } from '../../backend.ts';
+import { definePlugin, MAX_TURN_INPUT_BYTES, OWNED_LAUNCH_REFUSAL, userHome } from '../../backend.ts';
 import type { Backend, BackendCapabilities, LaunchSpec, PluginContext, SessionHandle, SessionHooks, SessionRef, SessionState, TurnInput, SendMode, TurnCursor, TurnEvent, PermissionMode, PermissionDraft, WorkspaceMode } from '../../backend.ts';
 import { openCodexRpc, CodexRpcError } from './rpc.ts';
 import type { CodexRpc } from './rpc.ts';
@@ -50,7 +50,7 @@ export function spawnPolicy(mode: PermissionMode): Obj {
 export default definePlugin<CodexConfig>({
   id: 'codex-app-server', configSchema: schema,
   async create(config, ctx) {
-    if (!config.codex_home.startsWith('/') || config.workspace_root && !config.workspace_root.startsWith('/')) throw new Error('Codex paths must be absolute');
+    if (!isAbsolute(config.codex_home) || config.workspace_root && !isAbsolute(config.workspace_root)) throw new Error('Codex paths must be absolute');
     const home = await realpath(config.codex_home);
     let connection: CodexRpc | undefined, connecting: Promise<CodexRpc> | undefined;
     const handles = new Map<string, NativeSession>();
@@ -148,7 +148,7 @@ export default definePlugin<CodexConfig>({
         for (const root of sandbox.writableRoots ?? []) {
           if (typeof root !== 'string' || !isAbsolute(root)) throw new EffectivePolicyRefusal('Codex effective writable root invalid');
           const rel = relative(o.workspace, await realpath(root));
-          if (isAbsolute(rel) || rel === '..' || rel.startsWith('../')) throw new EffectivePolicyRefusal('Codex effective writable root escapes workspace');
+          if (isAbsolute(rel) || rel === '..' || rel.startsWith('../') || rel.startsWith('..\\')) throw new EffectivePolicyRefusal('Codex effective writable root escapes workspace');
         }
       }
     }
@@ -403,7 +403,7 @@ export default definePlugin<CodexConfig>({
         const workspaceMode = spec.workspaceMode ?? 'worktree';
         if (!['worktree', 'project-root', 'temp'].includes(workspaceMode) || ((workspaceMode === 'temp') !== (spec.project.scratch === true))) throw new Error('Invalid workspace choice');
         const repo = await realpath(spec.project.repoRoot);
-        const root = config.workspace_root ?? (workspaceMode === 'temp' ? join(homedir(), '.cache', 'vecnet-launcher', 'workspaces') : join(repo, '.worktrees', 'vecnet'));
+        const root = config.workspace_root ?? (workspaceMode === 'temp' ? join(userHome(process.env) ?? homedir(), '.cache', 'vecnet-launcher', 'workspaces') : join(repo, '.worktrees', 'vecnet'));
         if (workspaceMode !== 'project-root') await mkdir(root, { recursive: true, mode: 0o700 });
         const parent = workspaceMode === 'project-root' ? repo : await realpath(root);
         if (workspaceMode === 'temp' && (parent === '/tmp' || parent.startsWith('/tmp/'))) throw new Error('Temporary launcher workspace requires persistent storage outside /tmp');

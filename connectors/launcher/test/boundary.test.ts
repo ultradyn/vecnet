@@ -67,9 +67,9 @@ function checkPluginImports(file:string, source?:string):void {
   for (const spec of imports(file,source)) {
     if (spec.startsWith('node:')) continue;
     assert.ok(spec.startsWith('.'),`${file}: ${spec}`);
-    const target=resolve(dirname(file),spec); const plugin=relative(backends,file).split('/')[0];
+    const target=resolve(dirname(file),spec); const plugin=relative(backends,file).split(/[\\/]/)[0];
     const own=relative(resolve(backends,plugin),target);
-    assert.ok(target===resolve(root,'src/backend.ts') || (own!== '..' && !own.startsWith('../') && !own.startsWith('/')),`${file}: ${spec}`);
+    assert.ok(target===resolve(root,'src/backend.ts') || (own!== '..' && !own.startsWith('../') && !own.startsWith('..\\') && !own.startsWith('/')),`${file}: ${spec}`);
   }
 }
 test('plugins import only backend.ts, their own files and node:*', () => {
@@ -135,7 +135,7 @@ function checkHubImports(file:string, source?:string):void {
   const hub=resolve(root,'../hub-client');
   for (const spec of imports(file,source)) {
     assert.ok(!spec.includes('launcher'),`${file}: ${spec}`);
-    if (spec.startsWith('.')) { const path=relative(hub,resolve(dirname(file),spec)); assert.ok(path!=='..' && !path.startsWith('../'),`${file}: ${spec}`); }
+    if (spec.startsWith('.')) { const path=relative(hub,resolve(dirname(file),spec)); assert.ok(path!=='..' && !path.startsWith('../') && !path.startsWith('..\\'),`${file}: ${spec}`); }
   }
 }
 for (const [index,form] of importForms.entries()) test(`hub-client guard checks literal import syntax ${index+1}`, () => {

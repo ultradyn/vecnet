@@ -17,7 +17,7 @@ import (
 func operatorSetup(t *testing.T, env *testhub.Env, agentSecret, extra string) *user {
 	t.Helper()
 	u := newUser(t)
-	if err := os.MkdirAll(filepath.Dir(u.conf), 0o700); err != nil {
+	if err := cliFixtureMkdirAll(filepath.Dir(u.conf), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	body := `default = "agent"
@@ -30,7 +30,7 @@ secret = "` + agentSecret + `"
 hub = "` + env.URL + `"
 secret = "` + env.OperatorSecret + `"
 `
-	if err := os.WriteFile(u.conf, []byte(body), 0o600); err != nil {
+	if err := cliFixtureWriteFile(u.conf, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return u
@@ -191,7 +191,7 @@ func TestDefaultOperatorProfileRefused(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(u.conf, []byte(strings.Replace(string(body), `default = "agent"`, `default = "op"`, 1)), 0o600); err != nil {
+	if err := cliFixtureWriteFile(u.conf, []byte(strings.Replace(string(body), `default = "agent"`, `default = "op"`, 1)), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	for _, args := range [][]string{{"--net", "agent", "peers"}, {"--net", "op", "peers"}, {"peers"}} {
@@ -202,7 +202,7 @@ func TestDefaultOperatorProfileRefused(t *testing.T) {
 		}
 	}
 	// A default naming a peer profile is merely ignored.
-	if err := os.WriteFile(u.conf, body, 0o600); err != nil {
+	if err := cliFixtureWriteFile(u.conf, body, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if out := u.mustRun("--net", "agent", "peers"); !strings.Contains(out, aID) {

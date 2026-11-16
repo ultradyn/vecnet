@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -94,10 +93,10 @@ func runDedupeWatchPages(t *testing.T, pages [][]envelope.Event) (string, chan<-
 	}))
 	t.Cleanup(srv.Close)
 	conf := env["VECNET_CONFIG"]
-	if err := os.MkdirAll(filepath.Dir(conf), 0o700); err != nil {
+	if err := cliFixtureMkdirAll(filepath.Dir(conf), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(conf, []byte(fmt.Sprintf("default = \"p\"\n[profiles.p]\nhub = %q\nsecret = \"vn_peer_test\"\n", srv.URL)), 0o600); err != nil {
+	if err := cliFixtureWriteFile(conf, []byte(fmt.Sprintf("default = \"p\"\n[profiles.p]\nhub = %q\nsecret = \"vn_peer_test\"\n", srv.URL)), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	path, err := statePath(func(k string) string { return env[k] }, "p", "")

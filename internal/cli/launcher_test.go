@@ -5,12 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/XertroV/vecnet/internal/platform"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -24,7 +26,7 @@ type launcherFixture struct {
 
 func newLauncherFixture(t *testing.T, kind string) launcherFixture {
 	t.Helper()
-	dir, err := os.MkdirTemp("/tmp", "vecnet-launcher-test-")
+	dir, err := os.MkdirTemp(launcherTestTempBase(), "vecnet-launcher-test-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +58,7 @@ func newLauncherFixture(t *testing.T, kind string) launcherFixture {
 		}
 	}))
 	t.Cleanup(srv.Close)
-	env := map[string]string{"HOME": dir, "VECNET_CONFIG": filepath.Join(dir, "config", "config.toml"), "XDG_CONFIG_HOME": filepath.Join(dir, "config"), "XDG_DATA_HOME": filepath.Join(dir, "data"), "XDG_STATE_HOME": filepath.Join(dir, "state"), "PATH": os.Getenv("PATH")}
+	env := map[string]string{"HOME": dir, "USERPROFILE": dir, "SystemRoot": os.Getenv("SystemRoot"), "VECNET_CONFIG": filepath.Join(dir, "config", "config.toml"), "XDG_CONFIG_HOME": filepath.Join(dir, "config"), "XDG_DATA_HOME": filepath.Join(dir, "data"), "XDG_STATE_HOME": filepath.Join(dir, "state"), "PATH": os.Getenv("PATH")}
 	if err := saveConfig(env["VECNET_CONFIG"], Config{Profiles: map[string]Profile{"launcher/test": {Hub: srv.URL, Secret: "vn_peer_LAUNCHER_TEST", PeerID: "peer_launcher"}}}); err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +119,7 @@ func TestLauncherSetupPreviewAndWrite(t *testing.T) {
 	}
 	for _, path := range []string{f.paths.Config, f.paths.Credential} {
 		st, err := os.Stat(path)
-		if err != nil || st.Mode().Perm() != 0o600 {
+		if err != nil || launcherTestPrivateFile(path, st) != nil {
 			t.Fatalf("private file %s: %v %v", path, st, err)
 		}
 	}
@@ -250,6 +252,9 @@ func launcherTestSource(t *testing.T) string {
 }
 
 func TestLauncherInstallSnapshotAndExplicitServiceActions(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("systemd/POSIX security boundary; native Windows parity tests are separate")
+	}
 	f := newLauncherFixture(t, "launcher")
 	if code, _, errs := f.run(t, append(f.setup, "--write")...); code != 0 {
 		t.Fatal(errs)
@@ -366,6 +371,9 @@ func TestLauncherNodeVersionsAndUnitEscaping(t *testing.T) {
 // Exercise install itself so unsafe reuse cannot publish a unit/manifest or
 // invoke the service manager, even when every source byte still matches.
 func TestLauncherInstallRejectsUnsafeSnapshotReuse(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("systemd/POSIX security boundary; native Windows parity tests are separate")
+	}
 	cases := map[string]func(*testing.T, launcherFixture, launcherInstall){
 		"snapshot writable": func(t *testing.T, _ launcherFixture, m launcherInstall) { launcherTestChmod(t, m.Snapshot, 0o770) },
 		"runtime directory writable": func(t *testing.T, _ launcherFixture, m launcherInstall) {
@@ -483,6 +491,9 @@ func launcherTestMoveToSymlink(t *testing.T, path string) {
 
 func launcherInstalledFixture(t *testing.T) (launcherFixture, []string, string) {
 	t.Helper()
+	if runtime.GOOS != "linux" {
+		t.Skip("systemd fixture; native Windows install/repair fixtures are separate")
+	}
 	f := newLauncherFixture(t, "launcher")
 	if code, _, errs := f.run(t, append(f.setup, "--write")...); code != 0 {
 		t.Fatal(errs)
@@ -534,4 +545,20 @@ func TestLauncherEmbeddedAssetsIncludeNativeAndACP(t *testing.T) {
 			t.Errorf("missing embedded runtime asset %s", name)
 		}
 	}
+}
+
+func launcherTestTempBase() string {
+	if runtime.GOOS == "windows" {
+		return ""
+	}
+	return "/tmp"
+}
+func launcherTestPrivateFile(path string, info os.FileInfo) error {
+	if runtime.GOOS == "windows" {
+		return platform.CheckPath(path, false, true)
+	}
+	if info.Mode().Perm() != 0o600 {
+		return fmt.Errorf("expected mode0600")
+	}
+	return nil
 }

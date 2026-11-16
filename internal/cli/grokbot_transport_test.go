@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -18,7 +17,7 @@ func TestRouteTransportExplicitCLI(t *testing.T) {
 	u := profileUser(t, env.URL, env.OperatorSecret)
 	peer, _ := env.NewPeer("grokbot", "Transport Route")
 	keyFile := filepath.Join(t.TempDir(), "synthetic-key")
-	if err := os.WriteFile(keyFile, []byte("crsr_SYNTHETIC_route"), 0600); err != nil {
+	if err := cliFixtureWriteFile(keyFile, []byte("crsr_SYNTHETIC_route"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	for _, selected := range []string{"delivery_v1", "recipient_drain_v1"} {
@@ -65,7 +64,7 @@ func TestAgentTransportExplicitCLI(t *testing.T) {
 	env := testhub.Start(t)
 	u := profileUser(t, env.URL, env.OperatorSecret)
 	keyFile := filepath.Join(t.TempDir(), "synthetic-key")
-	if err := os.WriteFile(keyFile, []byte("crsr_SYNTHETIC_agent"), 0600); err != nil {
+	if err := cliFixtureWriteFile(keyFile, []byte("crsr_SYNTHETIC_agent"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	raw := u.mustRun("--json", "agent", "add", "--kind", "grokbot", "--name", "Transport Agent", "--url", routineURL, "--key-file", keyFile, "--skip-mcp", "--request-id", "cli-transport", "--grokbot-transport", "recipient_drain_v1")

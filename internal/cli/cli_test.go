@@ -53,11 +53,11 @@ func profileUser(t *testing.T, hubURL, secret string) *user {
 	t.Helper()
 	u := newUser(t)
 	u.env["VECNET_PROFILE"] = "p"
-	if err := os.MkdirAll(filepath.Dir(u.conf), 0o700); err != nil {
+	if err := cliFixtureMkdirAll(filepath.Dir(u.conf), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	body := "[profiles.p]\nhub = \"" + hubURL + "\"\nsecret = \"" + secret + "\"\n"
-	if err := os.WriteFile(u.conf, []byte(body), 0o600); err != nil {
+	if err := cliFixtureWriteFile(u.conf, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return u
@@ -202,9 +202,7 @@ func TestEnrolWritesProfile(t *testing.T) {
 	if cfg.Default != "" {
 		t.Fatalf("default = %q, want none", cfg.Default)
 	}
-	if fi, err := os.Stat(u.conf); err != nil || fi.Mode().Perm() != 0o600 {
-		t.Fatalf("config mode = %v, %v; want 0600", fi.Mode().Perm(), err)
-	}
+	cliFixtureRequireMode(t, u.conf, 0o600)
 	// The new profile works: peers lists C.
 	if out := u.mustRun("--net", "p", "peers"); !strings.Contains(out, added.PeerID) {
 		t.Fatalf("peers via enrolled profile = %q, want %s", out, added.PeerID)
@@ -524,7 +522,7 @@ func TestAttachUploads(t *testing.T) {
 
 	content := "attached bytes\n"
 	path := filepath.Join(t.TempDir(), "file.txt")
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+	if err := cliFixtureWriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	a.send(bID, "see file", "--hold", "--attach", path)

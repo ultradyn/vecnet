@@ -16,6 +16,7 @@ import (
 
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/hubid"
+	"github.com/XertroV/vecnet/internal/platform"
 )
 
 // Pins are local trust state, separate from the operator's handwritten config.
@@ -55,7 +56,7 @@ func (a *app) updatePins(fn func(map[string]pinRecord) error) error {
 	if err != nil {
 		return err
 	}
-	if err = os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+	if err = platform.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err
 	}
 	if err = os.Chmod(filepath.Dir(path), 0700); err != nil {

@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/XertroV/vecnet/internal/platform"
 )
 
 // Session binding (PROTOCOL §13.9, issue 38). Claude Code sessions in one
@@ -227,7 +229,7 @@ func sessionsPath(statePath string) string {
 // basename) and returns every key it has run, sorted. It writes only when
 // something changed or the entry is an hour stale.
 func registerSession(ctx context.Context, path, session, key string, now time.Time) ([]string, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := platform.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
 	unlock, err := lockPath(ctx, path+".lock")

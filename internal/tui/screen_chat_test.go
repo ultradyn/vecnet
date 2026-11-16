@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -28,6 +29,7 @@ import (
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/opapi"
 	"github.com/XertroV/vecnet/internal/opclient"
+	"github.com/XertroV/vecnet/internal/platform"
 	"github.com/XertroV/vecnet/internal/tui/theme"
 )
 
@@ -351,10 +353,7 @@ func chatGolden(t *testing.T, m *Model, name string, w, h int) string {
 		}
 		return got
 	}
-	want, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read golden (run with UPDATE_GOLDEN=1 once the frame is right): %v", err)
-	}
+	want := readGolden(t, path)
 	if !bytes.Equal(want, []byte(got)) {
 		t.Errorf("frame differs from %s\n--- got ---\n%s\n--- want ---\n%s", path, got, want)
 	}
@@ -1345,6 +1344,9 @@ func TestSaveFileNameSafe(t *testing.T) {
 		if err != nil || string(data) != "contents" {
 			t.Fatalf("read %q, %v", data, err)
 		}
+		if err := platform.PrivateFile(filepath.Join(dir, "x")); err != nil {
+			t.Fatalf("saved attachment is not private: %v", err)
+		}
 		info, err := os.Stat(filepath.Join(dir, "x"))
 		if err != nil || info.Mode()&0o111 != 0 {
 			t.Fatalf("mode %v, %v", info.Mode(), err)
@@ -1381,9 +1383,7 @@ func TestSaveFileNameSafe(t *testing.T) {
 	t.Run("a dangling link is not followed", func(t *testing.T) {
 		dir, m, p := saved(t, "link")
 		target := filepath.Join(filepath.Dir(dir), "outside")
-		if err := os.Symlink(target, filepath.Join(dir, "link")); err != nil {
-			t.Fatal(err)
-		}
+		chatDanglingLink(t, filepath.Join(dir, "link"), target)
 		p.press("s")
 		waitToast(t, p, m, "saved")
 		if _, err := os.Stat(target); !errors.Is(err, os.ErrNotExist) {
@@ -1391,6 +1391,21 @@ func TestSaveFileNameSafe(t *testing.T) {
 		}
 		if got := entries(t, dir); got != "link|link (1)" {
 			t.Fatalf("cwd holds %q", got)
+		}
+	})
+	t.Run("an existing directory is not replaced", func(t *testing.T) {
+		dir, m, p := saved(t, "report.txt")
+		existing := filepath.Join(dir, "report.txt")
+		if err := os.Mkdir(existing, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		p.press("s")
+		waitToast(t, p, m, "saved")
+		if info, err := os.Stat(existing); err != nil || !info.IsDir() {
+			t.Fatalf("existing directory changed: %v, %v", info, err)
+		}
+		if data, err := os.ReadFile(filepath.Join(dir, "report (1).txt")); err != nil || string(data) != "contents" {
+			t.Fatalf("save alongside directory: %q, %v", data, err)
 		}
 	})
 	for _, name := range []string{"..", "/", "", "\x1b[31m"} {
@@ -2103,6 +2118,7 @@ func TestAttachTooLarge(t *testing.T) {
 func TestAttachPathWithSpaceAndTilde(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // os.UserHomeDir uses the native Windows home.
 	if err := os.Mkdir(filepath.Join(home, "my docs"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -2159,6 +2175,26 @@ func TestAttachPathWithSpaceAndTilde(t *testing.T) {
 			t.Fatalf("toast %q", m.toast.text)
 		}
 	})
+
+	t.Run("absolute path with spaces", func(t *testing.T) {
+		a, m, p := chatOpen(t)
+		chatAttach(p, filepath.Join(home, "my docs", "q3 report.txt"))
+		chatAttsSettled(t, p, m, 1)
+		if ups := a.uploaded(); len(ups) != 1 || ups[0].name != "q3 report.txt" || string(ups[0].data) != "quarterly" {
+			t.Fatalf("absolute path uploads %+v", ups)
+		}
+	})
+
+	if runtime.GOOS == "windows" {
+		t.Run("native tilde separator", func(t *testing.T) {
+			a, m, p := chatOpen(t)
+			chatAttach(p, "~\\my docs\\q3 report.txt")
+			chatAttsSettled(t, p, m, 1)
+			if ups := a.uploaded(); len(ups) != 1 || ups[0].name != "q3 report.txt" || string(ups[0].data) != "quarterly" {
+				t.Fatalf("native path uploads %+v", ups)
+			}
+		})
+	}
 }
 
 func TestAttachRetryKeepsKey(t *testing.T) {

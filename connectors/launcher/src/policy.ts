@@ -100,7 +100,7 @@ function mentionsPrivileged(line: string): boolean {
 }
 function within(root: string, path: string): boolean {
   const rel = relative(root,path);
-  return rel === '' || (!isAbsolute(rel) && rel !== '..' && !rel.startsWith('../'));
+  return rel === '' || (!isAbsolute(rel) && rel !== '..' && !rel.startsWith('../') && !rel.startsWith('..\\'));
 }
 export function classifyPermission(p: LaunchPermission, home: string): ApprovalCategory[] {
   const categories: ApprovalCategory[] = [p.kind];

@@ -9,9 +9,10 @@ import { createInterface } from 'node:readline';
 import type { Clock, Log } from '../../../hub-client/src/ports.ts';
 import type { KeyValue } from '../backend.ts';
 import { planInput } from '../input-plan.ts';
-import { redactingLog, scrubEnv } from '../redact.ts';
+import { redactingLog } from '../redact.ts';
 import { openCodexRpc, CodexRpcError } from './rpc.ts';
 import type { CodexRpc } from './rpc.ts';
+import { cliEnvironment, commandInvocation, terminateProcess, userHome } from '../../../hub-client/src/platform.ts';
 import type { RuntimeSnapshot } from './runtime-status.ts';
 import { buildThreadResume, buildThreadUnsubscribe, buildTurnStart, buildTurnSteer, buildTurnsPage, mapStatus, parseResumePolicy } from './protocol.ts';
 
@@ -41,7 +42,7 @@ export interface Engine {
 export function vecnetConfigPath(env: Record<string, string | undefined>): string | undefined {
   return env.VECNET_CONFIG ? env.VECNET_CONFIG
     : env.XDG_CONFIG_HOME ? join(env.XDG_CONFIG_HOME, 'vecnet', 'config.toml')
-    : env.HOME ? join(env.HOME, '.config', 'vecnet', 'config.toml') : undefined;
+    : userHome(env) ? join(userHome(env)!, '.config', 'vecnet', 'config.toml') : undefined;
 }
 type RecordValue = Record<string, any>;
 type Batch = { stub: string; entries: { key: string; value: string }[]; deliveries: string[] };
@@ -51,10 +52,7 @@ const timeout = 5000, blockedMs = 600_000;
 /** One serial delivery lane. Only Go renders peer input and claims delivery ids. */
 export function createEngine(b: Binding, d: EngineDeps): Engine {
   const log = redactingLog(d.log), { clock, kv } = d;
-  const envKeys = ['HOME', 'PATH', 'XDG_CONFIG_HOME', 'XDG_RUNTIME_DIR', 'VECNET_CONFIG'];
-  // scrubEnv removes credential-bearing names; intersect separately because the
-  // launcher's helper intentionally preserves ordinary non-secret variables.
-  const env = Object.fromEntries(Object.entries(scrubEnv(d.env, envKeys)).filter(([k]) => envKeys.includes(k)));
+  const env = cliEnvironment(d.env);
   const baseArgs = ['--net', b.profile, ...(b.as ? ['--as', b.as] : [])];
   const configPath = b.configPath;
   const owner = ownerOf(b);
@@ -95,7 +93,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
   }
   const quarantined = new Set<string>();
   function quarantine(key: string) {
-    ownershipChanged = true; watch?.kill();
+    ownershipChanged = true; watch && terminateProcess(watch);
     if (!quarantined.has(key)) { quarantined.add(key); log.warn('codex_recovery_quarantined', { threadId: b.threadId }); }
   }
   function parseRow(key: string): InflightRow | undefined {
@@ -226,7 +224,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
       const thread = obj(obj(result).thread);
       rootVerified = thread.id === owner.threadId && ['cli', 'vscode', 'exec', 'appServer'].includes(thread.source) && thread.parentThreadId == null;
       if (!rootVerified) {
-        watch?.kill(); watchVerified = false;
+        watch && terminateProcess(watch); watchVerified = false;
         log.warn('codex_thread_source_unverified', { threadId: b.threadId });
       }
     }
@@ -235,11 +233,12 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
   function runHook(args: string[], cleanup = false, command = 'hook'): Promise<unknown> {
     if (!running && !cleanup) return Promise.reject(new Error('engine_stopped'));
     return new Promise((resolve, reject) => {
-      const child = spawn(d.vecnetBin, [...baseArgs, command, ...args], { env, stdio: ['ignore', 'pipe', 'ignore'] });
+      const invocation = commandInvocation([d.vecnetBin, ...baseArgs, command, ...args], env);
+      const child = spawn(invocation.file, invocation.args, { ...invocation, windowsHide: true, env, stdio: ['ignore', 'pipe', 'ignore'] });
       children.add(child); let text = '', tooLarge = false;
       child.stdout!.setEncoding('utf8');
-      child.stdout!.on('data', (part: string) => { text += part; if (Buffer.byteLength(text) > 1_048_576) { tooLarge = true; child.kill(); } });
-      const timer = clock.timer(timeout, () => child.kill());
+      child.stdout!.on('data', (part: string) => { text += part; if (Buffer.byteLength(text) > 1_048_576) { tooLarge = true; terminateProcess(child); } });
+      const timer = clock.timer(timeout, () => terminateProcess(child));
       child.once('error', () => { timer.cancel(); children.delete(child); reject(new Error('hook_failed')); });
       child.once('close', code => {
         timer.cancel(); children.delete(child);
@@ -612,7 +611,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     if (!running || rpc) return;
     connectionState = 'connecting'; policyDenied = false; cold = rejectedResume;
     try {
-      const connection = await d.openRpc({ codexHome: b.codexHome, euid: d.euid, log, timeoutMs: timeout });
+      const connection = await d.openRpc({ codexHome: b.codexHome, euid: d.euid, env: d.env, log, timeoutMs: timeout });
       if (!running) { connection.close(); return; }
       rpc = connection;
       // RPC handshake already validates SemVer. Retain only bounded metadata.
@@ -652,7 +651,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
       r.attempt = randomBytes(16).toString('hex'); write(r);
       let guard;
       try { guard = await acquireGuard(d.vecnetBin, env, owner, r.claim, r.attempt, clock); }
-      catch { ownershipChanged = true; watch?.kill(); log.warn('codex_binding_ownership_changed', { threadId: b.threadId }); return; }
+      catch { ownershipChanged = true; watch && terminateProcess(watch); log.warn('codex_binding_ownership_changed', { threadId: b.threadId }); return; }
       if (!running || !liveness().live || proofBlocksDelivery() || !guard.valid()) { await guard.finish('rejected'); await releaseInflight(r); return; }
       write(r);
       try {
@@ -745,7 +744,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     }
     historyRetry?.cancel(); historyRetry = undefined; historyRetryIndex = 0;
     if (!liveness().live || proofBlocksDelivery() || (action === 'steer' && (turn?.status !== 'inProgress' || typeof turn.id !== 'string'))) return;
-    if (!verifyOwner(env, owner, d.euid, clock.now())) { ownershipChanged = true; watch?.kill(); return; }
+    if (!verifyOwner(env, owner, d.euid, clock.now())) { ownershipChanged = true; watch && terminateProcess(watch); return; }
     const nonce = randomBytes(12).toString('hex');
     kv.set('claiming:' + nonce, JSON.stringify({ owner, threadId: b.threadId, at: clock.now() }));
     let output: RecordValue;
@@ -760,11 +759,11 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     if (output.refused === 'identity_changed') {
       kv.set(identityKey, generation); identityChanged = true;
       kv.delete('claiming:' + nonce); await unsubscribe();
-      watch?.kill();
+      watch && terminateProcess(watch);
       log.warn('codex_binding_identity_changed', { threadId: b.threadId }); return;
     }
     if (output.refused) {
-      ownershipChanged = true; kv.delete('claiming:' + nonce); watch?.kill(); await unsubscribe(); return;
+      ownershipChanged = true; kv.delete('claiming:' + nonce); watch && terminateProcess(watch); await unsubscribe(); return;
     }
     if (!Array.isArray(output.deliveries) || !output.deliveries.every((id: unknown) => typeof id === 'string') ||
       !Array.isArray(output.entries ?? []) || (output.entries ?? []).some((e: unknown) => typeof obj(e).key !== 'string' || typeof obj(e).value !== 'string' || Buffer.byteLength(obj(e).value) > 1000)) {
@@ -786,7 +785,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
   }
   async function verifyAdmission(force = false) {
     if (!running || ownershipChanged || identityChanged || !rootVerified || clock.now() >= b.expiresAt) return;
-    if (!verifyOwner(env, owner, d.euid, clock.now())) { ownershipChanged = true; watch?.kill(); return; }
+    if (!verifyOwner(env, owner, d.euid, clock.now())) { ownershipChanged = true; watch && terminateProcess(watch); return; }
     const signature = configSignature();
     if (!force && authenticatedConfig === signature) return;
     try {
@@ -794,7 +793,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
       if (result.verified !== true || signature !== configSignature()) throw new Error('ownership_unverified');
       authenticatedConfig = signature;
     } catch {
-      authenticatedConfig = undefined; watch?.kill();
+      authenticatedConfig = undefined; watch && terminateProcess(watch);
       log.warn('codex_binding_auth_unverified', { threadId: b.threadId });
     }
   }
@@ -806,7 +805,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     // even the notification stream is started under this owner.
     if (rows().some(r => r.state !== 'pending') || ownershipChanged) return;
     if (!verifyOwner(env, owner, d.euid, clock.now())) {
-      ownershipChanged = true; watch?.kill();
+      ownershipChanged = true; watch && terminateProcess(watch);
       log.warn('codex_binding_ownership_changed', { threadId: b.threadId });
       return;
     }
@@ -816,7 +815,8 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
   function startWatch() {
     if (!running || watch || !watchVerified || !rootVerified || ownershipChanged || identityChanged || clock.now() >= b.expiresAt) return;
     if (!verifyOwner(env, owner, d.euid, clock.now())) { ownershipChanged = true; return; }
-    const child = spawn(d.vecnetBin, [...baseArgs, 'watch', '--json'], { env, stdio: ['ignore', 'pipe', 'ignore'] });
+    const invocation = commandInvocation([d.vecnetBin, ...baseArgs, 'watch', '--json'], env);
+    const child = spawn(invocation.file, invocation.args, { ...invocation, windowsHide: true, env, stdio: ['ignore', 'pipe', 'ignore'] });
     watch = child;
     // Set from the watch's own last line: it hit 401/403/204 (or another
     // terminal 4xx) and will not reconnect (PROTOCOL §13.1).
@@ -883,7 +883,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
       const child = watch; watch = undefined;
       const exits = [...children, ...(child ? [child] : [])].map(c => new Promise<void>(resolve => {
         if (c.exitCode !== null || c.signalCode !== null) { resolve(); return; }
-        c.once('close', () => resolve()); c.kill();
+        c.once('close', () => resolve()); terminateProcess(c);
       }));
       await queue; await Promise.all(exits); receiptClears.clear();
       // Drain the killed claim before releasing its nonce: Go may still be

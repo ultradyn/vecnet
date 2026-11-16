@@ -11,6 +11,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync/atomic"
@@ -21,6 +22,7 @@ import (
 	"github.com/XertroV/vecnet/internal/blobwire"
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/opapi"
+	"github.com/XertroV/vecnet/internal/platform"
 	"github.com/XertroV/vecnet/internal/prefs"
 	"github.com/XertroV/vecnet/internal/testhub"
 )
@@ -655,6 +657,8 @@ func TestR2UploadSeekableAndSpoolCleanup(t *testing.T) {
 		t.Run(kind, func(t *testing.T) {
 			tmp := t.TempDir()
 			t.Setenv("TMPDIR", tmp)
+			t.Setenv("TEMP", tmp)
+			t.Setenv("TMP", tmp)
 			completed, puts, sends := 0, 0, 0
 			direct := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				puts++
@@ -732,9 +736,21 @@ func TestR2UploadSeekableAndSpoolCleanup(t *testing.T) {
 					if err != nil || len(entries) != 1 {
 						t.Fatal("cancellation did not reach an existing spool")
 					}
-					info, err := entries[0].Info()
-					if err != nil || info.Mode().Perm() != 0600 {
-						t.Fatal("spool is not private")
+					// Windows directory-entry size can lag an open writer. Probe
+					// the inode through a handle, including its real DACL, before
+					// checking that cancellation happens after the first byte.
+					spool, err := os.Open(filepath.Join(tmp, entries[0].Name()))
+					if err != nil {
+						t.Fatal(err)
+					}
+					info, statErr := spool.Stat()
+					privateErr := platform.CheckFile(spool, false, true)
+					closeErr := spool.Close()
+					if err := errors.Join(statErr, closeErr); err != nil {
+						t.Fatal(err)
+					}
+					if privateErr != nil {
+						t.Fatalf("spool is not private: %v", privateErr)
 					}
 					reads++
 					if reads == 1 {
@@ -796,6 +812,8 @@ func TestR2UploadDoesNotDowngradeWhenCapabilitiesDisappears(t *testing.T) {
 		t.Run(kind, func(t *testing.T) {
 			tmp := t.TempDir()
 			t.Setenv("TMPDIR", tmp)
+			t.Setenv("TEMP", tmp)
+			t.Setenv("TMP", tmp)
 			caps, hubBytes, puts, completes := 0, 0, 0, 0
 			direct := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				puts++

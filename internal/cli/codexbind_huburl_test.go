@@ -21,14 +21,14 @@ func TestStoredBindingsReceivedHubURLs(t *testing.T) {
 	for _, hub := range []string{"https://binding.example/Vecnet/%2Fexact/", "https://[2001:db8::7]:8443/Vecnet/%2Fexact/", "http://127.0.0.1:7777/prefix/"} {
 		rows = append(rows, codexBinding{Hub: hub, Profile: "safe", ThreadID: bindT2, ExpiresAt: f.now.Add(-time.Hour)})
 	}
-	if err := os.MkdirAll(filepath.Dir(f.path), 0700); err != nil {
+	if err := cliFixtureMkdirAll(filepath.Dir(f.path), 0700); err != nil {
 		t.Fatal(err)
 	}
 	raw, err := json.MarshalIndent(codexBindingsFile{Version: 1, Bindings: rows}, "", "  ")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = os.WriteFile(f.path, raw, 0600); err != nil {
+	if err = cliFixtureWriteFile(f.path, raw, 0600); err != nil {
 		t.Fatal(err)
 	}
 	code, out, errs := f.run("--json", "bindings")
@@ -65,21 +65,25 @@ func TestStoredBindingsReceivedHubURLs(t *testing.T) {
 func TestStoredBindingsInspectionReadOnly(t *testing.T) {
 	f := newBindFixture(t)
 	dir := filepath.Dir(f.path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := cliFixtureMkdirAll(dir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(dir, 0755); err != nil {
+	if err := cliFixtureChmod(dir, 0755); err != nil {
 		t.Fatal(err)
 	}
 	raw := []byte("{\n  \"version\": 1, \"bindings\": []\n}\n")
-	if err := os.WriteFile(f.path, raw, 0600); err != nil {
+	if err := cliFixtureWriteFile(f.path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	permissions, err := cliFixturePermissions(dir)
+	if err != nil {
 		t.Fatal(err)
 	}
 	code, out, errs := f.run("--json", "bindings")
 	if code != 0 || strings.TrimSpace(out) != "[]" {
 		t.Fatalf("%d %s %s", code, out, errs)
 	}
-	if info, err := os.Stat(dir); err != nil || info.Mode().Perm() != 0755 {
+	if after, err := cliFixturePermissions(dir); err != nil || after != permissions {
 		t.Error("inspection changed directory permissions")
 	}
 	if _, err := os.Stat(f.path + ".lock"); !os.IsNotExist(err) {

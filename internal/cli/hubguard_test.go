@@ -80,7 +80,7 @@ func TestInsecureHubRefused(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(u.conf, append(raw, []byte("allow_insecure_http = true\n")...), 0o600); err != nil {
+	if err := cliFixtureWriteFile(u.conf, append(raw, []byte("allow_insecure_http = true\n")...), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	before := g.commandCalls.Load()

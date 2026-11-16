@@ -138,7 +138,7 @@ esac
   return { dir, fake, home, env, kv, clock, log, bindingsPath, binding, writeBindings, start, resumed, unsubscribed, subscribed, logged, reload, ready, trace, configTrace, reportTrace };
 }
 
-test('only the singleton reports bound runtime status and shutdown offline, never removed owners', async t => {
+test('only the singleton reports bound runtime status and shutdown offline, never removed owners', { skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const id = uuid(600), s = await setup(t, { threads: [{ id }] });
   const reports = () => readFileSync(s.reportTrace, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
   s.writeBindings([s.binding(id, 1)]);
@@ -153,7 +153,7 @@ test('only the singleton reports bound runtime status and shutdown offline, neve
   await duplicate.stop(); assert.equal(reports().length, before);
   s.writeBindings([]); await s.reload();
   assert.equal(reports().length, before, 'removed owner cannot publish offline or heartbeat');
-  await first.stop(); assert.equal(reports().length, before);
+  await first.stop(); assert.deepEqual(await first.stopped, { reason: 'stopped' }); assert.equal(reports().length, before);
 
   s.writeBindings([s.binding(id, 2)]);
   const next = s.start(); await eventually(() => s.subscribed(id), 'replacement ready');
@@ -162,7 +162,7 @@ test('only the singleton reports bound runtime status and shutdown offline, neve
   assert.match(readFileSync(s.trace, 'utf8'), /codex report-status .*--expect-generation 00000000000000000000000000000002/);
 });
 
-test('connector starts one engine per binding and stops removed ones', async t => {
+test('connector starts one engine per binding and stops removed ones', { skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const [a, b, c] = [uuid(1), uuid(2), uuid(3)];
   const s = await setup(t, { threads: [{ id: a }, { id: b }, { id: c }] });
   s.writeBindings([s.binding(a, 1), s.binding(b, 2), s.binding(c, 3)]);
@@ -191,7 +191,7 @@ test('connector starts one engine per binding and stops removed ones', async t =
   assert.equal(s.fake.requests.filter(r => r.method === 'initialize').length, 4);
 });
 
-test('reload waits for a slow engine shutdown before the next reload', async t => {
+test('reload waits for a slow engine shutdown before the next reload', { skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   // Retiring an engine waits for thread/unsubscribe. With that answer slower
   // than any fixed settling sleep, a removal, a renewal and a re-bind must
   // still each take effect at their own reload.
@@ -216,7 +216,7 @@ test('reload waits for a slow engine shutdown before the next reload', async t =
   assert.equal(s.fake.requests.filter(r => r.method === 'initialize').length, 4);
 });
 
-test('reload releases an interrupted claim before replacing its owner', async t => {
+test('reload releases an interrupted claim before replacing its owner', { skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const id = uuid(8);
   const s = await setup(t, { threads: [{ id }], blockHooks: true });
   s.writeBindings([s.binding(id, 1)]);
@@ -234,7 +234,7 @@ test('reload releases an interrupted claim before replacing its owner', async t 
   assert.deepEqual(s.logged('codex_recovery_quarantined'), []);
 });
 
-test('limit groups symlinked codex homes together', async t => {
+test('limit groups symlinked codex homes together', { skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const ids = Array.from({ length: 9 }, (_, i) => uuid(10 + i));
   const s = await setup(t, { threads: ids.map(id => ({ id })) });
   const alias = join(s.dir, 'alias-home');
@@ -251,7 +251,7 @@ test('limit groups symlinked codex homes together', async t => {
   assert.deepEqual(s.logged('codex_binding_over_limit').map(e => e.meta?.threadId), [ids[8]]);
 });
 
-test('absent bindings file disables quietly; 0644 file is refused', async t => {
+test('absent bindings file disables quietly; 0644 file is refused', { skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const id = uuid(20);
   const s = await setup(t, { threads: [{ id }] });
   s.start();
@@ -274,7 +274,7 @@ test('absent bindings file disables quietly; 0644 file is refused', async t => {
   assert.equal(s.logged('codex_bindings_refused').length, 2);
 });
 
-test('a FIFO at the bindings path is refused without blocking', async t => {
+test('a FIFO at the bindings path is refused without blocking', { skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const id = uuid(25);
   const s = await setup(t, { threads: [{ id }] });
   execFileSync('mkfifo', ['-m', '600', s.bindingsPath]);
@@ -285,7 +285,7 @@ test('a FIFO at the bindings path is refused without blocking', async t => {
   assert.deepEqual(s.fake.requests, [], 'a FIFO starts nothing');
 });
 
-test('daemon start and stop drive the connector', async t => {
+test('daemon start and stop drive the connector', { skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const id = uuid(30);
   const s = await setup(t, { threads: [{ id }] });
   // No bindings file: the daemon starts, the connector logs once and starts no engine.
@@ -308,7 +308,7 @@ test('daemon start and stop drive the connector', async t => {
   assert.deepEqual(h.inspect(l => l.kv('codex').keys('inflight:')), []);
 });
 
-test('memory-only launcher registration cannot authorize a thread or bypass recipient ownership', async t => {
+test('memory-only launcher registration cannot authorize a thread or bypass recipient ownership', { skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const [explicit, job] = [uuid(40), uuid(41)];
   const s = await setup(t, { threads: [{ id: explicit }, { id: job }] });
   s.writeBindings([s.binding(explicit, 1)]);
@@ -326,7 +326,7 @@ test('memory-only launcher registration cannot authorize a thread or bypass reci
   assert.ok(s.logged('codex_launcher_binding_unauthorized').length);
 });
 
-test('connector subscribes at most the limit, oldest first', async t => {
+test('connector subscribes at most the limit, oldest first', { skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const ids = Array.from({ length: 10 }, (_, i) => uuid(50 + i)), job = uuid(70);
   const s = await setup(t, { threads: [...ids, job].map(id => ({ id })) });
   // Written newest first: order comes from created_at, not file order.
@@ -358,7 +358,7 @@ test('connector subscribes at most the limit, oldest first', async t => {
   assert.equal(small.resumed(ids[2]), false);
 });
 
-test('connector stop unsubscribes every engine', async t => {
+test('connector stop unsubscribes every engine', { skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const ids = [uuid(80), uuid(81), uuid(82)], job = uuid(83);
   const s = await setup(t, { threads: [...ids, job].map(id => ({ id })) });
   s.writeBindings(ids.map((id, i) => s.binding(id, i + 1)));
@@ -406,7 +406,7 @@ async function smokeFixture(t: TestContext, o: { codex?: boolean; tmux?: boolean
   return { dir, env, trap, bin };
 }
 
-test('smoke skips without opt-in, without codex, and below the minimum daemon version', async t => {
+test('smoke skips without opt-in, without codex, and below the minimum daemon version', { skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const f = await smokeFixture(t);
   const optOut = await smoke({ ...f.env, VECNET_CODEX_APPSERVER_SMOKE: undefined });
   assert.equal(optOut.status, 0, optOut.stderr);
@@ -434,7 +434,7 @@ test('smoke skips without opt-in, without codex, and below the minimum daemon ve
 
 const handshakeOnly = (fake: { requests: { method: string }[] }) => fake.requests.map(r => r.method).filter(m => m !== 'initialized');
 
-test('smoke refuses a CODEX_HOME that is not a directory and a busy state directory', async t => {
+test('smoke refuses a CODEX_HOME that is not a directory and a busy state directory', { skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const f = await smokeFixture(t);
   const file = join(f.dir, 'not-a-dir');
   writeFileSync(file, '');
@@ -454,7 +454,7 @@ test('smoke refuses a CODEX_HOME that is not a directory and a busy state direct
 });
 
 
-test('complete authority rejects every legacy, malformed, or unresolved row without partial admission', async t => {
+test('complete authority rejects every legacy, malformed, or unresolved row without partial admission', { skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const [a, b] = [uuid(100), uuid(101)];
   const s = await setup(t, { threads: [{ id: a }, { id: b }] });
   s.start();
@@ -477,7 +477,7 @@ test('complete authority rejects every legacy, malformed, or unresolved row with
   assert.equal(s.subscribed(a), false, 'corruption revokes existing admission');
 });
 
-test('recipient aliases, delegated recipients, and canonical thread conflicts reject the whole authority', async t => {
+test('recipient aliases, delegated recipients, and canonical thread conflicts reject the whole authority', { skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const [a, b] = [uuid(110), uuid(111)];
   const s = await setup(t, { threads: [{ id: a }, { id: b }] });
   const alias = join(s.dir, 'home-alias');
@@ -495,7 +495,7 @@ test('recipient aliases, delegated recipients, and canonical thread conflicts re
   }
 });
 
-test('same thread id in distinct canonical homes has independent engines and status', async t => {
+test('same thread id in distinct canonical homes has independent engines and status', { skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const id = uuid(120);
   const s = await setup(t, { threads: [{ id }] });
   const other = await startFakeCodexAppServer({ dir: join(s.dir, 'other') });
@@ -514,7 +514,7 @@ test('same thread id in distinct canonical homes has independent engines and sta
   assert.equal(other.subscribers(id).length, 1);
 });
 
-test('readiness is private, exact-owner, refreshed, and removed only by its connector', async t => {
+test('readiness is private, exact-owner, refreshed, and removed only by its connector', { skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const id = uuid(130);
   const s = await setup(t, { threads: [{ id }] });
   s.writeBindings([s.binding(id, 1)]);
@@ -547,7 +547,7 @@ test('readiness is private, exact-owner, refreshed, and removed only by its conn
 });
 
 
-test('authority path is per canonical HOME and rejects cross-config overrides', async t => {
+test('authority path is per canonical HOME and rejects cross-config overrides', { skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const s = await setup(t);
   const homeAlias = join(s.dir, 'user-home-alias'); symlinkSync(s.env.HOME!, homeAlias);
   assert.equal(codexBindingsPath({ HOME: homeAlias, VECNET_CONFIG: '/different/config', XDG_CONFIG_HOME: '/different/xdg' }), s.bindingsPath);
@@ -561,7 +561,7 @@ test('authority path is per canonical HOME and rejects cross-config overrides', 
 });
 
 
-test('generation-only replacement restarts the engine and publishes the new exact owner', async t => {
+test('generation-only replacement restarts the engine and publishes the new exact owner', { skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const id = uuid(140), s = await setup(t, { threads: [{ id }] });
   s.writeBindings([s.binding(id, 1)]); s.start();
   await eventually(() => s.subscribed(id), 'initial owner');
@@ -572,7 +572,7 @@ test('generation-only replacement restarts the engine and publishes the new exac
   assert.equal(JSON.parse(readFileSync(s.bindingsPath + '.status.json', 'utf8')).bindings[0].generation, 'b'.repeat(32));
 });
 
-test('launcher callbacks require exact current authority and disappear on revocation', async t => {
+test('launcher callbacks require exact current authority and disappear on revocation', { skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const id = uuid(150), s = await setup(t, { threads: [{ id, status: { type: 'notLoaded' } }] });
   s.writeBindings([s.binding(id, 1, { attended: true })]);
   const c = s.start(); await s.ready();
@@ -588,7 +588,7 @@ test('launcher callbacks require exact current authority and disappear on revoca
 });
 
 
-test('readiness exposes approval refusal and corruption removes ready owners', async t => {
+test('readiness exposes approval refusal and corruption removes ready owners', { skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const id = uuid(160), s = await setup(t, { threads: [{ id, approvalPolicy: 'on-request' }] });
   s.writeBindings([s.binding(id, 1)]); s.start();
   await eventually(() => / watch --json\n/.test(readFileSync(s.trace, 'utf8')), 'ownership verification completed');
@@ -602,7 +602,7 @@ test('readiness exposes approval refusal and corruption removes ready owners', a
 });
 
 
-test('global authority runs every config namespace using each row config', async t => {
+test('global authority runs every config namespace using each row config', { skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const [a, b] = [uuid(170), uuid(171)], s = await setup(t, { threads: [{ id: a }, { id: b }] });
   const otherConfig = join(s.dir, 'other-config.toml'); writeFileSync(otherConfig, '');
   s.writeBindings([s.binding(a, 1), s.binding(b, 2, { config_path: otherConfig, profile: 'p1' })]);
@@ -615,7 +615,7 @@ test('global authority runs every config namespace using each row config', async
     [s.env.VECNET_CONFIG, otherConfig].sort());
 });
 
-test('unverified root source never publishes live readiness or starts a watch', async t => {
+test('unverified root source never publishes live readiness or starts a watch', { skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const id = uuid(180), s = await setup(t, { threads: [{ id }], source: 'unknown' });
   s.writeBindings([s.binding(id, 1)]); s.start();
   await eventually(() => s.logged('codex_thread_source_unverified').length > 0, 'source refused');

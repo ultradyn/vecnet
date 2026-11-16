@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/XertroV/vecnet/internal/platform"
 	"io"
 	"io/fs"
 	"os"
@@ -100,7 +101,7 @@ func launcherDecode(raw []byte, value any) error {
 	return walk()
 }
 
-func launcherManagedRead(root *os.Root, name string) ([]byte, error) {
+func launcherManagedRead(root *launcherRoot, name string) ([]byte, error) {
 	raw, err := launcherReadOwned(root, name, true)
 	if err != nil {
 		return nil, err
@@ -109,22 +110,22 @@ func launcherManagedRead(root *os.Root, name string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if info.Mode()&0o7777 != 0o600 || len(raw) > 16<<20 {
+	if launcherCheckMode(root, name, info, 0o600) != nil || len(raw) > 16<<20 {
 		return nil, errors.New("launcher managed file requires mode0600 and bounded size")
 	}
 	return raw, nil
 }
-func launcherSyncDir(root *os.Root) error {
+func launcherSyncDir(root *launcherRoot) error {
 	f, e := root.Open(".")
 	if e != nil {
 		return e
 	}
 	defer f.Close()
-	return f.Sync()
+	return platform.SyncDir(f)
 }
 
 // Every rename that authorizes a later publication is durable before returning.
-func launcherDurableWrite(root *os.Root, name string, raw []byte, mode fs.FileMode) error {
+func launcherDurableWrite(root *launcherRoot, name string, raw []byte, mode fs.FileMode) error {
 	if _, err := launcherReadOwned(root, name, true); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
@@ -136,7 +137,7 @@ func launcherDurableWrite(root *os.Root, name string, raw []byte, mode fs.FileMo
 	defer root.Remove(tmp)
 	_, err = f.Write(raw)
 	if err == nil {
-		err = f.Chmod(mode)
+		err = launcherSetMode(f, mode)
 	}
 	if err == nil {
 		err = f.Sync()
@@ -169,7 +170,7 @@ func launcherSnapshotInventory(snapshot string) (map[string]string, error) {
 		if e != nil {
 			return e
 		}
-		if e = launcherSafeInfo(info, entry.IsDir(), true); e != nil {
+		if e = launcherCheckInfo(root, name, info, entry.IsDir(), true); e != nil {
 			return e
 		}
 		if entry.IsDir() {
@@ -234,7 +235,7 @@ func (a *app) registerLauncherInstallation(p launcherPaths, m launcherInstall, u
 	if err != nil {
 		return err
 	}
-	meta := launcherManaged{Schema: 1, ConfigPath: p.Config, Profile: p.Name, UnitPath: p.Unit, ManifestPath: p.Manifest, DataPath: p.Data, VecnetConfig: vecnetConfig, Home: a.getenv("HOME"), Path: searchPath, Node: m.Node, PublicBin: m.VecnetBin, PublicBinDefault: publicBinDefault, Source: m.Source, SourceDefault: sourceDefault, UnitSHA256: launcherHash(unit), ManifestSHA256: launcherHash(manifest), ConfigSHA256: launcherHash(config), Version: localSoftwareVersion(), BinarySHA256: launcherHash(bin), ProjectRoots: roots, Assets: assets, Runtime: m}
+	meta := launcherManaged{Schema: 1, ConfigPath: p.Config, Profile: p.Name, UnitPath: p.Unit, ManifestPath: p.Manifest, DataPath: p.Data, VecnetConfig: vecnetConfig, Home: platform.Home(a.getenv), Path: searchPath, Node: m.Node, PublicBin: m.VecnetBin, PublicBinDefault: publicBinDefault, Source: m.Source, SourceDefault: sourceDefault, UnitSHA256: launcherHash(unit), ManifestSHA256: launcherHash(manifest), ConfigSHA256: launcherHash(config), Version: localSoftwareVersion(), BinarySHA256: launcherHash(bin), ProjectRoots: roots, Assets: assets, Runtime: m}
 	// Explicit installation is the adoption boundary. Refuse an unsafe sibling;
 	// never use runtime state or a service name alone as ownership evidence.
 	if err = launcherDurableWrite(root, "managed.json", launcherManagedJSON(meta), 0o600); err != nil {

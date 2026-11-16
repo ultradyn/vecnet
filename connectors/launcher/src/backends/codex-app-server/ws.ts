@@ -1,5 +1,6 @@
 import { createConnection } from 'node:net';
 import { createHash, randomBytes } from 'node:crypto';
+import type { Duplex } from 'node:stream';
 import { TextDecoder } from 'node:util';
 
 export interface WsConn {
@@ -22,17 +23,17 @@ function frame(opcode: number, payload: Buffer): Buffer {
   return out;
 }
 
-/** Minimal RFC 6455 client. Discovery and JSON-RPC belong to the caller. */
-export function connectUnixWebSocket(socketPath: string, o: {
-  maxMessageBytes: number; timeoutMs: number; signal?: AbortSignal;
-}): Promise<WsConn> {
+export interface WsOptions { maxMessageBytes: number; timeoutMs: number; signal?: AbortSignal }
+
+/** Minimal RFC 6455 client over a socket or a binary stdio tunnel. Discovery
+ * and JSON-RPC belong to the caller. Only GET / is ever used, never shutdown. */
+export function connectStreamWebSocket(socket: Duplex, o: WsOptions): Promise<WsConn> {
   return new Promise((resolve, reject) => {
     if (!Number.isSafeInteger(o.maxMessageBytes) || o.maxMessageBytes < 1 ||
         !Number.isFinite(o.timeoutMs) || o.timeoutMs <= 0) {
-      reject(new RangeError('invalid WebSocket limits')); return;
+      socket.destroy(); reject(new RangeError('invalid WebSocket limits')); return;
     }
-    if (o.signal?.aborted) { reject(o.signal.reason ?? new Error('WebSocket aborted')); return; }
-    const socket = createConnection({ path: socketPath });
+    if (o.signal?.aborted) { socket.destroy(); reject(o.signal.reason ?? new Error('WebSocket aborted')); return; }
     const key = randomBytes(16).toString('base64');
     const expected = createHash('sha1').update(key + guid).digest('base64');
     let ready = false, ended: string | undefined;
@@ -46,7 +47,13 @@ export function connectUnixWebSocket(socketPath: string, o: {
       // Completed messages may precede close in the upgrade chunk, before the
       // connect caller can attach listeners. Keep them for onMessage to drain.
       bytes = Buffer.alloc(0); fragments = [];
-      if (closePayload && ready && socket.writable) { socket.end(frame(8, closePayload)); socket.destroySoon(); }
+      if (closePayload && ready && socket.writable) {
+        socket.end(frame(8, closePayload));
+        // Socket.destroySoon is not available on a proxy Duplex. Destroy once
+        // the close frame drains; a short bound also covers a blocked proxy.
+        const deadline = setTimeout(() => socket.destroy(), 250); deadline.unref();
+        socket.once('finish', () => { clearTimeout(deadline); socket.destroy(); });
+      }
       else socket.destroy();
       if (!ready) reject(new Error(why));
       else for (const fn of closers) fn(why);
@@ -159,4 +166,8 @@ export function connectUnixWebSocket(socketPath: string, o: {
       }
     });
   });
+}
+
+export function connectUnixWebSocket(socketPath: string, o: WsOptions): Promise<WsConn> {
+  return connectStreamWebSocket(createConnection({ path: socketPath }), o);
 }

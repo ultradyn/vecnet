@@ -1,4 +1,6 @@
+import { realpathSync } from 'node:fs';
 import type { Logger as Log } from '../../backend.ts';
+import { connectControlProxy } from './control-proxy.ts';
 import { connectUnixWebSocket } from './ws.ts';
 import { socketPathFor, verifySocket, parseServerVersion, codexVersionCompatibility } from './discover.ts';
 type AllowedMethod = string;
@@ -27,16 +29,21 @@ const allowed: ReadonlySet<string> = new Set<AllowedMethod>([
 ]);
 type Pending = { resolve(value: unknown): void; reject(error: CodexRpcError): void; timer: ReturnType<typeof setTimeout> };
 
-export async function openCodexRpc(o: { codexHome: string; euid: number; log: Log; timeoutMs: number }): Promise<CodexRpc> {
+export async function openCodexRpc(o: { codexHome: string; euid: number; log: Log; timeoutMs: number; env?: NodeJS.ProcessEnv }): Promise<CodexRpc> {
   const log = o.log;
-  const checked = verifySocket(socketPathFor(o.codexHome), o.euid);
-  if (!checked.ok) {
-    const error = new CodexRpcError(-1, 'unreachable'); error.reason = checked.reason; throw error;
-  }
   if (!Number.isFinite(o.timeoutMs) || o.timeoutMs <= 0) throw new RangeError('invalid RPC timeout');
   let ws;
-  try { ws = await connectUnixWebSocket(checked.target, { maxMessageBytes: 4 * 1024 * 1024, timeoutMs: o.timeoutMs }); }
-  catch { throw new CodexRpcError(-1, 'unreachable'); }
+  if (process.platform === 'win32') {
+    try { ws = await connectControlProxy(o.codexHome, o.env, { maxMessageBytes: 4 * 1024 * 1024, timeoutMs: o.timeoutMs }); }
+    catch { throw new CodexRpcError(-1, 'unreachable'); }
+  } else {
+    const checked = verifySocket(socketPathFor(o.codexHome), o.euid);
+    if (!checked.ok) {
+      const error = new CodexRpcError(-1, 'unreachable'); error.reason = checked.reason; throw error;
+    }
+    try { ws = await connectUnixWebSocket(checked.target, { maxMessageBytes: 4 * 1024 * 1024, timeoutMs: o.timeoutMs }); }
+    catch { throw new CodexRpcError(-1, 'unreachable'); }
+  }
   const pending = new Map<number, Pending>();
   const requests: ((id: number | string, method: string, params: unknown) => void)[] = [];
   const notifications: ((method: string, params: unknown) => void)[] = [], closers: ((why: string) => void)[] = [];
@@ -111,6 +118,8 @@ export async function openCodexRpc(o: { codexHome: string; euid: number; log: Lo
       clientInfo: { name: 'vecnet-launcher', title: 'vecnet launcher', version: '0.1.0' },
       capabilities: { experimentalApi: true, optOutNotificationMethods: CODEX_OPT_OUT_NOTIFICATIONS },
     }, o.timeoutMs);
+    const returnedHome = initialized && typeof initialized === 'object' ? (initialized as Record<string, unknown>).codexHome : undefined;
+    if (returnedHome !== undefined && (typeof returnedHome !== 'string' || realpathSync(returnedHome) !== realpathSync(o.codexHome))) throw new CodexRpcError(-1, 'wrong_codex_home');
     const ua = initialized && typeof initialized === 'object' ? (initialized as Record<string, unknown>).userAgent : undefined;
     const version = typeof ua === 'string' ? parseServerVersion(ua) : null;
     const compatibility = version === null ? 'unsupported' : codexVersionCompatibility(version);

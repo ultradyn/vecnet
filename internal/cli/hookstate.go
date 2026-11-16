@@ -15,6 +15,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/XertroV/vecnet/internal/platform"
 )
 
 const shownWindow = 1024
@@ -164,7 +166,7 @@ func (f stateFile) update(ctx context.Context, fn func(*hookState) error) error 
 }
 
 func (f stateFile) updateMode(ctx context.Context, fn func(*hookState) error, strict, allowMissing bool) error {
-	if err := os.MkdirAll(filepath.Dir(f.path), 0o700); err != nil {
+	if err := platform.MkdirAll(filepath.Dir(f.path), 0o700); err != nil {
 		return err
 	}
 	unlock, err := lockPath(ctx, f.path+".lock")

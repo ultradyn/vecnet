@@ -25,14 +25,14 @@ test('distinguishes historical verification from provisional admission', () => {
 
 for (const [name, open] of [['delivery', openDelivery], ['launcher', openLauncher]] as const) {
   for (const version of ['0.166.0', '0.167.2', '0.169.0', '0.200.0', '1.0.0', '12.0.0', '0.169.0-alpha.1', '0.169.0+build.2']) {
-    test(`${name} admits ${version} and still checks RPC capabilities`, { timeout: 5000 }, async t => {
+    test(`${name} admits ${version} and still checks RPC capabilities`, { timeout: 5000, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
       const dir = await mkdtemp('/tmp/vn-compat-');
       t.after(() => rm(dir, { recursive: true, force: true }));
       const fake = await startFakeCodexAppServer({ dir, clock: fakeClock() });
       t.after(() => fake.close()); fake.setVersion(version);
       fake.setThread({ id: 'owned', status: { type: 'idle' } });
       const log = memoryLog();
-      const rpc = await open({ codexHome: join(dir, 'home'), euid: process.geteuid!(), log, timeoutMs: 1000 });
+      const rpc = await open({ codexHome: join(dir, 'home'), euid: (process.geteuid?.() ?? -1), log, timeoutMs: 1000 });
       t.after(() => rpc.close());
       assert.equal(rpc.version, version);
       assert.deepEqual(log.entries.filter(e => e.msg === 'codex_version_tentative').map(e => e.meta),
@@ -45,12 +45,12 @@ for (const [name, open] of [['delivery', openDelivery], ['launcher', openLaunche
     });
   }
   for (const version of ['0.165.9', '0.16.9', '0.166.0-alpha.1', '0.169', '0.169.0oops', '0.169.0.1', '00.169.0', '0.169.0-alpha.01', '0.169.0-', '0.169.0+']) {
-    test(`${name} refuses old or malformed ${version} before any thread access`, { timeout: 5000 }, async t => {
+    test(`${name} refuses old or malformed ${version} before any thread access`, { timeout: 5000, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
       const dir = await mkdtemp('/tmp/vn-compat-');
       t.after(() => rm(dir, { recursive: true, force: true }));
       const fake = await startFakeCodexAppServer({ dir, clock: fakeClock() });
       t.after(() => fake.close()); fake.setVersion(version);
-      await assert.rejects(open({ codexHome: join(dir, 'home'), euid: process.geteuid!(), log: memoryLog(), timeoutMs: 1000 }), /refused_version/);
+      await assert.rejects(open({ codexHome: join(dir, 'home'), euid: (process.geteuid?.() ?? -1), log: memoryLog(), timeoutMs: 1000 }), /refused_version/);
       assert.deepEqual(fake.requests.map(r => r.method), ['initialize']);
     });
   }

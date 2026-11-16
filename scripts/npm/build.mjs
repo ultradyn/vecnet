@@ -4,6 +4,7 @@ import { chmod, cp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/prom
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { releaseInfo } from './release.mjs';
+import { nativeTargets } from './platforms.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const source = path.join(root, 'npm');
@@ -69,10 +70,7 @@ await stageLauncher('connectors/launcher/systemd/vecnet-launcher-profile.service
 console.log(`Staged ${Object.keys(info.launcher.assets).length} launcher runtime files (${builtins.join(', ')})`);
 
 // Build sequentially so release preparation uses at most two compiler threads.
-for (const [platform, goos, goarch] of [
-  ['linux-x64', 'linux', 'amd64'],
-  ['linux-arm64', 'linux', 'arm64'],
-]) {
+for (const { platform, goos, goarch, suffix } of nativeTargets) {
   const directory = path.join(destination, 'native', platform);
   await mkdir(directory, { recursive: true });
   console.log(`Building vecnet ${manifest.version} for ${platform}`);
@@ -86,9 +84,10 @@ for (const [platform, goos, goarch] of [
     stdio: 'inherit',
   });
   for (const command of ['vecnet', 'vecnet-hub']) {
-    const file = path.join(directory, command);
+    const name = command + suffix;
+    const file = path.join(directory, name);
     await chmod(file, 0o755);
-    info.binaries[`native/${platform}/${command}`] = createHash('sha256').update(await readFile(file)).digest('hex');
+    info.binaries[`native/${platform}/${name}`] = createHash('sha256').update(await readFile(file)).digest('hex');
   }
 }
 

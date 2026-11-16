@@ -15,7 +15,7 @@ async function eventually(fn: () => boolean, what: string) {
   assert.ok(fn(), what);
 }
 
-test('launcher recovery survives a storage-mode switch and is not replayed from its retained ledger', async t => {
+test('launcher recovery survives a storage-mode switch and is not replayed from its retained ledger', { skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const home = mkdtempSync(join(tmpdir(), 'vn-recovery-'));
   const clock = fakeClock(Date.now()), log = memoryLog();
   const state = join(home, '.local', 'state', 'vecnet', 'codex');
@@ -100,7 +100,7 @@ esac
 });
 
 
-test('a conflicting legacy row rolls back the entire import and starts no engine', async t => {
+test('a conflicting legacy row rolls back the entire import and starts no engine', { skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const home = mkdtempSync(join(tmpdir(), 'vn-recovery-conflict-'));
   const clock = fakeClock(Date.now()), log = memoryLog();
   const state = join(home, '.local', 'state', 'vecnet', 'codex');

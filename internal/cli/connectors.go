@@ -9,6 +9,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+
+	"github.com/XertroV/vecnet/internal/platform"
 )
 
 // Connector admin commands (PROTOCOL §2.12, §10, §13.7): dot link codes,
@@ -93,6 +95,11 @@ func (a *app) readKeyFile(path string) (string, error) {
 		return "", err
 	}
 	// Windows reports no meaningful group or other bits.
+	if runtime.GOOS == "windows" {
+		if e := platform.CheckFile(f, false, true); e != nil {
+			a.warn("key file %s is readable by others or has unsafe ownership; restrict its Windows permissions", path)
+		}
+	}
 	if mode := info.Mode().Perm(); mode&0o077 != 0 && runtime.GOOS != "windows" {
 		a.warn("key file %s has mode %04o, readable by others; use chmod 600", path, mode)
 	}

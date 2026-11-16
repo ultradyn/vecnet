@@ -107,6 +107,7 @@ export async function harness(t: TestContext, opts: { cfg?: Record<string, unkno
   const env = opts.env ?? { VECNET_CODEX_BINDINGS: join(dir, 'codex-bindings.json') };
   const clock = fakeClock(T0), log = memoryLog();
   const hub = await startFakeHub();
+  t.after(() => hub.close());
   hub.setPeers(opts.peers ?? [
     directoryEntry({ peer_id: LAUNCHER, name: 'launcher-test', kind: 'launcher' }),
     directoryEntry({ peer_id: REQUESTER, name: 'requester', kind: 'session' }),

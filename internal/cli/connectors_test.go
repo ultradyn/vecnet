@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/events"
 	"github.com/XertroV/vecnet/internal/mcpserver"
+	"github.com/XertroV/vecnet/internal/platform"
 	"github.com/XertroV/vecnet/internal/testhub"
 	"github.com/XertroV/vecnet/internal/webhook"
 )
@@ -220,11 +222,16 @@ func TestRouteAddGrokbotKeyFile(t *testing.T) {
 	keyFile := func(name, body string, mode os.FileMode) string {
 		t.Helper()
 		p := filepath.Join(dir, name)
-		if err := os.WriteFile(p, []byte(body), mode); err != nil {
+		if err := cliFixtureWriteFile(p, []byte(body), mode); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Chmod(p, mode); err != nil { // beat the umask
+		if err := cliFixtureChmod(p, mode); err != nil { // beat the umask
 			t.Fatal(err)
+		}
+		if runtime.GOOS == "windows" && mode&0077 != 0 {
+			if err := platform.CheckPath(p, false, true); err == nil {
+				t.Fatal("public-read key fixture is still private")
+			}
 		}
 		return p
 	}
@@ -271,7 +278,11 @@ func TestRouteAddGrokbotKeyFile(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("route add with a 0644 file = %d %q %q, want 0", code, out, errs)
 	}
-	if !strings.Contains(errs, "warning") || !strings.Contains(errs, "0644") {
+	warningDetail := "0644"
+	if runtime.GOOS == "windows" {
+		warningDetail = "Windows permissions"
+	}
+	if !strings.Contains(errs, "warning") || !strings.Contains(errs, warningDetail) {
 		t.Fatalf("stderr = %q, want a warning naming the mode", errs)
 	}
 	if strings.Contains(out+errs, key) {
@@ -481,10 +492,10 @@ func TestRouteUpdate(t *testing.T) {
 	dir := t.TempDir()
 	const key, next = "crsr_0123456789abcdef", "crsr_fedcba9876543210"
 	keyFile := filepath.Join(dir, "k")
-	if err := os.WriteFile(keyFile, []byte(next+"\n"), 0o600); err != nil {
+	if err := cliFixtureWriteFile(keyFile, []byte(next+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(keyFile, 0o600); err != nil {
+	if err := cliFixtureChmod(keyFile, 0o600); err != nil {
 		t.Fatal(err)
 	}
 

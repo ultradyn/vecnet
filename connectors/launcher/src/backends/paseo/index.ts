@@ -1,7 +1,7 @@
 import { mkdtemp, mkdir, writeFile, rm, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve, relative, isAbsolute } from 'node:path';
-import { definePlugin } from '../../backend.ts';
+import { definePlugin, localPlatform } from '../../backend.ts';
 import type { Backend, BackendCapabilities, BackendHealth, PluginContext, SessionRef, SessionHooks, SessionHandle, SessionState, TurnEvent, TurnInput, SendMode, LaunchSpec } from '../../backend.ts';
 import { Bridge, fullAccessModes } from './bridge.ts';
 import type { PaseoConfig, Agent, Preset } from './bridge.ts';
@@ -11,7 +11,7 @@ export type { PaseoConfig } from './bridge.ts';
 const units = ['paseo-bot.service', 'paseo-bridge-watch.service', 'paseo-cache-prune.service'];
 const live = (a: Agent) => !a.archived && !a.archivedAt && !['archived', 'ended', 'settled', 'exited'].includes(a.status ?? '');
 const owns = (name: string, tag: string) => tag.startsWith('vl-') && (name === tag || name.startsWith(`${tag} `));
-const inside = (root: string, path: string) => { const rel = relative(root, path); return rel !== '' && rel !== '..' && !rel.startsWith('../') && !isAbsolute(rel); };
+const inside = (root: string, path: string) => { const rel = relative(root, path); return rel !== '' && rel !== '..' && !rel.startsWith('../') && !rel.startsWith('..\\') && !isAbsolute(rel); };
 
 class PaseoBackend implements Backend {
   readonly id = 'paseo';
@@ -57,7 +57,7 @@ class PaseoBackend implements Backend {
       for (const check of doctor.checks ?? []) if (!check.ok) degraded.push(this.ctx.redact(`doctor: ${check.name}`));
       if (!doctor.ok || result.code !== 0) degraded.push('doctor failed');
     } catch { if (signal?.aborted) throw signal.reason; degraded.push('doctor unavailable'); }
-    try {
+    if (process.platform === 'linux') try {
       const failed = await this.ctx.exec(['systemctl', '--user', 'is-failed', ...units], { timeoutMs: 90_000, signal });
       const states = failed.stdout.trim().split(/\r?\n/);
       if (states.length !== units.length || ![0, 1].includes(failed.code)) degraded.push('systemd unit status unavailable');
@@ -82,7 +82,8 @@ class PaseoBackend implements Backend {
     const prompt = join(dir, 'prompt');
     let settled = false;
     try {
-      await writeFile(prompt, spec.prompt, { mode: 0o600 });
+      if (process.platform === 'win32') localPlatform('write-private', prompt, { input: spec.prompt });
+      else await writeFile(prompt, spec.prompt, { mode: 0o600 });
       const result = await this.bridge.json<{ agent_id: string | null; preset: string; mode: string | null }>([
         'launch', '--preset', preset.preset, ...(preset.service_tier ? ['--service-tier', preset.service_tier] : []),
         '--title', `${spec.tag} ${this.ctx.redact(spec.title)}`, '--message-file', prompt, '--cwd', workspace, '--no-worktree',
@@ -139,7 +140,7 @@ class PaseoBackend implements Backend {
       const records = (await git(['worktree', 'list', '--porcelain'])).split('\n\n');
       for (const record of records) {
         const lines = record.split('\n');
-        if (lines.includes(`branch refs/heads/${branch}`) && lines[0] !== `worktree ${ws}`) return { removed: false, reason: 'branch_checked_out_elsewhere' };
+        if (lines.includes(`branch refs/heads/${branch}`) && resolve(lines[0].slice('worktree '.length)) !== ws) return { removed: false, reason: 'branch_checked_out_elsewhere' };
       }
       const repo = typeof ref.extra?.repoRoot === 'string' ? ref.extra.repoRoot : ws;
       await this.bridge.git(['-C', repo, 'worktree', 'remove', ws]);

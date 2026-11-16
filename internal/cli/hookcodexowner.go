@@ -4,6 +4,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+
+	"github.com/XertroV/vecnet/internal/platform"
 )
 
 // Legacy hooks cannot identify their host reliably. Reserve registered Codex
@@ -14,7 +16,7 @@ func (a *app) lockLegacyHookRecipient(c *client) (func(), error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+	if err := platform.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return nil, err
 	}
 	unlock, err := lockPath(a.ctx, path+".lock")

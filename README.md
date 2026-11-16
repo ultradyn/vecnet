@@ -16,7 +16,7 @@ Specified, with the Phase 1 core hub and CLI built (see Running) and the Grok Bo
 
 ## Running
 
-Install the prebuilt CLI and hub with `npm install -g vecnet` (Node.js 20+, Linux on x64/ARM64), then run `vecnet help`. See the [npm guide](npm/README.md) for connecting an agent or starting a local hub.
+Install the prebuilt CLI and hub with `npm install -g vecnet` (Node.js 20+, Linux or Windows on x64/ARM64), then run `vecnet help`. See the [Windows client guide](docs/WINDOWS.md) and [npm guide](npm/README.md) for connecting an agent or starting a local hub.
 
 Go 1.26+, no cgo. On xsm, builds and tests go through `build2` (two threads).
 
@@ -27,11 +27,11 @@ just hub-init              # create the dev hub's operator in .data/; prints the
 just run                   # dev hub on http://127.0.0.1:45752, operator UI at /ui/
 ```
 
-For npm releases, run `just release X.Y.Z` from a clean `master` checkout, or commit a version bump in `npm/package.json` and push its matching `vX.Y.Z` tag to the `gh` remote. [Release CI](.github/workflows/release.yml) tests Go, builds both Linux architectures, checks the same tarball on x64 and native ARM64, and publishes it to npm through OIDC. See [RELEASING.md](RELEASING.md) for setup, prereleases, and recovery. `just npm-pack` and `just npm-check` provide the local package gate.
+For npm releases, run `just release X.Y.Z` from a clean `master` checkout, or commit a version bump in `npm/package.json` and push its matching `vX.Y.Z` tag to the `gh` remote. [Release CI](.github/workflows/release.yml) tests Go, builds Linux and Windows x64/ARM64 binaries, checks the same tarball on x64 and native ARM64, and publishes it to npm through OIDC. See [RELEASING.md](RELEASING.md) for setup, prereleases, and recovery. `just npm-pack` and `just npm-check` provide the local package gate.
 
 Point the CLI at the dev hub with a profile in `~/.config/vecnet/config.toml` (`hub = "http://127.0.0.1:45752"`, `secret = "vn_operator_…"`), then `vecnet peer add --kind session --name <name>` (or `vecnet peer invite --name <name>` for a block to paste to an agent, which enrols it and points it at `vecnet guide`) and `vecnet enrol --hub URL --token - --profile NAME` on the peer's side (paste the token on stdin, or set `VECNET_ENROL_TOKEN`, to keep it out of shell history). `vecnet help` lists every command.
 
-For Codex, run that enrollment command inside the intended root conversation. On supported hosts it is the single setup action: save credentials, configure recognized hooks, bind the exact host-provided root, activate matching delivery software and verify readiness. Managed activation requires Linux user systemd and Node ≥22.18 with built-in TypeScript/SQLite, in addition to a supported Codex endpoint. Unsupported hosts or missing bridges remain pending. Review hook trust in Codex `/hooks`; setup never approves it.
+For Codex, run that enrollment command inside the intended root conversation. On supported hosts it is the single setup action: save credentials, configure recognized hooks, bind the exact host-provided root, activate matching delivery software and verify readiness. Managed activation requires Linux user systemd or Windows Task Scheduler and Node ≥22.18 with built-in TypeScript/SQLite, in addition to a supported Codex endpoint. Unsupported hosts or missing bridges remain pending. Review hook trust in Codex `/hooks`; setup never approves it.
 
 `credentials saved; session setup pending` is not delivery readiness: fix the reported requirement and run `vecnet repair --json` without redeeming the token again. Check `vecnet --net NAME codex status` for fresh exact-owner readiness. Ordinary project-scoped use records a private installation inventory; `vecnet projects list --json` inspects it and `vecnet projects forget PATH` forgets only inventory. First ordinary use after an npm or direct binary update schedules background maintenance; explicit repair covers registered managed artifacts across projects, the managed runtime/private CLI and pending enrollment. Missing paths remain deferred. Neither inventory nor upgrades transfer ownership or renew expired bindings. See [Codex setup and maintenance](docs/connectors/codex.md) for advanced setup, trust and explicit handoff.
 

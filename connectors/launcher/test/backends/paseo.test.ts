@@ -1,18 +1,19 @@
 import test from 'node:test';
 import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, writeFile, mkdir, rm, access, symlink } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, mkdir, rm, access } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { symlink } from '../fixtures/platform.ts';
 import plugin from '../../src/backends/paseo/index.ts';
 import type { PluginContext, SessionHooks, LaunchSpec, TurnEvent, SessionHandle, TurnCursor } from '../../src/backend.ts';
 const fixture = fileURLToPath(new URL('../fixtures/fake-paseo-bridge.mjs', import.meta.url));
-async function run(argv: string[], env?: Record<string, string>, signal?: AbortSignal, timeout = 10_000) {
+async function run(argv: string[], env?: Record<string, string>, signal?: AbortSignal, timeout = 10_000, cwd?: string) {
   return new Promise<{code:number; stdout:string; stderr:string}>((resolve, reject) => {
-    const child = spawn(argv[0], argv.slice(1), {env: {...process.env, ...env}, signal, timeout});
+    const child = spawn(argv[0], argv.slice(1), {env: {...process.env, ...env}, signal, timeout, cwd, windowsHide: true});
     let stdout = '', stderr = '';
     child.stdout.on('data', x => stdout += x); child.stderr.on('data', x => stderr += x);
     child.on('error', reject); child.on('close', code => resolve({code:code ?? 1, stdout, stderr}));
@@ -49,10 +50,8 @@ async function harness(t: TestContext) {
         if (argv.includes('is-active')) return {code:botActive?0:3, stdout:botActive?'active\n':'inactive\n', stderr:''};
         return {code:failed.length?0:1, stdout:['paseo-bot.service','paseo-bridge-watch.service','paseo-cache-prune.service'].map(x=>failed.includes(x)?'failed':'active').join('\n'), stderr:''};
       }
-      if (argv[0] === 'fake-paseo-bridge') return run([process.execPath, fixture, ...argv.slice(1)], {FAKE_PASEO_STATE:stateFile, FAKE_PASEO_LOG:logFile, ...opts.env}, opts.signal, opts.timeoutMs);
-      // PluginContext.exec has no cwd option; doctor uses env -C.
-      if (argv[0] === 'env' && argv.includes('fake-paseo-bridge')) return run([...argv.slice(0,argv.indexOf('fake-paseo-bridge')),process.execPath,fixture,...argv.slice(argv.indexOf('fake-paseo-bridge')+1)], {FAKE_PASEO_STATE:stateFile, FAKE_PASEO_LOG:logFile}, opts.signal, opts.timeoutMs);
-      return run(argv, opts.env, opts.signal, opts.timeoutMs);
+      if (argv[0] === 'fake-paseo-bridge') return run([process.execPath, fixture, ...argv.slice(1)], {FAKE_PASEO_STATE:stateFile, FAKE_PASEO_LOG:logFile, ...opts.env}, opts.signal, opts.timeoutMs, opts.cwd);
+      return run(argv, opts.env, opts.signal, opts.timeoutMs, opts.cwd);
     },
   };
   const config = {bridge_bin:'fake-paseo-bridge', workspace_root:ws, presets:Object.fromEntries(state.presets.map(p=>[p.name,{preset:p.name, service_tier:'priority'}])), wait_s:2};
@@ -79,7 +78,7 @@ test('launch creates worktree launch/<job> from base_ref and passes --cwd <ws> -
   const ws=join(h.ws,h.spec.jobId); assert.equal(s.ref.backend,'paseo'); assert.equal(s.ref.host,'test-host'); assert.equal(s.ref.extra?.workspace,ws); assert.equal(s.ref.extra?.branch,'launch/job_test'); assert.equal(s.ref.extra?.tag,h.spec.tag);
   assert.equal(await h.git('-C',ws,'rev-parse','HEAD'),h.base); assert.equal(await h.git('-C',ws,'branch','--show-current'),'launch/job_test');
   assert.equal(await readFile(join(ws,'file'),'utf8'),'base'); assert.equal(s.ref.extra?.base,h.base);
-  const call=(await h.entries()).find(x=>x.args[1]==='launch')!; assert.ok(call.args.includes('--no-worktree')); assert.equal(call.args[call.args.indexOf('--cwd')+1],ws); assert.equal(call.args[call.args.indexOf('--service-tier')+1],'priority'); assert.ok(call.args[call.args.indexOf('--title')+1].startsWith('vl-')); assert.equal(call.mode,0o600); assert.equal(call.prompt,'the prompt'); await assert.rejects(access(call.messageFile!));
+  const call=(await h.entries()).find(x=>x.args[1]==='launch')!; assert.ok(call.args.includes('--no-worktree')); assert.equal(call.args[call.args.indexOf('--cwd')+1],ws); assert.equal(call.args[call.args.indexOf('--service-tier')+1],'priority'); assert.ok(call.args[call.args.indexOf('--title')+1].startsWith('vl-')); if (process.platform !== 'win32') assert.equal(call.mode,0o600); assert.equal(call.prompt,'the prompt'); await assert.rejects(access(call.messageFile!));
   assert.ok(h.calls.find(x=>x.argv.includes('launch'))!.timeoutMs>=300_000); assert.equal(s.ref.extra?.preset,'sol'); assert.equal(s.ref.extra?.mode,'full-access');
 });
 test('launch with agent_id null fails; a returned preset different from the request settles and fails preset_changed', async t => {
@@ -124,9 +123,9 @@ test('permissionModes map Paseo mode ids to full-access; a null-mode preset is n
 });
 test('health: doctor exit 1 is parsed; a failed paseo-bridge-watch unit shows in degraded', async t => {
   const h=await harness(t); await rm(h.ws,{recursive:true}); h.state.doctor={ok:false, checks:[{name:'auth',ok:false,detail:'SECRET'}]}; h.healthUnits(['paseo-bridge-watch.service']); const b=await h.create(); const health=await b.health();
-  assert.equal(health.ok,false); assert.ok(health.degraded?.some(x=>x.includes('auth'))); assert.ok(health.degraded?.some(x=>x.includes('paseo-bridge-watch.service'))); assert.ok(!JSON.stringify(health).includes('SECRET'));
+  assert.equal(health.ok,false); assert.ok(health.degraded?.some(x=>x.includes('auth'))); if (process.platform === 'linux') assert.ok(health.degraded?.some(x=>x.includes('paseo-bridge-watch.service'))); assert.ok(!JSON.stringify(health).includes('SECRET'));
   assert.equal((await h.entries()).find(x=>x.args[1]==='doctor')?.cwd,h.ws); assert.ok(h.calls.find(x=>x.argv.includes('doctor'))!.timeoutMs>=300_000);
-  h.state.doctor={ok:true,checks:[]}; await h.save(); h.healthUnits([],false); assert.equal((await b.health()).ok,false); h.healthUnits([]); assert.equal((await b.health()).ok,true);
+  h.state.doctor={ok:true,checks:[]}; await h.save(); h.healthUnits([],false); assert.equal((await b.health()).ok,process.platform !== 'linux'); h.healthUnits([]); assert.equal((await b.health()).ok,true);
 });
 test('turns: a wait with inner idle yields one turn_finished with the best-effort final block and launch.final_text best_effort; timeout waits again; error → failed turn', async t => {
   const h=await harness(t); h.state.waits=[{agentId:'a1',status:'timeout'},{agentId:'a1',status:'permission'},{agentId:'a1',status:'permission'},{agentId:'a1',status:'idle'},{agentId:'a1',status:'error',message:'SECRET failure'}]; h.state.reads=[['[User] question','thinking','[Thought] hidden','[Tool] command','final answer','second line']]; const b=await h.create(), s=await b.launch(h.spec,h.hooks); const rows=await take(s,3);

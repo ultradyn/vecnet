@@ -23,6 +23,7 @@ import (
 	"github.com/XertroV/vecnet/internal/hubid"
 	"github.com/XertroV/vecnet/internal/hubnotice"
 	"github.com/XertroV/vecnet/internal/opapi"
+	"github.com/XertroV/vecnet/internal/platform"
 )
 
 // Error retains the hub's structured error, including recovery details.
@@ -406,7 +407,9 @@ func (c *Client) UploadWithProgress(ctx context.Context, r io.Reader, size int64
 		}
 		seeker, ok := r.(io.ReadSeeker)
 		if !ok {
-			f, err := os.CreateTemp("", "vecnet-upload-*")
+			// Unix 0600 and an owner-private Windows DACL must protect the
+			// spool before any attachment bytes are written.
+			f, err := platform.CreateTemp(os.TempDir(), "vecnet-upload-*")
 			if err != nil {
 				return envelope.Attachment{}, fmt.Errorf("cannot spool upload")
 			}

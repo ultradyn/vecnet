@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	_ "embed"
 	"errors"
@@ -10,9 +11,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf16"
 
 	"github.com/XertroV/vecnet/internal/onboarding"
 )
@@ -250,14 +253,29 @@ var clipboardTools = [][]string{{"wl-copy"}, {"xclip", "-selection", "clipboard"
 
 // copyClipboard pipes text into the first clipboard tool found on $PATH.
 func copyClipboard(ctx context.Context, getenv func(string) string, text string) (string, error) {
-	for _, t := range clipboardTools {
+	tools := clipboardTools
+	if runtime.GOOS == "windows" {
+		tools = [][]string{{"clip.exe"}}
+	}
+	for _, t := range tools {
 		bin, err := lookPath(t[0], getenv("PATH"))
 		if err != nil {
 			continue
 		}
 		cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		cmd := exec.CommandContext(cctx, bin, t[1:]...)
-		cmd.Stdin = strings.NewReader(text)
+		if runtime.GOOS == "windows" {
+			// clip.exe consumes UTF-16 with a BOM without relying on the active
+			// console code page, preserving non-ASCII invitation text.
+			units := utf16.Encode([]rune(text))
+			data := []byte{0xff, 0xfe}
+			for _, u := range units {
+				data = append(data, byte(u), byte(u>>8))
+			}
+			cmd.Stdin = bytes.NewReader(data)
+		} else {
+			cmd.Stdin = strings.NewReader(text)
+		}
 		cmd.WaitDelay = 100 * time.Millisecond
 		err = cmd.Run()
 		cancel()
@@ -266,7 +284,7 @@ func copyClipboard(ctx context.Context, getenv func(string) string, text string)
 		}
 		return t[0], nil
 	}
-	return "", errors.New("no clipboard tool found (wl-copy, xclip or pbcopy)")
+	return "", errors.New("no clipboard tool found (clip.exe, wl-copy, xclip or pbcopy)")
 }
 
 // lookPath finds name in the PATH list path (the CLI resolves its
@@ -276,9 +294,15 @@ func lookPath(name, path string) (string, error) {
 		if dir == "" {
 			continue
 		}
-		p := filepath.Join(dir, name)
-		if st, err := os.Stat(p); err == nil && !st.IsDir() && st.Mode()&0o111 != 0 {
-			return p, nil
+		names := []string{name}
+		if runtime.GOOS == "windows" && filepath.Ext(name) == "" {
+			names = append(names, name+".exe")
+		}
+		for _, n := range names {
+			p := filepath.Join(dir, n)
+			if st, err := os.Stat(p); err == nil && st.Mode().IsRegular() && (runtime.GOOS == "windows" || st.Mode()&0111 != 0) {
+				return p, nil
+			}
 		}
 	}
 	return "", exec.ErrNotFound

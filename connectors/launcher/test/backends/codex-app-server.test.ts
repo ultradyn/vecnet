@@ -124,7 +124,7 @@ async function take(handle: SessionHandle, count: number, after?: TurnCursor) {
   return rows;
 }
 
-test('native launch uses a private socket, real isolated worktree, branch, title and initial prompt', timeout, async t => {
+test('native launch uses a private socket, real isolated worktree, branch, title and initial prompt', { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const f = await fixture(t), spec = f.spec(), backend = await f.create(), handle = await backend.launch(spec, f.hooks);
   assert.equal((await lstat(f.daemon.socketPath)).isSymbolicLink(), true);
   assert.equal(await readlink(f.daemon.socketPath), f.daemon.target);
@@ -152,7 +152,7 @@ test('native launch uses a private socket, real isolated worktree, branch, title
   assert.deepEqual(await backend.health(), { ok: true, version: '0.166.0' });
 });
 
-test('all spawn modes send explicit native policy while inherited model configuration is omitted', timeout, async t => {
+test('all spawn modes send explicit native policy while inherited model configuration is omitted', { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const f = await fixture(t), backend = await f.create();
   const configText = 'model = "home-configured-model"\nmodel_reasoning_effort = "medium"\n';
   await writeFile(join(f.daemon.home, 'config.toml'), configText);
@@ -175,7 +175,7 @@ test('all spawn modes send explicit native policy while inherited model configur
   assert.deepEqual((await backend.capabilities()).permissionModes, cases.map(row => row[0]));
 });
 
-test('project-root launches in the exact existing cwd and branch, and cleanup always retains that root', timeout, async t => {
+test('project-root launches in the exact existing cwd and branch, and cleanup always retains that root', { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const f = await fixture(t), backend = await f.create(), spec = f.spec('root', { workspaceMode: 'project-root' });
   await writeFile(join(f.repo, 'tracked.txt'), 'existing project edit\n');
   const handle = await backend.launch(spec, f.hooks), launchCalls = [...f.calls];
@@ -201,7 +201,7 @@ test('project-root launches in the exact existing cwd and branch, and cleanup al
   await assert.rejects(stat(f.workspaceRoot), { code: 'ENOENT' });
 });
 
-test('temp with temporary alias creates a fresh Git repo and empty initial commit on its own branch', timeout, async t => {
+test('temp with temporary alias creates a fresh Git repo and empty initial commit on its own branch', { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const f = await fixture(t);
   f.config.workspace_root = await persistentScratchRoot(t);
   const backend = await f.create();
@@ -234,7 +234,7 @@ test('temp with temporary alias creates a fresh Git repo and empty initial commi
   assert.equal(await f.git('-C', f.repo, 'rev-parse', 'HEAD'), f.head);
 });
 
-test('invalid workspace modes and scratch-metadata combinations reject before Git or workspace mutation', timeout, async t => {
+test('invalid workspace modes and scratch-metadata combinations reject before Git or workspace mutation', { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const f = await fixture(t), backend = await f.create();
   const choices: [LaunchSpec['workspaceMode'], boolean][] = [
     ['invalid' as LaunchSpec['workspaceMode'], false], ['temp', false],
@@ -252,7 +252,7 @@ test('invalid workspace modes and scratch-metadata combinations reject before Gi
   assert.equal(await readFile(join(f.repo, 'tracked.txt'), 'utf8'), 'base contents\n');
 });
 
-test('an ordinary project named temporary retains the legacy default worktree behavior', timeout, async t => {
+test('an ordinary project named temporary retains the legacy default worktree behavior', { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const f = await fixture(t), backend = await f.create();
   const spec = f.spec('legacy_temporary', { project: { alias: 'temporary', repoRoot: f.repo, baseRef: 'base' } });
   const handle = await backend.launch(spec, f.hooks);
@@ -262,7 +262,7 @@ test('an ordinary project named temporary retains the legacy default worktree be
 });
 
 for (const variant of ['direct-tmp', 'symlink-to-tmp', 'ancestor-symlink-to-tmp'] as const) {
-  test(`scratch rejects a canonical /tmp allocation before native dispatch: ${variant}`, timeout, async t => {
+  test(`scratch rejects a canonical /tmp allocation before native dispatch: ${variant}`, { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
     const f = await fixture(t), persistent = await persistentScratchRoot(t);
     if (variant === 'direct-tmp') f.config.workspace_root = f.workspaceRoot;
     else {
@@ -278,7 +278,7 @@ for (const variant of ['direct-tmp', 'symlink-to-tmp', 'ancestor-symlink-to-tmp'
   });
 }
 
-test('unknown project-root launch never adopts a foreign thread with the same cwd or starts a duplicate', timeout, async t => {
+test('unknown project-root launch never adopts a foreign thread with the same cwd or starts a duplicate', { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const f = await fixture(t), backend = await f.create();
   const foreign = { id: 'foreign-project-root', cwd: f.repo, status: { type: 'idle' }, archived: false,
     name: 'foreign owner title', turns: [] };
@@ -304,7 +304,7 @@ test('unknown project-root launch never adopts a foreign thread with the same cw
   assert.equal(await f.git('-C', f.repo, 'rev-parse', 'HEAD'), f.head);
 });
 
-test('history hydrates final answers and consumed deliveries in chronological order across pages and restart cursors', timeout, async t => {
+test('history hydrates final answers and consumed deliveries in chronological order across pages and restart cursors', { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const f = await fixture(t), backend = await f.create(), handle = await backend.launch(f.spec(), f.hooks);
   const first = f.daemon.threads.get(handle.ref.id)!.turns[0];
   f.daemon.complete(first.id, [final('initial answer')]);
@@ -339,7 +339,7 @@ test('history hydrates final answers and consumed deliveries in chronological or
   await assert.rejects(resumed.handle.turns({ value: JSON.stringify({ last: 'missing-turn' }) })[Symbol.asyncIterator]().next(), /history gap/);
 });
 
-test('restart and reconnect resume owned threads without overriding model or permissions', timeout, async t => {
+test('restart and reconnect resume owned threads without overriding model or permissions', { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const f = await fixture(t), backend = await f.create(), handle = await backend.launch(f.spec(), f.hooks);
   f.config.presets.inherited = { model: 'changed-after-spawn', effort: 'low' };
   const resumed = await f.restart(handle);
@@ -357,7 +357,7 @@ test('restart and reconnect resume owned threads without overriding model or per
   assert.deepEqual(await resumed.backend.listOwned(), [handle.ref]);
 });
 
-test('effective model, provider and effort from native spawn survive restart and stale ref metadata', timeout, async t => {
+test('effective model, provider and effort from native spawn survive restart and stale ref metadata', { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const f = await fixture(t), backend = await f.create(), spec = f.spec(), handle = await backend.launch(spec, f.hooks);
   const expected = { ...handle.ref.extra, model: 'native-default-model', model_provider: 'native-default-provider',
     effort: 'medium', permission_mode: 'ask' };
@@ -380,7 +380,7 @@ test('effective model, provider and effort from native spawn survive restart and
   for (const request of f.methods('thread/resume')) assert.deepEqual(request.params, { threadId: handle.ref.id, excludeTurns: true });
 });
 
-test('duplicate job launch after restart never creates another thread, worktree or initial input', timeout, async t => {
+test('duplicate job launch after restart never creates another thread, worktree or initial input', { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const f = await fixture(t), backend = await f.create(), spec = f.spec(), handle = await backend.launch(spec, f.hooks);
   assert.equal((await backend.launch(spec, f.hooks)).ref.id, handle.ref.id);
   const resumed = await f.restart(handle);
@@ -390,7 +390,7 @@ test('duplicate job launch after restart never creates another thread, worktree 
   assert.deepEqual(await resumed.backend.findByTag(spec.tag), handle.ref);
 });
 
-test('accepted thread/start with a lost response recovers by workspace and starts the saved prompt once', timeout, async t => {
+test('accepted thread/start with a lost response recovers by workspace and starts the saved prompt once', { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const f = await fixture(t), backend = await f.create();
   f.daemon.failNext('thread/start', 'accept-drop');
   await assert.rejects(backend.launch(f.spec(), f.hooks), error => error instanceof CodexRpcError && error.ambiguous);
@@ -407,7 +407,7 @@ test('accepted thread/start with a lost response recovers by workspace and start
   assert.equal(f.owned().initialSent, true);
 });
 
-test('unresolved ambiguous thread launch refuses retries without duplicating a thread', timeout, async t => {
+test('unresolved ambiguous thread launch refuses retries without duplicating a thread', { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const f = await fixture(t), backend = await f.create();
   f.daemon.failNext('thread/start', 'drop');
   await assert.rejects(backend.launch(f.spec(), f.hooks), error => error instanceof CodexRpcError && error.ambiguous);
@@ -415,7 +415,7 @@ test('unresolved ambiguous thread launch refuses retries without duplicating a t
   assert.equal(f.methods('thread/start').length, 1); assert.equal(f.daemon.threads.size, 0);
 });
 
-test('accepted initial turn with a lost response is reconciled from its receipt after restart', timeout, async t => {
+test('accepted initial turn with a lost response is reconciled from its receipt after restart', { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const f = await fixture(t), backend = await f.create();
   f.daemon.failNext('turn/start', 'accept-drop');
   await assert.rejects(backend.launch(f.spec(), f.hooks), error => error instanceof CodexRpcError && error.ambiguous);
@@ -433,7 +433,7 @@ test('accepted initial turn with a lost response is reconciled from its receipt 
   assert.equal(f.owned().initialSending, false);
 });
 
-test('missing initial receipt refuses another send even across repeated restarts', timeout, async t => {
+test('missing initial receipt refuses another send even across repeated restarts', { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const f = await fixture(t), backend = await f.create();
   f.daemon.failNext('turn/start', 'drop');
   await assert.rejects(backend.launch(f.spec(), f.hooks), error => error instanceof CodexRpcError && error.ambiguous);
@@ -447,7 +447,7 @@ test('missing initial receipt refuses another send even across repeated restarts
   assert.equal(f.methods('turn/start').length, 1); assert.equal(f.owned().initialSending, true);
 });
 
-test('restart before initial dispatch resumes saved instructions when turn polling begins', timeout, async t => {
+test('restart before initial dispatch resumes saved instructions when turn polling begins', { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const f = await fixture(t), backend = await f.create();
   f.daemon.failNext('thread/name/set', { code: -32000, message: 'temporary name failure' });
   await assert.rejects(backend.launch(f.spec(), f.hooks), /temporary name failure/);
@@ -467,7 +467,7 @@ test('restart before initial dispatch resumes saved instructions when turn polli
   assert.equal(f.methods('turn/start')[0].params.input[0].text, f.spec().prompt);
 });
 
-test('ambiguous delivery acceptance is reconciled without another turn/start or losing consumed IDs', timeout, async t => {
+test('ambiguous delivery acceptance is reconciled without another turn/start or losing consumed IDs', { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const f = await fixture(t), backend = await f.create(), handle = await backend.launch(f.spec(), f.hooks);
   const thread = f.daemon.threads.get(handle.ref.id)!;
   f.daemon.complete(thread.turns[0].id, [final('initial')]);
@@ -480,7 +480,7 @@ test('ambiguous delivery acceptance is reconciled without another turn/start or 
   assert.deepEqual('consumed' in rows[1].event && rows[1].event.consumed, ['delivery-1', 'delivery-2']);
 });
 
-test('steer falls back to start across an inactive turn boundary and queue stays with launcher', timeout, async t => {
+test('steer falls back to start across an inactive turn boundary and queue stays with launcher', { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const f = await fixture(t), backend = await f.create(), handle = await backend.launch(f.spec(), f.hooks);
   const thread = f.daemon.threads.get(handle.ref.id)!;
   const steered = await handle.send(input(['steered']), 'steer');
@@ -496,7 +496,7 @@ test('steer falls back to start across an inactive turn boundary and queue stays
   assert.equal(f.methods('turn/start').length, 2);
 });
 
-test('definite steer rejection clears reservations and the same delivery retries once after restart and turn completion', timeout, async t => {
+test('definite steer rejection clears reservations and the same delivery retries once after restart and turn completion', { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const f = await fixture(t), handle = await (await f.create()).launch(f.spec(), f.hooks);
   const thread = f.daemon.threads.get(handle.ref.id)!;
   f.daemon.failNext('turn/steer', { code: -32602, message: 'turn completed before steer acceptance' });
@@ -512,7 +512,7 @@ test('definite steer rejection clears reservations and the same delivery retries
   assert.equal(thread.turns.flatMap(turn => turn.items).filter(item => item.clientId === clientId).length, 1);
 });
 
-test('definite start rejection clears reservations while ambiguous rejection retains them', timeout, async t => {
+test('definite start rejection clears reservations while ambiguous rejection retains them', { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const f = await fixture(t), handle = await (await f.create()).launch(f.spec(), f.hooks);
   f.daemon.complete(f.daemon.threads.get(handle.ref.id)!.turns[0].id, [final('initial')]);
   f.daemon.failNext('turn/start', { code: -32602, message: 'definite rejection' });
@@ -532,7 +532,7 @@ test('definite start rejection clears reservations while ambiguous rejection ret
   assert.equal(f.methods('turn/start').length, count);
 });
 
-test('definite initial rejection permits exactly one accepted retry after restart', timeout, async t => {
+test('definite initial rejection permits exactly one accepted retry after restart', { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const f = await fixture(t), backend = await f.create();
   f.daemon.failNext('turn/start', { code: -32602, message: 'initial rejected' });
   await assert.rejects(backend.launch(f.spec(), f.hooks), error => error instanceof CodexRpcError && !error.ambiguous);
@@ -550,7 +550,7 @@ test('definite initial rejection permits exactly one accepted retry after restar
   assert.equal(f.owned().initialSent, true);
 });
 
-test('park survives activity and polling across restart until input explicitly resumes the thread', timeout, async t => {
+test('park survives activity and polling across restart until input explicitly resumes the thread', { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const f = await fixture(t), handle = await (await f.create()).launch(f.spec(), f.hooks);
   f.daemon.complete(f.daemon.threads.get(handle.ref.id)!.turns[0].id, [final('initial')]);
   const [row] = await take(handle, 1);
@@ -582,7 +582,7 @@ test('park survives activity and polling across restart until input explicitly r
   assert.equal((await resumed.handle.activity()).turnRunning, true);
 });
 
-test('only owned thread requests reach typed hooks or receive protocol replies', timeout, async t => {
+test('only owned thread requests reach typed hooks or receive protocol replies', { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const f = await fixture(t), backend = await f.create(), handle = await backend.launch(f.spec(), f.hooks);
   const command = { threadId: handle.ref.id, command: 'git status', cwd: handle.ref.extra!.workspace, reason: 'inspect changes' };
   const own = f.daemon.serverRequest('item/commandExecution/requestApproval', command);
@@ -607,7 +607,7 @@ test('only owned thread requests reach typed hooks or receive protocol replies',
   assert.equal(f.daemon.replies.length, 4);
 });
 
-test('disconnect aborts owned permission and question hooks and clears pending activity', timeout, async t => {
+test('disconnect aborts owned permission and question hooks and clears pending activity', { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const f = await fixture(t);
   let startedCount = 0, abortedCount = 0, started!: () => void, aborted!: () => void;
   const start = new Promise<void>(resolve => { started = resolve; });
@@ -627,7 +627,7 @@ test('disconnect aborts owned permission and question hooks and clears pending a
   assert.equal((await handle.activity()).openApprovals, 0); assert.equal(f.daemon.replies.length, 0);
 });
 
-test('settle interrupts and archives once, removes ownership, keeps dirty workspace then cleans it safely', timeout, async t => {
+test('settle interrupts and archives once, removes ownership, keeps dirty workspace then cleans it safely', { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const f = await fixture(t), backend = await f.create(), spec = f.spec(), handle = await backend.launch(spec, f.hooks);
   const workspace = String(handle.ref.extra!.workspace);
   await writeFile(join(workspace, 'tracked.txt'), 'keep dirty change\n');
@@ -654,7 +654,7 @@ test('settle interrupts and archives once, removes ownership, keeps dirty worksp
   assert.equal(await f.git('-C', f.repo, 'branch', '--show-current'), 'base');
 });
 
-test('missing daemon and invalid job identities never create a workspace or launch a subprocess', timeout, async t => {
+test('missing daemon and invalid job identities never create a workspace or launch a subprocess', { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const f = await fixture(t), backend = await f.create();
   await assert.rejects(backend.launch(f.spec('invalid', { branch: '../escape' }), f.hooks), /identity/);
   await assert.rejects(backend.launch(f.spec('preset', { preset: 'missing' }), f.hooks), /preset/);
@@ -705,7 +705,7 @@ async function launchHarness(t: TestContext, f: Awaited<ReturnType<typeof fixtur
 }
 
 for (const timing of ['history-during-send', 'history-after-send'] as const) {
-  test(`W-I1 native pre-record crash correlates initial and follow-up completions: ${timing}`, timeout, async t => {
+  test(`W-I1 native pre-record crash correlates initial and follow-up completions: ${timing}`, { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
     const f = await fixture(t), h = await launchHarness(t, f);
     const jobId = h.job().jobId, launchDeliveryId = 'initial-launch-delivery';
     // Dispatch's initial input row exists before startLaunch; no lane has yet
@@ -792,7 +792,7 @@ for (const timing of ['history-during-send', 'history-after-send'] as const) {
   });
 }
 
-test('an accepted but invisible native start stays unresolved through launch, restart, retries and retention sweep', timeout, async t => {
+test('an accepted but invisible native start stays unresolved through launch, restart, retries and retention sweep', { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const f = await fixture(t), h = await launchHarness(t, f);
   f.daemon.failNext('thread/start', 'accept-drop'); f.daemon.setListVisible(false);
   assert.equal((await startLaunch(h.job(), h.deps)).ok, false);
@@ -824,7 +824,7 @@ test('an accepted but invisible native start stays unresolved through launch, re
   assert.equal(f.methods('thread/start').length, 1); assert.equal(f.methods('turn/start').length, 0);
 });
 
-test('restart without a caught failure fence keeps an invisible attempted native start recoverable', timeout, async t => {
+test('restart without a caught failure fence keeps an invisible attempted native start recoverable', { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const f = await fixture(t), h = await launchHarness(t, f);
   f.daemon.failNext('thread/start', 'accept-drop');
   await assert.rejects(h.backend().launch(f.spec(), f.hooks), error => error instanceof CodexRpcError && error.ambiguous);
@@ -841,7 +841,7 @@ test('restart without a caught failure fence keeps an invisible attempted native
   assert.equal(f.methods('thread/start').length, 1); assert.equal(f.methods('thread/archive').length, 1);
 });
 
-test('a Git allocation failure before native dispatch is safely absent and its clean workspace is reclaimable', timeout, async t => {
+test('a Git allocation failure before native dispatch is safely absent and its clean workspace is reclaimable', { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const f = await fixture(t), h = await launchHarness(t, f), exec = f.ctx.exec;
   f.ctx.exec = async (argv, opts) => {
     const result = await exec(argv, opts);
@@ -857,7 +857,7 @@ test('a Git allocation failure before native dispatch is safely absent and its c
 
 for (const failure of ['retained-broader-policy', 'zero-input-no-rollout'] as const) {
   for (const archiveAvailable of [true, false]) {
-    test(`fix2 ${failure}: exact owned cleanup ${archiveAvailable ? 'available' : 'unavailable then retried'} through launcher recovery`, timeout, async t => {
+    test(`fix2 ${failure}: exact owned cleanup ${archiveAvailable ? 'available' : 'unavailable then retried'} through launcher recovery`, { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
       const f = await fixture(t), h = await launchHarness(t, f);
       const workspace = join(f.workspaceRoot, h.job().jobId);
       const foreign = { id: 'foreign-fix2-thread', cwd: workspace, name: 'untouched foreign thread',
@@ -950,7 +950,7 @@ for (const failure of ['retained-broader-policy', 'zero-input-no-rollout'] as co
   }
 }
 
-test('fix2 settleOwned refuses tampered refs before RPC and settles only exact durable provenance without resume', timeout, async t => {
+test('fix2 settleOwned refuses tampered refs before RPC and settles only exact durable provenance without resume', { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const f = await fixture(t), backend = await f.create();
   f.daemon.retainStartPolicy(policy => { policy.approvalPolicy = 'never'; });
   f.daemon.rejectZeroInputResume(true);
@@ -987,9 +987,9 @@ test('fix2 settleOwned refuses tampered refs before RPC and settles only exact d
   assert.equal(foreign.name, 'foreign-direct'); assert.deepEqual(foreign.turns, []);
 });
 
-test('the fake accepts duplicate clientUserMessageId starts as distinct turns like the real native API', timeout, async t => {
+test('the fake accepts duplicate clientUserMessageId starts as distinct turns like the real native API', { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const f = await fixture(t), handle = await (await f.create()).launch(f.spec(), f.hooks);
-  const rpc = await openCodexRpc({ codexHome: f.daemon.home, euid: process.geteuid!(), log: f.log, timeoutMs: 1000 });
+  const rpc = await openCodexRpc({ codexHome: f.daemon.home, euid: (process.geteuid?.() ?? -1), log: f.log, timeoutMs: 1000 });
   t.after(() => rpc.close());
   const params = { threadId: handle.ref.id, clientUserMessageId: 'same-client-id', input: [{ type: 'text', text: 'same payload' }] };
   const first = await rpc.call<{ turn: { id: string } }>('turn/start', params, 1000);
@@ -1005,7 +1005,7 @@ for (const invalid of [
   { name: 'null candidate', page: { data: [null], nextCursor: null } },
   { name: 'non-string cursor', page: { data: [], nextCursor: 7 } },
   { name: 'repeated cursor', page: { data: [], nextCursor: 'native-threads:0' } },
-]) test(`attempted native recovery rejects ${invalid.name} and never treats malformed listing as absence`, timeout, async t => {
+]) test(`attempted native recovery rejects ${invalid.name} and never treats malformed listing as absence`, { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const f = await fixture(t), backend = await f.create();
   f.daemon.failNext('thread/start', 'accept-drop');
   await assert.rejects(backend.launch(f.spec(), f.hooks));
@@ -1018,7 +1018,7 @@ for (const invalid of [
   assert.equal((await backend.cleanupWorkspace({ backend: backend.id, host: f.ctx.host, id: '', extra: { tag: f.spec().tag } })).removed, false);
 });
 
-test('native recovery proves global uniqueness across pages before adopting or mutating any candidate', timeout, async t => {
+test('native recovery proves global uniqueness across pages before adopting or mutating any candidate', { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const f = await fixture(t), backend = await f.create();
   f.daemon.failNext('thread/start', 'accept-drop'); await assert.rejects(backend.launch(f.spec(), f.hooks));
   const actual = [...f.daemon.threads.values()][0];
@@ -1040,7 +1040,7 @@ test('native recovery proves global uniqueness across pages before adopting or m
   assert.equal(foreign.name, 'unmodified other client');
 });
 
-test('native recovery traverses an empty first page and accepts only the unique exact provenance match', timeout, async t => {
+test('native recovery traverses an empty first page and accepts only the unique exact provenance match', { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const f = await fixture(t), backend = await f.create();
   f.daemon.failNext('thread/start', 'accept-drop'); await assert.rejects(backend.launch(f.spec(), f.hooks));
   const actual = [...f.daemon.threads.values()][0];
@@ -1053,7 +1053,7 @@ test('native recovery traverses an empty first page and accepts only the unique 
   assert.equal(f.owned().id, actual.id);
 });
 
-test('a unique same-cwd thread with different provenance is never adopted', timeout, async t => {
+test('a unique same-cwd thread with different provenance is never adopted', { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const f = await fixture(t), backend = await f.create();
   f.daemon.failNext('thread/start', 'drop'); await assert.rejects(backend.launch(f.spec(), f.hooks));
   const foreign = { id: 'foreign-inspector', cwd: join(f.workspaceRoot, f.spec().jobId), source: 'appServer', threadSource: 'foreign' };
@@ -1063,7 +1063,7 @@ test('a unique same-cwd thread with different provenance is never adopted', time
   for (const method of ['thread/name/set', 'thread/resume', 'turn/start', 'thread/archive']) assert.equal(f.methods(method).length, 0, method);
 });
 
-test('a malformed later thread-list page prevents adopting the valid first-page candidate', timeout, async t => {
+test('a malformed later thread-list page prevents adopting the valid first-page candidate', { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const f = await fixture(t), backend = await f.create();
   f.daemon.failNext('thread/start', 'accept-drop'); await assert.rejects(backend.launch(f.spec(), f.hooks));
   const actual = [...f.daemon.threads.keys()][0];
@@ -1074,7 +1074,7 @@ test('a malformed later thread-list page prevents adopting the valid first-page 
   for (const method of ['thread/name/set', 'thread/resume', 'turn/start', 'thread/archive']) assert.equal(f.methods(method).length, 0, method);
 });
 
-test('a legacy no-id native intent remains unresolved and cannot authorize workspace cleanup', timeout, async t => {
+test('a legacy no-id native intent remains unresolved and cannot authorize workspace cleanup', { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const f = await fixture(t), backend = await f.create();
   f.daemon.failNext('thread/start', 'accept-drop'); await assert.rejects(backend.launch(f.spec(), f.hooks));
   const legacy = f.owned(); delete legacy.phase; delete legacy.threadSource;
@@ -1107,7 +1107,7 @@ const invalidEffectivePolicies: Array<{ name: string; mode: PermissionMode; alte
 ];
 
 for (const scenario of invalidEffectivePolicies) {
-  test(`effective start policy blocks initial instructions: ${scenario.name}`, timeout, async t => {
+  test(`effective start policy blocks initial instructions: ${scenario.name}`, { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
     const f = await fixture(t), backend = await f.create(), spec = f.spec('policy', { permissionMode: scenario.mode });
     f.daemon.nextResponse('thread/start', result => { scenario.alter(result); return result; });
     await assert.rejects(backend.launch(spec, f.hooks));
@@ -1120,7 +1120,7 @@ for (const scenario of invalidEffectivePolicies) {
   });
 
   for (const seam of ['reattach', 'reconnect'] as const) {
-    test(`effective policy is fenced on ${seam}: ${scenario.name}`, timeout, async t => {
+    test(`effective policy is fenced on ${seam}: ${scenario.name}`, { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
       const f = await fixture(t), backend = await f.create();
       const handle = await backend.launch(f.spec('policy_resume', { permissionMode: scenario.mode }), f.hooks);
       f.daemon.complete(f.daemon.threads.get(handle.ref.id)!.turns[0].id, [final('initial')]);
@@ -1140,7 +1140,7 @@ for (const scenario of invalidEffectivePolicies) {
   }
 }
 
-test('same-backend reattach cannot return an unverified handle left by a rejected start policy', timeout, async t => {
+test('same-backend reattach cannot return an unverified handle left by a rejected start policy', { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const f = await fixture(t), backend = await f.create();
   f.daemon.nextResponse('thread/start', result => { result.approvalPolicy = 'never'; return result; });
   await assert.rejects(backend.launch(f.spec(), f.hooks));
@@ -1150,7 +1150,7 @@ test('same-backend reattach cannot return an unverified handle left by a rejecte
   assert.equal(f.methods('turn/start').length, 0); assert.equal(f.methods('thread/start').length, 1);
 });
 
-test('an already owned handle can settle its exact thread after reconnect policy refusal', timeout, async t => {
+test('an already owned handle can settle its exact thread after reconnect policy refusal', { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const f = await fixture(t), backend = await f.create(), handle = await backend.launch(f.spec(), f.hooks);
   const thread = f.daemon.threads.get(handle.ref.id)!;
   f.daemon.failNext('thread/read', 'drop'); await assert.rejects(handle.activity());
@@ -1210,7 +1210,7 @@ async function nativeRoutingHarness(t: TestContext, config: { presets?: Array<'o
 
 const questionTimeout = 'no answer from requester; use your best judgement and say what you assumed';
 for (const change of ['question-id', 'text', 'header', 'option-label', 'option-description', 'allow-other', 'turn', 'item', 'reconnect'] as const) {
-  test(`W-I2 native reused question RPC id opens its own real bridge question: ${change}`, timeout, async t => {
+  test(`W-I2 native reused question RPC id opens its own real bridge question: ${change}`, { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
     const s = await nativeRoutingHarness(t, {});
     const prompts = () => s.h.deps.ledger.pendingOutbox(1000, s.f.clock.now())
       .filter(row => row.kind === 'send').map(row => row.payload as SendRequest).filter(row => parseQuestion(row.metadata));
@@ -1276,7 +1276,7 @@ for (const change of ['question-id', 'text', 'header', 'option-label', 'option-d
   });
 }
 
-test('W-I2 native numeric and string question ids remain distinct; secret requests stay refused', timeout, async t => {
+test('W-I2 native numeric and string question ids remain distinct; secret requests stay refused', { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const s = await nativeRoutingHarness(t, {});
   try {
     const method = 'item/tool/requestUserInput';
@@ -1300,7 +1300,7 @@ test('W-I2 native numeric and string question ids remain distinct; secret reques
 });
 
 for (const kind of ['outside-grant-root', 'sensitive-file-change', 'moved-sensitive-file', 'network-only'] as const) {
-  test(`native ${kind} reaches the operator through real canonicalization, routing and parent bridge`, timeout, async t => {
+  test(`native ${kind} reaches the operator through real canonicalization, routing and parent bridge`, { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
     const s = await nativeRoutingHarness(t, kind === 'network-only' ? { network: true } :
       { presets: [kind === 'outside-grant-root' ? 'outside-workspace' : 'privileged'] });
     try {
@@ -1339,7 +1339,7 @@ for (const kind of ['outside-grant-root', 'sensitive-file-change', 'moved-sensit
 }
 
 for (const variant of ['unknown-paths', 'mismatched-item', 'additional-permissions'] as const) {
-  test(`native unrepresentable approval fails closed without a requester card: ${variant}`, timeout, async t => {
+  test(`native unrepresentable approval fails closed without a requester card: ${variant}`, { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
     const s = await nativeRoutingHarness(t, {});
     try {
       const threadId = s.handle.ref.id, turnId = s.f.daemon.threads.get(threadId)!.turns[0].id;
@@ -1359,7 +1359,7 @@ for (const variant of ['unknown-paths', 'mismatched-item', 'additional-permissio
 }
 
 
-test('standalone native launcher check prints health and exits without leaving its probe socket open', timeout, async t => {
+test('standalone native launcher check prints health and exits without leaving its probe socket open', { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const f = await fixture(t), config = join(f.dir, 'check.json');
   await writeFile(join(f.dir, 'credential'), 'fixture-only-not-a-live-secret\n', { mode: 0o600 });
   await writeFile(config, JSON.stringify({host: 'check', hub: {url: 'http://127.0.0.1:1', credential_file: join(f.dir, 'credential')}, state_dir: join(f.dir, 'state'),
@@ -1374,7 +1374,7 @@ test('standalone native launcher check prints health and exits without leaving i
 });
 
 
-test('native reused RPC id cannot replay a prior requester grant onto a changed operator scope', timeout, async t => {
+test('native reused RPC id cannot replay a prior requester grant onto a changed operator scope', { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const s = await nativeRoutingHarness(t,{presets:['outside-workspace','privileged']});
   try {
     const threadId=s.handle.ref.id,turnId=s.f.daemon.threads.get(threadId)!.turns[0].id;
@@ -1395,7 +1395,7 @@ test('native reused RPC id cannot replay a prior requester grant onto a changed 
   } finally {s.finish();}
 });
 
-test('fix3 unchanged native wire replay binds approval to canonical scope after a symlink retarget', timeout, async t => {
+test('fix3 unchanged native wire replay binds approval to canonical scope after a symlink retarget', { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const s = await nativeRoutingHarness(t, { presets: ['outside-workspace', 'privileged'] });
   try {
     const workspace = String(s.handle.ref.extra!.workspace), ordinary = join(workspace, 'ordinary');
@@ -1434,7 +1434,7 @@ test('fix3 unchanged native wire replay binds approval to canonical scope after 
   } finally { s.finish(); }
 });
 
-test('fix3 legacy unscoped request cache cannot authorize an identical replay', timeout, async t => {
+test('fix3 legacy unscoped request cache cannot authorize an identical replay', { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
   const s = await nativeRoutingHarness(t, {});
   try {
     const options: PermissionRequest['options'] = [
@@ -1465,7 +1465,7 @@ test('fix3 legacy unscoped request cache cannot authorize an identical replay', 
 });
 
 for (const change of ['option-meaning', 'method', 'scope'] as const) {
-  test(`fix3 bridge cache binds the complete canonical permission when ${change} changes`, timeout, async t => {
+  test(`fix3 bridge cache binds the complete canonical permission when ${change} changes`, { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
     const s = await nativeRoutingHarness(t, {});
     try {
       const options: PermissionRequest['options'] = [
@@ -1501,7 +1501,7 @@ for (const change of ['option-meaning', 'method', 'scope'] as const) {
 
 for (const failure of ['retained-broader-policy', 'zero-input-no-rollout'] as const) {
   for (const archiveAvailable of [true, false]) {
-    test(`fix3 crash before failure fence: ${failure}, archive ${archiveAvailable ? 'available' : 'unavailable then restored'}`, timeout, async t => {
+    test(`fix3 crash before failure fence: ${failure}, archive ${archiveAvailable ? 'available' : 'unavailable then restored'}`, { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
       const f = await fixture(t), h = await launchHarness(t, f);
       const workspace = join(f.workspaceRoot, h.job().jobId);
       const foreign = { id: 'foreign-fix3', cwd: workspace, threadSource: 'other-owner', name: 'foreign unchanged',
@@ -1584,7 +1584,7 @@ for (const failure of ['retained-broader-policy', 'zero-input-no-rollout'] as co
 }
 
 for (const temporary of ['transport-drop', 'unclassified-rpc-error'] as const) {
-  test(`fix3 pre-fence ${temporary} stays pending and later adopts the successful owned launch`, timeout, async t => {
+  test(`fix3 pre-fence ${temporary} stays pending and later adopts the successful owned launch`, { ...timeout, skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
     const f = await fixture(t), h = await launchHarness(t, f);
     f.daemon.failNext('thread/name/set', 'drop'); h.deps.ledger.updateJob(h.job().jobId, { state: 'launching' });
     await assert.rejects(h.backend().launch(f.spec(), f.hooks));

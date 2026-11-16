@@ -91,7 +91,7 @@ func TestWatchPartialIdentityEvidenceDefersUnchanged(t *testing.T) {
 					scope = fmt.Sprintf(scope, f.hub)
 				}
 				raw := []byte(`{` + scope + `"shown":[],` + evidence + `}`)
-				if err := os.WriteFile(f.path, raw, 0600); err != nil {
+				if err := cliFixtureWriteFile(f.path, raw, 0600); err != nil {
 					t.Fatal(err)
 				}
 				out := new(hookWatchOutput)
@@ -110,7 +110,7 @@ func TestWatchPartialIdentityEvidenceDefersUnchanged(t *testing.T) {
 
 func TestMonitorEmptyLegacyStateBootstrapsFirstDisplay(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
-	if err := os.WriteFile(path, []byte(`{"shown":[]}`), 0600); err != nil {
+	if err := cliFixtureWriteFile(path, []byte(`{"shown":[]}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	f := stateFile{path}

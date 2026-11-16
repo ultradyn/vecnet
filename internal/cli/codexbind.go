@@ -13,6 +13,8 @@ import (
 	"regexp"
 	"strconv"
 	"time"
+
+	"github.com/XertroV/vecnet/internal/platform"
 )
 
 func unsafeCodexBindings(path, why string) error {
@@ -21,7 +23,7 @@ func unsafeCodexBindings(path, why string) error {
 
 // codexBindingsPath is shared with the launcher connector's default path.
 func codexBindingsPath(getenv func(string) string) (string, error) {
-	home := getenv("HOME")
+	home := platform.Home(getenv)
 	if home == "" || !filepath.IsAbs(home) {
 		return "", usageErr("Codex ownership requires an absolute HOME")
 	}
@@ -177,16 +179,16 @@ func (a *app) cmdCodex(args []string, nowTime func() time.Time) error {
 		if !o.has("codex-home") {
 			home = a.getenv("CODEX_HOME")
 			if home == "" {
-				if a.getenv("HOME") == "" {
+				if platform.Home(a.getenv) == "" {
 					return usageErr("cannot locate codex-home: set CODEX_HOME or HOME")
 				}
-				home = filepath.Join(a.getenv("HOME"), ".codex")
+				home = filepath.Join(platform.Home(a.getenv), ".codex")
 			}
 		}
 		if !filepath.IsAbs(home) {
 			return usageErr("--codex-home must be absolute")
 		}
-		home, err = filepath.EvalSymlinks(home)
+		home, err = platform.Canonical(home)
 		if err != nil {
 			return fmt.Errorf("codex-home: %w", err)
 		}
@@ -228,7 +230,7 @@ func (a *app) cmdCodex(args []string, nowTime func() time.Time) error {
 		if err != nil {
 			return err
 		}
-		config, err = filepath.EvalSymlinks(config)
+		config, err = platform.Canonical(config)
 		if err != nil {
 			return fmt.Errorf("config namespace: %w", err)
 		}
@@ -251,7 +253,7 @@ func (a *app) cmdCodex(args []string, nowTime func() time.Time) error {
 	}
 	if args[0] != "bindings" {
 		dir := filepath.Dir(path)
-		if err := os.MkdirAll(dir, 0700); err != nil {
+		if err := platform.MkdirAll(dir, 0700); err != nil {
 			return err
 		}
 		if err := os.Chmod(dir, 0700); err != nil {
@@ -445,7 +447,7 @@ func (a *app) cmdCodex(args []string, nowTime func() time.Time) error {
 				if !now.Before(b.ExpiresAt) {
 					continue
 				}
-				home, err := filepath.EvalSymlinks(b.CodexHome)
+				home, err := platform.Canonical(b.CodexHome)
 				switch {
 				case err != nil:
 					count++

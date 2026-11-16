@@ -2,6 +2,7 @@ package theme_test
 
 import (
 	"fmt"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -26,6 +27,12 @@ func rungName(p theme.Profile) string {
 // Design §4.1 and §10.2 test 1.
 func TestDetect(t *testing.T) {
 	const tc, c256, c16, none = theme.TrueColor, theme.ANSI256, theme.ANSI16, theme.NoColor
+	defaultProfile := c16
+	if runtime.GOOS == "windows" {
+		// colorprofile assumes ANSI256 for a native Windows terminal when
+		// TERM is absent. An explicit TERM still selects the usual rung.
+		defaultProfile = c256
+	}
 	cases := []struct {
 		name string
 		env  []string
@@ -46,9 +53,9 @@ func TestDetect(t *testing.T) {
 		// colorprofile reads screen as a 256-colour terminal.
 		{"screen", []string{"TERM=screen"}, c256},
 		{"dumb", []string{"TERM=dumb"}, c16},
-		{"TERM unset", nil, c16},
+		{"TERM unset", nil, defaultProfile},
 		{"a truecolor TERM without COLORTERM is capped at 256", []string{"TERM=xterm-kitty"}, c256},
-		{"last value wins", []string{"NO_COLOR=1", "NO_COLOR="}, c16},
+		{"last value wins", []string{"NO_COLOR=1", "NO_COLOR="}, defaultProfile},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

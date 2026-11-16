@@ -100,7 +100,7 @@ func TestHookInstallPrefersClaudeProjectDir(t *testing.T) {
 	gitT(t, "init", "--quiet", repo)
 	sub := filepath.Join(repo, "sub")
 	for _, d := range []string{sub, elsewhere} {
-		if err := os.MkdirAll(d, 0o755); err != nil {
+		if err := cliFixtureMkdirAll(d, 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -123,7 +123,7 @@ func TestHookInstallPrefersClaudeProjectDir(t *testing.T) {
 	}
 	// Outside a git repository CLAUDE_PROJECT_DIR itself is the root.
 	plain := filepath.Join(base, "plain")
-	if err := os.Mkdir(plain, 0o755); err != nil {
+	if err := cliFixtureMkdir(plain, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	u.env["CLAUDE_PROJECT_DIR"] = plain

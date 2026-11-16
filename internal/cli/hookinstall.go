@@ -12,9 +12,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/XertroV/vecnet/internal/platform"
 )
 
 type hookHandler struct {
@@ -64,6 +67,18 @@ func hookShellWord(bin string) string {
 	return "'" + strings.ReplaceAll(bin, "'", `'"'"'`) + "'"
 }
 
+// Codex uses PowerShell for Windows command hooks; Claude Code retains its
+// Bash hook contract on Windows. Do not use a call operator to quote arguments.
+func codexHookWord(bin string) string {
+	if runtime.GOOS != "windows" {
+		return hookShellWord(bin)
+	}
+	if hookShellSafe.MatchString(bin) {
+		return bin
+	}
+	return "& '" + strings.ReplaceAll(bin, "'", "''") + "'"
+}
+
 // hookCommand is an installed handler's command; mcp, when not empty, is
 // the MCP server name its hints name (`hook install --mcp`).
 func hookCommand(bin, profile, event string, autoAck bool, mcp string) string {
@@ -81,6 +96,17 @@ func hookCommand(bin, profile, event string, autoAck bool, mcp string) string {
 // re-run with or without --mcp replaces them in place.
 var hookOwnedCommand = regexp.MustCompile(`^([A-Za-z0-9/._-]+|'(?:[^']|'"'"')*') hook --profile ([^ ]+) --event ([^ ]+)( --auto-ack)?( --mcp vecnet-[A-Za-z0-9_-]{1,24})?$`)
 
+// Windows hooks use PowerShell's call operator and literal single-quoted
+// strings. Recognize only our canonical output, never arbitrary shell syntax.
+var hookOwnedPowerShell = regexp.MustCompile(`^(& '(?:[^']|'')*') hook --profile ([^ ]+) --event ([^ ]+)( --auto-ack)?( --mcp vecnet-[A-Za-z0-9_-]{1,24})?$`)
+
+func matchOwnedHook(command string) []string {
+	if runtime.GOOS == "windows" && strings.HasPrefix(command, "& '") {
+		return hookOwnedPowerShell.FindStringSubmatch(command)
+	}
+	return hookOwnedCommand.FindStringSubmatch(command)
+}
+
 // errHookInstallMCP refuses `hook install --mcp` for a profile with no MCP
 // server name, or under a global --as the installed hooks never carry.
 var errHookInstallMCP = usageErr("hook install --mcp: profile must be 1-24 letters, digits, _ or - (MCP server names), and the installed hooks never take --as")
@@ -92,7 +118,7 @@ var hookClaudeTimeout = 10 * time.Second
 // binary. Test executables and go-run binaries use PATH's vecnet instead.
 // The warning is returned so installation can send it only to stderr.
 func defaultBin(exe string) (bin, warning string) {
-	if filepath.Base(exe) != "vecnet" {
+	if filepath.Base(exe) != platform.Exe("vecnet") {
 		return "vecnet", ""
 	}
 	absolute, err := filepath.Abs(exe)
@@ -311,7 +337,7 @@ func (a *app) cmdHookInstall(args []string) error {
 			return err
 		}
 	}
-	target, err := filepath.EvalSymlinks(path)
+	target, err := platform.Canonical(path)
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
 			return err
@@ -380,7 +406,12 @@ func (a *app) registerMCP(dir, name string, add []string) {
 	run := func(argv []string) error {
 		ctx, cancel := context.WithTimeout(a.ctx, hookClaudeTimeout)
 		defer cancel()
-		cmd := exec.CommandContext(ctx, claude, argv...)
+		executable, arguments, err := hookMCPInvocation(claude, argv)
+		if err != nil {
+			return err
+		}
+		cmd := exec.CommandContext(ctx, executable, arguments...)
+		platform.Background(cmd)
 		cmd.Dir = dir
 		cmd.WaitDelay = 100 * time.Millisecond
 		out, err := cmd.CombinedOutput()
@@ -409,7 +440,7 @@ func (a *app) warnNestedCheckouts(path string) {
 		return
 	}
 	root := filepath.Dir(filepath.Dir(path))
-	home := a.getenv("HOME")
+	home := platform.Home(a.getenv)
 	report := func(dir, rel string) {
 		raw, err := os.ReadFile(filepath.Join(dir, ".claude", "settings.local.json"))
 		if err != nil {
@@ -437,7 +468,7 @@ func (a *app) warnNestedCheckouts(path string) {
 		return
 	}
 	realRoot := root
-	if r, err := filepath.EvalSymlinks(root); err == nil {
+	if r, err := platform.Canonical(root); err == nil {
 		realRoot = r
 	}
 	for _, line := range strings.Split(string(out), "\n") {
@@ -445,7 +476,7 @@ func (a *app) warnNestedCheckouts(path string) {
 		if !ok {
 			continue
 		}
-		if r, err := filepath.EvalSymlinks(wt); err == nil {
+		if r, err := platform.Canonical(wt); err == nil {
 			wt = r
 		}
 		if strings.HasPrefix(wt, realRoot+string(filepath.Separator)) {
@@ -468,7 +499,11 @@ func (a *app) hookGit(dir, arg string) (string, error) {
 	if err != nil && ctx.Err() != nil {
 		err = fmt.Errorf("git timed out: %w", ctx.Err())
 	}
-	return strings.TrimSuffix(string(out), "\n"), err
+	path := strings.TrimSuffix(strings.TrimSuffix(string(out), "\n"), "\r")
+	if runtime.GOOS == "windows" {
+		path = filepath.FromSlash(path)
+	}
+	return path, err
 }
 
 // hookNotGitRepo reports whether err is git's own answer that the directory
@@ -517,7 +552,7 @@ func (a *app) hookMainCheckout(dir string) string {
 		if !filepath.IsAbs(p) {
 			p = filepath.Join(dir, p)
 		}
-		if r, err := filepath.EvalSymlinks(p); err == nil {
+		if r, err := platform.Canonical(p); err == nil {
 			return r
 		}
 		return filepath.Clean(p)
@@ -558,7 +593,7 @@ func otherHookProfiles(settings []byte, profile string) []string {
 				if handler.member("type").scalarString() != "command" {
 					continue
 				}
-				m := hookOwnedCommand.FindStringSubmatch(handler.member("command").scalarString())
+				m := matchOwnedHook(handler.member("command").scalarString())
 				if m != nil && m[2] != profile && !slices.Contains(found, inert(m[2], 64)) {
 					found = append(found, inert(m[2], 64))
 				}
@@ -573,18 +608,18 @@ func otherHookProfiles(settings []byte, profile string) []string {
 // directory is a symlink, leaving the link and its target unchanged.
 func defaultSettingsRedirect(path, what string) error {
 	for _, p := range []string{filepath.Dir(path), path} {
-		info, err := os.Lstat(p)
+		reparse, err := platform.IsReparse(p)
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
 		if err != nil {
 			return err
 		}
-		if info.Mode()&os.ModeSymlink == 0 {
+		if !reparse {
 			continue
 		}
 		resolved := p
-		if r, err := filepath.EvalSymlinks(p); err == nil {
+		if r, err := platform.Canonical(p); err == nil {
 			resolved = r
 		} else if l, err := os.Readlink(p); err == nil {
 			resolved = l
@@ -601,7 +636,7 @@ func writeHookSettings(path string, body []byte, mode os.FileMode) error {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
-	f, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*")
+	f, err := platform.CreateTemp(dir, "."+filepath.Base(path)+".*")
 	if err != nil {
 		return err
 	}
@@ -617,7 +652,7 @@ func writeHookSettings(path string, body []byte, mode os.FileMode) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	return os.Rename(f.Name(), path)
+	return platform.Replace(f.Name(), path)
 }
 
 // Objects retain source-ordered raw keys; scalars retain their original
@@ -795,16 +830,18 @@ func oursHook(handler *jsonNode, bin, profile, event string) bool {
 	if handler.member("type").scalarString() != "command" {
 		return false
 	}
-	m := hookOwnedCommand.FindStringSubmatch(handler.member("command").scalarString())
+	m := matchOwnedHook(handler.member("command").scalarString())
 	if m == nil || m[2] != profile || m[3] != event {
 		return false
 	}
 	word := m[1]
-	if strings.HasPrefix(word, "'") {
+	if strings.HasPrefix(word, "& '") {
+		word = strings.ReplaceAll(word[3:len(word)-1], "''", "'")
+	} else if strings.HasPrefix(word, "'") {
 		word = strings.ReplaceAll(word[1:len(word)-1], `'"'"'`, "'")
 	}
 	// Quoting must be exactly hookCommand's: 'vecnet' is not its spelling.
-	if hookShellWord(word) != m[1] {
+	if hookShellWord(word) != m[1] && codexHookWord(word) != m[1] {
 		return false
 	}
 	base := filepath.Base(word)
@@ -935,7 +972,7 @@ func mergeCodexHooks(existing []byte, bin string) ([]byte, bool, error) {
 				kept = append(kept, group)
 			}
 		}
-		raw, _ := json.Marshal(hookGroup{Matcher: event.matcher, Hooks: []hookHandler{{Type: "command", Command: hookShellWord(bin) + " hook --client codex --event " + event.name, Timeout: 5, AdditionalContextLimit: event.contextLimit}}})
+		raw, _ := json.Marshal(hookGroup{Matcher: event.matcher, Hooks: []hookHandler{{Type: "command", Command: codexHookWord(bin) + " hook --client codex --event " + event.name, Timeout: 5, AdditionalContextLimit: event.contextLimit}}})
 		group, err := parseJSONNode(raw)
 		if err != nil {
 			return nil, false, err
@@ -994,9 +1031,9 @@ func codexOwnedHandler(handler *jsonNode, bin, event string) bool {
 		command = strings.Replace(command, " hook --client codex --event ", " hook --profile generic --event ", 1)
 		raw, _ := json.Marshal(hookHandler{Type: "command", Command: command})
 		candidate, _ := parseJSONNode(raw)
-		return command == hookCommand(bin, "generic", event, false, "") || (oursHook(candidate, bin, "generic", event) && !strings.Contains(command, " --auto-ack") && !strings.Contains(command, " --mcp"))
+		return command == codexHookWord(bin)+" hook --profile generic --event "+event || (oursHook(candidate, bin, "generic", event) && !strings.Contains(command, " --auto-ack") && !strings.Contains(command, " --mcp"))
 	}
-	m := hookOwnedCommand.FindStringSubmatch(command)
+	m := matchOwnedHook(command)
 	if m == nil || !hookInstallProfile.MatchString(m[2]) || m[3] != event {
 		return false
 	}
@@ -1030,7 +1067,7 @@ func (a *app) installCodexHooksExpected(path, bin string, o opts, expected strin
 	if err != nil {
 		return err
 	}
-	if resolved, e := filepath.EvalSymlinks(target); e == nil {
+	if resolved, e := platform.Canonical(target); e == nil {
 		target = resolved
 	} else if !errors.Is(e, os.ErrNotExist) {
 		return e
@@ -1039,7 +1076,7 @@ func (a *app) installCodexHooksExpected(path, bin string, o opts, expected strin
 			return errors.New("hook install: dangling settings symlink")
 		}
 		// Canonicalize an existing parent even for a new file.
-		if parent, e := filepath.EvalSymlinks(filepath.Dir(target)); e == nil {
+		if parent, e := platform.Canonical(filepath.Dir(target)); e == nil {
 			target = filepath.Join(parent, filepath.Base(target))
 		}
 	}
@@ -1062,6 +1099,9 @@ func (a *app) installCodexHooksExpected(path, bin string, o opts, expected strin
 		return errors.New("hook repair deferred: settings changed before migration acquired its lock")
 	}
 	mode := os.FileMode(0644)
+	if runtime.GOOS == "windows" {
+		mode = 0666
+	}
 	if existed {
 		st, e := os.Stat(target)
 		if e != nil {
@@ -1124,7 +1164,7 @@ func (a *app) installCodexHooksExpected(path, bin string, o opts, expected strin
 		if e != nil {
 			return e
 		}
-		f, e := os.CreateTemp(filepath.Dir(target), filepath.Base(target)+".vecnet-backup-*")
+		f, e := platform.CreateTemp(filepath.Dir(target), filepath.Base(target)+".vecnet-backup-*")
 		if e != nil {
 			return e
 		}
@@ -1236,4 +1276,26 @@ func customCodexHookCount(raw []byte, bin string) int {
 		}
 	}
 	return count
+}
+
+// Windows npm shims are shell programs, not executables. Resolve the known
+// Claude package entry and run Node directly, preserving argv without cmd.exe
+// interpolation. Native claude.exe and Unix entrypoints keep their own argv.
+func hookMCPInvocation(claude string, args []string) (string, []string, error) {
+	if runtime.GOOS != "windows" || !strings.EqualFold(filepath.Ext(claude), ".cmd") {
+		return claude, args, nil
+	}
+	entry := filepath.Join(filepath.Dir(claude), "node_modules", "@anthropic-ai", "claude-code", "cli.js")
+	if st, e := os.Stat(entry); e != nil || !st.Mode().IsRegular() {
+		return "", nil, errors.New("Claude npm shim has no package entry; install native Claude or run the printed registration manually")
+	}
+	node := filepath.Join(filepath.Dir(claude), "node.exe")
+	if st, e := os.Stat(node); e != nil || !st.Mode().IsRegular() {
+		var err error
+		node, err = exec.LookPath("node.exe")
+		if err != nil {
+			return "", nil, err
+		}
+	}
+	return node, append([]string{entry}, args...), nil
 }

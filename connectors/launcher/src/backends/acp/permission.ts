@@ -1,3 +1,4 @@
+import { isAbsolute } from 'node:path';
 import type { Grant, PermissionDraft, PermissionRequest } from '../../backend.ts';
 import { object } from './rpc.ts';
 
@@ -27,7 +28,7 @@ export function permissionRequest(params: unknown, requestId: string): Permissio
   const paths: NonNullable<PermissionDraft['paths']> = [];
   if (Array.isArray(tool.locations)) for (const value of tool.locations) {
     const location = object(value);
-    if (typeof location.path !== 'string' || !location.path.startsWith('/')) throw new Error('acp_permission_location');
+    if (typeof location.path !== 'string' || !isAbsolute(location.path)) throw new Error('acp_permission_location');
     paths.push({ path: location.path, access: tool.kind === 'delete' ? 'delete' : tool.kind === 'move' ? 'move' : tool.kind === 'edit' ? 'write' : 'read' });
   }
   let host: PermissionDraft['host'];

@@ -1,8 +1,8 @@
 import test from 'node:test';
 import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, rm, realpath, symlink, writeFile, readdir, lstat } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { mkdtemp, mkdir, readFile, rm, realpath, writeFile, readdir, lstat } from 'node:fs/promises';
+import { dirname, isAbsolute, join } from 'node:path';
 import { homedir } from 'node:os';
 import fsPromises from 'node:fs/promises';
 import { syncBuiltinESMExports } from 'node:module';
@@ -12,12 +12,15 @@ import type { AcpConfig } from '../src/backends/acp/index.ts';
 import type { AcpLaunchSpec } from '../src/backends/acp/workspace.ts';
 import type { PluginContext, SessionHandle, SessionHooks, TurnEvent, TurnInput } from '../src/backend.ts';
 import { redactText } from '../src/redact.ts';
+import { symlink } from './fixtures/platform.ts';
 import { acpTestDir, acpTestParent } from './fixtures/acp-test-root.ts';
 
+const fixtureHandles = new WeakMap<TestContext, Set<SessionHandle>>();
 const fixturePath = fileURLToPath(new URL('./fixtures/fake-acp-agent.mjs', import.meta.url));
 const input = (text = 'follow-up', id = 'dly_one'): TurnInput => ({ items: [{ deliveryId: id, messageId: 'msg_one', from: 'peer_one', text, attachments: [] }] });
 async function fixture(t: TestContext, scenario = 'normal') {
   const handles = new Set<SessionHandle>();
+  fixtureHandles.set(t, handles);
   const dir = await acpTestDir(t, 'vecnet-acp-', async () => { for (const h of handles) await h.settle('cancel'); });
   const values = new Map<string, string>(), execs: string[][] = [], log = join(dir, 'wire.jsonl');
   const ctx: PluginContext = {
@@ -42,11 +45,12 @@ async function fixture(t: TestContext, scenario = 'normal') {
   const backend = await plugin.create(config, ctx);
   const launch = async (over: Partial<AcpLaunchSpec> = {}, useHooks = hooks) => { const h = await backend.launch(spec(over), useHooks); handles.add(h); return h; };
   const calls = async (): Promise<Array<Record<string, any>>> => (await readFile(log, 'utf8')).trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
+  t.after(async () => { for (const h of handles) await h.settle('cancel'); });
   return { dir, ctx, config, hooks, backend, spec, launch, calls, values, execs };
 }
 async function eventsUntil(h: SessionHandle, predicate: (e: TurnEvent) => boolean): Promise<TurnEvent[]> {
   const controller = new AbortController(), events: TurnEvent[] = [];
-  const timeout = setTimeout(() => controller.abort(), 2000);
+  const timeout = setTimeout(() => controller.abort(), 10000);
   try {
     for await (const { event } of h.turns(undefined, controller.signal)) { events.push(event); if (predicate(event)) return events; }
     throw new Error('expected event not received');
@@ -268,7 +272,7 @@ test('I5 default test root uses the synthetic user persistent cache rather than 
   if (process.env.ACP_TEST_ROOT) { t.skip('explicit root supplied'); return; }
   const f = await fixture(t);
   const expected = await acpTestParent();
-  assert.ok(f.dir.startsWith(expected + '/'), 'default ACP fixtures must use the user persistent cache');
+  assert.ok(f.dir.startsWith(join(expected, 'acp').slice(0, -3)), 'default ACP fixtures must use the user persistent cache');
 });
 
 
@@ -287,9 +291,12 @@ test('C1 completed inbound identity tracking has a finite connection budget and 
 // test, so the RED run can clean a child even if fixture setup itself throws.
 async function rootSandbox(t: TestContext) {
   const control = await realpath(process.env.ACP_FIX2_CONTROL_ROOT ?? homedir());
-  assert.ok(control.startsWith('/') && control !== '/tmp' && !control.startsWith('/tmp/'));
+  assert.ok(isAbsolute(control) && control !== '/tmp' && !control.startsWith('/tmp/'));
   const dir = await mkdtemp(join(control, 'acp-fix2-root-'));
-  t.after(() => rm(dir, { recursive: true, force: true }));
+  t.after(async () => {
+    for (const handle of fixtureHandles.get(t) ?? []) await handle.settle('cancel');
+    await rm(dir, { recursive: true, force: true });
+  });
   return dir;
 }
 async function withRootEnv<T>(t: TestContext, root: string, explicit: boolean, run: () => Promise<T>): Promise<T> {
@@ -311,7 +318,7 @@ for (const explicit of [false, true]) {
       assert.equal(h.ref.extra?.workspace, await realpath(String(h.ref.extra?.workspace)));
     });
   });
-  test(`fix2 /tmp ancestor refused before mkdir (${explicit ? 'override' : 'default'})`, async t => {
+  test(`fix2 /tmp ancestor refused before mkdir (${explicit ? 'override' : 'default'})`, { skip: process.platform === 'win32' && 'Unix /tmp ancestry; Windows junctions covered separately' }, async t => {
     const sandbox = await rootSandbox(t), link = join(sandbox, 'cache-link');
     await symlink('/tmp', link);
     const forbiddenName = 'acp-fix2-never-create-' + sandbox.split('/').at(-1);
@@ -365,7 +372,7 @@ test('fix2 registers unique-child cleanup before a later awaited fixture initial
 
 
 for (const source of ['xdg', 'home', 'override'] as const) {
-  test(`fix3 symlink/.. preserves the independently known fixture parent (${source})`, async t => {
+  test(`fix3 symlink/.. preserves the independently known fixture parent (${source})`, { skip: process.platform === 'win32' && 'Unix symlink/.. semantics differ from junctions' }, async t => {
     const sandbox = await rootSandbox(t), target = `${sandbox}/persistent-target`, link = `${sandbox}/cache-link`;
     await mkdir(`${target}/inner`, { recursive: true });
     await symlink(`${target}/inner`, link);
@@ -389,7 +396,7 @@ for (const source of ['xdg', 'home', 'override'] as const) {
   });
 }
 
-test('fix3 default symlink-to-/tmp/../tmp root is refused with zero attempted mkdir', async t => {
+test('fix3 default symlink-to-/tmp/../tmp root is refused with zero attempted mkdir', { skip: process.platform === 'win32' && 'Unix /tmp ancestry' }, async t => {
   const sandbox = await rootSandbox(t), link = `${sandbox}/cache-link`;
   await symlink('/tmp', link);
   const unique = 'acp-fix3-never-create-' + sandbox.split('/').at(-1);

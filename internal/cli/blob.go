@@ -14,6 +14,7 @@ import (
 	"github.com/XertroV/vecnet/internal/blobclient"
 	"github.com/XertroV/vecnet/internal/blobwire"
 	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/platform"
 )
 
 // blobNow is replaced by deterministic transfer tests before running commands.
@@ -82,7 +83,7 @@ func (a *app) cmdBlob(args []string) error {
 	defer cancel()
 	// Same directory keeps publication atomic. CreateTemp uses 0600, including
 	// while unverified bytes are being streamed to this private file.
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".vecnet-blob-*")
+	tmp, err := platform.CreateTemp(filepath.Dir(path), ".vecnet-blob-*")
 	if err != nil {
 		return err
 	}

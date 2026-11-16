@@ -83,7 +83,7 @@ messaging:
   codex status [--thread UUID] [--codex-home DIR] [--json]
        read-only: ready requires fresh (30s), matching-owner, ready/live connector status; unresolved legacy bindings block readiness
        enrollment automatically stages/activates supported standalone delivery; retry pending setup with vecnet repair
-       requires Node >=22.18, Linux user systemd and a supported app-server host; docs/connectors/codex-appserver.md
+       requires Node >=22.18, Linux user systemd or Windows Task Scheduler, and a supported app-server host; docs/connectors/codex-appserver.md
   projects list [--json] | projects forget PATH
        private local installation inventory; forgetting leaves hooks and ownership intact
   repair [--status] [--json]
@@ -550,6 +550,8 @@ func hasRequestIDFlag(args []string) bool {
 
 func (a *app) dispatchOnce(cmd string, args []string) error {
 	switch cmd {
+	case "local-platform":
+		return a.cmdLocalPlatform(args)
 	case "projects":
 		return a.cmdProjects(args)
 	case "repair":

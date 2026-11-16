@@ -6,6 +6,7 @@ import type { ChildProcess } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { commandInvocation, terminateProcess } from '../src/platform.ts';
 import { fileURLToPath } from 'node:url';
 
 export interface RealHub {
@@ -17,7 +18,7 @@ export interface RealHub {
 
 const START_TIMEOUT_MS = 30_000;
 const STOP_TIMEOUT_MS = 15_000;
-const DEFAULT_BIN = fileURLToPath(new URL('../../../bin/vecnet-hub', import.meta.url));
+const DEFAULT_BIN = fileURLToPath(new URL(`../../../bin/vecnet-hub${process.platform === 'win32' ? '.exe' : ''}`, import.meta.url));
 
 /** The child environment: every VECNET_* variable removed, so a developer shell cannot move the hub. */
 function childEnv(): NodeJS.ProcessEnv {
@@ -28,7 +29,8 @@ function tail(chunks: string[]): string { return chunks.join('').slice(-2000); }
 
 function runInit(bin: string, dataDir: string, env: NodeJS.ProcessEnv): Promise<{ peerId: string; secret: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(bin, ['init', '--data-dir', dataDir, '--operator-name', 'Max'], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const command = commandInvocation([bin, 'init', '--data-dir', dataDir, '--operator-name', 'Max'], env);
+    const child = spawn(command.file, command.args, { ...command, windowsHide: true, env, stdio: ['ignore', 'pipe', 'pipe'] });
     const out: string[] = [], err: string[] = [];
     child.stdout.setEncoding('utf8').on('data', (c: string) => out.push(c));
     child.stderr.setEncoding('utf8').on('data', (c: string) => err.push(c));
@@ -45,7 +47,8 @@ function runInit(bin: string, dataDir: string, env: NodeJS.ProcessEnv): Promise<
 
 function serve(bin: string, dataDir: string, env: NodeJS.ProcessEnv): Promise<{ child: ChildProcess; url: string; exited: Promise<void> }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(bin, ['--listen', '127.0.0.1:0', '--data-dir', dataDir], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const command = commandInvocation([bin, '--listen', '127.0.0.1:0', '--data-dir', dataDir], env);
+    const child = spawn(command.file, command.args, { ...command, windowsHide: true, env, stdio: ['ignore', 'pipe', 'pipe'] });
     const err: string[] = [];
     let buffered = '', done = false;
     const exited = new Promise<void>(r => child.once('exit', () => r()));
@@ -53,7 +56,7 @@ function serve(bin: string, dataDir: string, env: NodeJS.ProcessEnv): Promise<{ 
     function fail(e: Error) {
       if (done) return;
       done = true; clearTimeout(timer);
-      child.kill('SIGKILL');
+      terminateProcess(child);
       reject(e);
     }
     // Keep draining both pipes for the child's whole life, so it never blocks on a full pipe.
@@ -110,8 +113,8 @@ export async function startRealHub(opts: { bin?: string } = {}): Promise<RealHub
     stop() {
       stopping ??= (async () => {
         if (child.exitCode === null && child.signalCode === null) {
-          child.kill('SIGTERM');
-          const timer = setTimeout(() => child.kill('SIGKILL'), STOP_TIMEOUT_MS);
+          terminateProcess(child, 'SIGTERM');
+          const timer = setTimeout(() => terminateProcess(child), STOP_TIMEOUT_MS);
           await exited;
           clearTimeout(timer);
         }

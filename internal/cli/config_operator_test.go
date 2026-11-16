@@ -76,7 +76,7 @@ func TestOperatorProfileValueSpan(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "config.toml")
-			if err := os.WriteFile(path, []byte(tc.body), 0o600); err != nil {
+			if err := cliFixtureWriteFile(path, []byte(tc.body), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			if err := setOperatorProfile(path, tc.profile); err != nil {
@@ -89,13 +89,7 @@ func TestOperatorProfileValueSpan(t *testing.T) {
 			if string(got) != tc.want {
 				t.Fatalf("bytes\n got %q\nwant %q", got, tc.want)
 			}
-			info, err := os.Stat(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if info.Mode().Perm() != 0o600 {
-				t.Fatalf("mode %o", info.Mode().Perm())
-			}
+			cliFixtureRequireMode(t, path, 0o600)
 			var cfg Config
 			if _, err := toml.Decode(string(got), &cfg); err != nil {
 				t.Fatal(err)
@@ -116,7 +110,7 @@ func TestOperatorProfileRefusesUnsafeForms(t *testing.T) {
 	}
 	for _, body := range cases {
 		path := filepath.Join(t.TempDir(), "config.toml")
-		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		if err := cliFixtureWriteFile(path, []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		if err := setOperatorProfile(path, "fly"); err == nil {
@@ -136,11 +130,11 @@ func TestOperatorProfileRefusesSymlink(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "real.toml")
 	body := "operator_profile = \"old\"\n[profiles.fly]\nhub = \"https://h\"\nsecret = \"vn_operator_FLY\"\n"
-	if err := os.WriteFile(target, []byte(body), 0o600); err != nil {
+	if err := cliFixtureWriteFile(target, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	link := filepath.Join(dir, "config.toml")
-	if err := os.Symlink(target, link); err != nil {
+	if err := cliFixtureSymlink(t, target, link); err != nil {
 		t.Fatal(err)
 	}
 	err := setOperatorProfile(link, "fly")
@@ -163,7 +157,7 @@ func TestOperatorProfileConcurrentPreservesEnrolment(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
 	original := "operator_profile = \"old\"\n\n[profiles.fly]\nhub = \"https://vecnet.fly.dev\"\nsecret = \"vn_operator_OLD\"\npeer_id = \"peer_old\"\n"
-	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+	if err := cliFixtureWriteFile(path, []byte(original), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -176,7 +170,7 @@ func TestOperatorProfileConcurrentPreservesEnrolment(t *testing.T) {
 	errc := make(chan error, 1)
 	go func() { errc <- setOperatorProfile(path, "fly") }()
 	time.Sleep(30 * time.Millisecond)
-	if err := os.WriteFile(path, []byte(updated), 0o600); err != nil {
+	if err := cliFixtureWriteFile(path, []byte(updated), 0o600); err != nil {
 		unlock()
 		t.Fatal(err)
 	}
@@ -204,7 +198,7 @@ func TestOperatorProfileRefusesMissingProfileUnderLock(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
 	original := "operator_profile = \"old\"\n[profiles.fly]\nhub = \"https://h\"\nsecret = \"vn_operator_FLY\"\n"
-	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+	if err := cliFixtureWriteFile(path, []byte(original), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -217,7 +211,7 @@ func TestOperatorProfileRefusesMissingProfileUnderLock(t *testing.T) {
 	errc := make(chan error, 1)
 	go func() { errc <- setOperatorProfile(path, "fly") }()
 	time.Sleep(30 * time.Millisecond)
-	if err := os.WriteFile(path, []byte(updated), 0o600); err != nil {
+	if err := cliFixtureWriteFile(path, []byte(updated), 0o600); err != nil {
 		unlock()
 		t.Fatal(err)
 	}
@@ -248,7 +242,7 @@ func TestOperatorProfileRefusesMissingProfileUnderLock(t *testing.T) {
 			dir := t.TempDir()
 			path := filepath.Join(dir, "config.toml")
 			original := "operator_profile = \"old\"\n[profiles.fly]\nhub = \"https://h\"\nsecret = \"vn_operator_FLY\"\n"
-			if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+			if err := cliFixtureWriteFile(path, []byte(original), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -265,7 +259,7 @@ func TestOperatorProfileRefusesMissingProfileUnderLock(t *testing.T) {
 					unlock()
 					t.Fatal(err)
 				}
-			} else if err := os.WriteFile(path, []byte(*tc.body), 0o600); err != nil {
+			} else if err := cliFixtureWriteFile(path, []byte(*tc.body), 0o600); err != nil {
 				unlock()
 				t.Fatal(err)
 			}
@@ -302,7 +296,7 @@ func strPtr(s string) *string { return &s }
 func TestCommitOperatorProfileRefusesStaleBytes(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	raw := []byte("operator_profile = \"old\"\nsecret = \"one\"\n")
-	if err := os.WriteFile(path, raw, 0o600); err != nil {
+	if err := cliFixtureWriteFile(path, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	info, err := os.Lstat(path)
@@ -310,7 +304,7 @@ func TestCommitOperatorProfileRefusesStaleBytes(t *testing.T) {
 		t.Fatal(err)
 	}
 	changed := []byte("operator_profile = \"old\"\nsecret = \"two\"\n")
-	if err := os.WriteFile(path, changed, 0o600); err != nil {
+	if err := cliFixtureWriteFile(path, changed, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	err = commitOperatorProfile(path, info, raw, []byte("operator_profile = \"fly\"\nsecret = \"one\"\n"))
@@ -330,7 +324,7 @@ func TestChooseQuotedAndUnderscoreProfiles(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
 	original := "# keep\n[profiles._op]\nhub = \"http://127.0.0.1:1\"\nsecret = \"vn_operator_X\"\n[profiles.\"fly.dev\"]\nhub = \"https://vecnet.fly.dev\"\nsecret = \"vn_operator_Y\"\n"
-	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+	if err := cliFixtureWriteFile(path, []byte(original), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	getenv := func(k string) string {
@@ -347,7 +341,7 @@ func TestChooseQuotedAndUnderscoreProfiles(t *testing.T) {
 
 	for _, name := range []string{"_op", "fly.dev"} {
 		t.Run("n "+name, func(t *testing.T) {
-			if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+			if err := cliFixtureWriteFile(path, []byte(original), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			a := &app{ctx: context.Background(), stdin: strings.NewReader(""), stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{}, getenv: getenv}
@@ -366,7 +360,7 @@ func TestChooseQuotedAndUnderscoreProfiles(t *testing.T) {
 			}
 		})
 		t.Run("y "+name, func(t *testing.T) {
-			if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+			if err := cliFixtureWriteFile(path, []byte(original), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			a := &app{ctx: context.Background(), stdin: strings.NewReader(""), stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{}, getenv: getenv}

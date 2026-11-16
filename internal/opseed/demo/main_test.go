@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/platform"
 	"github.com/XertroV/vecnet/internal/prefs"
 	"github.com/XertroV/vecnet/internal/store"
 )
@@ -335,12 +336,8 @@ func TestDemoReopensWithStableCredentials(t *testing.T) {
 		t.Fatal(response.StatusCode)
 	}
 	stop()
-	info, err := os.Stat(filepath.Join(dir, "demo.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Mode().Perm() != 0600 {
-		t.Fatal("credential manifest is not private")
+	if err := platform.PrivateFile(filepath.Join(dir, "demo.json")); err != nil {
+		t.Fatalf("credential manifest is not private: %v", err)
 	}
 	second, stop := startDemo(t, dir)
 	// Reopening on port 0 must repoint the seeded push receiver to this server.
@@ -392,6 +389,42 @@ func TestDemoReopensWithStableCredentials(t *testing.T) {
 	stop()
 	if third.OperatorPeer == first.OperatorPeer || third.OperatorSecret == first.OperatorSecret {
 		t.Fatal("reset did not create a new scenario")
+	}
+}
+
+func TestWriteDemoManifestPrivateReplacement(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "demo.json")
+	if err := os.WriteFile(path, []byte("public old manifest"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, data := range []string{"first private credentials\n", "replacement credentials\n"} {
+		if err := writeDemoManifest(path, []byte(data)); err != nil {
+			t.Fatal(err)
+		}
+		if err := platform.PrivateFile(path); err != nil {
+			t.Fatalf("published manifest is not private: %v", err)
+		}
+		if got, err := os.ReadFile(path); err != nil || string(got) != data {
+			t.Fatalf("manifest bytes = %q, %v", got, err)
+		}
+		if entries, err := os.ReadDir(dir); err != nil || len(entries) != 1 || entries[0].Name() != "demo.json" {
+			t.Fatalf("manifest publication leaked a temporary file: %v, %v", entries, err)
+		}
+	}
+}
+
+func TestWriteDemoManifestFailureCleansTemporary(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "demo.json")
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeDemoManifest(path, []byte("private credentials")); err == nil {
+		t.Fatal("replaced a directory with a credential manifest")
+	}
+	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 1 || !entries[0].IsDir() {
+		t.Fatalf("failed manifest publication leaked credentials: %v, %v", entries, err)
 	}
 }
 

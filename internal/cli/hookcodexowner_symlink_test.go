@@ -28,10 +28,10 @@ func TestCodexLegacyHookSymlinkPreservesReservedState(t *testing.T) {
 	now := time.Now()
 	binding := codexBinding{ConfigPath: env["VECNET_CONFIG"], Profile: "p", Hub: profile.Hub, Caller: "peer_test", Generation: appHookGeneration, CodexHome: env["HOME"], ThreadID: bindT1, CreatedAt: now.Add(-time.Hour), ExpiresAt: now.Add(time.Hour)}
 	raw, _ := json.Marshal(codexBindingsFile{Version: 1, Bindings: []codexBinding{binding}})
-	if err = os.MkdirAll(filepath.Dir(authority), 0700); err != nil {
+	if err = cliFixtureMkdirAll(filepath.Dir(authority), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err = os.WriteFile(authority, raw, 0600); err != nil {
+	if err = cliFixtureWriteFile(authority, raw, 0600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = readCodexAuthority(authority); err != nil {
@@ -54,10 +54,11 @@ func TestCodexLegacyHookSymlinkPreservesReservedState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	alias := filepath.Join(filepath.Dir(env["VECNET_CONFIG"]), "alias.toml")
-	if err = os.Symlink(other["VECNET_CONFIG"], alias); err != nil {
+	aliasDir := filepath.Join(filepath.Dir(env["VECNET_CONFIG"]), "alias-config")
+	if err = cliFixtureSymlink(t, filepath.Dir(other["VECNET_CONFIG"]), aliasDir); err != nil {
 		t.Fatal(err)
 	}
+	alias := filepath.Join(aliasDir, filepath.Base(other["VECNET_CONFIG"]))
 	env["VECNET_CONFIG"] = alias
 	out, errs := runHookAs(t, env, "legacy", "p")
 	after, err := os.ReadFile(state)

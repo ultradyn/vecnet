@@ -27,7 +27,7 @@ vecnet repair --json
 
 Ready requires fresh connector status for the exact owner generation, a reachable
 supported app-server and a loaded root. Service activation or a successful file
-write alone is insufficient. Managed activation requires Linux user systemd and
+write alone is insufficient. Managed activation requires Linux user systemd or Windows Task Scheduler and
 Node ≥22.18 with working built-in TypeScript and SQLite. Unsupported/embedded
 hosts and hosts requiring an unavailable bridge remain pending; use explicit
 `vecnet --net P inbox`. See the [capability matrix](codex-appserver.md).

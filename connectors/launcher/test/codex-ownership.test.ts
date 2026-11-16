@@ -1,3 +1,5 @@
+import { nodeCommand } from './fixtures/platform.ts';
+import { cliEnvironment, commandInvocation } from '../../hub-client/src/platform.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -18,26 +20,27 @@ for (const outcome of ['accepted', 'rejected', 'ambiguous', 'lost'] as const) {
     const claim = 'a'.repeat(24), attempt = 'b'.repeat(32);
     writeFileSync(config, JSON.stringify({ trace, claims, owner, guardFinishFailure: outcome === 'lost' }));
     writeFileSync(claims, JSON.stringify({ [claim]: ['delivery'] }));
-    writeFileSync(bin, `#!/bin/sh\nexport FAKE_VECNET_PLAN="$VECNET_CONFIG"\nexec '${process.execPath}' '${fileURLToPath(new URL('./fake-vecnet.ts', import.meta.url))}' "$@"\n`, { mode: 0o700 });
-    const env = { HOME: dir, VECNET_CONFIG: config };
-    const guard = await acquireGuard(bin, env, owner, claim, attempt);
+    const fixtureBin = nodeCommand(bin, `process.env.FAKE_VECNET_PLAN=process.env.VECNET_CONFIG; import(${JSON.stringify(new URL('./fake-vecnet.ts', import.meta.url).href)});`);
+    const env = { ...cliEnvironment(process.env), HOME: dir, VECNET_CONFIG: config };
+    const exec = (args: string[]) => { const c = commandInvocation([fixtureBin, ...args], env); return execFileSync(c.file, c.args, { ...c, env, stdio: 'pipe', windowsHide: true }); };
+    const guard = await acquireGuard(fixtureBin, env, owner, claim, attempt);
     assert.equal(guard.valid(), true);
     assert.deepEqual(JSON.parse(readFileSync(trace + '.pending', 'utf8')), { owner, claim, attempt });
     if (outcome === 'lost') await assert.rejects(guard.finish('accepted'), /ownership_guard_lost/);
     else await guard.finish(outcome);
     assert.equal(guard.valid(), false);
     assert.equal(existsSync(trace + '.pending'), outcome === 'ambiguous' || outcome === 'lost');
-    if (outcome !== 'rejected') await assert.rejects(acquireGuard(bin, env, owner, claim, attempt), /ownership_guard_refused/);
+    if (outcome !== 'rejected') await assert.rejects(acquireGuard(fixtureBin, env, owner, claim, attempt), /ownership_guard_refused/);
     if (outcome === 'ambiguous' || outcome === 'lost') {
-      assert.throws(() => execFileSync(bin, ['--net', 'p', 'codex', 'settle', ...ownerArgs(owner), '--claim', claim,
-        '--attempt', 'c'.repeat(32), '--outcome', 'rejected'], { env, stdio: 'pipe' }));
+      assert.throws(() => exec(['--net', 'p', 'codex', 'settle', ...ownerArgs(owner), '--claim', claim,
+        '--attempt', 'c'.repeat(32), '--outcome', 'rejected']));
       assert.equal(existsSync(trace + '.pending'), true, 'stale attempt cannot remove a newer ambiguity marker');
-      execFileSync(bin, ['--net', 'p', 'codex', 'settle', ...ownerArgs(owner), '--claim', claim, '--attempt', attempt, '--outcome', 'accepted'], { env });
+      exec(['--net', 'p', 'codex', 'settle', ...ownerArgs(owner), '--claim', claim, '--attempt', attempt, '--outcome', 'accepted']);
       assert.equal(existsSync(trace + '.pending'), false);
     }
     if (outcome !== 'rejected') assert.equal(JSON.parse(readFileSync(claims + '.accepted', 'utf8'))[claim], true);
     else {
-      const retry = await acquireGuard(bin, env, owner, claim, attempt);
+      const retry = await acquireGuard(fixtureBin, env, owner, claim, attempt);
       await retry.finish('rejected');
     }
   });

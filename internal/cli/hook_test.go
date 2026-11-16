@@ -46,11 +46,11 @@ func hookFixtureRaw(t *testing.T, h http.HandlerFunc) (map[string]string, string
 	env := hookTestEnv(t)
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
-	if err := os.MkdirAll(filepath.Dir(env["VECNET_CONFIG"]), 0700); err != nil {
+	if err := cliFixtureMkdirAll(filepath.Dir(env["VECNET_CONFIG"]), 0700); err != nil {
 		t.Fatal(err)
 	}
 	conf := fmt.Sprintf("default = \"p\"\n[profiles.p]\nhub = %q\nsecret = \"vn_peer_test\"\n[profiles.q]\nhub = %q\nsecret = \"vn_peer_test\"\n", srv.URL, srv.URL)
-	if err := os.WriteFile(env["VECNET_CONFIG"], []byte(conf), 0600); err != nil {
+	if err := cliFixtureWriteFile(env["VECNET_CONFIG"], []byte(conf), 0600); err != nil {
 		t.Fatal(err)
 	}
 	path, err := statePath(func(k string) string { return env[k] }, "p", "")
@@ -355,12 +355,12 @@ func TestHookNeverFailsATurn(t *testing.T) {
 					t.Fatal(err)
 				}
 			case "toml":
-				if err := os.WriteFile(env["VECNET_CONFIG"], []byte("[not toml"), 0600); err != nil {
+				if err := cliFixtureWriteFile(env["VECNET_CONFIG"], []byte("[not toml"), 0600); err != nil {
 					t.Fatal(err)
 				}
 			case "corrupt":
 				seedHook(t, path, "")
-				if err := os.WriteFile(path, []byte("{bad"), 0600); err != nil {
+				if err := cliFixtureWriteFile(path, []byte("{bad"), 0600); err != nil {
 					t.Fatal(err)
 				}
 			case "locked":
@@ -372,10 +372,10 @@ func TestHookNeverFailsATurn(t *testing.T) {
 				defer unlock()
 			case "unwritable":
 				seedHook(t, path, "e1.3")
-				if err := os.Chmod(filepath.Dir(path), 0500); err != nil {
+				if err := cliFixtureChmod(filepath.Dir(path), 0500); err != nil {
 					t.Fatal(err)
 				}
-				defer os.Chmod(filepath.Dir(path), 0700)
+				defer cliFixtureChmod(filepath.Dir(path), 0700)
 			case "unknown":
 				args = []string{"--event", "bogus"}
 			case "badflag":
@@ -497,10 +497,10 @@ func TestHookHostileIsInert(t *testing.T) {
 	ctx := contextOf(t, out)
 	golden := filepath.Join("testdata", "hook-hostile.golden")
 	if *updateHookGolden {
-		if err := os.MkdirAll("testdata", 0700); err != nil {
+		if err := cliFixtureMkdirAll("testdata", 0700); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(golden, []byte(ctx), 0600); err != nil {
+		if err := cliFixtureWriteFile(golden, []byte(ctx), 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -508,7 +508,7 @@ func TestHookHostileIsInert(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ctx != string(want) {
+	if ctx != strings.ReplaceAll(string(want), "\r\n", "\n") {
 		t.Fatalf("hostile golden mismatch: %q", ctx)
 	}
 	if strings.Count(ctx, "<vecnet-inbox") != 1 || strings.Count(ctx, "</vecnet-inbox>") != 1 || !strings.Contains(ctx, " kind=- ") {
@@ -792,7 +792,16 @@ func hookProcess(t *testing.T, env map[string]string) *exec.Cmd {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	t.Cleanup(cancel)
 	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestHookProcess$")
-	cmd.Env = append(os.Environ(), "HH_T02_HOOK_CHILD=1", "GORACE="+os.Getenv("GORACE")+" atexit_sleep_ms=0")
+	// A native subprocess must not inherit the coding agent's Codex markers:
+	// they intentionally silence Claude lifecycle delivery in production.
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		if strings.HasPrefix(key, "CODEX_") || strings.HasPrefix(key, "CLAUDE_") || strings.HasPrefix(key, "VECNET_") || key == "HH_T02_HOOK_CHILD" || key == "GORACE" {
+			continue
+		}
+		cmd.Env = append(cmd.Env, entry)
+	}
+	cmd.Env = append(cmd.Env, "HH_T02_HOOK_CHILD=1", "GORACE="+os.Getenv("GORACE")+" atexit_sleep_ms=0")
 	for key, value := range env {
 		cmd.Env = append(cmd.Env, key+"="+value)
 	}
@@ -895,7 +904,7 @@ func TestHookBlockedMessageCacheKeepsDelivery(t *testing.T) {
 	})
 	seedHook(t, path, "e1.0")
 	dir, _ := cacheDir(func(k string) string { return env[k] })
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	if err := cliFixtureMkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
 	fifo := filepath.Join(dir, "messages.json")

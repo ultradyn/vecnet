@@ -22,10 +22,7 @@ func TestEditProfilePreservesCommentsAndUnknownKeys(t *testing.T) {
 		t.Fatal("backup differs")
 	}
 	for _, p := range []string{path, path + ".bak"} {
-		info, e := os.Stat(p)
-		if e != nil || info.Mode().Perm() != 0600 {
-			t.Fatalf("mode: %v %v", info, e)
-		}
+		cliFixtureRequireMode(t, p, 0600)
 	}
 }
 func TestEditProfileRefusesUnsafe(t *testing.T) {
@@ -36,7 +33,7 @@ func TestEditProfileRefusesUnsafe(t *testing.T) {
 	} {
 		t.Run(body, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "config.toml")
-			if e := os.WriteFile(path, []byte(body), 0600); e != nil {
+			if e := cliFixtureWriteFile(path, []byte(body), 0600); e != nil {
 				t.Fatal(e)
 			}
 			if e := editProfiles(path, map[string]map[string]string{"p": {"hub": "https://new.example"}}); e == nil {

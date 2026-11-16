@@ -84,10 +84,10 @@ func TestCodexSetupReadinessRequiresFreshExactOwner(t *testing.T) {
 		{name: "stale", field: "updated_at", value: f.now.Add(-31 * time.Second).Format(time.RFC3339)},
 		{name: "future", field: "updated_at", value: f.now.Add(time.Second).Format(time.RFC3339)},
 		{name: "generation", field: "generation", value: strings.Repeat("f", 32)},
-		{name: "namespace", field: "config_path", value: "/other"},
+		{name: "namespace", field: "config_path", value: filepath.Join(t.TempDir(), "other.toml")},
 		{name: "profile", field: "profile", value: "q"},
 		{name: "as", field: "as", value: "peer_other"},
-		{name: "home", field: "codex_home", value: "/other"},
+		{name: "home", field: "codex_home", value: filepath.Join(t.TempDir(), "other-home")},
 		{name: "thread", field: "thread_id", value: bindT2},
 		{name: "dead", field: "liveness", value: map[string]any{"live": false}},
 		{name: "unsupported", field: "state", value: "unsupported"},
@@ -102,7 +102,7 @@ func TestCodexSetupReadinessRequiresFreshExactOwner(t *testing.T) {
 				row[tc.field] = tc.value
 			}
 			raw, _ := json.Marshal(status)
-			if err := os.WriteFile(f.path+".status.json", raw, 0600); err != nil {
+			if err := cliFixtureWriteFile(f.path+".status.json", raw, 0600); err != nil {
 				t.Fatal(err)
 			}
 			out, _, err := setupRun(f, "--thread", bindT1, "--settings", settings, "--bin", "vecnet")
@@ -137,7 +137,7 @@ func writeSetupStatus(t *testing.T, f *bindFixture) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(f.path+".status.json", raw, 0600); err != nil {
+	if err := cliFixtureWriteFile(f.path+".status.json", raw, 0600); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -160,14 +160,14 @@ func TestCodexSetupStatusPrivateAndReadOnly(t *testing.T) {
 		t.Fatalf("%s: %v", out, err)
 	}
 	for _, path := range []string{f.path, f.path + ".status.json"} {
-		if err := os.Chmod(path, 0644); err != nil {
+		if err := cliFixtureChmod(path, 0644); err != nil {
 			t.Fatal(err)
 		}
 		out, err = setupStatus(t, f)
 		if err != nil || strings.Contains(out, "delivery ready") {
 			t.Fatalf("nonprivate %s: %s %v", path, out, err)
 		}
-		if err := os.Chmod(path, 0600); err != nil {
+		if err := cliFixtureChmod(path, 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -192,7 +192,7 @@ func TestCodexSetupStatusOtherNamespace(t *testing.T) {
 	}
 	other := file.Bindings[0]
 	other.ConfigPath = filepath.Join(t.TempDir(), "other.toml")
-	if err := os.WriteFile(other.ConfigPath, []byte("# another config namespace\n"), 0600); err != nil {
+	if err := cliFixtureWriteFile(other.ConfigPath, []byte("# another config namespace\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	other.Caller = "peer_other"
@@ -200,7 +200,7 @@ func TestCodexSetupStatusOtherNamespace(t *testing.T) {
 	other.Generation = strings.Repeat("a", 32)
 	file.Bindings = append(file.Bindings, other)
 	raw, _ := json.Marshal(file)
-	if err := os.WriteFile(f.path, raw, 0600); err != nil {
+	if err := cliFixtureWriteFile(f.path, raw, 0600); err != nil {
 		t.Fatal(err)
 	}
 	out, err := setupStatus(t, f)
@@ -209,7 +209,7 @@ func TestCodexSetupStatusOtherNamespace(t *testing.T) {
 	}
 	file.Bindings = file.Bindings[1:]
 	raw, _ = json.Marshal(file)
-	if err := os.WriteFile(f.path, raw, 0600); err != nil {
+	if err := cliFixtureWriteFile(f.path, raw, 0600); err != nil {
 		t.Fatal(err)
 	}
 	out, err = setupStatus(t, f)
@@ -235,7 +235,7 @@ func TestCodexSetupStatusRejectsInvalidAndDuplicateReports(t *testing.T) {
 	status["bindings"] = append(rows, rows[0])
 	duplicate, _ := json.Marshal(status)
 	for _, src := range [][]byte{[]byte(`{"version":1,"version":1}`), []byte(`{"version":2}`), []byte(`{"version":1,"updated_at":"bad"}`), duplicate} {
-		if err := os.WriteFile(f.path+".status.json", src, 0600); err != nil {
+		if err := cliFixtureWriteFile(f.path+".status.json", src, 0600); err != nil {
 			t.Fatal(err)
 		}
 		out, err := setupStatus(t, f)
@@ -286,10 +286,10 @@ func TestCodexSetupLegacyAuthorityRefusesWritePreservesRows(t *testing.T) {
 	f.env["CODEX_THREAD_ID"] = bindT1
 	path := filepath.Join(filepath.Dir(f.env["VECNET_CONFIG"]), "codex", "bindings.json")
 	legacy := []byte(`{"version":1,"bindings":[{"profile":"p","thread_id":"old"},{"profile":"unrelated","thread_id":"keep"}]}`)
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+	if err := cliFixtureMkdirAll(filepath.Dir(path), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, legacy, 0600); err != nil {
+	if err := cliFixtureWriteFile(path, legacy, 0600); err != nil {
 		t.Fatal(err)
 	}
 	settings := filepath.Join(t.TempDir(), "hooks.json")
@@ -320,21 +320,21 @@ func TestCodexSetupLegacyStatusBlocksReady(t *testing.T) {
 			f.bind("p", bindT1)
 			writeSetupStatus(t, f)
 			path := filepath.Join(filepath.Dir(f.env["VECNET_CONFIG"]), "codex", "bindings.json")
-			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			if err := cliFixtureMkdirAll(filepath.Dir(path), 0700); err != nil {
 				t.Fatal(err)
 			}
 			var err error
 			switch kind {
 			case "directory":
-				err = os.Mkdir(path, 0700)
+				err = cliFixtureMkdir(path, 0700)
 			case "dangling":
-				err = os.Symlink(filepath.Join(t.TempDir(), "missing"), path)
+				err = cliFixtureSymlink(t, filepath.Join(t.TempDir(), "missing"), path)
 			case "corrupt":
-				err = os.WriteFile(path, []byte("bad"), 0600)
+				err = cliFixtureWriteFile(path, []byte("bad"), 0600)
 			case "empty":
-				err = os.WriteFile(path, []byte(`{"version":1,"bindings":[]}`), 0600)
+				err = cliFixtureWriteFile(path, []byte(`{"version":1,"bindings":[]}`), 0600)
 			default:
-				err = os.WriteFile(path, []byte(`{"version":1,"bindings":[{"profile":"other"}]}`), 0600)
+				err = cliFixtureWriteFile(path, []byte(`{"version":1,"bindings":[{"profile":"other"}]}`), 0600)
 			}
 			if err != nil {
 				t.Fatal(err)
@@ -367,15 +367,15 @@ func TestCodexSetupLegacyDetectsOriginalConfigSymlinkDirectory(t *testing.T) {
 	f.env["CODEX_THREAD_ID"] = bindT1
 	dir := t.TempDir()
 	alias := filepath.Join(dir, "config.toml")
-	if err := os.Symlink(f.env["VECNET_CONFIG"], alias); err != nil {
+	if err := cliFixtureSymlink(t, f.env["VECNET_CONFIG"], alias); err != nil {
 		t.Fatal(err)
 	}
 	f.env["VECNET_CONFIG"] = alias
 	path := filepath.Join(dir, "codex", "bindings.json")
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+	if err := cliFixtureMkdirAll(filepath.Dir(path), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, []byte("{}"), 0600); err != nil {
+	if err := cliFixtureWriteFile(path, []byte("{}"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	_, errs, err := setupRun(f, "--dry-run", "--settings", filepath.Join(t.TempDir(), "hooks.json"))
@@ -410,14 +410,14 @@ func TestCodexSetupLegacyConventionalHomesAndAuthorityAlias(t *testing.T) {
 			if kind == "home" {
 				path = filepath.Join(f.env["HOME"], ".config", "vecnet", "codex", "bindings.json")
 			}
-			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			if err := cliFixtureMkdirAll(filepath.Dir(path), 0700); err != nil {
 				t.Fatal(err)
 			}
 			var err error
 			if kind == "authority-alias" {
-				err = os.Symlink(f.path, path)
+				err = cliFixtureSymlink(t, f.path, path)
 			} else {
-				err = os.WriteFile(path, []byte(`{"version":1,"bindings":[]}`), 0600)
+				err = cliFixtureWriteFile(path, []byte(`{"version":1,"bindings":[]}`), 0600)
 			}
 			if err != nil {
 				t.Fatal(err)
@@ -460,7 +460,7 @@ func TestCodexSetupLivenessReasonWhitelist(t *testing.T) {
 	for _, reason := range []string{"expired", "archived", "not_loaded", "idle_stale", "approval_policy", "waiting_approval", "waiting_input", "over_limit", "identity_changed", "ownership_changed", "unverified_thread", "identity_unverified", "watch_stopped", "delivery_unresolved", "", "unexpected-private-detail\n\x1b[31m"} {
 		row["liveness"] = map[string]any{"live": false, "reason": reason}
 		raw, _ := json.Marshal(status)
-		if err := os.WriteFile(path, raw, 0600); err != nil {
+		if err := cliFixtureWriteFile(path, raw, 0600); err != nil {
 			t.Fatal(err)
 		}
 		delivery, got := codexSetupReadiness(path, file.Bindings[0], f.now)

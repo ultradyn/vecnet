@@ -18,7 +18,7 @@ func TestCodexAuthorityRejectsUnverifiableRows(t *testing.T) {
 			rows := f.entries()
 			rows[0][field] = json.RawMessage(`""`)
 			raw, _ := json.Marshal(map[string]any{"version": 1, "bindings": rows})
-			if err := os.WriteFile(f.path, raw, 0600); err != nil {
+			if err := cliFixtureWriteFile(f.path, raw, 0600); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := readCodexAuthority(f.path); err == nil {
@@ -39,16 +39,16 @@ func TestCodexAuthorityRejectsDuplicateJSONAndPublicMode(t *testing.T) {
 	if duplicate == string(raw) {
 		t.Fatal("fixture missing version")
 	}
-	if err := os.WriteFile(f.path, []byte(duplicate), 0600); err != nil {
+	if err := cliFixtureWriteFile(f.path, []byte(duplicate), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := readCodexAuthority(f.path); err == nil {
 		t.Fatal("duplicate keys accepted")
 	}
-	if err := os.WriteFile(f.path, raw, 0600); err != nil {
+	if err := cliFixtureWriteFile(f.path, raw, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(f.path, 0644); err != nil {
+	if err := cliFixtureChmod(f.path, 0644); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := readCodexAuthority(f.path); err == nil {
@@ -67,7 +67,7 @@ func TestCodexAuthorityRejectsAmbiguousScalarSchema(t *testing.T) {
 				rows[0][field] = json.RawMessage(`"peer_other"`)
 			}
 			raw, _ := json.Marshal(map[string]any{"version": 1, "bindings": rows})
-			if err := os.WriteFile(f.path, raw, 0600); err != nil {
+			if err := cliFixtureWriteFile(f.path, raw, 0600); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := readCodexAuthority(f.path); err == nil {

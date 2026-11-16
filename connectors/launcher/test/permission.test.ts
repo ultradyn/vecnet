@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync, readFileSync, readdirSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import type { PermissionDraft } from '../src/backend.ts';
+import { symlinkSync } from './fixtures/platform.ts';
 import { finishPermission, validateLaunchPermission, approvalOptions, hasShellOperators } from '../src/contract/permission.ts';
 const ctx={machineId:'xsm',jobId:'job_00000000000000000000000000',permissionMode:'ask' as const,preset:'sol',backend:'t3',workspaceRoot:'/workspace',home:'/home/test'};
 const draft=():PermissionDraft=>({kind:'edit',backend_method:'test',scope:'once',options:[{id:'yes',label:'Allow',grants:'once'},{id:'no',label:'Deny',grants:'deny'}],paths:[{path:'/workspace/file',access:'write'}],fidelity:{kind:'enforced',command:'none',paths:'enforced',host:'none'},backend_raw:{}});
@@ -78,7 +79,7 @@ test('permission redaction covers option-only secrets and raw keys; dangling sym
   try { assert.equal(finishPermission({...draft(),paths:[{path:'escape/file',access:'write'}]},{...ctx,workspaceRoot:join(root,'ws')}).outside_workspace,true); }
   finally {rmSync(root,{recursive:true,force:true});}
 });
-test('symlink traversal before .. is resolved by filesystem semantics',()=>{
+test('symlink traversal before .. is resolved by filesystem semantics', { skip: process.platform === 'win32' && 'Windows normalizes junction/.. before lookup' }, ()=>{
   const root=mkdtempSync(join(tmpdir(),'vl-dotdot-'));mkdirSync(join(root,'ws'));mkdirSync(join(root,'outside'));mkdirSync(join(root,'outside','nested'));writeFileSync(join(root,'outside','file'),'');symlinkSync(join(root,'outside','nested'),join(root,'ws','escape'));
   try {
     for(const name of ['file','new-file']) {

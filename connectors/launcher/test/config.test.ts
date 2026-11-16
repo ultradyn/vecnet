@@ -1,3 +1,4 @@
+import { writePrivate, makePublicReadable } from './fixtures/platform.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, chmod, rm, readFile } from 'node:fs/promises';
@@ -26,11 +27,11 @@ test('credential file looser than 0600 is refused', async () => {
   const dir=await mkdtemp(join(tmpdir(),'vl-config-'));
   try {
     const credential=join(dir,'credential'), config=join(dir,'config.json');
-    await writeFile(credential,'vn_peer_do-not-print',{mode:0o600});
+    writePrivate(credential,'vn_peer_do-not-print');
     await writeFile(config,JSON.stringify({...minimal(),hub:{url:'http://localhost',credential_file:credential}}));
-    await loadConfig(config); await chmod(credential,0o644);
+    await loadConfig(config); makePublicReadable(credential);
     await assert.rejects(loadConfig(config),(e:unknown)=>e instanceof ConfigError && e.pointer==='/hub/credential_file' && !e.message.includes('vn_peer'));
-    await chmod(credential,0o400); await assert.rejects(loadConfig(config),ConfigError);
+    if (process.platform !== 'win32') { await chmod(credential,0o400); await assert.rejects(loadConfig(config),ConfigError); }
   } finally { await rm(dir,{recursive:true,force:true}); }
 });
 test('to_operator presets: none alone ok; none plus privileged is a ConfigError',()=>{

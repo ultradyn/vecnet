@@ -417,6 +417,18 @@ func TestUIUnderSizeCap(t *testing.T) {
 	if total > uiMaxBytes {
 		t.Fatalf("UI is %d bytes, want at most %d", total, uiMaxBytes)
 	}
+	t.Logf("UI is %d bytes, cap %d", total, uiMaxBytes)
+}
+
+func TestUITextAssetsUseLF(t *testing.T) {
+	for name, data := range staticFiles(t) {
+		switch filepath.Ext(name) {
+		case ".js", ".css", ".html", ".svg":
+			if strings.Contains(string(data), "\r\n") {
+				t.Errorf("embedded %s has CRLF checkout bytes; static assets must use LF", name)
+			}
+		}
+	}
 }
 
 // Pin the complete policy: blob URLs are allowed only for image thumbnails.

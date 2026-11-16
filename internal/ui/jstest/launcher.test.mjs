@@ -583,7 +583,7 @@ test('launcher installation commands quote host paths and use the confirmed setu
   assert.match(lines[2], /launcher install --source '\/tmp\/vecnet checkout' --write --enable --start$/);
   assert.doesNotMatch(commands, /guide|setup .*--start/);
   // A shell stub returns the arguments without executing any generated tool.
-  const args = JSON.parse(execFileSync('bash', ['-c', "vecnet() { python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' \"$@\"; }; " + lines[1]], { encoding: 'utf8' }));
+  const args = JSON.parse(execFileSync(process.platform === 'win32' ? (process.env.ProgramFiles || 'C:/Program Files') + '/Git/bin/bash.exe' : 'bash', ['-c', "vecnet() { node -p 'JSON.stringify(process.argv.slice(1))' -- \"$@\"; }; " + lines[1]], { encoding: 'utf8', env: { ...process.env, MSYS2_ARG_CONV_EXCL: '*' } }));
   assert.deepEqual(args, ['--net', 'launch-host', 'launcher', 'setup', '--project', 'vecnet', '--repo', setup.repo, '--base-ref', 'master', '--write']);
   for (const patch of [{ repo: 'relative' }, { repo: '/tmp/a\nnext' }, { project: '../../tmp' }, { source: 'relative' }, { source: '/tmp/a\nnext' }, { source: '/tmp/a\u0000next' }, { baseRef: '' }]) {
     assert.ok(launcherSetupIssue({ ...setup, ...patch }));
@@ -606,7 +606,7 @@ test('optional custom launcher source remains an exact shell-quoted pin', () => 
   const output = inviteBlock({ owner: 'Max', expires: 'tomorrow', token: 'fake-token', profile: 'launch-host', hubURL: 'https://hub.example' });
   const setup = { project: 'vecnet', repo: '/host/repo', baseRef: 'master', source: "/host/it's a checkout $(false)" };
   const install = launcherSetupCommands(output, setup).split('\n')[2];
-  const args = JSON.parse(execFileSync('bash', ['-c', "vecnet() { python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' \"$@\"; }; " + install], { encoding: 'utf8' }));
+  const args = JSON.parse(execFileSync(process.platform === 'win32' ? (process.env.ProgramFiles || 'C:/Program Files') + '/Git/bin/bash.exe' : 'bash', ['-c', "vecnet() { node -p 'JSON.stringify(process.argv.slice(1))' -- \"$@\"; }; " + install], { encoding: 'utf8', env: { ...process.env, MSYS2_ARG_CONV_EXCL: '*' } }));
   assert.deepEqual(args, ['--net', 'launch-host', 'launcher', 'install', '--source', setup.source, '--write', '--enable', '--start']);
 });
 
@@ -614,4 +614,17 @@ test('host setup inputs never become onboarding API fields', () => {
   const spec = { kind: 'launcher', spec_version: 1, submit_action: 'invite', fields: [{ name: 'name', type: 'string', required: true }] };
   const body = submitBody(spec, { name: 'launcher', launcher_setup: { repo: '/host/private', source: '/host/checkout' } }, 'request-1');
   assert.deepEqual(body.inputs, { name: 'launcher' });
+});
+
+test('Windows launcher setup uses absolute drive paths and literal PowerShell quoting', () => {
+  const output=inviteBlock({owner:'Max',expires:'tomorrow',token:'fake-token',profile:'windows-host',hubURL:'https://hub.example'});
+  const repo=String.raw`C:\Users\Max\it's a repo $(never-run)`;
+  const source=String.raw`D:\vecnet checkout`;
+  const values={project:'vecnet',repo,baseRef:'master',source};
+  assert.equal(launcherSetupIssue(values),'');
+  const lines=launcherSetupCommands(output,values).split('\n');
+  assert.equal(lines[0],"'fake-token' | vecnet enrol --hub https://hub.example --token - --profile windows-host");
+  assert.ok(lines[1].includes("--repo 'C:\\Users\\Max\\it''s a repo $(never-run)'"));
+  assert.ok(lines[2].includes("--source 'D:\\vecnet checkout'"));
+  assert.notEqual(launcherSetupIssue({...values,repo:'C:relative'}),'');
 });

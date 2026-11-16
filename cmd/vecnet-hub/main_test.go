@@ -69,7 +69,10 @@ func TestInitPrintsSecretOnce(t *testing.T) {
 	}
 }
 
-func TestSIGTERMSendsHubRestarting(t *testing.T) { testRestartShutdown(t, noEnv, nil, 5000) }
+// Cancel the same lifecycle context that SIGTERM cancels on Unix and a console
+// interrupt cancels on Windows. Sending SIGTERM to a Windows process is not a
+// graceful shutdown, and bootHub deliberately runs the hub in-process.
+func TestShutdownSendsHubRestarting(t *testing.T) { testRestartShutdown(t, noEnv, nil, 5000) }
 
 func testRestartShutdown(t *testing.T, getenv func(string) string, extra []string, wantMS int) {
 	t.Helper()

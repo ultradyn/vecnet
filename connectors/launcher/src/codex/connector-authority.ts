@@ -1,6 +1,8 @@
-import { closeSync, constants, fstatSync, openSync, readSync, realpathSync, statSync } from 'node:fs';
+import { realpathSync, statSync } from 'node:fs';
 import { dirname, isAbsolute } from 'node:path';
 import type { Binding } from './engine.ts';
+import { PrivateFileError, readPrivateFileSync } from '../private-files.ts';
+import type { Environment } from '../../../hub-client/src/platform.ts';
 
 export type FileState = { state: 'absent' | 'refused' | 'invalid' | 'unlocatable'; reason?: string }
   | { state: 'ok'; bindings: Binding[] };
@@ -85,24 +87,13 @@ function parseAuthorityJSON(raw: string): unknown {
 }
 
 /** A single bad row invalidates the authority; never choose a winner by file order. */
-export function readBindings(path: string | undefined, euid: number): FileState {
+export function readBindings(path: string | undefined, euid: number, env?: Environment): FileState {
   if (path === undefined) return { state: 'unlocatable' };
   let raw: string;
   try {
-    const fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
-    try {
-      const st = fstatSync(fd);
-      if (!st.isFile()) return { state: 'refused', reason: 'not_file' };
-      if (st.uid !== euid) return { state: 'refused', reason: 'foreign_owner' };
-      if ((st.mode & 0o077) !== 0) return { state: 'refused', reason: 'mode' };
-      if (st.size > maxBytes) return { state: 'invalid', reason: 'size' };
-      const bytes = Buffer.alloc(maxBytes + 1);
-      let n = 0, count: number;
-      while (n < bytes.length && (count = readSync(fd, bytes, n, bytes.length - n, null)) > 0) n += count;
-      if (n > maxBytes) return { state: 'invalid', reason: 'size' };
-      raw = bytes.subarray(0, n).toString('utf8');
-    } finally { closeSync(fd); }
+    raw = readPrivateFileSync(path, { owner: euid, env });
   } catch (e) {
+    if (e instanceof PrivateFileError) return { state: e.code === 'size' ? 'invalid' : 'refused', reason: e.code };
     return (e as NodeJS.ErrnoException).code === 'ENOENT' ? { state: 'absent' } : { state: 'invalid', reason: 'unreadable' };
   }
   let file: unknown;

@@ -19,7 +19,7 @@ func TestAutomaticEnrollmentRetainsCredentialsAndRetriesWithoutToken(t *testing.
 	project := t.TempDir()
 	t.Chdir(project)
 	codexHome := filepath.Join(home, "codex")
-	if err := os.Mkdir(codexHome, 0700); err != nil {
+	if err := cliFixtureMkdir(codexHome, 0700); err != nil {
 		t.Fatal(err)
 	}
 	var redeemed atomic.Int32
@@ -89,22 +89,24 @@ func TestAllProjectRepairMigratesOtherCheckoutAndDefersMissing(t *testing.T) {
 	env := map[string]string{"HOME": home}
 	var out, errs bytes.Buffer
 	a := &app{ctx: context.Background(), stdout: &out, stderr: &errs, getenv: func(k string) string { return env[k] }}
-	t.Chdir(dirB)
+	cliFixtureChdir(t, dirB)
 	if _, err := a.observeLocalProject("old", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(dirB, ".codex/hooks.json")
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+	if err := cliFixtureMkdirAll(filepath.Dir(path), 0700); err != nil {
 		t.Fatal(err)
 	}
 	raw := `{"custom":true,"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"vecnet hook --profile old --event user-prompt","timeout":5}]}]}}`
-	if err := os.WriteFile(path, []byte(raw), 0600); err != nil {
+	if err := cliFixtureWriteFile(path, []byte(raw), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if err := a.registerLocalArtifact(path, "codex-hooks", "old", time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	t.Chdir(dirA)
+	if err := os.Chdir(dirA); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := a.observeLocalProject("new", time.Now()); err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +148,7 @@ func TestLocalMaintenanceDoesNotRunForDeliveryChildrenOrStatus(t *testing.T) {
 
 func TestAutomaticEnrollmentReadyUsesSavedRootAndPreservesGeneration(t *testing.T) {
 	f := newBindFixture(t)
-	if err := os.Chmod(f.env["HOME"], 0700); err != nil {
+	if err := cliFixtureChmod(f.env["HOME"], 0700); err != nil {
 		t.Fatal(err)
 	}
 	f.now = time.Now().UTC()
@@ -195,7 +197,7 @@ func TestAutomaticEnrollmentCannotTransferOrRenewExpiredOwner(t *testing.T) {
 	for _, expired := range []bool{false, true} {
 		t.Run(map[bool]string{false: "different-root", true: "expired"}[expired], func(t *testing.T) {
 			f := newBindFixture(t)
-			if err := os.Chmod(f.env["HOME"], 0700); err != nil {
+			if err := cliFixtureChmod(f.env["HOME"], 0700); err != nil {
 				t.Fatal(err)
 			}
 			f.now = time.Now().UTC()
@@ -229,7 +231,7 @@ func TestAutomaticEnrollmentPersistsIntentBeforeConfigExists(t *testing.T) {
 	home := localSetupHome(t)
 	t.Chdir(t.TempDir())
 	codexHome := filepath.Join(home, "codex")
-	if err := os.Mkdir(codexHome, 0700); err != nil {
+	if err := cliFixtureMkdir(codexHome, 0700); err != nil {
 		t.Fatal(err)
 	}
 	env := map[string]string{"HOME": home, "VECNET_CONFIG": filepath.Join(home, "new/config.toml"), "CODEX_HOME": codexHome, "CODEX_THREAD_ID": bindT1}
@@ -249,7 +251,7 @@ func TestAutomaticEnrollmentPersistsIntentBeforeConfigExists(t *testing.T) {
 // A rejected invitation must never authorize setup of a pre-existing profile.
 func TestEnrollmentRejectedInvitationCannotReplayOldCredential(t *testing.T) {
 	f := newBindFixture(t)
-	if err := os.Chmod(f.env["HOME"], 0700); err != nil {
+	if err := cliFixtureChmod(f.env["HOME"], 0700); err != nil {
 		t.Fatal(err)
 	}
 	t.Chdir(t.TempDir())
@@ -280,12 +282,12 @@ func TestEnrollmentRequiresIntentPersistenceBeforeRedemption(t *testing.T) {
 	home := localSetupHome(t)
 	t.Chdir(t.TempDir())
 	codexHome := filepath.Join(home, "codex")
-	if err := os.Mkdir(codexHome, 0700); err != nil {
+	if err := cliFixtureMkdir(codexHome, 0700); err != nil {
 		t.Fatal(err)
 	}
 	// HOME is unusable for the private intent, while config remains writable.
 	badHome := filepath.Join(home, "not-a-directory")
-	if err := os.WriteFile(badHome, []byte("blocked"), 0600); err != nil {
+	if err := cliFixtureWriteFile(badHome, []byte("blocked"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	var redeemed atomic.Int32
@@ -332,7 +334,7 @@ func TestEnrollmentCommittedIntentRejectsCredentialReplacement(t *testing.T) {
 	for _, field := range []string{"secret", "hub", "peer", "marker", "live-caller"} {
 		t.Run(field, func(t *testing.T) {
 			f := newBindFixture(t)
-			if err := os.Chmod(f.env["HOME"], 0700); err != nil {
+			if err := cliFixtureChmod(f.env["HOME"], 0700); err != nil {
 				t.Fatal(err)
 			}
 			t.Chdir(t.TempDir())
@@ -407,7 +409,7 @@ func TestEnrollmentMissingThreadReportsUnsupportedWithoutRepairPromise(t *testin
 func localSetupHome(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
-	if err := os.Chmod(home, 0700); err != nil {
+	if err := cliFixtureChmod(home, 0700); err != nil {
 		t.Fatal(err)
 	}
 	return home
@@ -453,7 +455,7 @@ func enrollmentStatusRuntime(path string, done chan<- error, delay ...time.Durat
 
 func TestAutomaticEnrollmentWaitsForNextConnectorStatus(t *testing.T) {
 	f := newBindFixture(t)
-	if err := os.Chmod(f.env["HOME"], 0700); err != nil {
+	if err := cliFixtureChmod(f.env["HOME"], 0700); err != nil {
 		t.Fatal(err)
 	}
 	f.now = time.Now().UTC()
@@ -480,7 +482,7 @@ func TestEnrollmentFreshRecipientConvergesWithConnectorStatus(t *testing.T) {
 	project := t.TempDir()
 	t.Chdir(project)
 	codexHome := filepath.Join(home, "codex")
-	if err := os.Mkdir(codexHome, 0700); err != nil {
+	if err := cliFixtureMkdir(codexHome, 0700); err != nil {
 		t.Fatal(err)
 	}
 	var redeemed atomic.Int32
@@ -536,7 +538,7 @@ func TestEnrollmentFreshRecipientConvergesWithConnectorStatus(t *testing.T) {
 
 func TestEnrollmentInterruptedAfterConfigCommitResumesPreparedRecord(t *testing.T) {
 	f := newBindFixture(t)
-	if err := os.Chmod(f.env["HOME"], 0700); err != nil {
+	if err := cliFixtureChmod(f.env["HOME"], 0700); err != nil {
 		t.Fatal(err)
 	}
 	original := t.TempDir()
@@ -592,15 +594,12 @@ func TestEnrollmentDurableSavePreservesOtherProfileMetadata(t *testing.T) {
 	if got.OperatorProfile != cfg.OperatorProfile || got.Profiles["p"] != cfg.Profiles["p"] || got.Profiles["op"] != cfg.Profiles["op"] {
 		t.Fatal("durable enrollment changed unrelated config semantics")
 	}
-	info, err := os.Stat(path)
-	if err != nil || info.Mode().Perm() != 0600 {
-		t.Fatal("config is not private")
-	}
+	cliFixtureRequireMode(t, path, 0600)
 }
 
 func TestEnrollmentSupersededIntentDoesNotPreventLaterRepair(t *testing.T) {
 	f := newBindFixture(t)
-	if err := os.Chmod(f.env["HOME"], 0700); err != nil {
+	if err := cliFixtureChmod(f.env["HOME"], 0700); err != nil {
 		t.Fatal(err)
 	}
 	t.Chdir(t.TempDir())

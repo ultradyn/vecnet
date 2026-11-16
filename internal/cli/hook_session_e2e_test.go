@@ -28,7 +28,7 @@ func newSharedDir(t *testing.T, hub, p1Secret, p2Secret string) *sharedDir {
 	u := hookUser(t, hub, p1Secret)
 	delete(u.env, "VECNET_PROFILE")
 	body := "[profiles.p1]\nhub = \"" + hub + "\"\nsecret = \"" + p1Secret + "\"\n[profiles.p2]\nhub = \"" + hub + "\"\nsecret = \"" + p2Secret + "\"\n"
-	if err := os.WriteFile(u.conf, []byte(body), 0o600); err != nil {
+	if err := cliFixtureWriteFile(u.conf, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return &sharedDir{t: t, env: u.env}

@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/XertroV/vecnet/internal/platform"
 )
 
 func TestParseEncodeRoundTrip(t *testing.T) {
@@ -20,6 +22,7 @@ func TestParseEncodeRoundTrip(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			src = bytes.ReplaceAll(src, []byte("\r\n"), []byte("\n"))
 			node, err := parseJSONNode(src)
 			if err != nil {
 				t.Fatal(err)
@@ -46,12 +49,15 @@ func TestParseEncodeRoundTrip(t *testing.T) {
 }
 
 func TestHookInstallRefusesTempBinary(t *testing.T) {
+	root := filepath.VolumeName(os.TempDir()) + string(filepath.Separator)
+	opt := filepath.Join(root, "opt")
+	bin := platform.Exe("vecnet")
 	for _, tc := range []struct{ exe, want, warning string }{
-		{filepath.Join(os.TempDir(), "go-build123", "exe", "vecnet"), "vecnet", "temporary"},
-		{"/opt/project/.worktrees/x/bin/vecnet", "/opt/project/.worktrees/x/bin/vecnet", "worktree"},
-		{"/opt/bin/vecnet", "/opt/bin/vecnet", ""},
-		{"/opt/bin/other", "vecnet", ""},
-		{filepath.Clean(os.TempDir()) + "-other/vecnet", filepath.Clean(os.TempDir()) + "-other/vecnet", ""},
+		{filepath.Join(os.TempDir(), "go-build123", "exe", bin), "vecnet", "temporary"},
+		{filepath.Join(opt, "project", ".worktrees", "x", "bin", bin), filepath.Join(opt, "project", ".worktrees", "x", "bin", bin), "worktree"},
+		{filepath.Join(opt, "bin", bin), filepath.Join(opt, "bin", bin), ""},
+		{filepath.Join(opt, "bin", "other"), "vecnet", ""},
+		{filepath.Join(filepath.Clean(os.TempDir())+"-other", bin), filepath.Join(filepath.Clean(os.TempDir())+"-other", bin), ""},
 	} {
 		got, warning := defaultBin(tc.exe)
 		if got != tc.want || (tc.warning == "" && warning != "") || (tc.warning != "" && !strings.Contains(warning, tc.warning)) {

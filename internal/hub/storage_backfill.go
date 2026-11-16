@@ -12,11 +12,11 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"syscall"
 	"time"
 
 	"github.com/XertroV/vecnet/internal/auth"
 	"github.com/XertroV/vecnet/internal/eventpayload"
+	"github.com/XertroV/vecnet/internal/store"
 )
 
 const backfillMetaKey = "delivery_backfill_v1"
@@ -122,11 +122,11 @@ func (h *Hub) backfillCapacity(ctx context.Context) (BackfillCapacity, error) {
 	if err := ctx.Err(); err != nil {
 		return BackfillCapacity{}, err
 	}
-	var stat syscall.Statfs_t
-	if err := syscall.Statfs(h.Cfg.DataDir, &stat); err != nil {
+	available, err := store.AvailableDiskBytes(h.Cfg.DataDir)
+	if err != nil {
 		return BackfillCapacity{}, errors.New("backfill: capacity_probe")
 	}
-	c := BackfillCapacity{AvailableBytes: int64(stat.Bavail) * int64(stat.Bsize)}
+	c := BackfillCapacity{AvailableBytes: available}
 	info, err := os.Stat(filepath.Join(h.Cfg.DataDir, "hub.db-wal"))
 	if err == nil {
 		c.WALBytes = info.Size()

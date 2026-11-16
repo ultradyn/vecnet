@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -279,25 +278,25 @@ func prefsUser(t *testing.T, profiles string) *user {
 	t.Helper()
 	u := newUser(t)
 	decoyDir := filepath.Join(u.env["HOME"], ".config", "vecnet")
-	if err := os.MkdirAll(decoyDir, 0o700); err != nil {
+	if err := cliFixtureMkdirAll(decoyDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	decoy := "[profiles.p]\nhub = \"http://127.0.0.1:1\"\nsecret = \"vn_operator_decoy\"\nhub_pubkey = \"ed25519:decoy\"\n"
-	if err := os.WriteFile(filepath.Join(decoyDir, "config.toml"), []byte(decoy), 0o600); err != nil {
+	if err := cliFixtureWriteFile(filepath.Join(decoyDir, "config.toml"), []byte(decoy), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	xdg := filepath.Join(t.TempDir(), "xdg")
-	if err := os.MkdirAll(filepath.Join(xdg, "vecnet"), 0o700); err != nil {
+	if err := cliFixtureMkdirAll(filepath.Join(xdg, "vecnet"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(xdg, "vecnet", "config.toml"), []byte(decoy), 0o600); err != nil {
+	if err := cliFixtureWriteFile(filepath.Join(xdg, "vecnet", "config.toml"), []byte(decoy), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	u.env["XDG_CONFIG_HOME"] = xdg
-	if err := os.MkdirAll(filepath.Dir(u.conf), 0o700); err != nil {
+	if err := cliFixtureMkdirAll(filepath.Dir(u.conf), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(u.conf, []byte(profiles), 0o600); err != nil {
+	if err := cliFixtureWriteFile(u.conf, []byte(profiles), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return u

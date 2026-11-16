@@ -71,11 +71,14 @@ export function buildLaunch(row, values, key, now) {
   };
 }
 
+const absoluteHostPath = s => typeof s === 'string' && (s.startsWith('/') || /^[A-Za-z]:[\\/]/.test(s));
+const windowsHostPath = s => /^[A-Za-z]:[\\/]/.test(s);
+const powershellQuote = s => "'" + String(s).replace(/'/g, "''") + "'";
 const quote = s => "'" + String(s).replace(/'/g, "'\\''") + "'";
 export function launcherSetupIssue(v) {
   if (!ALIAS.test(v.project || '')) return 'Project alias must contain letters, digits, dots, underscores or hyphens, starting with a letter or digit.';
-  if (!v.repo?.startsWith('/') || /[\x00-\x1f\x7f]/.test(v.repo)) return 'Enter an absolute repository directory on the launcher host.';
-  if (v.source !== undefined && v.source !== '' && (typeof v.source !== 'string' || !v.source.startsWith('/') || /[\x00-\x1f\x7f]/.test(v.source))) return 'Enter an absolute custom vecnet source checkout directory, or leave it empty for managed upgrades.';
+  if (!absoluteHostPath(v.repo) || /[\x00-\x1f\x7f]/.test(v.repo)) return 'Enter an absolute repository directory on the launcher host.';
+  if (v.source !== undefined && v.source !== '' && (typeof v.source !== 'string' || !absoluteHostPath(v.source) || /[\x00-\x1f\x7f]/.test(v.source))) return 'Enter an absolute custom vecnet source checkout directory, or leave it empty for managed upgrades.';
   if (!v.baseRef?.trim() || /[\x00-\x1f\x7f]/.test(v.baseRef)) return 'Enter the host project base ref.';
   return '';
 }
@@ -85,9 +88,14 @@ export function launcherSetupCommands(output, v) {
   if (issue) throw new Error(issue);
   const enrol = output.match(/^\s*(printf %s .* \| vecnet enrol .*--profile ([A-Za-z0-9._-]+).*)$/m);
   if (!enrol) throw new Error('The hub did not return a launcher enrolment command.');
-  const prefix = 'vecnet --net ' + quote(enrol[2]) + ' launcher ';
-  return [enrol[1], prefix + 'setup --project ' + quote(v.project) + ' --repo ' + quote(v.repo) + ' --base-ref ' + quote(v.baseRef) + ' --write',
-    prefix + 'install' + (v.source ? ' --source ' + quote(v.source) : '') + ' --write --enable --start'].join('\n');
+  const windows = windowsHostPath(v.repo), word = windows ? powershellQuote : quote;
+  const prefix = 'vecnet --net ' + word(enrol[2]) + ' launcher ';
+  // Invitations use a POSIX printf pipeline. For a Windows launcher host use
+  // PowerShell's literal token pipeline instead, without executing or expanding
+  // any host path supplied through this page.
+  const enrollment = windows ? enrol[1].replace(/^printf %s ('[A-Za-z0-9_-]+') \| /, '$1 | ') : enrol[1];
+  return [enrollment, prefix + 'setup --project ' + word(v.project) + ' --repo ' + word(v.repo) + ' --base-ref ' + word(v.baseRef) + ' --write',
+    prefix + 'install' + (v.source ? ' --source ' + word(v.source) : '') + ' --write --enable --start'].join('\n');
 }
 
 // Only submitted requests, public identity pins and safe result ids live in

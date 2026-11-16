@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/XertroV/vecnet/connectors"
+	"github.com/XertroV/vecnet/internal/platform"
 )
 
 // verifyLegacyRetired is a read-only precondition for retiring an empty v1
@@ -78,7 +79,7 @@ func (a *app) verifyLegacyRetired(path string) error {
 		}
 	}
 
-	if err := verifyLegacyRetiredWith(ctx, runtime.GOOS, a.getenv("HOME"), "/proc", os.Getuid(), run, compatible); err != nil {
+	if err := verifyLegacyRetiredWith(ctx, runtime.GOOS, platform.Home(a.getenv), "/proc", os.Getuid(), run, compatible); err != nil {
 		return fmt.Errorf("cannot retire legacy bindings %s: %w", path, err)
 	}
 	return nil

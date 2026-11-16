@@ -53,7 +53,7 @@ func TestCodexOptOutFencesSavedEnrollment(t *testing.T) {
 		t.Run(map[bool]string{false: "already-unbound", true: "unbind-during-runtime"}[duringRuntime], func(t *testing.T) {
 			f := newBindFixture(t)
 			f.now = time.Now().UTC()
-			if err := os.Chmod(f.env["HOME"], 0700); err != nil {
+			if err := cliFixtureChmod(f.env["HOME"], 0700); err != nil {
 				t.Fatal(err)
 			}
 			t.Chdir(t.TempDir())
@@ -105,7 +105,7 @@ func TestCodexOptOutCorruptionRefusesReacquisition(t *testing.T) {
 	f.ok("--net", "p", "unbind")
 	before := f.raw()
 	for _, raw := range []string{`{}`, `{"version":1}`, `{"version":1,"disabled":null}`, `{"version":1,"disabled":[],"Disabled":[]}`, `{"version":1,"disabled":[],"future":true}`} {
-		if err := os.WriteFile(f.path+".optout", []byte(raw), 0600); err != nil {
+		if err := cliFixtureWriteFile(f.path+".optout", []byte(raw), 0600); err != nil {
 			t.Fatal(err)
 		}
 		code, _, _ := f.run("--net", "p", "bind", "--thread", bindT1)

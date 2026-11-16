@@ -5,6 +5,7 @@ import { realpathSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import type { Clock } from '../../../hub-client/src/ports.ts';
 import type { Binding } from './engine.ts';
+import { cliEnvironment, commandInvocation, terminateProcess, userHome } from '../../../hub-client/src/platform.ts';
 
 export type Owner = Pick<Binding, 'profile' | 'as' | 'hub' | 'caller' | 'codexHome' | 'threadId' | 'configPath' | 'generation'>;
 export function ownerOf(b: Owner): Owner {
@@ -32,8 +33,9 @@ export function authorityPath(env: Record<string, string>): string | undefined {
     }
   }
   try {
-    if (!env.HOME || !isAbsolute(env.HOME)) return;
-    const expected = canonical(join(realpathSync(env.HOME), '.local', 'state', 'vecnet', 'codex', 'bindings.json'));
+    const home = userHome(env);
+    if (!home) return;
+    const expected = canonical(join(realpathSync(home), '.local', 'state', 'vecnet', 'codex', 'bindings.json'));
     if (env.VECNET_CODEX_BINDINGS && canonical(env.VECNET_CODEX_BINDINGS) !== expected) return;
     return expected;
   } catch { return; }
@@ -41,7 +43,7 @@ export function authorityPath(env: Record<string, string>): string | undefined {
 export function verifyOwner(env: Record<string, string>, owner: Owner, euid: number, now: number): boolean {
   const path = authorityPath(env);
   if (!path || !validOwner(owner)) return false;
-  const file = readBindings(path, euid);
+  const file = readBindings(path, euid, env);
   return file.state === 'ok' && file.bindings.some(b => sameOwner(ownerOf(b), owner) && b.expiresAt > now);
 }
 export function ownerArgs(b: Owner): string[] {
@@ -54,11 +56,12 @@ export interface Guard { finish(outcome: 'accepted' | 'rejected' | 'ambiguous'):
 export function acquireGuard(bin: string, env: Record<string, string>, b: Owner, claim: string, attempt: string, clock?: Pick<Clock, 'timer'>): Promise<Guard> {
   if (!validOwner(b) || !/^[a-f0-9]{32}$/.test(attempt)) return Promise.reject(new Error('ownership_guard_invalid_owner'));
   return new Promise((resolve, reject) => {
-    const child = spawn(bin, ['--net', b.profile, ...(b.as ? ['--as', b.as] : []), 'codex', 'guard', ...ownerArgs(b), '--claim', claim, '--attempt', attempt],
-      { env: { ...env, VECNET_CONFIG: b.configPath ?? '' }, stdio: ['pipe', 'pipe', 'ignore'] });
+    const command = commandInvocation([bin, '--net', b.profile, ...(b.as ? ['--as', b.as] : []), 'codex', 'guard', ...ownerArgs(b), '--claim', claim, '--attempt', attempt], env);
+    const child = spawn(command.file, command.args,
+      { ...command, windowsHide: true, env: { ...cliEnvironment(env), VECNET_CONFIG: b.configPath ?? '' }, stdio: ['pipe', 'pipe', 'ignore'] });
     let ready = false, live = true, settled = false, exitCode: number | null = null;
-    const timer = clock?.timer(32_000, () => child.kill());
-    const timeout = timer ? undefined : setTimeout(() => child.kill(), 32_000);
+    const timer = clock?.timer(32_000, () => terminateProcess(child));
+    const timeout = timer ? undefined : setTimeout(() => terminateProcess(child), 32_000);
     const reader = createInterface({ input: child.stdout });
     const closed = new Promise<void>(done => {
       child.once('error', () => { live = false; reject(new Error('ownership_guard_failed')); });
@@ -67,7 +70,7 @@ export function acquireGuard(bin: string, env: Record<string, string>, b: Owner,
     child.stdin.on('error', () => {});
     reader.once('line', line => {
       try { if (line.length > 1024 || JSON.parse(line).ready !== true) throw new Error(); }
-      catch { child.kill(); reject(new Error('ownership_guard_invalid')); return; }
+      catch { terminateProcess(child); reject(new Error('ownership_guard_invalid')); return; }
       ready = true;
       resolve({ valid: () => live && !settled,
         async finish(outcome) {

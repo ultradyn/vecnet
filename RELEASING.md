@@ -1,6 +1,6 @@
 # npm releases
 
-The npm package is `vecnet`, its homepage is <https://vecnet.ai>, and its version lives in `npm/package.json`. Each release bundles the CLI and hub for Linux x64 and ARM64.
+The npm package is `vecnet`, its homepage is <https://vecnet.ai>, and its version lives in `npm/package.json`. Each release bundles the CLI and hub for Linux and Windows x64 and ARM64.
 
 ## One-time npm setup
 
@@ -37,9 +37,9 @@ The tag must exactly match the manifest version and point to a commit included i
 
 ## Release checks and artifacts
 
-`Release` runs the full Go test suite, builds using Go 1.27.1 and npm 12.0.1, then tests the packed package on GitHub-hosted Linux x64 and ARM64 runners. Both architectures install the same tarball with lifecycle scripts disabled and exercise enrolment, peer messaging, hub shutdown, and signal exit status. Builds and tests use two threads.
+`Release` runs the full Go test suite, builds using Go 1.27.4 and npm 12.0.1, then tests the packed package on GitHub-hosted Linux and Windows x64 and ARM64 runners. All platforms install the same tarball with lifecycle scripts disabled and exercise enrolment, peer messaging, hub shutdown, and signal exit status. Builds and tests use two threads.
 
-Only after both architectures pass does CI publish the tested tarball and verify npm serves the same integrity after processing. The GitHub Release contains that tarball and `SHA256SUMS`; the Actions run retains the artifact for 30 days. An existing npm version is accepted on a rerun only when its integrity matches the artifact exactly, allowing recovery if publishing succeeded but GitHub Release creation failed.
+Only after every platform passes does CI publish the tested tarball and verify npm serves the same integrity after processing. The GitHub Release contains that tarball and `SHA256SUMS`; the Actions run retains the artifact for 30 days. An existing npm version is accepted on a rerun only when its integrity matches the artifact exactly, allowing recovery if publishing succeeded but GitHub Release creation failed.
 
 Use **Run workflow** on the Release Actions page to build and test a branch without publishing. A manual run never publishes or creates a GitHub Release.
 

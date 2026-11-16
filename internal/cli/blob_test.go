@@ -32,7 +32,7 @@ func TestBlobTransfersNetworkErrorExitCode(t *testing.T) {
 				args := []string{"blob", "get", strings.Repeat("a", 64), "--blob-id", "blo_00000000000000000000000001", "--out", path}
 				if command != "get" {
 					path = filepath.Join(t.TempDir(), "attachment")
-					if err := os.WriteFile(path, []byte("abc"), 0o600); err != nil {
+					if err := cliFixtureWriteFile(path, []byte("abc"), 0o600); err != nil {
 						t.Fatal(err)
 					}
 					args = []string{command, "peer_test", "text", "--hold", "--attach", path}
@@ -127,7 +127,7 @@ func TestAttachmentErrorExitCodes(t *testing.T) {
 				defer hub.Close()
 				u := profileUser(t, hub.URL, "fake")
 				path := filepath.Join(t.TempDir(), "attachment")
-				if err := os.WriteFile(path, []byte("abc"), 0o600); err != nil {
+				if err := cliFixtureWriteFile(path, []byte("abc"), 0o600); err != nil {
 					t.Fatal(err)
 				}
 				args := []string{command, "peer_test", "text", "--hold", "--attach", path}
@@ -246,10 +246,7 @@ func TestBlobGetVerifiedOutputAndNoOverwrite(t *testing.T) {
 		if err != nil || string(b) != "abc" {
 			t.Fatal("missing verified output")
 		}
-		st, _ := os.Stat(path)
-		if st.Mode().Perm()&0o077 != 0 {
-			t.Fatal("output is not private")
-		}
+		cliFixtureRequireMode(t, path, 0o600)
 		code, _, _ = u.run("blob", "get", sha, "--blob-id", id, "--out", path)
 		if code != 1 {
 			t.Fatal("overwrote output")

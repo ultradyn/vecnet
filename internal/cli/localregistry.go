@@ -18,6 +18,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/XertroV/vecnet/internal/platform"
 )
 
 type localProject struct {
@@ -67,7 +69,7 @@ func localRegistryCanonical(path string) (string, error) {
 	probe := path
 	var tail []string
 	for {
-		real, err := filepath.EvalSymlinks(probe)
+		real, err := platform.Canonical(probe)
 		if err == nil {
 			for i := len(tail) - 1; i >= 0; i-- {
 				real = filepath.Join(real, tail[i])
@@ -88,7 +90,7 @@ func (a *app) localRegistryDirectory(create bool) (*os.File, error) {
 	if a.getenv == nil {
 		return nil, usageErr("local inventory requires an absolute HOME")
 	}
-	home, err := localRegistryCanonical(a.getenv("HOME"))
+	home, err := localRegistryCanonical(platform.Home(a.getenv))
 	if err != nil {
 		return nil, err
 	}
@@ -359,22 +361,22 @@ func (a *app) localProjectIdentity() (localProject, error) {
 			cmd.Env = append(cmd.Env, e)
 		}
 	}
-	cmd.Env = append(cmd.Env, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_TERMINAL_PROMPT=0")
+	cmd.Env = append(cmd.Env, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_TERMINAL_PROMPT=0")
 	out, gitErr := cmd.Output()
 	if gitErr == nil {
 		paths := strings.Split(strings.TrimSuffix(string(out), "\n"), "\n")
 		if len(paths) != 3 {
 			return p, usageErr("invalid Git project identity")
 		}
-		p.Root, err = localRegistryCanonical(paths[0])
+		p.Root, err = localRegistryCanonical(filepath.FromSlash(strings.TrimSuffix(paths[0], "\r")))
 		if err != nil {
 			return p, err
 		}
-		p.Repository, err = localRegistryCanonical(paths[1])
+		p.Repository, err = localRegistryCanonical(filepath.FromSlash(strings.TrimSuffix(paths[1], "\r")))
 		if err != nil {
 			return p, err
 		}
-		p.Worktree, err = localRegistryCanonical(paths[2])
+		p.Worktree, err = localRegistryCanonical(filepath.FromSlash(strings.TrimSuffix(paths[2], "\r")))
 		if err != nil {
 			return p, err
 		}

@@ -1,6 +1,7 @@
+import { symlinkSync, writePrivate } from './fixtures/platform.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readBindings } from '../src/codex/connector-authority.ts';
@@ -10,14 +11,15 @@ test('authority parser requires complete typed records and preserves canonical i
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const config = join(dir, 'config'), home = join(dir, 'home'), path = join(dir, 'bindings');
   writeFileSync(config, ''); mkdirSync(home);
-  symlinkSync(config, join(dir, 'config-alias')); symlinkSync(home, join(dir, 'home-alias'));
-  const row = { config_path: join(dir, 'config-alias'), codex_home: join(dir, 'home-alias'),
+  if (process.platform !== 'win32') symlinkSync(config, join(dir, 'config-alias'));
+  symlinkSync(home, join(dir, 'home-alias'));
+  const row = { config_path: process.platform === 'win32' ? config : join(dir, 'config-alias'), codex_home: join(dir, 'home-alias'),
     generation: 'abc123'.padEnd(32, '0'), thread_id: '00000000-0000-4000-8000-000000000001',
     profile: 'p', caller: 'peer', as: '', hub: 'https://HUB.invalid:443/',
     created_at: '2026-11-01T00:00:00Z', expires_at: '2026-12-01T00:00:00Z', idle_dormant_hours: 0, attended: true };
   const read = (value: unknown) => {
-    writeFileSync(path, JSON.stringify(value), { mode: 0o600 });
-    return readBindings(path, process.geteuid!());
+    writePrivate(path, JSON.stringify(value));
+    return readBindings(path, (process.geteuid?.() ?? -1));
   };
   const parsed = read({ version: 1, bindings: [row] });
   assert.equal(parsed.state, 'ok');
@@ -41,7 +43,7 @@ test('authority parser requires complete typed records and preserves canonical i
     assert.equal(read(file).state, 'invalid');
   }
   writeFileSync(path, ' '.repeat(1_048_577));
-  assert.equal(readBindings(path, process.geteuid!()).state, 'invalid');
+  assert.equal(readBindings(path, (process.geteuid?.() ?? -1)).state, 'invalid');
 });
 
 
@@ -55,11 +57,11 @@ test('authority rejects duplicate JSON properties including escaped names at eve
     '{"version":1,"bindings":[],"meta":[{"owner":"old","own\\u0065r":"new"}]}',
     '{"version":1,"bindings":[],"meta":{"__proto__":1,"__proto__":2}}',
   ]) {
-    writeFileSync(path, raw, { mode: 0o600 });
-    assert.equal(readBindings(path, process.geteuid!()).state, 'invalid', raw);
+    writePrivate(path, raw);
+    assert.equal(readBindings(path, (process.geteuid?.() ?? -1)).state, 'invalid', raw);
   }
-  writeFileSync(path, JSON.stringify({ version: 1, bindings: [], meta: [
+  writePrivate(path, JSON.stringify({ version: 1, bindings: [], meta: [
     { name: 'braces {} [] and \"quotes\" : in strings' }, { name: 'same key in different object' },
   ] }));
-  assert.equal(readBindings(path, process.geteuid!()).state, 'ok');
+  assert.equal(readBindings(path, (process.geteuid?.() ?? -1)).state, 'ok');
 });

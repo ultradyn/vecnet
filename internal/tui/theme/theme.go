@@ -48,8 +48,9 @@ const (
 //     ANSI256. COLORTERM=yes or true does not count as truecolor.
 //  4. Otherwise ANSI16.
 //
-// The TUI only ever draws to a terminal, so step 3 treats out as one: only
-// TERM decides, and a test can pass a nil writer.
+// The TUI only ever draws to a terminal, so step 3 treats out as one and a test
+// can pass a nil writer. TERM decides when set; without it, colorprofile uses
+// its native platform default (ANSI256 on Windows).
 func Detect(env []string, out io.Writer) Profile {
 	if v, ok := lookup(env, "NO_COLOR"); ok && v != "" {
 		return NoColor

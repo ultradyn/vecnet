@@ -1,5 +1,4 @@
 import { spawn } from 'node:child_process';
-import { open, readFile } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { Clock, Log } from '../../hub-client/src/ports.ts';
@@ -11,6 +10,8 @@ import type { Schema } from './contract/metadata.ts';
 import type { Ledger } from './ledger.ts';
 import { redactText, redactingLog, scrubEnv } from './redact.ts';
 import { checkRoute } from './route-check.ts';
+import { readPrivateFile } from './private-files.ts';
+import { commandInvocation, terminateProcess } from '../../hub-client/src/platform.ts';
 
 const MAX_EXEC_OUTPUT = 16 * 1024 * 1024;
 
@@ -20,7 +21,8 @@ function isPlugin(x: unknown): x is Plugin {
 // Relative module paths resolve against src/ (this file's directory), so the
 // shipped config's "./backends/t3/index.ts" works from any working directory.
 function moduleUrl(spec: string): string {
-  if (spec.startsWith('./') || spec.startsWith('../')) return new URL(spec, import.meta.url).href;
+  const relative = process.platform === 'win32' ? spec.replace(/\\/g, '/') : spec;
+  if (relative.startsWith('./') || relative.startsWith('../')) return new URL(relative, import.meta.url).href;
   if (isAbsolute(spec)) return pathToFileURL(spec).href;
   return spec;
 }
@@ -51,13 +53,7 @@ export async function loadBackends(cfg: LauncherConfig, ctxFor: (id: string) => 
 }
 
 async function readSecretFile(path: string): Promise<string> {
-  const file = await open(path, 'r');
-  try {
-    const stat = await file.stat();
-    // Owner-only: a group- or world-readable secret is refused, never read.
-    if (!stat.isFile() || (stat.mode & 0o077) !== 0) throw new Error('secret file must be a regular file readable only by its owner');
-    return await file.readFile('utf8');
-  } finally { await file.close(); }
+  return readPrivateFile(path);
 }
 
 export function pluginContext(a: { host: string; log: Log; ledger: Ledger; id: string; clock: Clock }): PluginContext {
@@ -72,16 +68,17 @@ export function pluginContext(a: { host: string; log: Log; ledger: Ledger; id: s
     now: () => new Date(a.clock.now()),
     sleep: (ms, signal) => a.clock.sleep(ms, signal),
     redact: s => redactText(s).text,
-    checkRoute: (route, signal) => checkRoute(route, { readFile }, signal),
+    checkRoute: (route, signal) => checkRoute(route, { readFile: readPrivateFile }, signal),
     exec(argv, opts) {
       return new Promise((resolve, reject) => {
         if (!argv.length || !argv[0]) { reject(new Error('exec needs a command')); return; }
         if (opts.signal?.aborted) { reject(new Error('exec aborted')); return; }
         const env = scrubEnv({ ...process.env, ...opts.env }, []);
-        const child = spawn(argv[0], argv.slice(1), { env, stdio: ['pipe', 'pipe', 'pipe'] });
+        const command = commandInvocation(argv, env, opts.cwd);
+        const child = spawn(command.file, command.args, { ...command, env, cwd: opts.cwd, windowsHide: true, detached: process.platform !== 'win32', stdio: ['pipe', 'pipe', 'pipe'] });
         const out: Buffer[] = [], err: Buffer[] = [];
         let size = 0, settled = false;
-        const kill = () => { try { child.kill('SIGKILL'); } catch { /* already gone */ } };
+        const kill = () => { terminateProcess(child, 'SIGKILL', true); };
         const timer = a.clock.timer(opts.timeoutMs, kill);
         const abort = () => kill();
         opts.signal?.addEventListener('abort', abort, { once: true });

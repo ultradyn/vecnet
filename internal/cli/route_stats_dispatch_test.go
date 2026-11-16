@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -104,7 +103,7 @@ func t4RouteUser(t *testing.T, handle http.HandlerFunc) *user {
 	u.env["XDG_RUNTIME_DIR"] = filepath.Join(u.env["HOME"], "runtime")
 	body := fmt.Sprintf("[profiles.p]\nhub = %q\nsecret = %q\n\n[profiles.%s]\nhub = %q\nsecret = %q\n",
 		fallback.URL, "vn_operator_task4_fallback_synthetic", t4RouteProfile, selected.URL, t4RouteBearer)
-	if err := os.WriteFile(u.conf, []byte(body), 0o600); err != nil {
+	if err := cliFixtureWriteFile(u.conf, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return u
@@ -273,7 +272,7 @@ func TestRouteStatsDispatchAndHelp(t *testing.T) {
 func TestRouteStatsDispatchPreservesRouteVerbs(t *testing.T) {
 	const key = "crsr_task4_rotate_synthetic_key"
 	keyPath := filepath.Join(t.TempDir(), "routine-key")
-	if err := os.WriteFile(keyPath, []byte(key+"\n"), 0o600); err != nil {
+	if err := cliFixtureWriteFile(keyPath, []byte(key+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct {

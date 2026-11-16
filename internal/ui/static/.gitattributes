@@ -1,0 +1,6 @@
+# Embedded assets ship verbatim. Keep their bytes and all-files size portable.
+*.js text eol=lf
+*.css text eol=lf
+*.html text eol=lf
+*.svg text eol=lf
+*.png -text

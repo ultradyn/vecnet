@@ -14,6 +14,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 
+	"github.com/XertroV/vecnet/internal/platform"
 	"github.com/XertroV/vecnet/internal/tui"
 )
 
@@ -66,7 +67,7 @@ func configPath(getenv func(string) string) (string, error) {
 	if d := getenv("XDG_CONFIG_HOME"); d != "" {
 		return filepath.Join(d, "vecnet", "config.toml"), nil
 	}
-	if h := getenv("HOME"); h != "" {
+	if h := platform.Home(getenv); h != "" {
 		return filepath.Join(h, ".config", "vecnet", "config.toml"), nil
 	}
 	return "", usageErr("cannot locate the config file: set VECNET_CONFIG, XDG_CONFIG_HOME or HOME")
@@ -77,7 +78,7 @@ func cacheDir(getenv func(string) string) (string, error) {
 	if d := getenv("XDG_CACHE_HOME"); d != "" {
 		return filepath.Join(d, "vecnet"), nil
 	}
-	if h := getenv("HOME"); h != "" {
+	if h := platform.Home(getenv); h != "" {
 		return filepath.Join(h, ".cache", "vecnet"), nil
 	}
 	return "", errors.New("cannot locate the cache dir: set XDG_CACHE_HOME or HOME")
@@ -181,10 +182,10 @@ func operatorProfiles(c Config, allowEnv bool) []tui.ProfileChoice {
 // over path, so a reader never sees a half-written file. Mode 0600.
 func writeFileAtomic(path string, data []byte) error {
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := platform.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	f, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*")
+	f, err := platform.CreateTemp(dir, "."+filepath.Base(path)+".*")
 	if err != nil {
 		return err
 	}
@@ -198,7 +199,7 @@ func writeFileAtomic(path string, data []byte) error {
 		werr = os.Chmod(tmp, 0o600)
 	}
 	if werr == nil {
-		werr = os.Rename(tmp, path)
+		werr = platform.Replace(tmp, path)
 	}
 	if werr != nil {
 		os.Remove(tmp)
@@ -341,7 +342,7 @@ func saveConfigDurable(path string, c Config) error {
 		return err
 	}
 	defer dir.Close()
-	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
+	f, err := platform.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
 	if err != nil {
 		return err
 	}
@@ -357,10 +358,10 @@ func saveConfigDurable(path string, c Config) error {
 	if err != nil {
 		return err
 	}
-	if err = os.Rename(tmp, path); err != nil {
+	if err = platform.Replace(tmp, path); err != nil {
 		return err
 	}
-	return dir.Sync()
+	return platform.SyncDir(dir)
 }
 
 // Sync each newly created directory's parent before relying on the new name.
@@ -382,7 +383,7 @@ func makeConfigDirectoryDurable(path string) error {
 	if err := makeConfigDirectoryDurable(parent); err != nil {
 		return err
 	}
-	if err := os.Mkdir(path, 0700); err != nil && !errors.Is(err, os.ErrExist) {
+	if err := platform.MkdirAll(path, 0700); err != nil && !errors.Is(err, os.ErrExist) {
 		return err
 	}
 	dir, err := os.Open(parent)
@@ -390,5 +391,5 @@ func makeConfigDirectoryDurable(path string) error {
 		return err
 	}
 	defer dir.Close()
-	return dir.Sync()
+	return platform.SyncDir(dir)
 }

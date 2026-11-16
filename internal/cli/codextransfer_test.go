@@ -59,7 +59,7 @@ func TestCodexAcceptancePreservesInvalidState(t *testing.T) {
 				if damaged == "null-accepted" {
 					raw = bytes.Replace(raw, []byte(`"Accepted":true`), []byte(`"Accepted":null`), 1)
 				}
-				if err := os.WriteFile(path, raw, 0600); err != nil {
+				if err := cliFixtureWriteFile(path, raw, 0600); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -78,7 +78,7 @@ func TestCodexTransferPreservesCorruptState(t *testing.T) {
 	f := newBindFixture(t)
 	f.bind("p", bindT1)
 	path := f.seedGuardClaim("send1")
-	if err := os.WriteFile(path, []byte("{corrupt"), 0600); err != nil {
+	if err := cliFixtureWriteFile(path, []byte("{corrupt"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	before := f.raw()

@@ -1,3 +1,4 @@
+import { writePrivate } from '../fixtures/platform.ts';
 // End to end: the launcher daemon in-process, with the real hub client and
 // event stream, against a real bin/vecnet-hub child and the fake backend
 // loaded by module path. No T3, no Paseo. Run through `just ln-e2e`.
@@ -123,8 +124,7 @@ async function setup(t: TestContext, o: { idle?: Record<string, string>; clockOf
   git('commit', '-q', '-m', 'init');
 
   const credential = join(dir, 'credential');
-  writeFileSync(credential, `${launcher.secret}\n`, { mode: 0o600 });
-  chmodSync(credential, 0o600);
+  writePrivate(credential, `${launcher.secret}\n`);
   const stateFile = join(dir, 'fake-state.json');
   const clock = shiftClock(o.clockOffsetMs ?? 0);
   const cfg = parseConfig({

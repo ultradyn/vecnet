@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import type { Clock, Log } from '../../../hub-client/src/ports.ts';
 import type { Binding } from './engine.ts';
 import { ownerArgs, ownerOf, validOwner } from './ownership.ts';
-import { scrubEnv } from '../redact.ts';
+import { cliEnvironment, commandInvocation, terminateProcess } from '../../../hub-client/src/platform.ts';
 
 /** Public, bounded metadata only. Never serialize a binding or an RPC error. */
 export interface RuntimeSnapshot {
@@ -19,16 +19,16 @@ const offline: RuntimeSnapshot = { state: 'offline', delivery: 'unavailable', re
 /** The credential-holding CLI validates exact ownership under the handoff lock.
  * Stdin is a closed shape; neither subprocess output nor errors are logged. */
 export function runtimeStatusPost(bin: string, sourceEnv: Record<string, string>): RuntimeStatusPost {
-  const keys = ['HOME', 'PATH', 'XDG_CONFIG_HOME', 'XDG_RUNTIME_DIR', 'VECNET_CONFIG'];
-  const env = Object.fromEntries(Object.entries(scrubEnv(sourceEnv, keys)).filter(([key]) => keys.includes(key)));
+  const env = cliEnvironment(sourceEnv);
   return (binding, snapshot, signal) => new Promise(resolve => {
     if (signal.aborted || !validOwner(ownerOf(binding))) { resolve(false); return; }
     const body = JSON.stringify({ state: snapshot.state, delivery: snapshot.delivery, reason: snapshot.reason, version: snapshot.version });
-    const child = spawn(bin, ['--net', binding.profile, ...(binding.as ? ['--as', binding.as] : []),
-      'codex', 'report-status', ...ownerArgs(binding)],
-    { env: { ...env, VECNET_CONFIG: binding.configPath! }, stdio: ['pipe', 'ignore', 'ignore'] });
+    const command = commandInvocation([bin, '--net', binding.profile, ...(binding.as ? ['--as', binding.as] : []),
+      'codex', 'report-status', ...ownerArgs(binding)], env);
+    const child = spawn(command.file, command.args,
+    { ...command, windowsHide: true, env: { ...env, VECNET_CONFIG: binding.configPath! }, stdio: ['pipe', 'ignore', 'ignore'] });
     let settled = false;
-    const kill = () => { child.kill('SIGKILL'); };
+    const kill = () => { terminateProcess(child); };
     const timeout = setTimeout(kill, 4000);
     const finish = (ok: boolean) => {
       if (settled) return;
@@ -48,7 +48,7 @@ export function runtimeStatusPost(bin: string, sourceEnv: Record<string, string>
  * loop. The connector's ordinary reload supplies changes and 30s heartbeats. */
 export function createRuntimeStatusReporter(o: { clock: Clock; log: Log; post: RuntimeStatusPost }) {
   const slots = new Map<string, Slot>();
-  let active = 0, stopping = false, stopped = false, stopPromise: Promise<void> | undefined;
+  let active = 0, stopping = false, stopped = false, fenced = false, stopPromise: Promise<void> | undefined;
   let drained: (() => void) | undefined;
   function pump() {
     if (stopped) return;
@@ -72,7 +72,7 @@ export function createRuntimeStatusReporter(o: { clock: Clock; log: Log; post: R
   }
   return {
     sync(entries: Iterable<Entry>) {
-      if (stopping) return;
+      if (stopping || fenced) return;
       const wanted = new Set<string>(), now = o.clock.now();
       for (const entry of entries) {
         if (entry.binding.expiresAt <= now || !validOwner(ownerOf(entry.binding))) continue;
@@ -85,6 +85,13 @@ export function createRuntimeStatusReporter(o: { clock: Clock; log: Log; post: R
       }
       for (const [key, slot] of slots) if (!wanted.has(key)) { slots.delete(key); slot.active?.abort(); }
       pump();
+    },
+    /** Singleton loss revokes ALL writes, including an already-started offline
+     * shutdown. Abort adapters synchronously and drain them in stop(). */
+    fence(): void {
+      fenced = true;
+      for (const slot of slots.values()) slot.active?.abort();
+      slots.clear(); pump();
     },
     stop(): Promise<void> {
       if (stopPromise) return stopPromise;

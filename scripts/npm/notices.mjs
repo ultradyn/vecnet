@@ -1,26 +1,26 @@
 import { execFileSync } from 'node:child_process';
 import { readFile, readdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { nativeTargets } from './platforms.mjs';
 
-// Include the union of modules linked on both supported Linux architectures.
+// Include the union of modules linked on every supported OS and architecture,
+// including Windows-only dependencies.
 export async function writeNotices({ root, destination, workers = '2' }) {
   const env = { ...process.env, CGO_ENABLED: '0', GOMAXPROCS: workers, GOFLAGS: `${process.env.GOFLAGS || ''} -p=${workers}`.trim() };
   const go = (args, targetEnv = {}) => execFileSync('go', args, {
     cwd: root, env: { ...env, ...targetEnv }, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024,
   }).trim();
   const modules = new Map();
-  for (const GOOS of ['linux']) {
-    for (const GOARCH of ['amd64', 'arm64']) {
-      const rows = go([
-        'list', '-mod=readonly', '-deps', '-f',
-        '{{if .Module}}{{if not .Module.Main}}{{.Module.Path}}\t{{.Module.Version}}\t{{.Module.Dir}}{{end}}{{end}}',
-        './cmd/vecnet', './cmd/vecnet-hub',
-      ], { GOOS, GOARCH });
-      for (const row of rows.split('\n').filter(Boolean)) {
-        const [name, version, directory] = row.split('\t');
-        if (!name || !version || !directory) throw new Error(`Incomplete module license inventory: ${name}`);
-        modules.set(`${name}@${version}`, { name, version, directory });
-      }
+  for (const { goos: GOOS, goarch: GOARCH } of nativeTargets) {
+    const rows = go([
+      'list', '-mod=readonly', '-deps', '-f',
+      '{{if .Module}}{{if not .Module.Main}}{{.Module.Path}}\t{{.Module.Version}}\t{{.Module.Dir}}{{end}}{{end}}',
+      './cmd/vecnet', './cmd/vecnet-hub',
+    ], { GOOS, GOARCH });
+    for (const row of rows.split(/\r?\n/).filter(Boolean)) {
+      const [name, version, directory] = row.split('\t');
+      if (!name || !version || !directory) throw new Error(`Incomplete module license inventory: ${name}`);
+      modules.set(`${name}@${version}`, { name, version, directory });
     }
   }
 
