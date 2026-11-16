@@ -3,11 +3,12 @@ import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, writeFile, mkdir, rm, access, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, delimiter, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { symlink } from '../fixtures/platform.ts';
+import { nodeCommand, symlink } from '../fixtures/platform.ts';
+import { commandInvocation, envValue } from '../../../hub-client/src/platform.ts';
 import plugin from '../../src/backends/paseo/index.ts';
 import type { PluginContext, SessionHooks, LaunchSpec, TurnEvent, SessionHandle, TurnCursor } from '../../src/backend.ts';
 const fixture = fileURLToPath(new URL('../fixtures/fake-paseo-bridge.mjs', import.meta.url));
@@ -508,7 +509,7 @@ test('a launch that returned agent_id null leaves a worktree cleanupWorkspace ca
   assert.deepEqual(await b.cleanupWorkspace!({backend:'paseo',host:'test-host',id:'',extra:{tag:'vl-job_other'}}),{removed:false,reason:'missing_workspace_metadata'});
 });
 
-test('launch through a configured root alias stores canonical provenance and uses the real bridge cwd', async t => {
+test('launch through a configured root alias stores canonical provenance and preserves the prior bridge context', async t => {
   const h=await harness(t), alias=join(h.root,'configured-root');
   await symlink(h.ws,alias); h.config.workspace_root=alias;
   const root=await realpath(h.ws), workspace=join(root,h.spec.jobId);
@@ -519,7 +520,7 @@ test('launch through a configured root alias stores canonical provenance and use
   for(const key of [`ref:${h.spec.tag}`,`id:${s.ref.id}`]) assert.deepEqual(JSON.parse(h.saved.get(key)!),s.ref);
   const launch=(await h.entries()).find(x=>x.args[1]==='launch')!;
   assert.equal(launch.args[launch.args.indexOf('--cwd')+1],workspace);
-  assert.equal(launch.cwd,workspace,'the bridge subprocess itself runs in the canonical owned workspace');
+  assert.equal(launch.cwd,process.cwd(),'the bridge keeps its prior execution context; --cwd selects the agent workspace');
   const add=h.calls.find(x=>x.argv[0]==='git' && x.argv.includes('worktree') && x.argv.includes('add'))!;
   assert.equal(add.argv.at(-2),workspace,'real Git creates the canonical path saved in the ref');
   await access(join(alias,h.spec.jobId,'file'));
@@ -568,7 +569,7 @@ test('a failed launch through a configured root alias preserves canonical proven
   const stored=JSON.parse(h.saved.get(`ref:${h.spec.tag}`)!);
   assert.equal(stored.extra.workspace,workspace); assert.equal(stored.id,'');
   const launch=(await h.entries()).find(x=>x.args[1]==='launch')!;
-  assert.equal(launch.args[launch.args.indexOf('--cwd')+1],workspace); assert.equal(launch.cwd,workspace);
+  assert.equal(launch.args[launch.args.indexOf('--cwd')+1],workspace); assert.equal(launch.cwd,process.cwd());
   const ref={backend:'paseo',host:'test-host',id:''};
   for(const tag of ['vl-job_other',h.spec.tag+'_other',h.spec.tag.slice(0,-1)]) {
     assert.deepEqual(await b.cleanupWorkspace!({...ref,extra:{tag}}),{removed:false,reason:'missing_workspace_metadata'});
@@ -582,6 +583,51 @@ test('launch creates a missing configured root before resolving canonical worksp
   const h=await harness(t); await rm(h.ws,{recursive:true});
   const b=await h.create(), s=await b.launch(h.spec,h.hooks), workspace=join(await realpath(h.ws),h.spec.jobId);
   assert.equal(s.ref.extra?.workspace,workspace);
-  assert.equal((await h.entries()).find(x=>x.args[1]==='launch')!.cwd,workspace);
+  assert.equal((await h.entries()).find(x=>x.args[1]==='launch')!.cwd,process.cwd());
   assert.deepEqual(await b.cleanupWorkspace!(s.ref),{removed:true});
+});
+
+
+for (const kind of ['relative', 'PATH'] as const) test(`launch preserves real ${kind} bridge executable resolution and its prior context`, async t => {
+  const h=await harness(t), runDir=join(h.root,'run'), binDir=join(h.root,'bin');
+  await mkdir(runDir); await mkdir(binDir);
+  const priorContext=await realpath(runDir);
+  const executable=nodeCommand(join(binDir,'paseo-bridge'), `import(${JSON.stringify(new URL('../fixtures/fake-paseo-bridge.mjs', import.meta.url).href)});`);
+  h.config.bridge_bin=kind==='relative' ? '../bin/'+basename(executable) : basename(executable);
+  const originalExec=h.ctx.exec;
+  // Use the production invocation adapter and a real executable, without the
+  // harness's absolute-Node bridge substitution or changing the test process cwd.
+  h.ctx.exec=async (argv,opts) => {
+    if (argv[0]==='git' || argv[0]==='systemctl') return originalExec(argv,opts);
+    assert.equal(argv[0],h.config.bridge_bin);
+    const cwd=opts.cwd ?? priorContext;
+    const env={...process.env, FAKE_PASEO_STATE:join(h.root,'state.json'), FAKE_PASEO_LOG:join(h.root,'log.jsonl'), ...opts.env,
+      PATH:binDir+delimiter+(envValue(process.env,'PATH') ?? '')};
+    const command=commandInvocation(argv,env,cwd);
+    return new Promise((resolve,reject) => {
+      const child=spawn(command.file,command.args,{...command,env,cwd,signal:opts.signal,timeout:opts.timeoutMs,windowsHide:true});
+      let stdout='', stderr='';
+      child.stdout.on('data',x=>stdout+=x); child.stderr.on('data',x=>stderr+=x);
+      child.on('error',error=>{
+        t.diagnostic(`bridge=${kind} operation=${argv[2]} errno=${(error as NodeJS.ErrnoException).code ?? 'unknown'} stdoutBytes=${Buffer.byteLength(stdout)} stderrBytes=${Buffer.byteLength(stderr)}`);
+        reject(new Error('test bridge spawn failed'));
+      });
+      child.on('close',code=>resolve({code:code ?? 1,stdout,stderr}));
+      child.stdin.end(opts.stdin ?? '');
+    });
+  };
+  const b=await h.create();
+  assert.ok((await b.capabilities()).presets.some(p=>p.id==='sol'),'configured executable works before launch');
+  assert.equal((await b.health()).ok,true,'doctor resolves the sibling executable from the configured root');
+  const s=await b.launch(h.spec,h.hooks), workspace=await realpath(join(h.ws,h.spec.jobId));
+  const launch=(await h.entries()).find(x=>x.args[1]==='launch')!;
+  assert.equal(launch.cwd,priorContext,'launch retains the bridge execution context');
+  assert.equal(launch.args[launch.args.indexOf('--cwd')+1],workspace);
+  assert.equal(s.ref.extra?.workspace,workspace);
+  for(const key of [`ref:${h.spec.tag}`,`id:${s.ref.id}`]) assert.deepEqual(JSON.parse(h.saved.get(key)!),s.ref);
+  assert.equal(await h.git('-C',workspace,'branch','--show-current'),'launch/job_test');
+  assert.equal(await h.git('-C',workspace,'rev-parse','HEAD'),h.base);
+  await s.settle('requested');
+  assert.deepEqual(await b.cleanupWorkspace!(s.ref),{removed:true});
+  await assert.rejects(access(workspace)); await assert.rejects(access(launch.messageFile!));
 });

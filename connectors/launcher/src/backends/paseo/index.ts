@@ -89,7 +89,7 @@ class PaseoBackend implements Backend {
       const result = await this.bridge.json<{ agent_id: string | null; preset: string; mode: string | null }>([
         'launch', '--preset', preset.preset, ...(preset.service_tier ? ['--service-tier', preset.service_tier] : []),
         '--title', `${spec.tag} ${this.ctx.redact(spec.title)}`, '--message-file', prompt, '--cwd', workspace, '--no-worktree',
-      ], { env: { ...spec.env }, cwd: workspace, signal });
+      ], { env: { ...spec.env }, signal });
       if (!result.agent_id) throw new Error('launch_failed');
       ref.id = result.agent_id; ref.extra = { ...ref.extra, preset: result.preset, mode: result.mode }; this.save(ref);
       if (result.preset !== preset.preset || result.mode === null || !fullAccessModes.has(result.mode)) {
