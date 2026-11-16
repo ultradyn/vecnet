@@ -44,3 +44,36 @@ func TestCodexBindingsPathUsesCanonicalHomeIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func testCodexBindingsPathDefaultAncestor(t *testing.T, f *bindFixture) {
+	t.Helper()
+	home := f.env["HOME"]
+	alias := filepath.Join(t.TempDir(), "home alias")
+	if err := cliFixtureSymlink(t, home, alias); err != nil {
+		t.Fatal(err)
+	}
+	other := filepath.Join(t.TempDir(), "bindings.json")
+	for _, existing := range []bool{false, true} {
+		for _, h := range []string{home, alias} {
+			f.env["HOME"] = h
+			for _, override := range []string{"", f.path, filepath.Join(alias, ".local", "state", "vecnet", "codex", "bindings.json")} {
+				f.env["VECNET_CODEX_BINDINGS"] = override
+				got, err := codexBindingsPath(func(k string) string { return f.env[k] })
+				if err != nil || got != f.path {
+					t.Fatalf("existing=%v HOME=%q override=%q: path=%q err=%v, want default %q", existing, h, override, got, err, f.path)
+				}
+			}
+			for _, override := range []string{other, "bindings.json"} {
+				f.env["VECNET_CODEX_BINDINGS"] = override
+				if _, err := codexBindingsPath(func(k string) string { return f.env[k] }); err == nil {
+					t.Fatalf("separate authority %q accepted", override)
+				}
+			}
+		}
+		f.env["HOME"], f.env["VECNET_CODEX_BINDINGS"] = home, f.path
+		f.bind("p", bindT1)
+		if _, err := readCodexAuthority(f.path); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
