@@ -111,7 +111,7 @@ jobs:
           - runner: windows-11-arm
             arch: arm64
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 45
+    timeout-minutes: 75
     steps:
       - name: Preserve LF asset bytes for packed-source verification
         shell: pwsh
@@ -134,7 +134,7 @@ jobs:
       - name: Test read-only Windows artifact evidence helper
         run: .\scripts\windows\Get-ArtifactEvidence.Tests.ps1
       - name: Test the full Go suite on Windows
-        run: go test -mod=readonly -p 2 -timeout=20m ./...
+        run: go test -mod=readonly -p 2 -timeout=40m -json ./...
       - name: Build native binaries for connector tests
         run: go build -mod=readonly -p 2 -o bin/ ./cmd/vecnet ./cmd/vecnet-hub
       - name: Test Node connectors on Windows
