@@ -1,17 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, rm, copyFile, readFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
 const cli = fileURLToPath(new URL('./check.mjs', import.meta.url));
+const scratch = fileURLToPath(new URL('../../.superpowers/sdd/2026-11-16-public-evidence/scratch/', import.meta.url));
 const gitEnv = { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' };
 for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_COMMON_DIR']) delete gitEnv[key];
 
 async function repository(t, { initialCommit = true, name = '.' } = {}) {
-  const parent = await mkdtemp(join(tmpdir(), 'vecnet-evidence-guard-'));
+  await mkdir(scratch, { recursive: true });
+  const parent = await mkdtemp(join(scratch, 'vecnet-evidence-guard-'));
   t.after(() => rm(parent, { recursive: true, force: true }));
   const cwd = join(parent, name);
   await mkdir(cwd, { recursive: true });
@@ -113,7 +114,7 @@ test('renames are checked at their destination, including changed and unusual na
   repo.git('mv', destination, 'internal/ui/static/returned.png');
   allowed(repo.check());
   repo.commit();
-  allowed(repo.check(['--base', base]));
+  blocked(repo.check(['--base', base]), [destination]);
 });
 
 test('guard handles unborn repositories and reads root paths from a subdirectory', async t => {
@@ -141,14 +142,74 @@ for (const suffix of [' ', '\t', '\r', '\n']) {
   });
 }
 
-test('all-zero push bases deliberately compare the entire HEAD tree', async t => {
+test('initial zero and empty-tree bases check all introduced history (Plan 4 final I2)', async t => {
   const repo = await repository(t);
   await repo.put('docs/plans/initial.png');
   repo.commit();
   blocked(repo.check(['--base', '0'.repeat(40)]), ['docs/plans/initial.png']);
   repo.git('rm', 'docs/plans/initial.png');
   repo.commit();
-  allowed(repo.check(['--base', '0'.repeat(40)]));
+  const empty = repo.git('hash-object', '-t', 'tree', '/dev/null');
+  for (const base of ['0'.repeat(40), empty]) blocked(repo.check(['--base', base]), ['docs/plans/initial.png']);
+});
+
+test('history rejects add/delete while staged mode stays local (Plan 4 final I2)', async t => {
+  const repo = await repository(t);
+  await repo.put('docs/plans/historical.png', 'grandfathered');
+  const base = repo.commit();
+  await repo.put('docs/plans/transient.PNG');
+  repo.commit();
+  repo.git('rm', 'docs/plans/transient.PNG');
+  repo.commit();
+  allowed(repo.check());
+  blocked(repo.check(['--base', base]), ['docs/plans/transient.PNG']);
+});
+
+test('history rejects modified then restored grandfathered media (Plan 4 final I2)', async t => {
+  const repo = await repository(t);
+  await repo.put('docs/plans/historical.png', 'grandfathered');
+  const beforeModify = repo.commit();
+  await repo.put('docs/plans/historical.png', 'changed');
+  repo.commit();
+  await repo.put('docs/plans/historical.png', 'grandfathered');
+  repo.commit();
+  blocked(repo.check(['--base', beforeModify]), ['docs/plans/historical.png']);
+  allowed(repo.check());
+});
+
+test('history examines merged side commits and merge-created evidence (Plan 4 final I2)', async t => {
+  const repo = await repository(t);
+  const base = repo.git('rev-parse', 'HEAD');
+  const cleanTree = repo.git('rev-parse', 'HEAD^{tree}');
+  await repo.put('docs/design/side.png');
+  const sideAdd = repo.commit();
+  const sideDelete = repo.git('commit-tree', cleanTree, '-p', sideAdd, '-m', 'side deletion');
+  const main = repo.git('commit-tree', cleanTree, '-p', base, '-m', 'main');
+  const merge = repo.git('commit-tree', cleanTree, '-p', main, '-p', sideDelete, '-m', 'merge');
+  repo.git('update-ref', 'HEAD', merge);
+  blocked(repo.check(['--base', base]), ['docs/design/side.png']);
+  await repo.put('docs/design/merge.png');
+  repo.git('add', '--all');
+  const tree = repo.git('write-tree');
+  const novelMerge = repo.git('commit-tree', tree, '-p', main, '-p', sideDelete, '-m', 'merge creates media');
+  repo.git('update-ref', 'HEAD', novelMerge);
+  blocked(repo.check(['--base', base]), ['docs/design/merge.png', 'docs/design/side.png']);
+});
+
+test('merge preserves unchanged grandfathered media present on only one parent (Plan 4 final I2)', async t => {
+  const repo = await repository(t);
+  const ancestor = repo.git('rev-parse', 'HEAD');
+  const cleanTree = repo.git('rev-parse', 'HEAD^{tree}');
+  await repo.put('docs/plans/grandfathered.png');
+  const base = repo.commit();
+  const oldTree = repo.git('rev-parse', 'HEAD^{tree}');
+  const side = repo.git('commit-tree', cleanTree, '-p', ancestor, '-m', 'old side');
+  const merge = repo.git('commit-tree', oldTree, '-p', base, '-p', side, '-m', 'keep historical image');
+  repo.git('update-ref', 'HEAD', merge);
+  allowed(repo.check(['--base', base]));
+  repo.git('rm', 'docs/plans/grandfathered.png');
+  repo.commit();
+  allowed(repo.check(['--base', base]));
 });
 
 test('invalid arguments and missing base history fail closed', async t => {
@@ -159,6 +220,8 @@ test('invalid arguments and missing base history fail closed', async t => {
     assert.match(result.stderr, /usage|base|git/i);
     assert.doesNotMatch(result.stderr, /MODULE_NOT_FOUND/);
   }
+  const tree = repo.git('rev-parse', 'HEAD^{tree}');
+  assert.notEqual(repo.check(['--base', tree]).status, 0, 'nonempty trees cannot delimit commit history');
 });
 
 test('CI uses event base SHAs and a read-only full-history checkout', async t => {

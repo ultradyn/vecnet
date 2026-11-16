@@ -28,6 +28,10 @@ and make ordinary UI gates stop overwriting tracked evidence files.
 - `just evidence-publish DIRECTORY ...` invokes the publisher.
 - `just check-evidence` rejects additions or modifications to evidence media in
   `.scratch/`, `docs/plans/`, `docs/prototypes/` and `docs/design/`.
+  Staged mode checks the index; CI `--base REF` checks newly introduced commits,
+  including merged history and intermediate additions/deletions or modifications
+  later restored. Unchanged grandfathered files and deletion-only commits pass.
+  Zero SHA and empty-tree bases check all reachable history; invalid bases fail.
 
 ## Constraints
 
