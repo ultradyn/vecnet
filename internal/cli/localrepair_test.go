@@ -121,6 +121,70 @@ func TestLocalRepairReportsLauncherUpgradePending(t *testing.T) {
 		t.Fatalf("launcher software incorrectly marked upgraded: %#v %v", projects, err)
 	}
 }
+
+// Windows pathname Stat may defer file identity lookup until SameFile. Stat an
+// open handle so the identity is captured before repair can replace the path.
+func localRepairFileIdentity(path string) (os.FileInfo, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	info, statErr := file.Stat()
+	closeErr := file.Close()
+	if statErr != nil {
+		return nil, statErr
+	}
+	if closeErr != nil {
+		return nil, closeErr
+	}
+	return info, nil
+}
+
+func TestLocalRepairFileIdentityRejectsSameContentReplacement(t *testing.T) {
+	for _, name := range []string{"vecnet-launcher.service", "vecnet-codex-delivery.service"} {
+		t.Run(name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "leftovers")
+			if err := cliFixtureMkdir(dir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, name)
+			raw := []byte("[Service]\nExecStart=/private/old-runtime\n")
+			if err := cliFixtureWriteFile(path, raw, 0600); err != nil {
+				t.Fatal(err)
+			}
+			before, err := localRepairFileIdentity(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			permissions, err := cliFixturePermissions(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Keep the old object alive so identity cannot be reused, while
+			// replacing its pathname with identical content and security.
+			if err := os.Rename(path, path+".original"); err != nil {
+				t.Fatal(err)
+			}
+			if err := cliFixtureWriteFile(path, raw, 0600); err != nil {
+				t.Fatal(err)
+			}
+			after, err := localRepairFileIdentity(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if os.SameFile(before, after) {
+				t.Error("saved leftover identity followed a same-content replacement")
+			}
+			if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, raw) {
+				t.Fatalf("replacement content differs: %q %v", got, err)
+			}
+			if got, err := cliFixturePermissions(path); err != nil || got != permissions {
+				t.Fatalf("replacement security differs: %q want=%q err=%v", got, permissions, err)
+			}
+		})
+	}
+}
+
 func TestLocalRepairPrefersStandaloneWithLeftoverLauncherUnit(t *testing.T) {
 	uncertain := errors.New("fixture task inventory is uncertain")
 	for _, tc := range []struct {
@@ -149,7 +213,7 @@ func TestLocalRepairPrefersStandaloneWithLeftoverLauncherUnit(t *testing.T) {
 				if err := cliFixtureWriteFile(path, before, 0600); err != nil {
 					t.Fatal(err)
 				}
-				info, err := os.Stat(path)
+				info, err := localRepairFileIdentity(path)
 				if err != nil {
 					t.Fatal(err)
 				}
