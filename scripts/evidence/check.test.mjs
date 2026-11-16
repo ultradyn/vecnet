@@ -10,9 +10,11 @@ const cli = fileURLToPath(new URL('./check.mjs', import.meta.url));
 const gitEnv = { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' };
 for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_COMMON_DIR']) delete gitEnv[key];
 
-async function repository(t, { initialCommit = true } = {}) {
-  const cwd = await mkdtemp(join(tmpdir(), 'vecnet-evidence-guard-'));
-  t.after(() => rm(cwd, { recursive: true, force: true }));
+async function repository(t, { initialCommit = true, name = '.' } = {}) {
+  const parent = await mkdtemp(join(tmpdir(), 'vecnet-evidence-guard-'));
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  const cwd = join(parent, name);
+  await mkdir(cwd, { recursive: true });
   const git = (...args) => {
     const result = spawnSync('git', ['-c', 'user.name=Evidence Test', '-c', 'user.email=evidence@example.invalid',
       '-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=/dev/null', ...args], { cwd, env: gitEnv, encoding: 'utf8' });
@@ -120,6 +122,24 @@ test('guard handles unborn repositories and reads root paths from a subdirectory
   repo.git('add', '--all');
   blocked(repo.check([], join(repo.cwd, 'docs/design')), ['docs/design/fresh.png']);
 });
+
+for (const suffix of [' ', '\t', '\r', '\n']) {
+  test(`guard preserves root suffix ${JSON.stringify(suffix)} instead of checking a clean sibling`, async t => {
+    const repo = await repository(t, { initialCommit: false, name: `repo${suffix}` });
+    const sibling = join(dirname(repo.cwd), 'repo');
+    await mkdir(sibling);
+    repo.git('-C', sibling, 'init', '--quiet');
+    repo.git('-C', sibling, 'commit', '--quiet', '--allow-empty', '-m', 'clean sibling');
+    assert.equal(repo.git('-C', sibling, 'status', '--porcelain'), '');
+    allowed(repo.check([], sibling));
+    await repo.put('docs/plans/new.PNG');
+    repo.git('add', '--all');
+    // check() invokes the actual CLI by absolute path, regardless of cwd.
+    for (const cwd of [repo.cwd, join(repo.cwd, 'docs/plans')]) {
+      blocked(repo.check([], cwd), ['docs/plans/new.PNG']);
+    }
+  });
+}
 
 test('all-zero push bases deliberately compare the entire HEAD tree', async t => {
   const repo = await repository(t);

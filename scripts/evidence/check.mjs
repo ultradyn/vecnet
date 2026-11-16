@@ -10,7 +10,8 @@ export function checkEvidence({ cwd = process.cwd(), base } = {}) {
     return result.stdout;
   }
   // Anchor names at the repository root even when invoked from a subdirectory.
-  cwd = git(['rev-parse', '--show-toplevel']).trimEnd();
+  // Git appends one LF; all preceding whitespace belongs to the root path.
+  cwd = git(['rev-parse', '--show-toplevel']).slice(0, -1);
   let range = ['--cached'];
   if (base !== undefined) {
     // GitHub sends an all-zero before SHA when there is no previous branch tip.
