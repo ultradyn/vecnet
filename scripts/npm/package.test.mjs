@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFileSync, statSync, writeFileSync } from 'node:fs';
-import { chmod, copyFile, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -253,11 +253,22 @@ test('packed npm installation runs both commands and exchanges messages through 
   // Hosted toolcaches may have writable ancestors. Install a byte-identical
   // real Node in our private fixture rather than weakening executable checks.
   const nodeDir = path.join(temporary, 'private node');
+  await assert.rejects(lstat(nodeDir), { code: 'ENOENT' }, 'private Node directory must be fresh');
   mustRun(cli, ['local-platform', 'mkdir-private', nodeDir]);
   const node = path.join(nodeDir, windows ? 'node.exe' : 'node');
-  // Create a fresh file so Windows inherits the private directory's DACL
-  // instead of copying any toolcache security attributes along with Node.
-  await writeFile(node, await readFile(process.execPath), { flag: 'wx', mode: 0o500 });
+  // Inheriting a private DACL does not set TokenUser ownership on elevated
+  // Windows tokens. Seed an empty native-owned file within this fresh private
+  // directory, then populate that same file without creating or replacing it.
+  await assert.rejects(lstat(node), { code: 'ENOENT' }, 'private Node target must be fresh');
+  mustRun(cli, ['local-platform', 'write-private', node], { input: '' });
+  mustRun(cli, ['local-platform', 'check-private', node]);
+  const emptyNode = await stat(node, { bigint: true });
+  assert.equal(emptyNode.size, 0n, 'native private seed is empty');
+  await writeFile(node, await readFile(process.execPath), { flag: 'r+' });
+  if (!windows) await chmod(node, 0o500);
+  const populatedNode = await stat(node, { bigint: true });
+  assert.equal(populatedNode.dev, emptyNode.dev, 'Node population preserves the private file device');
+  assert.equal(populatedNode.ino, emptyNode.ino, 'Node population preserves the native-owned file');
   mustRun(cli, ['local-platform', 'check-private', node]);
   assert.deepEqual(await readFile(node), await readFile(process.execPath), 'private Node preserves the actual executable bytes');
   const nodeProbe = JSON.parse(execFileSync(node, ['-e',
