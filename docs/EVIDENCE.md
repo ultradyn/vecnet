@@ -8,9 +8,9 @@ The publisher uses the dedicated **vecnet-evidence** R2 bucket in account
 `375a8abfb0c42fd0940edbef36fcd1e9`, with public origin
 `https://vecnet-evidence.xk.io`. These identifiers in
 [`scripts/evidence/config.json`](../scripts/evidence/config.json) are public.
-**Deployment status: pending controller verification.** The bucket, domain,
-public access and lifecycle must be independently verified before treating this
-configuration as a working public service. This task does not provision them.
+**Deployment verified on 2026-11-16.** The bucket and custom domain are active,
+anonymous downloads passed all-object checksum checks, and the lifecycle was read
+back from Cloudflare. See the [acceptance receipt](plans/receipts/2026-11-16-public-evidence.md).
 
 ## Installation and authentication
 
@@ -38,12 +38,12 @@ Wrangler installation, credentials or network access.
 Run these commands from the repository root. Capture to an ignored directory:
 
 ```sh
-SHOTS_DIR=.scratch/evidence/ui just ui-shots
+BB_JOBS=2 just bb SHOTS_DIR=.scratch/evidence/ui just ui-shots
 node scripts/evidence/publish.mjs .scratch/evidence/ui --dry-run
 ```
 
-The screenshot helpers default to `.scratch/evidence/ui` once the companion
-screenshot task is integrated; `SHOTS_DIR` remains the explicit override.
+The screenshot helpers and index validator default to `.scratch/evidence/ui`;
+`SHOTS_DIR` overrides both.
 The publisher stages each run under `.scratch/evidence-publish/` relative to the
 working directory. Its printed run directory contains copied media under
 `media/<original-relative-path>`, with `index.html` and `manifest.json` at the run
@@ -67,8 +67,7 @@ node scripts/evidence/publish.mjs .scratch/evidence/ui \
   --receipt .scratch/evidence-publish/ui-receipt.json
 ```
 
-The companion task adds `just evidence-publish DIRECTORY ...` as a wrapper around
-this CLI. Omitting `--commit` uses `git rev-parse HEAD` in the current working
+`just evidence-publish DIRECTORY ...` wraps this CLI. Omitting `--commit` uses `git rev-parse HEAD` in the current working
 directory. An explicit commit must be a full 40-character hexadecimal source SHA.
 It records provenance supplied by the caller; it does not prove that captures were
 generated from a clean checkout. `--public-url HTTPS_URL` overrides the public
@@ -95,8 +94,8 @@ Every uploaded artifact, including media, manifest and HTML, receives
 `Cache-Control: public, max-age=300, no-transform`. The `no-transform` directive
 requests byte preservation through the CDN, preventing transformations such as
 analytics injection from invalidating recorded hashes. Public hash verification
-remains mandatory; a live canary of this updated publisher is pending controller
-verification. The five-minute cache policy is independent of object retention.
+remains mandatory; the [live canary receipt](plans/receipts/2026-11-16-public-evidence-canary.json)
+records a successful check of every object through this domain. The five-minute cache policy is independent of object retention.
 `--expires` is deliberately unused: it controls cache expiry, not object deletion.
 Subprocess stdout/stderr is captured and suppressed on both success and failure, because
 Wrangler diagnostics may contain credentials. Errors report a sanitized stage.
@@ -133,12 +132,11 @@ Links in historical receipts will stop working after deletion.
 should remain available. A partially uploaded kept run also has no automatic
 expiry and may need operator cleanup after inspection.
 
-The controller must verify a lifecycle that expires only the **`runs/` prefix**
-after 30 days, excludes `kept/`, and cleans up abandoned multipart uploads. Do not
-apply whole-bucket expiration. Bucket isolation, custom-domain HTTPS, public GETs,
-all-object hash checks on a synthetic canary and lifecycle readback are required
-deployment handoffs. Live ET4 lifecycle verification is controller-owned and
-remains pending here.
+The deployed lifecycle expires only the **`runs/` prefix** after 30 days and
+aborts abandoned multipart uploads after one day. No deletion rule matches
+`kept/`. Preserve this prefix scope when changing the lifecycle; do not apply
+whole-bucket expiration. The acceptance receipt records configuration readback;
+actual deletion after 30 days has not yet been observed.
 
 ## Manifest and receipt interfaces
 

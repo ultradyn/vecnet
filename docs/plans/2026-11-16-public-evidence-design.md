@@ -19,6 +19,8 @@ and make ordinary UI gates stop overwriting tracked evidence files.
   supplied Cloudflare API credential authenticates uploads; public reads need none.
 - A run contains media, `manifest.json` (relative names, keys, SHA-256, sizes,
   source commit, creation time and expected expiry), and an HTML gallery.
+- Input media occupies `media/<original-relative-path>` inside the run; generated
+  manifest/gallery occupy its root, avoiding collisions with input directory names.
 - A small local receipt is emitted only after all published bytes are verified
   through the public HTTPS origin. The receipt names the gallery and manifest.
 - Shared screenshot helpers and the index validator default to
@@ -39,6 +41,8 @@ and make ordinary UI gates stop overwriting tracked evidence files.
 - Media names are URL-encoded, HTML output escaped, and source SHA validated.
 - `--dry-run` performs no uploads or external requests and needs no credentials.
 - Limit upload concurrency to two. Check every public object's byte length and hash.
+- Send `Cache-Control: public, max-age=300, no-transform` on every object; CDN
+  transformations must not alter the bytes whose hashes appear in receipts.
 - Never write a success receipt on an upload or verification failure.
 - Routine expiry is expected, approximate and visible in the gallery/receipt.
 - Keep application images and required test fixtures in Git.
