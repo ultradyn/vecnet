@@ -278,6 +278,9 @@ func TestBackfillRealReaderCheckpointPressure(t *testing.T) {
 				if err != nil {
 					t.Fatalf("reader relief did not resume: progress=%+v err=%v", p, err)
 				}
+				if p.Processed != p.Converted+p.Skipped+p.Failed {
+					t.Fatal("slice row counts do not balance")
+				}
 				if p.Converted != 0 {
 					break
 				}
