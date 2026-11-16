@@ -1,5 +1,7 @@
 # NAS storage for vecnet evidence
 
+Historical investigation snapshot. The selected R2 service is now deployed; see the [acceptance receipt](../plans/receipts/2026-11-16-public-evidence.md) for current implementation status.
+
 Feasibility investigation, 2026-11-16. No infrastructure, credentials, Git
 attributes, LFS configuration, or repository history was changed.
 

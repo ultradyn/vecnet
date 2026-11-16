@@ -18,16 +18,17 @@ The publisher exited successfully on `xsm`. An independent anonymous HTTPS reade
 
 ## Repository verification
 
-The merged feature code at `52570e00` passed **78 tests, zero failures, zero skips**, through the build box:
+Final source at `50717f47` passed **94 tests, zero failures, zero skips**, through the build box:
 
 ```sh
 BB_JOBS=2 just bb node --test --test-concurrency=2 \
   scripts/evidence/publish.test.mjs scripts/evidence/check.test.mjs \
   scripts/ui/shot-paths.test.mjs scripts/ui/recipes.test.mjs \
-  scripts/ui/lib.test.mjs scripts/ui/closer.test.mjs
+  scripts/ui/lib.test.mjs scripts/ui/closer.test.mjs \
+  scripts/ui/capture-generation.test.mjs scripts/bb/shots-handoff.test.mjs
 ```
 
-`node scripts/evidence/check.mjs --base origin/master` passed. Both task reviews requested concrete fixes, and both scoped re-reviews passed. Whole-branch review is recorded beside this receipt at closure.
+`node scripts/evidence/check.mjs --base origin/master` passed. The existing build-box physical-path/framing harness also passed all 19 assertions through `BB_JOBS=2 just bb bash scripts/bb/remote.test.sh`. Both task reviews and their scoped re-reviews passed after fixes. The [whole-branch review](2026-11-16-public-evidence-review.md) found three Important issues: stale captures/handoff, intermediate-commit evidence, and a missing partial-upload regression pin. The [fix report](2026-11-16-public-evidence-fix.md) and [scoped re-review](2026-11-16-public-evidence-rereview.md) close all three. No publisher transport/config changes followed the live canary. See the [decision ledger](2026-11-16-public-evidence-ledger.md).
 
 ## Preserved evidence and separate cleanup
 
