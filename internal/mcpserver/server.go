@@ -77,11 +77,12 @@ type Session struct {
 	clientName, clientVersion string // bounded initialize metadata, never credentials
 
 	// 2025 only:
-	stream    *sseConn
-	streamSeq uint64 // orders GETs before their initial flush; guarded by Server.mu
-	created   time.Time
-	lastUsed  time.Time
-	res       *sessionResources // nil until the first resources/subscribe; guarded by Server.mu
+	stream       *sseConn
+	streamSeq    uint64             // orders GETs before their initial flush; guarded by Server.mu
+	streamCancel context.CancelFunc // newest GET, including initialization; guarded by Server.mu
+	created      time.Time
+	lastUsed     time.Time
+	res          *sessionResources // nil until the first resources/subscribe; guarded by Server.mu
 }
 
 // sseConn is a session's open GET stream. live re-checks the credential that
@@ -620,10 +621,30 @@ func (s *Server) get(w http.ResponseWriter, r *http.Request, p Principal) {
 	// The client can open its next GET as soon as Stream flushes headers,
 	// before this handler attaches. Reserve the order now so a slow older
 	// handler cannot later replace a newer stream.
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	r = r.WithContext(ctx)
 	s.mu.Lock()
+	if s.sessions[sid] != sess {
+		s.mu.Unlock()
+		httpErr(w, http.StatusNotFound, "session_not_found", "session not found")
+		return
+	}
 	sess.streamSeq++
 	seq := sess.streamSeq
+	oldCancel := sess.streamCancel
+	sess.streamCancel = cancel
 	s.mu.Unlock()
+	if oldCancel != nil {
+		oldCancel() // Stream's existing drain also covers a blocked initial write
+	}
+	defer func() {
+		s.mu.Lock()
+		if sess.streamSeq == seq {
+			sess.streamCancel = nil
+		}
+		s.mu.Unlock()
+	}()
 	st, err := s.Stream(w, r)
 	if err != nil {
 		return
@@ -635,7 +656,7 @@ func (s *Server) get(w http.ResponseWriter, r *http.Request, p Principal) {
 	defer s.streamReach(owners)()
 	conn := &sseConn{st: st, live: func() bool { return s.credentialLive(r) }}
 	s.mu.Lock()
-	if sess.streamSeq != seq || s.sessions[sid] != sess {
+	if sess.streamSeq != seq || s.sessions[sid] != sess || ctx.Err() != nil {
 		s.mu.Unlock()
 		st.Close()
 		return
@@ -717,7 +738,12 @@ func (s *Server) delete(w http.ResponseWriter, r *http.Request, p Principal) {
 	sess.dropResources()
 	conn := sess.stream
 	sess.stream = nil
+	cancel := sess.streamCancel
+	sess.streamCancel = nil
 	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 	if conn != nil {
 		conn.st.Close()
 	}
@@ -730,7 +756,7 @@ func (s *Server) mint(p Principal, proto string) *Session {
 	sess := &Session{ID: newSessionID(), Proto: proto, Principal: p, created: now, lastUsed: now}
 	var closing []*sseConn
 	s.mu.Lock()
-	s.sweepLocked(now)
+	cancelling := s.sweepLocked(now)
 	var mine []*Session
 	for _, o := range s.sessions {
 		if samePrincipal(o.Principal, p) {
@@ -742,6 +768,10 @@ func (s *Server) mint(p Principal, proto string) *Session {
 		for _, o := range mine[:len(mine)-maxSessionsPerCaller+1] {
 			delete(s.sessions, o.ID)
 			o.dropResources()
+			if o.streamCancel != nil {
+				cancelling = append(cancelling, o.streamCancel)
+				o.streamCancel = nil
+			}
 			if o.stream != nil {
 				closing = append(closing, o.stream)
 				o.stream = nil
@@ -750,6 +780,9 @@ func (s *Server) mint(p Principal, proto string) *Session {
 	}
 	s.sessions[sess.ID] = sess
 	s.mu.Unlock()
+	for _, cancel := range cancelling {
+		cancel()
+	}
 	for _, c := range closing {
 		c.st.Close()
 	}
@@ -761,26 +794,37 @@ func (s *Server) mint(p Principal, proto string) *Session {
 func (s *Server) lookup(id string, p Principal) (*Session, bool) {
 	now := s.now()
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.sweepLocked(now)
+	cancelling := s.sweepLocked(now)
 	sess, ok := s.sessions[id]
 	if !ok || !samePrincipal(sess.Principal, p) {
-		return nil, false
+		sess, ok = nil, false
+	} else {
+		sess.lastUsed = now
 	}
-	sess.lastUsed = now
-	return sess, true
+	s.mu.Unlock()
+	for _, cancel := range cancelling {
+		cancel()
+	}
+	return sess, ok
 }
 
 // sweepLocked drops sessions idle past SessionTTL; a session with an open
 // GET stream is in use and stays.
-func (s *Server) sweepLocked(now time.Time) {
+// Returned GET cancellations must run after releasing Server.mu.
+func (s *Server) sweepLocked(now time.Time) []context.CancelFunc {
 	ttl := s.sessionTTL()
+	var cancelling []context.CancelFunc
 	for id, o := range s.sessions {
 		if o.stream == nil && now.Sub(o.lastUsed) > ttl {
 			delete(s.sessions, id)
 			o.dropResources()
+			if o.streamCancel != nil {
+				cancelling = append(cancelling, o.streamCancel)
+				o.streamCancel = nil
+			}
 		}
 	}
+	return cancelling
 }
 
 func samePrincipal(a, b Principal) bool {

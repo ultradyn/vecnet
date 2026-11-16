@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -855,6 +856,289 @@ func TestLegacyStreamDeletedDuringInitialFlush(t *testing.T) {
 		headers: map[string]string{"Mcp-Session-Id": sid, "Accept": "text/event-stream"}})
 	if missing.StatusCode != http.StatusNotFound {
 		t.Fatalf("GET after DELETE: %d %s", missing.StatusCode, body)
+	}
+}
+
+// initialFlushGate forwards real HTTP writes and deadlines, but holds the
+// initial Flush after the bytes reach the client. Unlike delayedFlushWriter,
+// it also wakes when the stream's write/drain deadline expires. Its context
+// is the incoming HTTP request's, not the GET handler's derived context.
+type initialFlushGate struct {
+	release, entered, done chan struct{}
+	changed                chan struct{}
+	mu                     sync.Mutex
+	deadline               time.Time
+	once, releaseOnce      sync.Once
+}
+
+func (g *initialFlushGate) open() { g.releaseOnce.Do(func() { close(g.release) }) }
+
+type gatedInitialFlushWriter struct {
+	http.ResponseWriter
+	ctx context.Context
+	g   *initialFlushGate
+}
+
+func (w *gatedInitialFlushWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+func (w *gatedInitialFlushWriter) SetWriteDeadline(at time.Time) error {
+	err := http.NewResponseController(w.ResponseWriter).SetWriteDeadline(at)
+	w.g.mu.Lock()
+	w.g.deadline = at
+	w.g.mu.Unlock()
+	select {
+	case w.g.changed <- struct{}{}:
+	default:
+	}
+	return err
+}
+
+func (w *gatedInitialFlushWriter) FlushError() error {
+	if err := http.NewResponseController(w.ResponseWriter).Flush(); err != nil {
+		return err
+	}
+	initial := false
+	w.g.once.Do(func() { initial = true })
+	if !initial {
+		return nil
+	}
+	close(w.g.entered)
+	for {
+		w.g.mu.Lock()
+		at := w.g.deadline
+		w.g.mu.Unlock()
+		var timer *time.Timer
+		var expired <-chan time.Time
+		if !at.IsZero() {
+			timer = time.NewTimer(time.Until(at))
+			expired = timer.C
+		}
+		var err error
+		changed := false
+		select {
+		case <-w.g.release:
+		case <-w.ctx.Done():
+			err = w.ctx.Err()
+		case <-expired:
+			err = context.DeadlineExceeded
+		case <-w.g.changed:
+			changed = true
+		}
+		if timer != nil {
+			timer.Stop()
+		}
+		if !changed {
+			return err
+		}
+	}
+}
+
+func pendingGETFront(t *testing.T, env *testhub.Env, count int) (*testhub.Env, []*initialFlushGate) {
+	t.Helper()
+	srv := mcpserver.New(env.Hub, &mcpserver.BearerAuth{Resolver: env.Hub.Auth}, env.URL)
+	stop := make(chan struct{})
+	srv.Stop = stop
+	gates := make([]*initialFlushGate, count)
+	for i := range gates {
+		gates[i] = &initialFlushGate{release: make(chan struct{}), entered: make(chan struct{}), done: make(chan struct{}), changed: make(chan struct{}, 1)}
+	}
+	var mu sync.Mutex
+	next := 0
+	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			mu.Lock()
+			index := next
+			next++
+			mu.Unlock()
+			if index < len(gates) {
+				g := gates[index]
+				defer close(g.done)
+				w = &gatedInitialFlushWriter{ResponseWriter: w, ctx: r.Context(), g: g}
+			}
+		}
+		srv.ServeHTTP(w, r)
+	}))
+	t.Cleanup(func() {
+		for _, g := range gates {
+			g.open()
+		}
+		close(stop)
+		front.Close()
+	})
+	return &testhub.Env{T: t, Hub: env.Hub, URL: front.URL}, gates
+}
+
+type pendingGETEnd struct {
+	body []byte
+	err  error
+}
+
+func openPendingGET(t *testing.T, ctx context.Context, env *testhub.Env, secret, sid string, gate *initialFlushGate) <-chan pendingGETEnd {
+	t.Helper()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, env.URL+"/mcp", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+secret)
+	req.Header.Set("Mcp-Session-Id", sid)
+	req.Header.Set("Accept", "text/event-stream")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { resp.Body.Close() })
+	if resp.StatusCode != http.StatusOK || !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
+		t.Fatalf("pending GET: %d %s", resp.StatusCode, resp.Header.Get("Content-Type"))
+	}
+	end := make(chan pendingGETEnd, 1)
+	go func() {
+		body, err := io.ReadAll(resp.Body)
+		end <- pendingGETEnd{body, err}
+	}()
+	select {
+	case <-gate.entered:
+	case <-time.After(time.Second):
+		t.Fatal("GET did not enter the initial flush gate")
+	}
+	return end
+}
+
+func wantPendingGETEnded(t *testing.T, gate *initialFlushGate, end <-chan pendingGETEnd, cancelled bool) {
+	t.Helper()
+	// The existing drain budget is one second; allow the same total budget
+	// as TestShutdownInterruptsBlockedMCPWriter for handler and wire completion.
+	deadline := time.NewTimer(2500 * time.Millisecond)
+	defer deadline.Stop()
+	select {
+	case result := <-end:
+		if cancelled {
+			if !errors.Is(result.err, context.Canceled) {
+				t.Fatalf("cancelled pending GET ended with %v", result.err)
+			}
+		} else if result.err != nil || string(result.body) != "retry: 3000\n\n" {
+			t.Fatalf("pending GET: error %v, body %q; want retry frame and clean EOF", result.err, result.body)
+		}
+	case <-deadline.C:
+		t.Fatal("pending GET did not reach EOF before manual flush release")
+	}
+	select {
+	case <-gate.done:
+	case <-deadline.C:
+		t.Fatal("pending GET handler did not finish before manual flush release")
+	}
+	select {
+	case <-gate.release:
+		t.Fatal("pending GET was manually released before completion")
+	default:
+	}
+}
+
+func TestLegacyPendingGETReplacement(t *testing.T) {
+	for _, pending := range []int{1, 2} {
+		t.Run(strconv.Itoa(pending+1)+" GETs", func(t *testing.T) {
+			env := testhub.Start(t)
+			_, sender := env.NewPeer("session", "sender")
+			peer, secret := env.NewPeer("session", "reader")
+			own, gates := pendingGETFront(t, env, pending)
+			sid := legacySession(t, own, secret)
+			legacySubscribe(t, own, secret, sid, peerURI(peer))
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			ends := make([]<-chan pendingGETEnd, pending)
+			for i, g := range gates {
+				ends[i] = openPendingGET(t, ctx, own, secret, sid, g)
+				if i > 0 {
+					// Finish the old handler while its replacement is still
+					// pending. Old cleanup must retain that GET's cancellation
+					// handle, which the next GET must be able to invoke.
+					wantPendingGETEnded(t, gates[i-1], ends[i-1], false)
+				}
+			}
+			current, frames := getStream(t, ctx, own, secret, sid)
+			defer current.Body.Close()
+			sendTo(t, env, sender, peer, "while-old-GETs-pending")
+			if !hintFor(t, frames, peerURI(peer), 2*time.Second) {
+				t.Fatal("current stream received no hint")
+			}
+			wantPendingGETEnded(t, gates[pending-1], ends[pending-1], false)
+			sendTo(t, env, sender, peer, "after-old-GETs-ended")
+			if !hintFor(t, frames, peerURI(peer), 2*time.Second) {
+				t.Fatal("old GET cleanup lost the current stream")
+			}
+		})
+	}
+}
+
+func TestLegacyPendingGETSessionRemoval(t *testing.T) {
+	for _, removal := range []string{"DELETE", "eviction", "TTL lookup", "TTL mint"} {
+		t.Run(removal, func(t *testing.T) {
+			env := testhub.Start(t)
+			_, sender := env.NewPeer("session", "sender")
+			peer, secret := env.NewPeer("session", "reader")
+			own, gates := pendingGETFront(t, env, 1)
+			sid := legacySession(t, own, secret)
+			legacySubscribe(t, own, secret, sid, peerURI(peer))
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			end := openPendingGET(t, ctx, own, secret, sid, gates[0])
+			switch removal {
+			case "DELETE":
+				resp, body := do(t, own, call{method: http.MethodDelete, secret: secret, headers: map[string]string{"Mcp-Session-Id": sid}})
+				if resp.StatusCode != http.StatusNoContent {
+					t.Fatalf("DELETE: %d %s", resp.StatusCode, body)
+				}
+			case "eviction":
+				for range 64 {
+					env.Now.Advance(time.Second) // make the pending session strictly oldest
+					legacySession(t, own, secret)
+				}
+			case "TTL lookup", "TTL mint":
+				env.Now.Advance(2 * time.Hour)
+				if removal == "TTL mint" {
+					legacySession(t, own, secret)
+				}
+			}
+			resp, body := do(t, own, call{secret: secret, headers: map[string]string{"Mcp-Session-Id": sid}, body: map[string]any{"jsonrpc": "2.0", "id": 3, "method": "ping"}})
+			if resp.StatusCode != http.StatusNotFound {
+				t.Fatalf("removed session: %d %s", resp.StatusCode, body)
+			}
+			wantPendingGETEnded(t, gates[0], end, false)
+			fresh := legacySession(t, own, secret)
+			legacySubscribe(t, own, secret, fresh, peerURI(peer))
+			current, frames := getStream(t, ctx, own, secret, fresh)
+			defer current.Body.Close()
+			sendTo(t, env, sender, peer, "after-session-removal")
+			if !hintFor(t, frames, peerURI(peer), 2*time.Second) {
+				t.Fatal("fresh session received no hint after pending GET removal")
+			}
+		})
+	}
+}
+
+func TestLegacyPendingGETRequestCancellation(t *testing.T) {
+	env := testhub.Start(t)
+	_, sender := env.NewPeer("session", "sender")
+	peer, secret := env.NewPeer("session", "reader")
+	own, gates := pendingGETFront(t, env, 1)
+	sid := legacySession(t, own, secret)
+	legacySubscribe(t, own, secret, sid, peerURI(peer))
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	pendingCtx, cancelPending := context.WithCancel(ctx)
+	defer cancelPending()
+	end := openPendingGET(t, pendingCtx, own, secret, sid, gates[0])
+	// Cancel while this GET is certainly pending, then let its cleanup
+	// overlap a new GET. No replacement/deadline can have ended it first.
+	cancelPending()
+	current, frames := getStream(t, ctx, own, secret, sid)
+	defer current.Body.Close()
+	sendTo(t, env, sender, peer, "while-cancelled-pending-GET-finishes")
+	if !hintFor(t, frames, peerURI(peer), 2*time.Second) {
+		t.Fatal("current stream received no hint during pending GET cleanup")
+	}
+	wantPendingGETEnded(t, gates[0], end, true)
+	sendTo(t, env, sender, peer, "after-pending-request-cancel")
+	if !hintFor(t, frames, peerURI(peer), 2*time.Second) {
+		t.Fatal("cancelled pending GET cleared or closed the current stream")
 	}
 }
 
