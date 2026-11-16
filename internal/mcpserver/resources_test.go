@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -742,6 +743,118 @@ func TestLegacyHintsGoToOneStream(t *testing.T) {
 	up, raw, ok := nextMessage(t, secondFrames, 2*time.Second)
 	if !ok || up.Method != "notifications/resources/updated" || up.Params["uri"] != uri {
 		t.Fatalf("no hint on the second stream: %s", raw)
+	}
+}
+
+// delayedFlushWriter lets the client see the initial response while the
+// handler is still returning from Flush. Unwrap preserves socket deadlines.
+type delayedFlushWriter struct {
+	http.ResponseWriter
+	ctx     context.Context
+	release <-chan struct{}
+	once    sync.Once
+}
+
+func (w *delayedFlushWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+func (w *delayedFlushWriter) FlushError() error {
+	if err := http.NewResponseController(w.ResponseWriter).Flush(); err != nil {
+		return err
+	}
+	w.once.Do(func() {
+		select {
+		case <-w.release:
+		case <-w.ctx.Done():
+		}
+	})
+	return w.ctx.Err()
+}
+
+func delayedFirstGETFront(t *testing.T, env *testhub.Env) (*testhub.Env, func()) {
+	t.Helper()
+	srv := mcpserver.New(env.Hub, &mcpserver.BearerAuth{Resolver: env.Hub.Auth}, env.URL)
+	stop := make(chan struct{})
+	srv.Stop = stop
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseFirst := func() { releaseOnce.Do(func() { close(release) }) }
+	var firstGET sync.Once
+	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			firstGET.Do(func() { w = &delayedFlushWriter{ResponseWriter: w, ctx: r.Context(), release: release} })
+		}
+		srv.ServeHTTP(w, r)
+	}))
+	t.Cleanup(func() {
+		releaseFirst()
+		close(stop)
+		front.Close()
+	})
+	return &testhub.Env{T: t, Hub: env.Hub, URL: front.URL}, releaseFirst
+}
+
+// A slow return from the first GET's initial flush must not let it replace a
+// newer GET that has already opened and received a resource notification.
+func TestLegacyStreamReplacementDuringInitialFlush(t *testing.T) {
+	env := testhub.Start(t)
+	_, aSecret := env.NewPeer("session", "sender")
+	b, bSecret := env.NewPeer("session", "reader")
+	uri := peerURI(b)
+	own, releaseFirst := delayedFirstGETFront(t, env)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	sid := legacySession(t, own, bSecret)
+	legacySubscribe(t, own, bSecret, sid, uri)
+	first, firstFrames := getStream(t, ctx, own, bSecret, sid)
+	defer first.Body.Close()
+	second, secondFrames := getStream(t, ctx, own, bSecret, sid)
+	defer second.Body.Close()
+
+	// Receiving this hint proves the second stream is attached, rather than
+	// merely having flushed its headers. No sleeps decide the ordering.
+	sendTo(t, env, aSecret, b, "during-first-flush")
+	if up, raw, ok := nextMessage(t, secondFrames, 2*time.Second); !ok || up.Method != "notifications/resources/updated" || up.Params["uri"] != uri {
+		t.Fatalf("no hint on the second stream during the first flush: %s", raw)
+	}
+	releaseFirst()
+	if _, raw, ok := nextMessage(t, firstFrames, 2*time.Second); ok {
+		t.Fatalf("first stream got a message: %s", raw)
+	}
+	select {
+	case _, open := <-firstFrames:
+		if open {
+			t.Fatal("first stream still open after a second GET")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("first stream still open after a second GET")
+	}
+	sendTo(t, env, aSecret, b, "after-first-flush")
+	if up, raw, ok := nextMessage(t, secondFrames, 2*time.Second); !ok || up.Method != "notifications/resources/updated" || up.Params["uri"] != uri {
+		t.Fatalf("no hint on the second stream after the first flush: %s", raw)
+	}
+}
+
+// DELETE can finish while the GET is returning from its initial flush. That
+// GET must end rather than attach itself to a session that no longer exists.
+func TestLegacyStreamDeletedDuringInitialFlush(t *testing.T) {
+	env := testhub.Start(t)
+	_, secret := env.NewPeer("session", "reader")
+	own, releaseFirst := delayedFirstGETFront(t, env)
+	sid := legacySession(t, own, secret)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	resp, frames := getStream(t, ctx, own, secret, sid)
+	defer resp.Body.Close()
+	deleted, body := do(t, own, call{method: http.MethodDelete, secret: secret,
+		headers: map[string]string{"Mcp-Session-Id": sid}})
+	if deleted.StatusCode != http.StatusNoContent {
+		t.Fatalf("DELETE: %d %s", deleted.StatusCode, body)
+	}
+	releaseFirst()
+	wantUnfinished(t, frames)
+	missing, body := do(t, own, call{method: http.MethodGet, secret: secret,
+		headers: map[string]string{"Mcp-Session-Id": sid, "Accept": "text/event-stream"}})
+	if missing.StatusCode != http.StatusNotFound {
+		t.Fatalf("GET after DELETE: %d %s", missing.StatusCode, body)
 	}
 }
 

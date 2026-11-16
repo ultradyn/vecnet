@@ -77,10 +77,11 @@ type Session struct {
 	clientName, clientVersion string // bounded initialize metadata, never credentials
 
 	// 2025 only:
-	stream   *sseConn
-	created  time.Time
-	lastUsed time.Time
-	res      *sessionResources // nil until the first resources/subscribe; guarded by Server.mu
+	stream    *sseConn
+	streamSeq uint64 // orders GETs before their initial flush; guarded by Server.mu
+	created   time.Time
+	lastUsed  time.Time
+	res       *sessionResources // nil until the first resources/subscribe; guarded by Server.mu
 }
 
 // sseConn is a session's open GET stream. live re-checks the credential that
@@ -616,6 +617,13 @@ func (s *Server) get(w http.ResponseWriter, r *http.Request, p Principal) {
 		httpErr(w, http.StatusNotAcceptable, "not_acceptable", "Accept must list text/event-stream")
 		return
 	}
+	// The client can open its next GET as soon as Stream flushes headers,
+	// before this handler attaches. Reserve the order now so a slow older
+	// handler cannot later replace a newer stream.
+	s.mu.Lock()
+	sess.streamSeq++
+	seq := sess.streamSeq
+	s.mu.Unlock()
 	st, err := s.Stream(w, r)
 	if err != nil {
 		return
@@ -627,6 +635,11 @@ func (s *Server) get(w http.ResponseWriter, r *http.Request, p Principal) {
 	defer s.streamReach(owners)()
 	conn := &sseConn{st: st, live: func() bool { return s.credentialLive(r) }}
 	s.mu.Lock()
+	if sess.streamSeq != seq || s.sessions[sid] != sess {
+		s.mu.Unlock()
+		st.Close()
+		return
+	}
 	old := sess.stream
 	sess.stream = conn
 	s.mu.Unlock()
