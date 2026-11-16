@@ -67,7 +67,7 @@ test('ET1: dry-run selects nested media, hashes bytes and does not use transport
   assert.equal(png.sha256, 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad');
   assert.equal(png.size, 3);
   assert.equal(png.contentType, 'image/png');
-  assert.match(png.key, new RegExp(`^runs/${commit}/[^/]+/one\\.PNG$`));
+  assert.match(png.key, new RegExp(`^runs/${commit}/[^/]+/media/one\\.PNG$`));
   assert.equal(manifest.sourceCommit, commit);
   assert.equal(await readFile(join(f.directory, 'one.PNG'), 'utf8'), 'abc');
   assert.deepEqual((await readdir(f.directory)).sort(), ['nested', 'notes.txt', 'one.PNG']);
@@ -95,6 +95,54 @@ test('ET2: publishes media then indexes, verifies every public byte before a rec
     assert.equal(object.sha256, hash(remote.objects.get(object.key)));
     assert.equal(object.size, remote.objects.get(object.key).length);
     assert.ok(remote.events.includes(`read:${object.url}`));
+  }
+});
+
+test('R6 media namespace supports input directories named index.html and manifest.json', async t => {
+  const { publishEvidence } = await load();
+  for (const dryRun of [true, false]) {
+    await t.test(dryRun ? 'dry-run' : 'publish', async t => {
+      const f = await fixture(t);
+      for (const directory of ['index.html', 'manifest.json']) {
+        await mkdir(join(f.directory, directory));
+        await writeFile(join(f.directory, directory, 'shot.png'), `${directory} media bytes`);
+      }
+      const remote = transport(f);
+      const result = await publishEvidence({ ...f.options, ...remote, dryRun });
+      for (const index of ['index.html', 'manifest.json']) {
+        assert.ok((await lstat(join(result.runDirectory, index))).isFile());
+      }
+      const manifest = await json(join(result.runDirectory, 'manifest.json'));
+      assert.deepEqual(manifest.files.map(file => file.name).sort(), ['index.html/shot.png', 'manifest.json/shot.png', 'nested/clip.mov', 'one.PNG']);
+      const gallery = await readFile(join(result.runDirectory, 'index.html'), 'utf8');
+      for (const file of manifest.files) {
+        const relativePath = `media/${file.name}`;
+        assert.equal(file.key, manifest.prefix + relativePath);
+        assert.equal(file.url, new URL(relativePath, result.galleryUrl).href);
+        assert.ok(gallery.includes(`src="${relativePath}"`));
+        assert.ok(gallery.includes(`href="${relativePath}">${file.name}</a>`));
+        const source = await readFile(join(f.directory, file.name));
+        assert.deepEqual(await readFile(join(result.runDirectory, relativePath)), source);
+        assert.equal(file.sha256, hash(source));
+        if (!dryRun) {
+          assert.deepEqual(remote.objects.get(file.key), source);
+          assert.ok(remote.events.includes(`read:${file.url}`));
+        }
+      }
+      if (dryRun) {
+        assert.deepEqual(remote.events, []);
+        assert.equal(result.receipt, null);
+        await absent(f.receipt);
+      } else {
+        const receipt = await json(f.receipt);
+        assert.equal(receipt.objects.length, 6);
+        assert.equal(remote.events.findIndex(event => event.startsWith('read:')), 6);
+        for (const object of receipt.objects) {
+          assert.ok(remote.events.includes(`read:${object.url}`));
+          assert.equal(hash(remote.objects.get(object.key)), object.sha256);
+        }
+      }
+    });
   }
 });
 
@@ -241,14 +289,38 @@ test('run identifiers are unique even with an identical injected clock', async t
 test('invalid public origins and invalid config fail without transport', async t => {
   const { publishEvidence } = await load();
   const f = await fixture(t);
-  for (const publicUrl of ['http://example.test', 'https://user:synthetic-private-token@example.test', 'https://example.test?token=synthetic-private-token', 'https://example.test/#fragment', 'bad-url']) {
-    await assert.rejects(publishEvidence({ ...f.options, publicUrl, upload: () => assert.fail('invalid origin upload') }), error => {
-      assert.doesNotMatch(String(error), /synthetic-private-token/);
-      return true;
+  for (const publicUrl of ['http://example.test', 'https://user:synthetic-private-token@example.test', 'https://example.test?token=synthetic-private-token', 'https://example.test/#fragment', 'bad-url',
+    'https://host?', 'https://host#', 'https://host/?', 'https://host/#', 'https://host/base/?', 'https://host/base/#']) {
+    await t.test(publicUrl.replace('synthetic-private-token', '[sentinel]'), async () => {
+      let uploads = 0;
+      let reads = 0;
+      await assert.rejects(publishEvidence({ ...f.options, publicUrl,
+        upload: async () => { uploads++; }, readPublic: async () => { reads++; return Buffer.alloc(0); },
+      }), error => {
+        assert.match(String(error), /Invalid public HTTPS URL/);
+        assert.doesNotMatch(String(error), /synthetic-private-token/);
+        return true;
+      });
+      assert.equal(uploads, 0);
+      assert.equal(reads, 0);
+      await absent(f.receipt);
     });
   }
   for (const invalid of [{ accountId: 'bad' }, { bucket: '../bad' }, { retentionDays: 0 }]) {
     await assert.rejects(publishEvidence({ ...f.options, config: { ...config, ...invalid }, dryRun: true }));
+  }
+});
+
+test('I1 preserves percent-encoded query and fragment characters in base paths', async t => {
+  const { publishEvidence } = await load();
+  const f = await fixture(t);
+  const result = await publishEvidence({ ...f.options, dryRun: true, publicUrl: 'https://evidence.example.test/base%3F%23/' });
+  for (const file of result.manifest.files) {
+    const url = new URL(file.url);
+    assert.ok(url.pathname.startsWith('/base%3F%23/runs/'));
+    assert.equal(url.search, '');
+    assert.equal(url.hash, '');
+    assert.equal(decodeURIComponent(url.pathname).split('/').at(-1), file.name.split('/').at(-1));
   }
 });
 
@@ -271,7 +343,7 @@ test('Wrangler transport uses remote argv and captured subprocess errors never e
   const object = { accountId: config.accountId, bucket: config.bucket, key: `runs/${commit}/run/name ; $(bad).png`, path: join(f.directory, 'one.PNG'), contentType: 'image/png' };
   await createWranglerUploader({ executable, env })(object);
   const argv = await json(log);
-  assert.deepEqual(argv, ['r2', 'object', 'put', `${config.bucket}/${object.key}`, '--remote', '--file', object.path, '--content-type', 'image/png', '--cache-control', 'public, max-age=300', '--force']);
+  assert.deepEqual(argv, ['r2', 'object', 'put', `${config.bucket}/${object.key}`, '--remote', '--file', object.path, '--content-type', 'image/png', '--cache-control', 'public, max-age=300, no-transform', '--force']);
   assert.ok(!argv.includes('--expires'));
   await assert.rejects(createWranglerUploader({ executable, env: { ...env, FAIL: '1' } })(object), error => {
     assert.doesNotMatch(String(error), /synthetic-private-token/);
@@ -279,6 +351,34 @@ test('Wrangler transport uses remote argv and captured subprocess errors never e
     assert.doesNotMatch(JSON.stringify(error), /synthetic-private-token/);
     return true;
   });
+});
+
+test('R7 public artifact uploads request no-transform', async t => {
+  const { publishEvidence, createWranglerUploader } = await load();
+  const f = await fixture(t);
+  const executable = join(f.root, 'fake-wrangler');
+  const uploaded = join(f.root, 'uploaded');
+  await mkdir(uploaded);
+  await writeFile(executable, `#!${process.execPath}
+const fs = require('node:fs');
+const path = require('node:path');
+const argv = process.argv.slice(2);
+const bytes = fs.readFileSync(argv[argv.indexOf('--file') + 1]).toString('base64');
+fs.writeFileSync(path.join(process.env.UPLOADED, encodeURIComponent(argv[3]) + '.json'), JSON.stringify({ argv, bytes }));
+`, { mode: 0o700 });
+  const upload = createWranglerUploader({ executable, env: { PATH: dirname(process.execPath), HOME: f.root, UPLOADED: uploaded } });
+  const result = await publishEvidence({ ...f.options, upload, readPublic: async url => {
+    await absent(f.receipt);
+    const key = `${config.bucket}/${decodeURIComponent(new URL(url).pathname.slice(1))}`;
+    return Buffer.from((await json(join(uploaded, `${encodeURIComponent(key)}.json`))).bytes, 'base64');
+  } });
+  const records = await Promise.all((await readdir(uploaded)).map(name => json(join(uploaded, name))));
+  assert.equal(records.length, 4);
+  assert.equal(result.receipt.objects.length, 4);
+  assert.deepEqual(records.map(({ argv }) => argv[argv.indexOf('--content-type') + 1]).sort(), ['application/json', 'image/png', 'text/html; charset=utf-8', 'video/quicktime']);
+  for (const { argv } of records) {
+    assert.equal(argv[argv.indexOf('--cache-control') + 1], 'public, max-age=300, no-transform');
+  }
 });
 
 test('CLI help and dry-run work offline in isolated directories without operator config', async t => {

@@ -45,10 +45,13 @@ node scripts/evidence/publish.mjs .scratch/evidence/ui --dry-run
 The screenshot helpers default to `.scratch/evidence/ui` once the companion
 screenshot task is integrated; `SHOTS_DIR` remains the explicit override.
 The publisher stages each run under `.scratch/evidence-publish/` relative to the
-working directory. Its printed run directory contains copied media, `index.html`
-and `manifest.json`. Open `index.html` for offline inspection. Relative gallery
-links work both locally and at the public origin. Dry-run emits no success receipt
-and never uploads or downloads anything.
+working directory. Its printed run directory contains copied media under
+`media/<original-relative-path>`, with `index.html` and `manifest.json` at the run
+root. This keeps valid input directories such as `index.html/shot.png` and
+`manifest.json/shot.png` separate from the generated files. Open `index.html` for
+offline inspection. Relative gallery links point into `media/` and work both
+locally and at the public origin. Labels retain the original input paths. Dry-run
+emits no success receipt and never uploads or downloads anything.
 
 Only PNG, JPG/JPEG, GIF, WebP, MP4, WebM and MOV are selected, case insensitively,
 including nested files. Ordinary files such as notes are ignored. Symlinks anywhere
@@ -70,23 +73,32 @@ directory. An explicit commit must be a full 40-character hexadecimal source SHA
 It records provenance supplied by the caller; it does not prove that captures were
 generated from a clean checkout. `--public-url HTTPS_URL` overrides the public
 origin/base path for a separate deployment; credentials, query strings and fragments
-are rejected in this URL. It changes verification URLs, not the configured bucket.
+(including empty `?` and `#` delimiters) are rejected before any upload or public
+read. Percent-encoded path characters such as `%3F` and `%23` remain valid. This
+option changes verification URLs, not the configured bucket.
 
 Each run uses `runs/<source-commit>/<timestamp>-<random-suffix>/`. Names are
 URL-encoded for public links and HTML-escaped in the gallery. The timestamp and
-cryptographically random suffix avoid reuse of an existing run's keys.
+cryptographically random suffix avoid reuse of an existing run's keys. Public
+media keys use `runs/<source-commit>/<run>/media/<original-relative-path>` (or the
+corresponding `kept/` prefix); generated indexes occupy the run root.
 
 The publisher uploads staged media first, then `manifest.json` and `index.html`,
 with at most two concurrent uploads. Wrangler receives argv without a shell:
 
 ```text
-wrangler r2 object put BUCKET/KEY --remote --file PATH --content-type TYPE --cache-control 'public, max-age=300' --force
+wrangler r2 object put BUCKET/KEY --remote --file PATH --content-type TYPE --cache-control 'public, max-age=300, no-transform' --force
 ```
 
 `--force` suppresses the Basin Catalog prompt; it is not overwrite protection.
-The five-minute cache policy is independent of object retention. `--expires` is
-deliberately unused: it controls cache expiry, not object deletion. Subprocess
-stdout/stderr is captured and suppressed on both success and failure, because
+Every uploaded artifact, including media, manifest and HTML, receives
+`Cache-Control: public, max-age=300, no-transform`. The `no-transform` directive
+requests byte preservation through the CDN, preventing transformations such as
+analytics injection from invalidating recorded hashes. Public hash verification
+remains mandatory; a live canary of this updated publisher is pending controller
+verification. The five-minute cache policy is independent of object retention.
+`--expires` is deliberately unused: it controls cache expiry, not object deletion.
+Subprocess stdout/stderr is captured and suppressed on both success and failure, because
 Wrangler diagnostics may contain credentials. Errors report a sanitized stage.
 
 Before writing a success receipt, the publisher downloads **every** uploaded
@@ -134,8 +146,9 @@ Both JSON formats have `version: 1`, `sourceCommit`, ISO-8601 `createdAt`,
 `expiresAt` (ISO-8601 or `null`), and `kept` (boolean).
 
 The manifest adds `prefix` and `files`. Each media entry has `name` (relative to
-the input), `key` (bucket object key), `url`, `sha256` (lowercase hex), `size`
-(bytes), and `contentType`. Index/manifest hashes cannot be embedded in their own
+the input, unchanged), `key` (bucket object key with the per-run `media/` prefix),
+`url` (including that namespace), `sha256` (lowercase hex), `size` (bytes), and
+`contentType`. Index/manifest hashes cannot be embedded in their own
 manifest; they are recorded in the receipt instead.
 
 The receipt adds `galleryUrl`, `manifestUrl` and `objects`. Each object entry has

@@ -30,7 +30,9 @@ function validateConfig(config, override) {
   if (!Number.isSafeInteger(config.retentionDays) || config.retentionDays <= 0) fail('Invalid retention days.');
   let url;
   try { url = new URL(override ?? config.publicUrl); } catch { fail('Invalid public HTTPS URL.'); }
-  if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) fail('Invalid public HTTPS URL.');
+  // search/hash omit bare delimiters, but href retains them. Encoded path
+  // characters (%3F/%23) remain valid because they contain no literal delimiter.
+  if (url.protocol !== 'https:' || url.username || url.password || /[?#]/.test(url.href)) fail('Invalid public HTTPS URL.');
   return { ...config, publicUrl: url.href.replace(/\/+$/, '') };
 }
 
@@ -83,7 +85,7 @@ function gallery(manifest) {
 <p>Created: ${escape(manifest.createdAt)}</p><p>${escape(expiry)}</p><p><a href="manifest.json">Integrity manifest</a></p>
 <main>${manifest.files.map(file => {
     // Relative media URLs also make the staged gallery inspectable offline.
-    const url = escape(encodePath(file.name));
+    const url = escape(encodePath(`media/${file.name}`));
     const name = escape(file.name);
     const media = file.contentType.startsWith('video/')
       ? `<video controls preload="none" src="${url}"></video>`
@@ -99,7 +101,7 @@ export function createWranglerUploader({ executable = 'wrangler', env = process.
       await exec(executable, [
         'r2', 'object', 'put', `${object.bucket}/${object.key}`, '--remote',
         '--file', object.path, '--content-type', object.contentType,
-        '--cache-control', 'public, max-age=300', '--force',
+        '--cache-control', 'public, max-age=300, no-transform', '--force',
       ], {
         env: { ...env, CLOUDFLARE_ACCOUNT_ID: object.accountId, WRANGLER_SEND_METRICS: 'false' },
         encoding: 'utf8', maxBuffer: 1024 * 1024, timeout: 300_000,
@@ -188,10 +190,10 @@ async function publish({ directory, commit, keep = false, dryRun = false, receip
       if (!(await handle.stat()).isFile()) fail('Media must remain a regular file.');
       bytes = await handle.readFile();
     } finally { await handle.close(); }
-    const path = join(runDirectory, file.name);
+    const path = join(runDirectory, 'media', file.name);
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, bytes, { flag: 'wx' });
-    const key = prefix + file.name;
+    const key = prefix + 'media/' + file.name;
     const entry = { name: file.name, key, sha256: sha256(bytes), size: bytes.length, contentType: file.contentType, url: urlFor(key) };
     manifest.files.push(entry);
     media.push({ ...entry, path, accountId: config.accountId, bucket: config.bucket });
