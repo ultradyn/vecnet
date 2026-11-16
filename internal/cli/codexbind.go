@@ -119,6 +119,12 @@ func (a *app) codexBindCaller(c *client) (string, error) {
 // cmdCodex takes its clock at the command boundary so expiry and renewal are
 // deterministic without changing the clock used by other CLI commands.
 func (a *app) cmdCodex(args []string, nowTime func() time.Time) error {
+	return a.cmdCodexWithBindingLockContext(args, nowTime, a.ctx)
+}
+
+// The separate context lets tests observe real lock contention without replacing
+// the lock or sharing that observation context with authentication HTTP.
+func (a *app) cmdCodexWithBindingLockContext(args []string, nowTime func() time.Time, bindingLockContext context.Context) error {
 	if len(args) == 0 {
 		return usageErr("codex: expected setup, status, bind, unbind or bindings")
 	}
@@ -265,7 +271,7 @@ func (a *app) cmdCodex(args []string, nowTime func() time.Time) error {
 		if err := os.Chmod(dir, 0700); err != nil {
 			return err
 		}
-		unlock, err := lockPath(a.ctx, path+".lock")
+		unlock, err := lockPath(bindingLockContext, path+".lock")
 		if err != nil {
 			return err
 		}
