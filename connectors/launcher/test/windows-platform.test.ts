@@ -3,9 +3,9 @@ import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import childProcess from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, linkSync, existsSync, readFileSync, statSync, lstatSync, realpathSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, linkSync, existsSync, readFileSync, statSync, lstatSync, realpathSync, chmodSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { once } from 'node:events';
 import { localPlatform, readPrivateFileSync } from '../src/private-files.ts';
@@ -28,6 +28,64 @@ function sandbox(t: { after(fn: () => void): void }) {
   const root = mkdtempSync(join(tmpdir(), 'vecnet-native-')), dir = join(root, 'private');
   t.after(() => rmSync(root, { recursive: true, force: true }));
   makePrivateDirectory(dir); return realpathSync.native(dir);
+}
+
+for (const kind of ['ENOTDIR', 'EACCES'] as const) {
+  test(`private fixture parent probes redact real ${kind} errors`, t => {
+    const dir = sandbox(t), sentinel = 'F1-parent-path-SENTINEL', parent = join(dir, sentinel), probe = join(parent, 'child');
+    const bytes = 'unchanged parent fixture bytes';
+    let restore = () => {};
+    if (kind === 'ENOTDIR') writeFileSync(parent, bytes);
+    else {
+      makePrivateDirectory(probe); writePrivate(join(probe, 'keep'), bytes);
+      if (windows) {
+        const identity = childProcess.spawnSync('whoami.exe', ['/user', '/fo', 'csv', '/nh'], { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
+        const sid = identity.stdout?.match(/S-1-\d+(?:-\d+)+/)?.[0];
+        assert.ok(identity.status === 0 && sid, 'fixture token identity lookup failed');
+        const acl = join(dir, 'saved-acl');
+        const aclCommand = (args: string[]) => {
+          const result = childProcess.spawnSync('icacls.exe', args, { windowsHide: true, stdio: 'ignore' });
+          assert.equal(result.status, 0, 'fixture ACL operation failed');
+        };
+        aclCommand([probe, '/save', acl, '/q']);
+        restore = () => aclCommand([dirname(probe), '/restore', acl, '/q']);
+        try { aclCommand([probe, '/deny', `*${sid}:(F)`, '/q']); }
+        catch (error) { restore(); throw error; }
+      } else {
+        const mode = statSync(parent).mode & 0o777;
+        chmodSync(parent, 0o000); restore = () => chmodSync(parent, mode);
+      }
+    }
+    try {
+      assert.throws(() => lstatSync(probe), (error: unknown) => (error as NodeJS.ErrnoException).code === kind,
+        'the control must reach a real filesystem refusal');
+      const descriptor = Object.getOwnPropertyDescriptor(process, 'platform')!;
+      try {
+        // Linux exercises the Windows fixture branch only up to its real
+        // failing lstat. No native helper result or ACL success is mocked.
+        Object.defineProperty(process, 'platform', { ...descriptor, value: 'win32' });
+        for (const invoke of [() => writePrivate(join(probe, 'authority'), 'private-input-SENTINEL'), () => makePrivateDirectory(join(probe, 'directory'))]) {
+          let failure: unknown;
+          try { invoke(); } catch (error) { failure = error; }
+          assert.ok(failure instanceof Error, 'unsafe parent must refuse fixture creation');
+          const own = Object.fromEntries(Object.getOwnPropertyNames(failure).map(key => [key, Reflect.get(failure, key)]));
+          const serialized = JSON.stringify(own, (_key, value) => value instanceof Error
+            ? Object.fromEntries(Object.getOwnPropertyNames(value).map(key => [key, Reflect.get(value, key)])) : value);
+          assert.equal(serialized.includes(sentinel), false, 'serialized own/nonenumerable diagnostics must omit the parent path');
+          assert.equal(serialized.includes('private-input-SENTINEL'), false);
+          assert.equal('path' in failure, false); assert.equal('cause' in failure, false);
+          assert.deepEqual(JSON.parse(failure.message), { operation: 'lstat', errno: kind });
+          assert.deepEqual(Object.getOwnPropertyNames(failure).sort(), ['message', 'stack']);
+        }
+      } finally { Object.defineProperty(process, 'platform', descriptor); }
+    } finally { restore(); }
+    if (kind === 'ENOTDIR') assert.equal(readFileSync(parent, 'utf8'), bytes);
+    else {
+      assert.deepEqual(readdirSync(parent), ['child']); assert.deepEqual(readdirSync(probe), ['keep']);
+      assert.equal(readFileSync(join(probe, 'keep'), 'utf8'), bytes);
+      if (windows) localPlatform('check-private', probe, { directory: true });
+    }
+  });
 }
 
 test('Windows DACL reads enforce private ownership for credentials and bindings; no chmod bypass', { skip: !windows }, async t => {

@@ -27,7 +27,10 @@ function checkExistingParent(path: string): void {
   for (;;) {
     try { lstatSync(parent); break; }
     catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || dirname(parent) === parent) throw error;
+      const errno = (error as NodeJS.ErrnoException).code;
+      if (errno !== 'ENOENT' || dirname(parent) === parent) {
+        throw new Error(JSON.stringify({ operation: 'lstat', errno: errno ?? 'UNKNOWN' }));
+      }
       parent = dirname(parent);
     }
   }
