@@ -30,7 +30,7 @@ async function eventually(fn: () => boolean, what: string, ms = 8000) {
   }
 }
 
-async function setup(t: TestContext, o: { threads?: { id: string; status?: unknown; approvalPolicy?: string }[]; maxBindings?: string; startAt?: number; unsubscribeDelayMs?: number; source?: string; blockHooks?: boolean; holdReadyReport?: boolean } = {}) {
+async function setup(t: TestContext, o: { threads?: { id: string; status?: unknown; approvalPolicy?: string }[]; maxBindings?: string; startAt?: number; unsubscribeDelayMs?: number; source?: string; blockHooks?: boolean; holdReadyReport?: boolean; onResume?: () => Promise<void> } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'vn-cc-'));
   const fake = await startFakeCodexAppServer({ dir: join(dir, 'fake'), unsubscribeDelayMs: o.unsubscribeDelayMs });
   const home = join(dir, 'fake', 'home');
@@ -117,6 +117,7 @@ esac
       return { ...rpc, async call<T>(method: Parameters<CodexRpc['call']>[0], params: unknown, timeout: number): Promise<T> {
         const response = await rpc.call<any>(method, params, timeout);
         if (method === 'thread/read') response.thread.source = o.source ?? 'cli';
+        if (method === 'thread/resume' && o.onResume) await o.onResume();
         return response;
       } };
     } }), stop = c.stop;
@@ -150,7 +151,18 @@ esac
     assert.deepEqual(fake.replies, []);
     rmSync(dir, { recursive: true, force: true });
   });
-  return { dir, fake, home, env, kv, clock, log, bindingsPath, binding, writeBindings, start, resumed, unsubscribed, subscribed, logged, reload, ready, trace, configTrace, reportTrace, reports, reportCaptured };
+  const runtimeDiagnostics = () => ({ now: clock.now(), reloadsArmed, reloadsPending, reloadsFired,
+    trace: readFileSync(trace, 'utf8'), reports: readFileSync(reportTrace, 'utf8'), requests: fake.requests, log: log.entries,
+    readiness: existsSync(bindingsPath + '.status.json') ? readFileSync(bindingsPath + '.status.json', 'utf8') : undefined });
+  // Server membership precedes the client's resume/recovery/watch completion.
+  // Sample runtime status once, after that client's verified watch has started.
+  const reloadForRuntime = async (profile: string) => {
+    try {
+      await eventually(() => readFileSync(trace, 'utf8').split('\n').includes(`--net ${profile} watch --json`), `verified client watch for ${profile}`);
+      await reload();
+    } catch (error) { t.diagnostic(JSON.stringify(runtimeDiagnostics())); throw error; }
+  };
+  return { dir, fake, home, env, kv, clock, log, bindingsPath, binding, writeBindings, start, resumed, unsubscribed, subscribed, logged, reload, ready, trace, configTrace, reportTrace, reports, reportCaptured, runtimeDiagnostics, reloadForRuntime };
 }
 
 test('only the singleton reports bound runtime status and shutdown offline, never removed owners', { skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
@@ -159,7 +171,7 @@ test('only the singleton reports bound runtime status and shutdown offline, neve
     s.writeBindings([s.binding(id, 1)]);
     const c = s.start();
     await eventually(() => s.subscribed(id), 'bound session ready');
-    await s.reload();
+    await s.reloadForRuntime('p1');
     await eventually(() => existsSync(s.reportCaptured), 'ready report captured and child held');
     const duringRaw = readFileSync(s.reportTrace, 'utf8');
     const during = s.reports();
@@ -180,13 +192,41 @@ test('only the singleton reports bound runtime status and shutdown offline, neve
     assert.equal(lines.at(-1), '', 'the final offline report is newline-framed');
   });
 
+  await t.test('runtime report sampling waits for client readiness before advancing the clock', async t => {
+    let releaseResume!: () => void, resumeReceived = false;
+    const held = new Promise<void>(resolve => { releaseResume = resolve; });
+    const id = uuid(598), s = await setup(t, { threads: [{ id }], onResume: async () => { resumeReceived = true; await held; } });
+    try {
+      s.writeBindings([s.binding(id, 1)]);
+      const c = s.start();
+      await eventually(() => resumeReceived && s.subscribed(id), 'server subscribed before client resume return');
+      await eventually(() => s.reports().length === 1, 'initial connecting report captured');
+      const before = s.clock.now(), observation = s.reloadForRuntime('p1');
+      try {
+        await s.ready();
+        assert.equal(s.clock.now(), before, 'server subscription alone must not advance the runtime sampling clock');
+      } finally { releaseResume(); await observation; }
+      assert.equal(s.clock.now(), before + CODEX_RELOAD_MS, 'one reload after client readiness');
+      await eventually(() => s.reports().some(r => r.state === 'idle' && r.delivery === 'ready'), 'ready status report');
+      assert.deepEqual(s.reports(), [
+        { state: 'offline', delivery: 'unavailable', reason: 'connecting' },
+        { state: 'idle', delivery: 'ready', version: '0.166.0' },
+      ]);
+      await c.stop();
+      assert.deepEqual(await c.stopped, { reason: 'stopped' });
+      assert.deepEqual(s.reports().at(-1), { state: 'offline', delivery: 'unavailable', reason: 'stopped', version: '0.166.0' });
+    } catch (error) { t.diagnostic(JSON.stringify(s.runtimeDiagnostics())); throw error; }
+    finally { releaseResume(); }
+  });
+
   const id = uuid(600), s = await setup(t, { threads: [{ id }] });
   const reports = s.reports;
   s.writeBindings([s.binding(id, 1)]);
   const first = s.start();
   await eventually(() => s.subscribed(id), 'bound session ready');
-  await s.reload();
-  await eventually(() => reports().some(r => r.state === 'idle' && r.delivery === 'ready'), 'ready status report');
+  await s.reloadForRuntime('p1');
+  try { await eventually(() => reports().some(r => r.state === 'idle' && r.delivery === 'ready'), 'ready status report'); }
+  catch (error) { t.diagnostic(JSON.stringify(s.runtimeDiagnostics())); throw error; }
   assert.deepEqual(reports().at(-1), { state: 'idle', delivery: 'ready', version: '0.166.0' });
   const duplicate = s.start();
   await eventually(() => s.logged('codex_connector_duplicate').length > 0, 'duplicate reporter excluded');
@@ -198,7 +238,7 @@ test('only the singleton reports bound runtime status and shutdown offline, neve
 
   s.writeBindings([s.binding(id, 2)]);
   const next = s.start(); await eventually(() => s.subscribed(id), 'replacement ready');
-  await s.reload(); await next.stop();
+  await s.reloadForRuntime('p2'); await next.stop();
   assert.equal(reports().at(-1).state, 'offline'); assert.equal(reports().at(-1).reason, 'stopped');
   assert.match(readFileSync(s.trace, 'utf8'), /codex report-status .*--expect-generation 00000000000000000000000000000002/);
 });
