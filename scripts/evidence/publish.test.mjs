@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { mkdtemp, mkdir, writeFile, readFile, readdir, lstat, symlink, access } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
@@ -18,9 +17,11 @@ const load = () => import('./publish.mjs');
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const json = async path => JSON.parse(await readFile(path, 'utf8'));
 const absent = async path => assert.rejects(access(path), { code: 'ENOENT' });
+const scratch = fileURLToPath(new URL('../../.superpowers/sdd/2026-11-16-public-evidence/scratch/', import.meta.url));
 
 async function fixture(t) {
-  const root = await mkdtemp(join(tmpdir(), 'vecnet-evidence-'));
+  await mkdir(scratch, { recursive: true });
+  const root = await mkdtemp(join(scratch, 'vecnet-evidence-'));
   t.after(async () => {
     const { rm } = await import('node:fs/promises');
     await rm(root, { recursive: true, force: true });
@@ -171,6 +172,103 @@ test('ET3: failed uploads and corrupt public bytes do not write success receipts
       await absent(f.receipt);
     });
   }
+});
+
+test('completed media followed by media failure never verifies or receipts (Plan 4 final I3)', async t => {
+  const { publishEvidence } = await load();
+  const f = await fixture(t);
+  const remote = transport(f);
+  const completed = Promise.withResolvers();
+  const attempted = [];
+  await assert.rejects(publishEvidence({ ...f.options, upload: async object => {
+    attempted.push(object.key);
+    if (attempted.length === 1) {
+      await remote.upload(object);
+      completed.resolve();
+    } else {
+      await completed.promise;
+      throw Error('synthetic-private-token');
+    }
+  }, readPublic: () => assert.fail('public verification after partial media failure') }), error => {
+    assert.match(String(error), /Evidence upload failed/);
+    assert.doesNotMatch(String(error), /synthetic-private-token/);
+    return true;
+  });
+  assert.equal(remote.objects.size, 1, 'one media upload completed before failure');
+  assert.equal(attempted.length, 2);
+  assert.ok(attempted.every(key => key.includes('/media/')), 'no indexes start after media failure');
+  assert.equal(remote.events.filter(event => event.startsWith('read:')).length, 0);
+  await absent(f.receipt);
+});
+
+test('index failure after completed media never verifies or receipts (Plan 4 final I3)', async t => {
+  const { publishEvidence } = await load();
+  for (const index of ['manifest.json', 'index.html']) await t.test(index, async t => {
+    const f = await fixture(t);
+    const remote = transport(f);
+    const attempted = [];
+    await assert.rejects(publishEvidence({ ...f.options, upload: async object => {
+      attempted.push(object.key);
+      if (object.key.endsWith('/' + index)) {
+        assert.equal([...remote.objects.keys()].filter(key => key.includes('/media/')).length, 2);
+        throw Error('synthetic-private-token');
+      }
+      await remote.upload(object);
+    }, readPublic: () => assert.fail('public verification after index failure') }), error => {
+      assert.match(String(error), /Evidence upload failed/);
+      assert.doesNotMatch(String(error), /synthetic-private-token/);
+      return true;
+    });
+    assert.equal(attempted.length, 4, 'only the media batch and two in-flight indexes start');
+    assert.ok(attempted.slice(0, 2).every(key => key.includes('/media/')));
+    assert.equal(remote.objects.size, 3, 'media and the other index completed');
+    assert.equal(remote.events.filter(event => event.startsWith('read:')).length, 0);
+    await absent(f.receipt);
+  });
+});
+
+test('partial failure waits for its in-flight sibling and starts no queued uploads (Plan 4 final I3)', { timeout: 5000 }, async t => {
+  const { publishEvidence } = await load();
+  const f = await fixture(t);
+  for (const name of ['a.png', 'b.png']) await writeFile(join(f.directory, name), 'extra media');
+  const remote = transport(f);
+  const pending = Promise.withResolvers();
+  const failing = Promise.withResolvers();
+  const release = Promise.withResolvers();
+  let attempted = 0, settled = false, pendingEnded = false;
+  const outcome = publishEvidence({ ...f.options, upload: async object => {
+    const position = attempted++;
+    if (position === 0) return remote.upload(object);
+    if (position === 1) {
+      await pending.promise;
+      failing.resolve();
+      throw Error('synthetic-private-token');
+    }
+    assert.equal(position, 2, 'queued media or indexes must not start after failure');
+    pending.resolve();
+    await release.promise;
+    await remote.upload(object);
+    pendingEnded = true;
+  }, readPublic: () => assert.fail('public verification after partial failure') }).then(
+    () => { settled = true; return null; },
+    error => { settled = true; return error; },
+  );
+  try {
+    await failing.promise;
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(remote.objects.size, 1, 'at least one media upload already completed');
+    assert.equal(settled, false, 'publisher must wait for the pending sibling');
+    assert.equal(attempted, 3);
+    await absent(f.receipt);
+  } finally { release.resolve(); }
+  const error = await outcome;
+  assert.match(String(error), /Evidence upload failed/);
+  assert.doesNotMatch(String(error), /synthetic-private-token/);
+  assert.equal(pendingEnded, true);
+  assert.equal(attempted, 3);
+  assert.equal(remote.objects.size, 2);
+  assert.equal(remote.events.filter(event => event.startsWith('read:')).length, 0);
+  await absent(f.receipt);
 });
 
 test('ET4: routine expiry is 30 days and kept evidence has no automatic expiry', async t => {
