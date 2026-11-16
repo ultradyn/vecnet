@@ -13,8 +13,8 @@ Run tests and gates on a LAN build box instead of xsm. `just bb <command…>`, f
 just bb go test -count=1 ./...
 just bb CGO_ENABLED=1 CC=/usr/bin/gcc go test -race ./internal/hub/
 just bb build2 node --test --test-concurrency=2 internal/ui/jstest/
-just bb SHOTS_DIR=.scratch/vecnet/mine/shots just ui-shots
-just bb UI_CPU_THROTTLE=4 SHOTS_DIR=.scratch/vecnet/mine/rep just ui-repeat 3 sidebar thread
+BB_JOBS=2 just bb SHOTS_DIR=.scratch/evidence/ui just ui-shots
+BB_JOBS=2 just bb UI_CPU_THROTTLE=4 SHOTS_DIR=.scratch/evidence/repeat just ui-repeat 3 sidebar thread
 just bb just validate-protocol
 just bb bash -c '[ ! -f connectors/launcher/package.json ] || (just ln-setup && just ln-check)'
 ```
@@ -99,7 +99,7 @@ Environment forwarded: `CGO_ENABLED CC CXX GOFLAGS GORACE GOEXPERIMENT GODEBUG U
 ## Coming back
 
 - **SHOTS_DIR**: a local path (relative paths resolve from the worktree root, as they would locally) becomes `<lane>/shots` on the box; afterwards its contents are copied to the local path. It is not emptied locally.
-- **Files the command wrote** (goldens with `UPDATE_GOLDEN=1`, committed shots from `just ui-shots` without `SHOTS_DIR`, a `go.sum`): pulled back when their content differs, unless the local copy changed during the run (it is then left alone, with a message). `BB_PULLBACK=0` turns this off. Box shots use the same Inter and JetBrains Mono as xsm, so layout and line breaks match. The pixels still differ, because the box has different font rasterisation and fallback fonts (DejaVu, where xsm has Noto). Regenerating the committed PNGs on the box therefore rewrites every file, so give checks an explicit `SHOTS_DIR`, and decide deliberately when committed shots should come from the box.
+- **Files the command wrote** (goldens with `UPDATE_GOLDEN=1`, a `go.sum`): pulled back when their content differs, unless the local copy changed during the run (it is then left alone, with a message). `BB_PULLBACK=0` turns this off. The shared screenshot helpers and index validator default to ignored `.scratch/evidence/ui`; `.scratch/` is excluded from automatic source-file pull-back, so pass `SHOTS_DIR=.scratch/evidence/ui` explicitly to retrieve captures. Box shots use the same Inter and JetBrains Mono as xsm, so layout and line breaks match. The pixels still differ, because the box has different font rasterisation and fallback fonts (DejaVu, where xsm has Noto). Keep historical committed PNGs; publish new captures with `just evidence-publish .scratch/evidence/ui` and commit a verified public receipt (see [the evidence guide](EVIDENCE.md)). `just check-evidence` rejects staged new or modified evidence media while allowing removals and application assets.
 
 ## First-run bootstrap
 

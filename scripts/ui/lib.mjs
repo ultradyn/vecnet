@@ -8,6 +8,7 @@ import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createInterface } from 'node:readline';
 import { crc32, deflateSync } from 'node:zlib';
+import { shotsDirectory } from './shot-paths.mjs';
 
 export const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 export function assert(cond, msg = 'assertion failed') { if (!cond) throw new Error(msg); }
@@ -155,7 +156,7 @@ export async function chromium() {
 }
 export async function shotPath(name) {
   assert(/^[a-zA-Z0-9_-]+$/.test(name), 'invalid shot name');
-  const dir = resolve(process.env.SHOTS_DIR || join(root, 'docs/plans/shots/oui'));
+  const dir = shotsDirectory();
   await mkdir(dir, { recursive: true });
   return join(dir, `${name}.png`);
 }

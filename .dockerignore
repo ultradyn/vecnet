@@ -32,3 +32,26 @@ connectors/hub-client/test/
 **/*.pem
 **/*.key
 **/credentials*
+
+# Generated evidence media is not part of the application build.
+# .scratch/ and docs/prototypes/ are already excluded above.
+docs/plans/**/*.[pP][nN][gG]
+docs/plans/**/*.[jJ][pP][gG]
+docs/plans/**/*.[jJ][pP][eE][gG]
+docs/plans/**/*.[gG][iI][fF]
+docs/plans/**/*.[wW][eE][bB][pP]
+docs/plans/**/*.[mM][pP]4
+docs/plans/**/*.[wW][eE][bB][mM]
+docs/plans/**/*.[mM][oO][vV]
+docs/plans/**/*.[aA][vV][iI]
+docs/plans/**/*.[mM][kK][vV]
+docs/design/**/*.[pP][nN][gG]
+docs/design/**/*.[jJ][pP][gG]
+docs/design/**/*.[jJ][pP][eE][gG]
+docs/design/**/*.[gG][iI][fF]
+docs/design/**/*.[wW][eE][bB][pP]
+docs/design/**/*.[mM][pP]4
+docs/design/**/*.[wW][eE][bB][mM]
+docs/design/**/*.[mM][oO][vV]
+docs/design/**/*.[aA][vV][iI]
+docs/design/**/*.[mM][kK][vV]

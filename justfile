@@ -103,10 +103,19 @@ ui-shots:
     bash scripts/ui/reap-demos.sh
     build2 node --test --test-concurrency=2 scripts/ui/lib.test.mjs scripts/ui/closer.test.mjs
     for script in scripts/ui/*.mjs; do
-        case "$script" in */lib.mjs|*/tmux.mjs|*/ansi.mjs|*/shots-index.mjs|*.test.mjs) continue ;; esac
+        case "$script" in */lib.mjs|*/tmux.mjs|*/ansi.mjs|*/shots-index.mjs|*/shot-paths.mjs|*.test.mjs) continue ;; esac
         build2 node "$script"
     done
     build2 node scripts/ui/shots-index.mjs
+
+# Publish ignored captures and emit a verified public receipt (docs/EVIDENCE.md).
+[positional-arguments]
+evidence-publish directory *ARGS:
+    node scripts/evidence/publish.mjs "$@"
+
+# Reject staged additions or modifications to evidence media; deletions are allowed.
+check-evidence:
+    node scripts/evidence/check.mjs
 
 # Run screen scripts N times each, run i into $SHOTS_DIR/<script>/run-<i>, to
 # check their PNGs agree. UI_CPU_THROTTLE=4 slows the browser to expose load races.

@@ -3,9 +3,10 @@ import assert from 'node:assert/strict';
 import { readFile, readdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { shotsDirectory } from './shot-paths.mjs';
 
 export async function checkShotsIndex({
-  directory = resolve(process.env.SHOTS_DIR || fileURLToPath(new URL('../../docs/plans/shots/oui/', import.meta.url))),
+  directory = shotsDirectory(),
   index = new URL('../../docs/plans/shots/oui/README.md', import.meta.url),
 } = {}) {
   const markdown = await readFile(index, 'utf8');
