@@ -104,7 +104,10 @@ func launcherWindowsFixture(t *testing.T, nodeMode launcherFixtureNodeMode) (lau
 		t.Fatal("stage genuine Windows Node for launcher install tests: ", err)
 	}
 	args := []string{"install", "--source", launcherTestSource(t), "--node", nodeCopy, "--vecnet-bin", bin}
-	if code, _, errs := f.run(t, append(args, "--write")...); code != 0 {
+	start := time.Now()
+	code, _, errs := f.run(t, append(args, "--write")...)
+	t.Logf("launcher fixture initial install: prepared=%t elapsed=%s exit=%d", nodeMode == preparedLauncherNode, time.Since(start), code)
+	if code != 0 {
 		t.Fatal(errs)
 	}
 	a := &app{ctx: context.Background(), getenv: func(k string) string { return f.env[k] }, stdout: io.Discard, stderr: io.Discard}
@@ -112,7 +115,7 @@ func launcherWindowsFixture(t *testing.T, nodeMode launcherFixtureNodeMode) (lau
 }
 func launcherWindowsRepairFixture(t *testing.T, active, enabled bool) (launcherFixture, *app, *launcherFakeTasks, string, localArtifact) {
 	t.Helper()
-	f, a, manager, _ := launcherWindowsFixture(t, sharedLauncherNode)
+	f, a, manager, _ := launcherWindowsFixture(t, preparedLauncherNode)
 	path := filepath.Join(filepath.Dir(f.paths.Manifest), "managed.json")
 	var meta launcherManaged
 	if err := json.Unmarshal(launcherTestRead(t, path), &meta); err != nil {
@@ -217,7 +220,9 @@ func TestLauncherWindowsTaskDefinitionIsLiteralAndComplete(t *testing.T) {
 	}
 }
 func TestLauncherWindowsInstallPreviewAndExplicitIntent(t *testing.T) {
-	f, _, manager, args := launcherWindowsFixture(t, sharedLauncherNode)
+	// This existing exclusive root covers cold admission through the real
+	// install's five-second probe. Do not prepare this image in the fixture.
+	f, _, manager, args := launcherWindowsFixture(t, coldLauncherNode)
 	if manager.state.Active || manager.state.Enabled {
 		t.Fatal("implicit install enabled/started task")
 	}
@@ -405,7 +410,7 @@ func TestLauncherWindowsRepairRejectsTaskAndPublicationDrift(t *testing.T) {
 func TestLauncherWindowsInstallRejectsUnsafeDACLAndHardlinks(t *testing.T) {
 	for _, kind := range []string{"credential", "snapshot", "unit", "lock", "hardlink", "data-ancestor", "manifest-ancestor"} {
 		t.Run(kind, func(t *testing.T) {
-			f, _, manager, args := launcherWindowsFixture(t, sharedLauncherNode)
+			f, _, manager, args := launcherWindowsFixture(t, preparedLauncherNode)
 			var runtime launcherInstall
 			json.Unmarshal(launcherTestRead(t, f.paths.Manifest), &runtime)
 			path := map[string]string{"credential": f.paths.Credential, "snapshot": runtime.Entry, "unit": f.paths.Unit, "lock": f.paths.Manifest + ".lock", "hardlink": runtime.Entry, "data-ancestor": f.env["XDG_DATA_HOME"], "manifest-ancestor": f.env["XDG_CONFIG_HOME"]}[kind]
@@ -615,7 +620,7 @@ func TestLauncherWindowsLiveTaskScheduler(t *testing.T) {
 }
 
 func TestLauncherWindowsTaskControllerRejectsConcurrentChanges(t *testing.T) {
-	f, _, manager, args := launcherWindowsFixture(t, sharedLauncherNode)
+	f, _, manager, args := launcherWindowsFixture(t, preparedLauncherNode)
 	raw := launcherTestRead(t, f.paths.Unit)
 	prepare, err := (&app{ctx: context.Background(), getenv: func(k string) string { return f.env[k] }}).launcherWindowsPrepareInstall(f.paths, raw, false, false)
 	if err != nil {
@@ -782,7 +787,7 @@ func TestLauncherWindowsUnregisteredProfileDiscovery(t *testing.T) {
 func TestLauncherWindowsInstallRejectsUnsafeExecutableBeforeExecution(t *testing.T) {
 	for _, kind := range []string{"node-file", "node-parent", "cli-file", "cli-parent", "node-hardlink"} {
 		t.Run(kind, func(t *testing.T) {
-			f, _, manager, args := launcherWindowsFixture(t, freshLauncherNode)
+			f, _, manager, args := launcherWindowsFixture(t, coldLauncherNode)
 			var installed launcherInstall
 			if err := launcherReadJSON(f.paths.Manifest, &installed); err != nil {
 				t.Fatal(err)
@@ -829,8 +834,8 @@ func TestLauncherWindowsInstallRejectsUnsafeExecutableBeforeExecution(t *testing
 			}
 			beforeUnit, beforeManifest := launcherTestRead(t, f.paths.Unit), launcherTestRead(t, f.paths.Manifest)
 			manager.calls = nil
-			if code, _, errs := f.run(t, append(args, "--write", "--start")...); code == 0 {
-				t.Fatalf("accepted unsafe %s: %s", kind, errs)
+			if code, _, errs := f.run(t, append(args, "--write", "--start")...); code == 0 || !strings.Contains(errs, "unsafe launcher executable") {
+				t.Fatalf("want executable trust rejection before Node version admission for %s, exit=%d: %s", kind, code, errs)
 			}
 			if len(manager.calls) != 0 {
 				t.Fatalf("unsafe executable reached Task Scheduler: %v", manager.calls)
