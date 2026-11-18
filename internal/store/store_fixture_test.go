@@ -14,8 +14,10 @@ import (
 	"github.com/XertroV/vecnet/internal/store"
 )
 
-// Keep only the bytes of a closed, fully migrated empty database. Building
-// with explicit FULL makes the image independent of the caller's environment.
+// Cache only the bytes of a closed, checkpointed, fully migrated empty DB.
+// This disposable bootstrap uses explicit NORMAL to avoid per-migration WAL
+// syncs, regardless of the caller's environment. The policy is connection-local;
+// fixture copies still select their own policy through store.Open.
 var migratedStoreImage = sync.OnceValues(func() (image []byte, err error) {
 	dir, err := os.MkdirTemp("", "vecnet-store-image-")
 	if err != nil {
@@ -27,7 +29,7 @@ var migratedStoreImage = sync.OnceValues(func() (image []byte, err error) {
 		}
 	}()
 	path := filepath.Join(dir, "hub.db")
-	db, err := store.OpenWithSynchronous(path, "full")
+	db, err := store.OpenWithSynchronous(path, "normal")
 	if err != nil {
 		return nil, err
 	}

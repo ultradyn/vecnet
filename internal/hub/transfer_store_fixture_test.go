@@ -16,7 +16,9 @@ import (
 )
 
 // Cache only a closed, checkpointed empty store, never a hub or its data.
-// Build with explicit FULL so the template does not depend on the test env.
+// This disposable bootstrap uses explicit NORMAL to avoid per-migration WAL
+// syncs, regardless of the caller's environment. The policy is connection-local;
+// fixture copies still select their own policy through store.Open.
 var transferStoreImage = sync.OnceValues(func() (image []byte, err error) {
 	dir, err := os.MkdirTemp("", "vecnet-transfer-image-")
 	if err != nil {
@@ -28,7 +30,7 @@ var transferStoreImage = sync.OnceValues(func() (image []byte, err error) {
 		}
 	}()
 	path := filepath.Join(dir, "hub.db")
-	db, err := store.OpenWithSynchronous(path, "full")
+	db, err := store.OpenWithSynchronous(path, "normal")
 	if err != nil {
 		return nil, err
 	}
