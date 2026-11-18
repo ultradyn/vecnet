@@ -54,6 +54,13 @@ var inviteURLPolicies = []inviteURLPolicy{
 	{name: "environment-opt-in", env: "1"},
 }
 
+type inviteURLClipboardMode uint8
+
+const (
+	inviteURLClipboardHelper inviteURLClipboardMode = iota
+	inviteURLClipboardRefusal
+)
+
 type inviteURLResponseFixture struct {
 	getenv         func(string) string
 	hub            string
@@ -66,7 +73,7 @@ type inviteURLResponseFixture struct {
 	pathLookups                                            atomic.Int32
 }
 
-func newInviteURLResponseFixture(t *testing.T, verb, received, profileHub string, policy inviteURLPolicy) *inviteURLResponseFixture {
+func newInviteURLResponseFixture(t *testing.T, verb, received, profileHub string, policy inviteURLPolicy, clipboard inviteURLClipboardMode) *inviteURLResponseFixture {
 	t.Helper()
 	f := &inviteURLResponseFixture{}
 	issuancePath := inviteURLPrefix + "/v1/admin/peers"
@@ -137,16 +144,20 @@ func newInviteURLResponseFixture(t *testing.T, verb, received, profileHub string
 	}
 	f.clipboard = filepath.Join(filepath.Dir(f.config), "clipboard.txt")
 	f.clipboardCalls = filepath.Join(filepath.Dir(f.config), "clipboard-calls.txt")
-	quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
-	// Only shell builtins: this fixture PATH cannot find a real clipboard tool.
-	// Invitation blocks end in a newline; read/printf preserves their bytes.
-	script := "#!/bin/sh\nprintf 'called\\n' >> " + quote(f.clipboardCalls) + "\n" +
-		"while IFS= read -r line; do printf '%s\\n' \"$line\"; done > " + quote(f.clipboard) + "\n"
-	tool := "wl-copy"
-	if runtime.GOOS == "windows" {
-		tool = "clip.exe"
+	// Refusal cases keep an empty private PATH and the same lookup and
+	// artifact checks; a premature copy attempt cannot reach a real tool.
+	if clipboard != inviteURLClipboardRefusal {
+		quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
+		// Only shell builtins: this fixture PATH cannot find a real clipboard tool.
+		// Invitation blocks end in a newline; read/printf preserves their bytes.
+		script := "#!/bin/sh\nprintf 'called\\n' >> " + quote(f.clipboardCalls) + "\n" +
+			"while IFS= read -r line; do printf '%s\\n' \"$line\"; done > " + quote(f.clipboard) + "\n"
+		tool := "wl-copy"
+		if runtime.GOOS == "windows" {
+			tool = "clip.exe"
+		}
+		cliFixtureProgram(t, bin, tool, script, cliFixtureProgramSpec{Kind: "clipboard", Log: f.clipboard, Calls: f.clipboardCalls})
 	}
-	cliFixtureProgram(t, bin, tool, script, cliFixtureProgramSpec{Kind: "clipboard", Log: f.clipboard, Calls: f.clipboardCalls})
 	f.getenv = func(k string) string {
 		switch k {
 		case "PATH":
@@ -251,7 +262,7 @@ func TestInviteHubURLResponseRefusesUnsafe(t *testing.T) {
 				}
 				for _, mode := range inviteURLModes {
 					t.Run(verb+"/"+tc.name+"/"+policy.name+"/"+mode.name, func(t *testing.T) {
-						f := newInviteURLResponseFixture(t, verb, tc.hub, "", policy)
+						f := newInviteURLResponseFixture(t, verb, tc.hub, "", policy, inviteURLClipboardRefusal)
 						code, out, errs := f.run(verb, mode)
 						if code != exitUsage || errs != "vecnet: invalid invitation hub URL\n" {
 							t.Errorf("want fixed invalid invitation hub URL refusal/exit 1; got exit %d, stderr %q", code, errs)
@@ -290,7 +301,7 @@ func TestInviteHubURLResponsePreservesSafeOutput(t *testing.T) {
 		for _, tc := range cases {
 			for _, mode := range inviteURLModes {
 				t.Run(verb+"/"+tc.name+"/"+mode.name, func(t *testing.T) {
-					f := newInviteURLResponseFixture(t, verb, tc.hub, "", tc.policy)
+					f := newInviteURLResponseFixture(t, verb, tc.hub, "", tc.policy, inviteURLClipboardHelper)
 					code, out, errs := f.run(verb, mode)
 					if code != exitOK {
 						t.Errorf("safe response failed: exit %d, stderr %q", code, errs)
@@ -368,7 +379,7 @@ func TestInviteHubURLResponseUnsafeFallbackStopsBeforeIssuance(t *testing.T) {
 		for _, verb := range []string{"create", "reissue"} {
 			for _, mode := range inviteURLModes {
 				t.Run(verb+"/"+hub.name+"/"+mode.name, func(t *testing.T) {
-					f := newInviteURLResponseFixture(t, verb, "", hub.url, inviteURLPolicies[0])
+					f := newInviteURLResponseFixture(t, verb, "", hub.url, inviteURLPolicies[0], inviteURLClipboardHelper)
 					code, out, errs := f.run(verb, mode)
 					if code != exitUsage || out != "" || !strings.Contains(errs, "profile \"p\" is unusable; edit the config:") {
 						t.Errorf("want earlier selected-profile refusal, got exit %d, stdout %q, stderr %q", code, out, errs)
