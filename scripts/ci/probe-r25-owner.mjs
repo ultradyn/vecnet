@@ -23,6 +23,9 @@ if (mode === 'build') {
   assert.equal(metadata.unitHash, sha(await readFile(unit)));
   await stageTargetOwner(await readWindowsOwner(directory, metadata, platform));
   console.log(JSON.stringify({revision: metadata.revision, platform, metadata}));
+} else if (mode === 'unit') {
+  // Keep Go's dotted flags out of PowerShell's argument parser.
+  process.exitCode = await run(unit, ['-test.v', '-test.timeout=50s'], {ms: 53000});
 } else if (mode === 'benchmark') {
   assert.ok(path.isAbsolute(process.env.CI_WINDOWS_OWNER));
   const native = process.env.CI_WINDOWS_OWNER;
@@ -34,4 +37,4 @@ if (mode === 'build') {
     for (let i = 0; i < 3; i++) assert.equal(await run(process.execPath, ['-e', 'process.exit(0)'], {ms: 2000, env}), 0);
     console.log('probe-owner ' + JSON.stringify({kind, launches: 3, elapsed_ms: performance.now() - started, platform}));
   }
-} else throw new Error('build, stage or benchmark required');
+} else throw new Error('build, stage, unit or benchmark required');

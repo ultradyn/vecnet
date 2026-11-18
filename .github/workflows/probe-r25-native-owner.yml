@@ -71,7 +71,7 @@ jobs:
         run: node scripts/ci/probe-r25-owner.mjs stage
       - name: Execute native owner unit contracts
         timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 "${{ github.workspace }}/dist/owner/owner.test.exe" -test.v -test.timeout=50s
+        run: node scripts/ci/probe-r25-owner.mjs unit
       - name: Execute actual owner lifecycle and literal argv contracts
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node --test --test-concurrency=1 scripts/ci/budget.test.mjs scripts/ci/ownership.test.mjs scripts/ci/native-node.test.mjs
