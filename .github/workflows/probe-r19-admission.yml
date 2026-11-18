@@ -1,0 +1,94 @@
+name: R19 native admission diagnostic
+
+on:
+  push:
+    branches: [ci80/probe-r19-admission]
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  compare:
+    if: github.repository == 'ultradyn/vecnet' && github.ref == 'refs/heads/ci80/probe-r19-admission'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        cap: [6, 3]
+        os: [windows-2025, windows-11-arm]
+        include:
+          - os: windows-2025
+            platform: win32-x64
+            artifact: 14432165338
+          - os: windows-11-arm
+            platform: win32-arm64
+            artifact: 14431621105
+    env:
+      CGO_ENABLED: '0'
+      GOMAXPROCS: '1'
+    steps:
+      - uses: actions/checkout@v5
+        timeout-minutes: 1
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/ci
+            scripts/npm
+      - uses: actions/setup-node@v6
+        timeout-minutes: 1
+        with:
+          node-version: '24.22.3'
+          package-manager-cache: false
+      - name: Download exact R18 producer ZIP
+        timeout-minutes: 1
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $deadlineBase = curl.exe --fail --silent --show-error --max-time 5 --header "Authorization: Bearer $env:GH_TOKEN" "$env:GITHUB_API_URL/repos/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $current = $deadlineBase | ConvertFrom-Json
+          if ($current.head_sha -ne $env:GITHUB_SHA -or $current.run_attempt -ne 1) { throw 'Expected original diagnostic attempt at this SHA' }
+          $deadline = ([DateTimeOffset]$current.created_at).AddSeconds(293).ToUnixTimeMilliseconds()
+          "CI_RUN_DEADLINE=$deadline" >> $env:GITHUB_ENV
+          $seconds = [Math]::Min(48, [Math]::Floor(($deadline - [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) / 1000) - 3)
+          if ($seconds -lt 1) { throw 'Diagnostic overall budget exhausted before download' }
+          New-Item -ItemType Directory .r19-admission | Out-Null
+          curl.exe --fail --silent --show-error --location --max-time $seconds --header "Authorization: Bearer $env:GH_TOKEN" --output .r19-admission/bundle.zip "$env:GITHUB_API_URL/repos/$env:GITHUB_REPOSITORY/actions/artifacts/${{ matrix.artifact }}/zip"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify ZIP and restore the actual R18 source
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/probe-r19-admission.mjs unpack ${{ matrix.platform }}
+      - name: Verify and record exact native inventory
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/probe-r19-admission.mjs discover ${{ matrix.platform }}
+      - name: Compare whole Enabled root
+        id: enabled
+        continue-on-error: true
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/probe-r19-admission.mjs sample ${{ matrix.cap }} enabled
+      - name: Compare whole Intent root
+        id: intent
+        continue-on-error: true
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/probe-r19-admission.mjs sample ${{ matrix.cap }} intent
+      - name: Compare whole task and publication drift root
+        id: drift
+        continue-on-error: true
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/probe-r19-admission.mjs sample ${{ matrix.cap }} drift
+      - name: Compare whole TaskController concurrent changes root
+        id: controller
+        continue-on-error: true
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/probe-r19-admission.mjs sample ${{ matrix.cap }} controller
+      - name: Retain every diagnostic failure in the job conclusion
+        if: ${{ !cancelled() }}
+        timeout-minutes: 1
+        env:
+          RESULTS: ${{ format('{0} {1} {2} {3}', steps.enabled.outcome, steps.intent.outcome, steps.drift.outcome, steps.controller.outcome) }}
+        run: |
+          Write-Output "Whole windows (including neighbors): $env:RESULTS"
+          if ($env:RESULTS -ne 'success success success success') { exit 1 }
