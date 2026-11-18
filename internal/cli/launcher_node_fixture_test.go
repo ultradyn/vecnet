@@ -1,14 +1,17 @@
 package cli
 
 import (
-	"bytes"
+	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/XertroV/vecnet/internal/platform"
 )
@@ -24,26 +27,45 @@ var (
 		if err != nil {
 			return "", err
 		}
-		return copyLauncherFixtureNode(launcherFixtureNodeDir)
+		node, err := copyLauncherFixtureNode(launcherFixtureNodeDir)
+		if err != nil {
+			return "", err
+		}
+		// One real execution on the just-created, unmodified private image.
+		// The enclosing test/owner still owns this fixture work; this is not
+		// a retry or an extension of any install/repair probe's deadline.
+		ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+		defer cancel()
+		start := time.Now()
+		version, err := launcherNodeOutput(ctx, node)
+		elapsed := time.Since(start)
+		if err != nil || ctx.Err() != nil || !launcherNodeVersion(string(version)) {
+			return "", fmt.Errorf("prepare private Node --version after %s: command=%v context=%v output=%.80q", elapsed, err, ctx.Err(), version)
+		}
+		fmt.Fprintf(os.Stderr, "launcher Node fixture: prepared private image in %s, version=%.80q\n", elapsed, version)
+		return node, nil
 	})
 )
 
-type launcherFixtureNodeMode bool
+type launcherFixtureNodeMode uint8
 
 const (
-	sharedLauncherNode launcherFixtureNodeMode = false
-	freshLauncherNode  launcherFixtureNodeMode = true
+	preparedLauncherNode launcherFixtureNodeMode = iota
+	coldLauncherNode
 )
 
-// Share one private, single-link Node image across cases that only execute
-// or inspect it. This avoids new executable identities without bypassing
-// the real install's trust checks or --version invocation. Mutators instead
-// stage a fresh image into their own home, including a distinct parent ACL.
+// Read-only callers share one prepared, private, single-link image per test
+// process. The real install still validates and executes it. Cold admission
+// and mutation cases instead receive a never-executed, independently owned copy.
 func launcherFixtureNode(home string, mode launcherFixtureNodeMode) (string, error) {
-	if mode == sharedLauncherNode {
+	switch mode {
+	case preparedLauncherNode:
 		return launcherFixtureSharedNode()
+	case coldLauncherNode:
+		return copyLauncherFixtureNode(filepath.Join(home, "private node"))
+	default:
+		return "", fmt.Errorf("unknown launcher Node fixture mode %d", mode)
 	}
-	return copyLauncherFixtureNode(filepath.Join(home, "private node"))
 }
 
 func copyLauncherFixtureNode(dir string) (string, error) {
@@ -75,7 +97,7 @@ func TestLauncherFixtureNodeIsolation(t *testing.T) {
 	if err != nil {
 		t.Skipf("native Node required for the fixture contract: %v", err)
 	}
-	identity := func(path string) (os.FileInfo, []byte) {
+	identity := func(path string) (os.FileInfo, [sha256.Size]byte) {
 		t.Helper()
 		file, err := os.Open(path)
 		if err != nil {
@@ -87,11 +109,11 @@ func TestLauncherFixtureNodeIsolation(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		prefix := make([]byte, 16)
-		if _, err := io.ReadFull(file, prefix); err != nil {
+		h := sha256.New()
+		if _, err := io.Copy(h, file); err != nil {
 			t.Fatal(err)
 		}
-		return info, prefix
+		return info, [sha256.Size]byte(h.Sum(nil))
 	}
 	get := func(home string, mode launcherFixtureNodeMode) string {
 		t.Helper()
@@ -110,16 +132,16 @@ func TestLauncherFixtureNodeIsolation(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	sourceID, prefix := identity(source)
+	sourceID, sourceDigest := identity(source)
 	firstHome := t.TempDir()
-	first := get(firstHome, sharedLauncherNode)
+	first := get(firstHome, preparedLauncherNode)
 	firstID, got := identity(first)
-	if !bytes.Equal(got, prefix) || firstID.Size() != sourceID.Size() || os.SameFile(firstID, sourceID) {
+	if got != sourceDigest || firstID.Size() != sourceID.Size() || os.SameFile(firstID, sourceID) {
 		t.Fatal("shared Node is not an independent copy of the source image")
 	}
 	private(first)
 	secondHome := t.TempDir()
-	second := get(secondHome, sharedLauncherNode)
+	second := get(secondHome, preparedLauncherNode)
 	if err := os.RemoveAll(firstHome); err != nil {
 		t.Fatal(err)
 	}
@@ -129,8 +151,11 @@ func TestLauncherFixtureNodeIsolation(t *testing.T) {
 	if !os.SameFile(firstID, after) || !os.SameFile(firstID, secondID) {
 		t.Fatal("read-only launcher fixtures did not reuse the same Node image")
 	}
-	fresh := get(secondHome, freshLauncherNode)
-	freshID, _ := identity(fresh)
+	fresh := get(secondHome, coldLauncherNode)
+	freshID, freshDigest := identity(fresh)
+	if freshDigest != sourceDigest {
+		t.Fatal("cold Node is not a byte-for-byte copy of the source image")
+	}
 	if os.SameFile(freshID, firstID) || os.SameFile(freshID, sourceID) {
 		t.Fatal("mutable Node aliases the shared or source image")
 	}
@@ -149,7 +174,7 @@ func TestLauncherFixtureNodeIsolation(t *testing.T) {
 		info os.FileInfo
 	}{{source, sourceID}, {first, firstID}} {
 		info, got := identity(unchanged.path)
-		if !os.SameFile(info, unchanged.info) || info.Size() != unchanged.info.Size() || !bytes.Equal(got, prefix) {
+		if !os.SameFile(info, unchanged.info) || info.Size() != unchanged.info.Size() || got != sourceDigest {
 			t.Errorf("mutable fixture changed %s", unchanged.path)
 		}
 	}
