@@ -594,7 +594,13 @@ func TestMCPAllowedOriginsFlagAndEnv(t *testing.T) {
 		{"empty flag resets default", "none", []string{"--mcp-allowed-origins", ""}, "https://chatgpt.com", 401},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			args := append([]string{"--listen", "127.0.0.1:0", "--data-dir", t.TempDir()}, tc.flags...)
+			dir := t.TempDir()
+			// Origin policy needs a running server, not a first-install migration.
+			// Prepare a private store and close it before run reopens it normally.
+			if err := testhub.FreshStore(t, filepath.Join(dir, "hub.db")).Close(); err != nil {
+				t.Fatal(err)
+			}
+			args := append([]string{"--listen", "127.0.0.1:0", "--data-dir", dir}, tc.flags...)
 			h := bootHub(t, args, func(key string) string {
 				if key == "VECNET_MCP_ALLOWED_ORIGINS" {
 					return tc.env
