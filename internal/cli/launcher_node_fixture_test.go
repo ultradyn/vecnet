@@ -283,3 +283,18 @@ func TestLauncherFixtureNodeMutableRequiresPreparation(t *testing.T) {
 		t.Fatalf("mutable staging must reject an invalid image during preparation: %v", err)
 	}
 }
+
+// This root only borrows the shared image. Lifecycle children use it to prove
+// that borrowing neither prepares a replacement nor takes cleanup ownership.
+func TestLauncherFixtureNodeReadOnlyBorrow(t *testing.T) {
+	node, err := launcherFixtureSharedNode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shared, configured := os.LookupEnv("CI_LAUNCHER_NODE_FIXTURE"); configured && node != shared {
+		t.Fatal("read-only borrower did not use the configured job image")
+	}
+	if _, err := borrowLauncherFixtureNode(node); err != nil {
+		t.Fatal("read-only borrower image is not a private independent copy of genuine Node:", err)
+	}
+}

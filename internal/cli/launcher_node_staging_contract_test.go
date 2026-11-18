@@ -99,10 +99,10 @@ else {await m.cleanupLauncherNode(inventory);}`
 		t.Fatalf("invalid owner metadata did not fail closed: %v: %s", err, output)
 	}
 	for range 2 {
-		borrower := command("-test.run=^TestLauncherFixtureNodeIsolation$", "-test.v", "-test.count=1")
+		borrower := command("-test.run=^TestLauncherFixtureNodeReadOnlyBorrow$", "-test.v", "-test.count=1")
 		borrower.Env = append(os.Environ(), "CI_LAUNCHER_NODE_FIXTURE="+node)
 		output, err := borrower.CombinedOutput()
-		if err != nil || !bytes.Contains(output, []byte("--- PASS: TestLauncherFixtureNodeIsolation")) || bytes.Contains(output, []byte("prepared private image")) {
+		if err != nil || !bytes.Contains(output, []byte("--- PASS: TestLauncherFixtureNodeReadOnlyBorrow")) || bytes.Contains(output, []byte("prepared private image")) {
 			t.Fatalf("borrower failed or prepared a replacement: %v: %s", err, output)
 		}
 		// Borrower TestMain has exited, including all its fixture cleanup.
@@ -133,9 +133,9 @@ else {await m.cleanupLauncherNode(inventory);}`
 	}
 	// An explicitly invalid shared path must fail the real consumer process,
 	// rather than silently preparing another image after owner cleanup.
-	borrower := command("-test.run=^TestLauncherFixtureNodeIsolation$", "-test.v")
+	borrower := command("-test.run=^TestLauncherFixtureNodeReadOnlyBorrow$", "-test.v")
 	borrower.Env = append(os.Environ(), "CI_LAUNCHER_NODE_FIXTURE="+node)
-	if output, err := borrower.CombinedOutput(); err == nil || !bytes.Contains(output, []byte("--- FAIL: TestLauncherFixtureNodeIsolation")) {
+	if output, err := borrower.CombinedOutput(); err == nil || !bytes.Contains(output, []byte("--- FAIL: TestLauncherFixtureNodeReadOnlyBorrow")) {
 		t.Fatalf("missing shared image did not fail closed: %v: %s", err, output)
 	}
 }
