@@ -1,0 +1,36 @@
+name: R22 Windows ownership fixture
+on:
+  push:
+    branches: [ci80/r22-ownership-probe]
+permissions:
+  contents: read
+jobs:
+  native:
+    if: github.repository == 'ultradyn/vecnet' && github.ref == 'refs/heads/ci80/r22-ownership-probe'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 2
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2025, windows-11-arm]
+    env:
+      NODE_OPTIONS: --max-old-space-size=512
+    steps:
+      - name: Preserve source bytes
+        timeout-minutes: 1
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v5
+        timeout-minutes: 1
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/ci
+            scripts/npm
+      - uses: actions/setup-node@v6
+        timeout-minutes: 1
+        with:
+          node-version: '24.22.3'
+          package-manager-cache: false
+      - name: Execute all real ownership cases
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node --test --test-reporter=spec scripts/ci/ownership.test.mjs
