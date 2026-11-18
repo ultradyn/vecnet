@@ -53,7 +53,7 @@ async function finalize(platform){
  const directory=path.resolve('dist/go-tests',platform);const groups=[];
  for(let index=0;index<6;index++)groups.push(JSON.parse(await readFile(path.join(directory,String(index),'packages.json'),'utf8')).map(row=>({...row,group:index})));
  const expected=packages().map(p=>p.pkg).sort(),actual=groups.flat().map(p=>p.pkg).sort();if(JSON.stringify(expected)!==JSON.stringify(actual))throw new Error('incomplete bundle packages');
- const tool='test2json'+(platform.startsWith('win32')?'.exe':'');go(['build','-p','2','-trimpath','-o',path.join(directory,tool),'cmd/test2json']);
+ const tool='test2json'+(platform.startsWith('win32')?'.exe':'');go(['build','-p','2','-trimpath','-ldflags','-s -w','-o',path.join(directory,tool),'cmd/test2json']);
  const revision=execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim();
  await writeFile(path.join(directory,'bundle.json'),JSON.stringify({revision,platform,groups,toolHash:hash(await readFile(path.join(directory,tool)))},null,2));
 }

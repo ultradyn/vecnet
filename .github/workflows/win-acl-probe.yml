@@ -1,14 +1,14 @@
-name: Disposable Windows runtime probe
+name: Disposable Windows inbox probe
 on:
   push:
     branches: [ci80/r8-focused-probe]
 permissions:
   contents: read
+  actions: read
 concurrency:
-  group: ci80-r8-focused-probe
+  group: ci80-r10-focused-probe
   cancel-in-progress: true
 env:
-  CGO_ENABLED: '0'
   GOMAXPROCS: '2'
 jobs:
   focused:
@@ -30,36 +30,21 @@ jobs:
         timeout-minutes: 1
         with:
           node-version: '24'
-      - name: Download verified Go
+      - uses: actions/download-artifact@v5
         timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/toolchain.mjs download
-      - name: Extract Go
+        with:
+          name: go-tests-win32-${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
+          path: dist/go-tests
+          run-id: 44260174057
+          github-token: ${{ github.token }}
+      - name: Verify exact R9 source bundle and discover real native roots
         timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/toolchain.mjs extract
-      - name: Cold dependencies 1
+        env:
+          GITHUB_SHA: 1c05da91ba7b1306b4def2bb48c38d7c9aa0b7d6
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs consume-go
+      - name: Unchanged inbox assertion in isolation
         timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs prepare-go 0
-      - name: Cold dependencies 2
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/diagnostic-inbox.mjs 1
+      - name: Unchanged inbox assertion under four-process load
         timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs prepare-go 1
-      - name: Cold dependencies 3
-        timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs prepare-go 2
-      - name: Cold dependencies 4
-        timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs prepare-go 3
-      - name: Node sharding regressions
-        timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node --test scripts/ci/node-schedule.test.mjs
-      - name: Concurrent Windows runtime and activation guards
-        timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 go test -p 2 -count=1 -timeout=50s -json ./internal/localruntime
-      - name: Real reader checkpoint pressure
-        timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 go test -p 2 -count=1 -timeout=50s -json ./internal/hub -run '^TestBackfillRealReaderCheckpointPressure$'
-      - name: Independent Windows enabled repair case
-        timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 go test -p 2 -count=1 -timeout=50s -json ./internal/cli -run '^TestLauncherWindowsRepairPendingDriftEnabled$'
-      - name: Independent Windows intent repair case
-        timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 go test -p 2 -count=1 -timeout=50s -json ./internal/cli -run '^TestLauncherWindowsRepairPendingDriftIntent$'
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/diagnostic-inbox.mjs 4

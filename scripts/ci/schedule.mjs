@@ -18,9 +18,13 @@ export function planGo(inventory, profile = {}) {
     if (new Set(row.names).size !== row.names.length) throw new Error('duplicate root inventory');
     const fallback = cost(profile.packages?.[row.pkg] ?? 0.1);
     const weight = name => cost(profile.roots?.[row.pkg]?.[name] ?? fallback);
-    if (row.names.length < 20) {
-      const measured = profile.packageElapsed?.[row.pkg];
-      // Small packages run whole; summed root wall times overcount parallel tests.
+    const measured = profile.packageElapsed?.[row.pkg];
+    if (measured !== undefined) cost(measured);
+    // ~70s remaining across four groups gives ~17.5s/group. An 8s threshold
+    // leaves placement headroom; it is policy, not a measured runtime forecast.
+    const split = row.names.length >= 20 || (row.names.length >= 2 && measured > 8);
+    if (!split) {
+      // Whole packages use process elapsed; summed roots overcount parallel tests.
       work.push({row, selected:row.names, split:false, cost:measured === undefined ? Math.max(fallback,row.names.reduce((n,name)=>n+weight(name),0)) : cost(measured), measured:measured!==undefined});
     } else {
       for (const name of row.names) work.push({row, selected:[name], split:true, cost:weight(name)});
@@ -45,16 +49,17 @@ export function planGo(inventory, profile = {}) {
 }
 
 // Do not return on the first error with live children still running. Stop
-// dequeuing and drain the other worker; the enclosing budget owns cancellation.
-export async function bounded(items, worker) {
-  const results=new Array(items.length);let next=0, failure;
+// dequeuing and drain ALL active workers; the enclosing budget owns cancellation.
+export async function bounded(items, worker, concurrency = 2) {
+  if (!Number.isInteger(concurrency) || concurrency <= 0) throw new Error('concurrency must be a positive integer');
+  const results=new Array(items.length);let next=0, failed=false, failure;
   async function run() {
-    while(!failure && next<items.length){
+    while(!failed && next<items.length){
       const index=next++;
-      try{results[index]=await worker(items[index],index);}catch(error){failure??=error;}
+      try{results[index]=await worker(items[index],index);}catch(error){if(!failed){failed=true;failure=error;}}
     }
   }
-  await Promise.all([run(),run()]);
-  if(failure)throw failure;
+  await Promise.all(Array.from({length:Math.min(concurrency,items.length)},()=>run()));
+  if(failed)throw failure;
   return results;
 }

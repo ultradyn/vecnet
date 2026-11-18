@@ -82,7 +82,7 @@ if (kind === 'prepare-go') {
       child.once('close',(code,signal)=>code===0?resolve():reject(new Error(`${pkg} failed: exit=${code} signal=${signal}`)));
     });
     console.log(`ci-package pkg=${pkg} roots=${selected.length} elapsed_ms=${Math.round(performance.now()-started)} estimated_s=${cost.toFixed(3)}`);
-  });
+  },process.platform==='win32'?4:2);
   console.log(`Go lane=${lane}/${goLanes} group=${group}/${goGroups} packages=${tasks.length} roots=${tasks.reduce((n,t)=>n+t.selected.length,0)}`);
 } else if (kind === 'node' || kind === 'e2e') {
   const patterns = kind === 'node' ? ['connectors/hub-client/test/*.test.ts', 'connectors/launcher/test/*.test.ts', 'connectors/launcher/test/backends/*.test.ts'] : ['connectors/launcher/test/e2e/*.test.ts'];
