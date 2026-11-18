@@ -69,6 +69,7 @@ func TestCodexHookWindowsInstalledCommandPreservesArgv(t *testing.T) {
 			t.Fatalf("PowerShell event=%s elapsed=%s budget=%s context=%v: %v: %s", event.name, elapsed, startupBudget, contextErr, err, out)
 		}
 		t.Logf("PowerShell event=%s elapsed=%s context=%v", event.name, elapsed, contextErr)
+		t.Logf("[R14] PowerShell child output=%s", out)
 		raw, err := os.ReadFile(log)
 		if err != nil {
 			t.Fatal(err)

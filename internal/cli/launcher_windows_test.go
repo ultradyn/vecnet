@@ -69,11 +69,18 @@ func launcherUseFakeTasks(t *testing.T) *launcherFakeTasks {
 }
 func launcherWindowsFixture(t *testing.T) (launcherFixture, *app, *launcherFakeTasks, []string) {
 	t.Helper()
+	r14started := time.Now()
+	r14mark := func(phase string) {
+		t.Logf("[R14] %s elapsed=%s", phase, time.Since(r14started))
+		r14started = time.Now()
+	}
 	manager := launcherUseFakeTasks(t)
 	f := newLauncherFixture(t, "launcher")
+	r14mark("newLauncherFixture")
 	if code, _, errs := f.run(t, append(f.setup, "--write")...); code != 0 {
 		t.Fatal(errs)
 	}
+	r14mark("setup write")
 	node, err := exec.LookPath("node.exe")
 	if err != nil {
 		t.Fatal("native Windows Node is required for launcher install tests: ", err)
@@ -103,6 +110,7 @@ func launcherWindowsFixture(t *testing.T) (launcherFixture, *app, *launcherFakeT
 	if closeErr != nil {
 		t.Fatal(closeErr)
 	}
+	r14mark("private CLI image copy")
 	// Stage a genuine Node image into this private fixture, so software/repair
 	// tests are independent of the machine's package-manager install ACLs.
 	nodeCopy := filepath.Join(f.env["HOME"], "private node", "node.exe")
@@ -127,10 +135,13 @@ func launcherWindowsFixture(t *testing.T) (launcherFixture, *app, *launcherFakeT
 	if closeErr != nil {
 		t.Fatal(closeErr)
 	}
+	r14mark("private Node image copy")
 	args := []string{"install", "--source", launcherTestSource(t), "--node", nodeCopy, "--vecnet-bin", bin}
+	r14mark("source fixture")
 	if code, _, errs := f.run(t, append(args, "--write")...); code != 0 {
 		t.Fatal(errs)
 	}
+	r14mark("install write")
 	a := &app{ctx: context.Background(), getenv: func(k string) string { return f.env[k] }, stdout: io.Discard, stderr: io.Discard}
 	return f, a, manager, args
 }
@@ -291,13 +302,20 @@ func TestLauncherWindowsManagedRepairPreservesServiceIntent(t *testing.T) {
 	for _, active := range []bool{false, true} {
 		for _, enabled := range []bool{false, true} {
 			t.Run(fmt.Sprintf("active=%t/enabled=%t", active, enabled), func(t *testing.T) {
+				r14started := time.Now()
+				r14mark := func(phase string) {
+					t.Logf("[R14] intent %s elapsed=%s", phase, time.Since(r14started))
+					r14started = time.Now()
+				}
 				f, a, manager, project, art := launcherWindowsRepairFixture(t, active, enabled)
+				r14mark("fixture ready")
 				config, credential := launcherTestRead(t, f.paths.Config), launcherTestRead(t, f.paths.Credential)
 				projects, err := a.localProjects()
 				if err != nil {
 					t.Fatal(err)
 				}
 				done, err := a.repairLauncherArtifact(project, art)
+				r14mark("repair first")
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -319,6 +337,7 @@ func TestLauncherWindowsManagedRepairPreservesServiceIntent(t *testing.T) {
 					t.Fatal(err)
 				}
 				current, err := launcherCurrentBinary()
+				r14mark("current binary")
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -342,6 +361,7 @@ func TestLauncherWindowsManagedRepairPreservesServiceIntent(t *testing.T) {
 				if _, err = a.repairLauncherArtifact(project, done); err != nil {
 					t.Fatal(err)
 				}
+				r14mark("stale and no-op repairs")
 				if strings.Contains(strings.Join(manager.calls, "\n"), "register ") || strings.Contains(strings.Join(manager.calls, "\n"), "restart ") {
 					t.Fatal("no-op repair mutated task")
 				}

@@ -236,6 +236,7 @@ func init() {
 		fmt.Fprintf(f, "cwd=%s argv=%s\n", cwd, strings.Join(os.Args[1:], " "))
 		f.Close()
 	case "argv":
+		fmt.Fprintf(os.Stderr, "[R14] argv helper entry ms=%d\n", time.Now().UnixMilli())
 		raw, err := json.Marshal(os.Args[1:])
 		if err != nil {
 			panic(err)

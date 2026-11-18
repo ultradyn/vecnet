@@ -1,0 +1,103 @@
+name: Disposable native fixture phase diagnostic
+on:
+  push:
+    branches: [ci80/r14-fixture-probe]
+permissions:
+  contents: read
+jobs:
+  compile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    env:
+      GOOS: windows
+      GOARCH: ${{ matrix.arch }}
+      CGO_ENABLED: '0'
+      GOMAXPROCS: '2'
+      CI_GO_COMPILE_JOBS: '4'
+    steps:
+      - uses: actions/checkout@v5
+        timeout-minutes: 1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        timeout-minutes: 1
+        with:
+          node-version: '24'
+      - name: Download pinned Go
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/toolchain.mjs download
+      - name: Extract pinned Go
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/toolchain.mjs extract
+      - name: Cold dependencies 0
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs prepare-go 0
+      - name: Cold dependencies 1
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs prepare-go 1
+      - name: Cold dependencies 2
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs prepare-go 2
+      - name: Cold dependencies 3
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs prepare-go 3
+      - name: Compile instrumented original CLI fixture assertions
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/diagnostic-fixture-build.mjs
+      - uses: actions/upload-artifact@v4
+        timeout-minutes: 1
+        with:
+          name: fixture-phase-${{ matrix.arch }}
+          path: dist/fixture-probe
+          if-no-files-found: error
+  native:
+    needs: compile
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: windows-2025
+          - arch: arm64
+            runner: windows-11-arm
+    steps:
+      - uses: actions/checkout@v5
+        timeout-minutes: 1
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            internal
+            connectors
+            scripts
+            docs/protocol
+            npm
+      - uses: actions/setup-node@v6
+        timeout-minutes: 1
+        with:
+          node-version: '24'
+      - uses: actions/download-artifact@v5
+        timeout-minutes: 1
+        with:
+          name: fixture-phase-${{ matrix.arch }}
+          path: dist/fixture-probe
+      - name: Cold original PowerShell hook assertions
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/diagnostic-fixture-run.mjs startup
+      - name: Original legacy adoption assertions
+        if: always()
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/diagnostic-fixture-run.mjs legacy
+      - name: Full original repair intent matrix phases
+        if: always()
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/diagnostic-fixture-run.mjs repair
+      - name: Four original independent workloads with unchanged assertions
+        if: always()
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/diagnostic-fixture-run.mjs loaded
