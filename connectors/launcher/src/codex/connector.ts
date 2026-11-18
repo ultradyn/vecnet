@@ -308,11 +308,12 @@ export function startCodexConnector(o: { kv?: KeyValue; clock: Clock; log: Log; 
       await Promise.allSettled([...entries.keys()].map(retire));
       console.log('RECOVERY_STOP_AFTER=4');
       console.log('RECOVERY_STOP_BEFORE=5');
-      try { recovery?.close(); }
-      console.log('RECOVERY_STOP_AFTER=5');
-      console.log('RECOVERY_STOP_BEFORE=6');
-      finally { recovery = undefined; await publisher?.close(); publisher = undefined; }
-      console.log('RECOVERY_STOP_AFTER=6');
+      try { recovery?.close(); console.log('RECOVERY_STOP_AFTER=5'); }
+      finally {
+        console.log('RECOVERY_STOP_BEFORE=6');
+        recovery = undefined; await publisher?.close(); publisher = undefined;
+        console.log('RECOVERY_STOP_AFTER=6');
+      }
     })().finally(() => { markStopped({ reason: stopReason }); });
     return stopping;
   }
