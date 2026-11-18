@@ -1,7 +1,7 @@
-name: Disposable native fixture phase diagnostic
+name: Disposable Windows Node shard diagnostic
 on:
   push:
-    branches: [ci80/r14-fixture-probe]
+    branches: [ci80/r14-node-probe]
 permissions:
   contents: read
 jobs:
@@ -45,19 +45,21 @@ jobs:
       - name: Cold dependencies 3
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs prepare-go 3
-      - name: Compile instrumented original CLI fixture assertions
+      - name: Build exact-source native product targets
         timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/diagnostic-fixture-build.mjs
+        run: node scripts/ci/budget.mjs 53000 node scripts/npm/target.mjs win32-${{ matrix.arch == 'amd64' && 'x64' || 'arm64' }}
       - uses: actions/upload-artifact@v4
         timeout-minutes: 1
         with:
-          name: fixture-phase-${{ matrix.arch }}
-          path: dist/fixture-probe
+          name: node-native-${{ matrix.arch }}
+          path: dist/targets
           if-no-files-found: error
   native:
     needs: compile
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 5
+    env:
+      VECNET_BIN: ${{ github.workspace }}/bin/vecnet.exe
     strategy:
       fail-fast: false
       matrix:
@@ -84,11 +86,28 @@ jobs:
       - uses: actions/download-artifact@v5
         timeout-minutes: 1
         with:
-          name: fixture-phase-${{ matrix.arch }}
-          path: dist/fixture-probe
-      - name: Exact first four packet neighbors cold
+          name: node-native-${{ matrix.arch }}
+          path: dist/targets
+      - name: Verify and install same-source native targets
         timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/diagnostic-fixture-run.mjs neighbors
-      - name: Original store replacement guard matrices
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/native.mjs
+      - name: Whole original Windows platform assertions on x64
+        if: matrix.arch == 'amd64'
         timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/diagnostic-fixture-run.mjs storeguards
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/diagnostic-node-shard.mjs whole
+      - name: Original Windows platform assertions shard 0 of 4
+        if: always()
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/diagnostic-node-shard.mjs 0
+      - name: Original Windows platform assertions shard 1 of 4
+        if: always()
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/diagnostic-node-shard.mjs 1
+      - name: Original Windows platform assertions shard 2 of 4
+        if: always()
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/diagnostic-node-shard.mjs 2
+      - name: Original Windows platform assertions shard 3 of 4
+        if: always()
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/diagnostic-node-shard.mjs 3
