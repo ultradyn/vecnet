@@ -24,7 +24,7 @@ async function deadline() {
   const current = await response.json();
   assert(current.head_sha === env.GITHUB_SHA && current.run_attempt === 1 && env.GITHUB_RUN_ATTEMPT === '1',
     'Expected original diagnostic attempt at this SHA');
-  const cutoff = Date.parse(current.created_at) + 293_000;
+  const cutoff = Date.parse(current.created_at) + 280_000;
   assert(Number.isSafeInteger(cutoff) && cutoff > Date.now(), 'Diagnostic overall budget exhausted or invalid');
   await appendFile(env.GITHUB_ENV, `CI_RUN_DEADLINE=${cutoff}\n`);
   console.log(`Original run-created cutoff: ${new Date(cutoff).toISOString()}`);
