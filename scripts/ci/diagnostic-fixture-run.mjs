@@ -9,7 +9,7 @@ if(receipt.revision!==process.env.GITHUB_SHA||receipt.arch!==({x64:'amd64',arm64
 for(const [name,digest] of Object.entries(receipt.files))if(createHash('sha256').update(await readFile(path.join(root,name))).digest('hex')!==digest)throw new Error('binary hash mismatch');
 console.log(JSON.stringify({source:receipt.revision,cpus:os.availableParallelism(),memory:os.totalmem(),mode:process.argv[2]}));
 const image=await mkdtemp(path.join(await realpath(os.tmpdir()),'vecnet-r14-image-'));
-for(const name of ['cli.test.exe','store.test.exe','test2json.exe']){await copyFile(path.join(root,name),path.join(image,name));await chmod(path.join(image,name),0o700);}
+for(const name of ['hub.test.exe','test2json.exe']){await copyFile(path.join(root,name),path.join(image,name));await chmod(path.join(image,name),0o700);}
 const isolated=async task=>{
  const {pkg,filter}=typeof task==='string'?{pkg:'cli',filter:task}:task;
  const temporary=await mkdtemp(path.join(await realpath(os.tmpdir()),'vecnet-r14-probe-'));
@@ -25,10 +25,7 @@ const isolated=async task=>{
   });
  }finally{console.log(JSON.stringify({filter,elapsed_ms:Date.now()-started}));await rm(temporary,{recursive:true,force:true});}
 };
-const rootName='TestLauncherWindowsManagedRepairPreservesServiceIntent';
-const neighbors=[{pkg:'cli',filter:'^TestStateConcurrentWriters$'},{pkg:'cli',filter:'^TestCodexHookWindowsInstalledCommandPreservesArgv$'},{pkg:'cli',filter:'^TestRouteStatsRelocationRefusals$'},{pkg:'store',filter:'^TestOpenSynchronousEnv$'}];
-const modes={neighbors,neighbors2:neighbors,startup:['^TestCodexHookWindowsInstalledCommandPreservesArgv$'],repair:[`^${rootName}$`],legacy:['^TestLocalStartupObservesWithoutInstallingAndAdoptsLegacyHooks$'],loaded:[`^${rootName}$`,'^TestLauncherWindowsRepairRejectsTaskAndPublicationDrift$','^TestCodexHookWindowsInstalledCommandPreservesArgv$','^TestInviteHubURLResponsePreservesSafeOutput$']};
-modes.storeguards=[{pkg:'store',filter:'^TestPayloadReferenceReplacementGuards$'},{pkg:'store',filter:'^TestMessageReplacementGuardCutoverAndIdenticalBytes$'}];
+const modes={download:[{pkg:'hub',filter:'^TestR2OAuthDownloadRevalidatesAfterProviderWait$'}],completion:[{pkg:'hub',filter:'^TestR2OAuthCompletionRevalidatesInsideTransactionAfterHEAD$'}],preferences:[{pkg:'hub',filter:'^TestR2PreferenceSnapshotsAndClasses$'}]};
 const selected=modes[process.argv[2]];if(!selected)throw new Error('unknown diagnostic mode');
 const result=[];
 if(process.argv[2]==='neighbors2'){

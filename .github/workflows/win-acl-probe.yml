@@ -45,7 +45,7 @@ jobs:
       - name: Cold dependencies 3
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs prepare-go 3
-      - name: Compile instrumented original CLI fixture assertions
+      - name: Compile original Hub fixture assertions
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/diagnostic-fixture-build.mjs
       - uses: actions/upload-artifact@v4
@@ -86,9 +86,12 @@ jobs:
         with:
           name: fixture-phase-${{ matrix.arch }}
           path: dist/fixture-probe
-      - name: Exact first four packet neighbors cold
+      - name: Original Hub download matrix
         timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/diagnostic-fixture-run.mjs neighbors
-      - name: Original store replacement guard matrices
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/diagnostic-fixture-run.mjs download
+      - name: Original Hub completion matrix
         timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/diagnostic-fixture-run.mjs storeguards
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/diagnostic-fixture-run.mjs completion
+      - name: Original Hub preferences matrix
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/diagnostic-fixture-run.mjs preferences
