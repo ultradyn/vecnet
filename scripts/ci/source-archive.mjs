@@ -2,7 +2,7 @@
 // same-run artifact carries this bootstrap, the archive and its source receipt.
 import {execFileSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
-import {copyFile, mkdir, readFile, writeFile} from 'node:fs/promises';
+import {copyFile, lstat, mkdir, readFile, writeFile} from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 
@@ -21,6 +21,17 @@ export async function stageSource(root,bundle,scope='go'){
   // Cone-mode sparse checkout also retains files directly inside ancestors.
   const selected=files.filter(file=>!file.includes('/')||folders.some(folder=>
     file.startsWith(folder+'/')||(folder.startsWith(path.posix.dirname(file)+'/')&&path.posix.dirname(file)!=='.')));
+  if(scope==='go'){
+    const included=new Set(selected), missing=[];
+    // Use the full committed tree as the denominator, including future roots.
+    for(const file of files.filter(file=>file.endsWith('.go'))){
+      let regular=false;
+      try{regular=(await lstat(path.join(root,file))).isFile();}
+      catch(error){if(error.code!=='ENOENT'&&error.code!=='ENOTDIR')throw error;}
+      if(!regular||!included.has(file))missing.push(file);
+    }
+    if(missing.length)throw new Error('Go source omitted: '+missing.join(', '));
+  }
   if(!selected.length)throw new Error('empty native source inventory');
   await mkdir(bundle,{recursive:true});
   const archive=path.join(bundle,'source.tar.gz');

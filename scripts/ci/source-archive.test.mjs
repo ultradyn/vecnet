@@ -13,7 +13,7 @@ test('native source archive restores committed fixture bytes and sparse ancestor
   const root=path.join(temp,'producer'), bundle=path.join(temp,'bundle'), destination=path.join(temp,'native');
   await mkdir(root); await mkdir(destination);
   const files={
-    'go.mod':'module fixture\n', 'internal/cli/testdata/input.txt':'first\nsecond\n',
+    'go.mod':'module fixture\n', 'internal/cli/source_test.go':'package cli\n', 'internal/cli/testdata/input.txt':'first\nsecond\n',
     'docs/PROTOCOL.md':'ancestor file\n', 'docs/protocol/schema.json':'{}\n',
     'scripts/root-helper.py':'print(1)\n', 'scripts/ci/guard.mjs':'export default 1;\n',
     'connectors/launcher/test/fixture.ts':'export {};\n',
@@ -59,6 +59,7 @@ test('package source includes the release manifest and runtime comparison inputs
     'connectors/launcher/src/main.ts':'export {};\n',
     'scripts/ci/audit.mjs':'export {};\n', 'scripts/npm/package.test.mjs':'export {};\n',
     'scripts/shared.mjs':'ancestor\n', 'internal/cli/fixture.txt':'go fixture\n',
+    'futurecoverage/new_test.go':'package futurecoverage\n',
     'docs/protocol/schema.json':'{}\n',
   };
   for(const [name,bytes] of Object.entries(files)){
@@ -72,9 +73,48 @@ test('package source includes the release manifest and runtime comparison inputs
   // Exercise the producer CLI as used by the package workflow, including paths with spaces.
   execFileSync(process.execPath,[fileURLToPath(new URL('./source-archive.mjs',import.meta.url)),'stage',bundle,'package'],{cwd:root});
   await restoreSource(bundle,sha,destination);
-  for(const [name,bytes] of Object.entries(files).filter(([name])=>!name.startsWith('internal/')&&!name.startsWith('docs/'))){
+  for(const [name,bytes] of Object.entries(files).filter(([name])=>!name.startsWith('internal/')&&!name.startsWith('docs/')&&!name.startsWith('futurecoverage/'))){
     assert.equal(await readFile(path.join(destination,name),'utf8'),bytes,name);
   }
-  for(const name of ['.git','internal/cli/fixture.txt','docs/protocol/schema.json'])await assert.rejects(access(path.join(destination,name)));
+  for(const name of ['.git','internal/cli/fixture.txt','futurecoverage/new_test.go','docs/protocol/schema.json'])await assert.rejects(access(path.join(destination,name)));
   await assert.rejects(stageSource(root,path.join(temp,'invalid'),'typo'),/scope/);
 });
+
+for(const scenario of [
+  {name:'Go archive rejects a committed future test package outside its selected scope', files:['futurecoverage/new_test.go'], sparse:false},
+  {name:'Go archive rejects an included committed Go file absent from the sparse producer', files:['internal/new_test.go'], sparse:true},
+  {name:'Go archive rejects a committed Go path replaced by a directory', files:['internal/new_test.go'], directory:true},
+  {name:'Go archive reports every omitted Go path before publishing files', files:['futurecoverage/first_test.go','futurecoverage/second_test.go'], sparse:false},
+]) {
+  test(scenario.name,async t=>{
+    const temp=await mkdtemp(path.join(os.tmpdir(),'ci source coverage '));
+    t.after(()=>rm(temp,{recursive:true,force:true}));
+    const root=path.join(temp,'producer'), bundle=path.join(temp,'bundle');
+    await mkdir(root);
+    await writeFile(path.join(root,'go.mod'),'module fixture\n');
+    for(const file of scenario.files){
+      await mkdir(path.dirname(path.join(root,file)),{recursive:true});
+      await writeFile(path.join(root,file),'package fixture\n');
+    }
+    const git=args=>execFileSync('git',args,{cwd:root,encoding:'utf8'}).trim();
+    git(['init','-q']); git(['add','.']);
+    git(['-c','core.hooksPath=/dev/null','-c','commit.gpgsign=false','-c','user.name=CI','-c','user.email=ci@example.invalid','commit','-qm','fixture']);
+    if(scenario.sparse){
+      git(['sparse-checkout','init','--no-cone']);
+      git(['sparse-checkout','set','/go.mod']);
+      await assert.rejects(access(path.join(root,scenario.files[0])));
+    }
+    if(scenario.directory){
+      await rm(path.join(root,scenario.files[0]));
+      await mkdir(path.join(root,scenario.files[0]));
+    }
+    await assert.rejects(stageSource(root,bundle),error=>{
+      assert.match(error.message,/Go source omitted/);
+      for(const file of scenario.files)assert.ok(error.message.includes(file),file);
+      return true;
+    });
+    for(const file of ['source.tar.gz','source.json','restore-source.mjs']){
+      await assert.rejects(access(path.join(bundle,file)));
+    }
+  });
+}
