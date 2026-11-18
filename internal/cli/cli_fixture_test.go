@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf16"
@@ -79,9 +81,9 @@ func cliFixtureRequireMode(t *testing.T, path string, want os.FileMode) {
 	}
 }
 
-// cliFixtureProgram installs a synthetic subprocess, never a real clipboard or
-// agent binary. Windows executes a copy of this test binary (not a shebang).
-type cliFixtureProgramSpec struct {
+// Export only in the test build so cli and cli_test use the same installer,
+// dispatcher and per-process snapshot.
+type CLIFixtureProgramSpec struct {
 	Kind   string
 	Log    string
 	Calls  string
@@ -89,7 +91,16 @@ type cliFixtureProgramSpec struct {
 	Exit   int
 }
 
+type cliFixtureProgramSpec = CLIFixtureProgramSpec
+
 func cliFixtureProgram(t *testing.T, dir, name, script string, spec cliFixtureProgramSpec) {
+	t.Helper()
+	CLIFixtureProgram(t, dir, name, script, spec)
+}
+
+// CLIFixtureProgram installs a synthetic subprocess, never a real clipboard
+// or agent binary. Windows uses a distinct sidecar for each helper pathname.
+func CLIFixtureProgram(t *testing.T, dir, name, script string, spec CLIFixtureProgramSpec) {
 	t.Helper()
 	if runtime.GOOS != "windows" {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0755); err != nil {
@@ -100,29 +111,17 @@ func cliFixtureProgram(t *testing.T, dir, name, script string, spec cliFixturePr
 	if filepath.Ext(name) == "" {
 		name += ".exe"
 	}
-	exe, err := os.Executable()
+	snapshot, err := cliFixtureSnapshot()
 	if err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(dir, name)
-	// Never hardlink the running binary: launcher repair requires it to
-	// remain single-link, including while other packet processes use fixtures.
-	src, err := os.Open(exe)
-	if err != nil {
+	// Only link the independent snapshot, never the running executable:
+	// launcher repair requires the latter to remain single-link. Treat
+	// aliases as execute-only fixtures: never write or chmod the shared
+	// image through an alias. All per-test state lives outside the image.
+	if err := os.Link(snapshot, path); err != nil {
 		t.Fatal(err)
-	}
-	defer src.Close()
-	dst, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0700)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = io.Copy(dst, src)
-	closeErr := dst.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if closeErr != nil {
-		t.Fatal(closeErr)
 	}
 	raw, err := json.Marshal(spec)
 	if err != nil {
@@ -131,6 +130,51 @@ func cliFixtureProgram(t *testing.T, dir, name, script string, spec cliFixturePr
 	if err := cliFixtureWriteFile(path+".cli-fixture.json", raw, 0600); err != nil {
 		t.Fatal(err)
 	}
+}
+
+var (
+	cliFixtureSnapshotDir string // owned by TestMain; set only inside OnceValues
+	cliFixtureSnapshot    = sync.OnceValues(makeCLIFixtureSnapshot)
+)
+
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if cliFixtureSnapshotDir != "" {
+		if err := os.RemoveAll(cliFixtureSnapshotDir); err != nil {
+			fmt.Fprintf(os.Stderr, "remove CLI fixture snapshot directory: %v\n", err)
+			code = 1
+		}
+	}
+	os.Exit(code)
+}
+
+func makeCLIFixtureSnapshot() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	src, err := os.Open(exe)
+	if err != nil {
+		return "", err
+	}
+	defer src.Close()
+	base, err := filepath.EvalSymlinks(os.TempDir())
+	if err != nil {
+		return "", err
+	}
+	// Use the same temp volume as t.TempDir for hardlinks, but do not depend
+	// on any test's cleanup or on the location of the running executable.
+	cliFixtureSnapshotDir, err = platform.MkdirTemp(base, "vecnet-cli-fixture-")
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(cliFixtureSnapshotDir, "helper.exe")
+	dst, err := platform.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0700)
+	if err != nil {
+		return "", err
+	}
+	_, err = io.Copy(dst, src)
+	return path, errors.Join(err, dst.Close())
 }
 
 func init() {

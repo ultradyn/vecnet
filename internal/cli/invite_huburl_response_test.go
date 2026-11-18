@@ -328,15 +328,23 @@ func TestInviteHubURLResponsePreservesSafeOutput(t *testing.T) {
 						t.Error("paste block changed the exact accepted hub or one-time token command")
 					}
 					if mode.copy && !mode.json {
-						if f.pathLookups.Load() != 1 || string(pinRead(t, f.clipboardCalls)) != "called\n" || string(pinRead(t, f.clipboard)) != block {
-							t.Error("--copy did not invoke exactly the fixture tool with the full paste block")
+						if got := f.pathLookups.Load(); got != 1 {
+							t.Errorf("--copy clipboard PATH lookups = %d, want 1", got)
+						}
+						// Read independently so a missing artifact does not mask the
+						// subprocess diagnostic or later request/output checks.
+						if got, err := os.ReadFile(f.clipboardCalls); err != nil || string(got) != "called\n" {
+							t.Errorf("--copy did not invoke the fixture exactly once: call log %q, error %v", got, err)
+						}
+						if got, err := os.ReadFile(f.clipboard); err != nil || string(got) != block {
+							t.Errorf("--copy did not send the full paste block to the fixture: %v", err)
 						}
 						tool := "wl-copy"
 						if runtime.GOOS == "windows" {
 							tool = "clip.exe"
 						}
 						if !strings.Contains(errs, "copied to the clipboard ("+tool+")\n") {
-							t.Error("--copy did not report the fixture clipboard tool")
+							t.Errorf("--copy did not report the fixture clipboard tool: stderr %q", errs)
 						}
 					} else {
 						f.checkNoCopy(t) // Includes --json --copy: no lookup or invocation.
