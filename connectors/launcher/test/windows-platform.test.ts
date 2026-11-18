@@ -122,7 +122,10 @@ for (const kind of ['file ancestor', 'inaccessible read'] as const) {
       else {
         assert.deepEqual(readdirSync(parent), ['child']); assert.deepEqual(readdirSync(probe), ['keep']);
         assert.equal(readFileSync(join(probe, 'keep'), 'utf8'), bytes);
-        if (windows) localPlatform('check-private', probe, { directory: true });
+        if (windows) {
+          localPlatform('check-private', probe, { directory: true });
+          localPlatform('check-private', join(probe, 'keep'));
+        }
       }
     });
     onCleanup(t, () => verifyRestored());
@@ -137,7 +140,7 @@ for (const kind of ['file ancestor', 'inaccessible read'] as const) {
         const identity = childProcess.spawnSync('whoami.exe', ['/user', '/fo', 'csv', '/nh'], { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
         const sid = identity.stdout?.match(/S-1-\d+(?:-\d+)+/)?.[0];
         assert.ok(identity.status === 0 && sid, 'fixture token identity lookup failed');
-        const acl = join(dir, 'saved-acl'), restored = join(dir, 'restored-acl');
+        const acl = join(dir, 'saved-acl'), canonical = join(dir, 'canonical-acl'), restored = join(dir, 'restored-acl');
         const aclCommand = (args: string[]) => {
           const result = childProcess.spawnSync('icacls.exe', args, { windowsHide: true, stdio: 'ignore' });
           assert.equal(result.status, 0, 'fixture ACL operation failed');
@@ -146,10 +149,20 @@ for (const kind of ['file ancestor', 'inaccessible read'] as const) {
         // lstat can query metadata despite deny; assert a real denied read.
         aclCommand([probe, '/save', acl, '/t', '/q']);
         restore = () => aclCommand([dirname(probe), '/restore', acl, '/q']);
+        // icacls restore canonicalizes auto-inheritance metadata and leaf
+        // inheritance flags. Establish that native form before denial, then
+        // require exact bytes on a second round trip and after denied reads.
+        restore();
+        aclCommand([probe, '/save', canonical, '/t', '/q']);
+        restore = () => aclCommand([dirname(probe), '/restore', canonical, '/q']);
         verifyRestored = () => {
           aclCommand([probe, '/save', restored, '/t', '/q']);
-          assert.deepEqual(readFileSync(restored), readFileSync(acl), 'all owned ACLs must be restored exactly');
+          assert.deepEqual(readFileSync(restored), readFileSync(canonical), 'all owned canonical ACLs must be restored exactly');
         };
+        restore(); verifyRestored();
+        localPlatform('check-private', probe, { directory: true });
+        localPlatform('check-private', join(probe, 'keep'));
+        assert.equal(readFileSync(join(probe, 'keep'), 'utf8'), bytes);
         // Native-private children have protected DACLs: deny the actual
         // read target explicitly before denying its container.
         aclCommand([join(probe, 'keep'), '/deny', `*${sid}:(F)`, '/q']);
