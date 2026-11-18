@@ -92,10 +92,8 @@ copies the source, checks private ownership and independent source-matching
 bytes, and runs the original real `--version` preparation with its 12s context.
 Only success publishes a path. Read-only packet fixtures validate and borrow
 that job image; they never remove it or fall back after an invalid path. Real
-installation admission and its 5s version probe still run. Cold-admission cases
-retain independent never-executed copies. Security-mutation cases receive
-independent genuinely prepared copies before the unchanged initial installation,
-mutations and assertions; the shared image remains read-only. An `always()` step
+installation admission and its 5s version probe still run. Cold admission and
+mutation cases retain independent never-executed copies. An `always()` step
 removes only the fixed fixture child of the native bundle, ignoring the published
 path as a cleanup target. Both new Windows-only steps retain the 53s owner and
 one-minute step deadline. This deduplicates preparation; the cause of the R35 ARM
@@ -111,7 +109,7 @@ roots that failed cold Node admission in R16: `TestLauncherWindowsInstallPreview
 `TestLauncherWindowsInstallRejectsUnsafeExecutableBeforeExecution`. In the R21
 full run its first valid cold Node probe failed under the ARM64 ordinary pool;
 the same root passed in isolation in a separate diagnostic, after other tests.
-It still runs all five original independently isolated cases. Each exclusive root runs serially
+It still runs all five original independently cold cases. Each exclusive root runs serially
 before the ordinary packet pool in its assigned group, with the same process
 isolation, root filter and deadlines. The repair root still runs all four
 original cases together, alone in its existing group slot: R16 recorded a
@@ -377,20 +375,22 @@ only group 3 follows the four E2E groups. Windows x64 runs groups 0 and 1 with
 the guards, and groups 2 and 3 after E2E. R26's previous x64 layout put all
 four Node groups after E2E, producing a 209s job and the final test completion
 at +314s. Returning groups 0 and 1 to the Node job moves 52s in that fixed
-duration comparison; runner queues still require native measurement. All groups,
+duration comparison; package eligibility also moves later and runner queues
+still require native measurement. All groups,
 platforms, shards and assertions remain admitted once, without additional
 jobs. These changes enable overlap and remove repeated checkout work; actual
 native completion below 300 seconds and individual steps below 60 seconds
 are still required.
 
-The three Node platform jobs keep identical steps and remain direct acceptance
-dependencies. Windows and Linux package gates wait for build and the ARM test
-producer: all ARM Go lanes are eligible before package jobs claim runner slots.
-Windows packages no longer wait for the unrelated x64 Node job, whose output
-they do not consume. Package jobs still download and verify the same build
-artifacts and run the same native tests; acceptance waits for all Node, Go,
-E2E and package proofs. Removing that dependency permits earlier package
-admission without establishing a native time saving. The extra Windows Go
-lanes and earlier package eligibility may compete for runners; actual queue
-allocation, cold-cache correctness and the strict overall budget still require
-a fresh full native run. The dependency graph does not guarantee queue order.
+The three Node platform jobs keep identical steps but expose completion
+milestones for package admission. Windows package gates wait for build, the
+ARM test producer and x64 Node completion; Linux package gates wait for build
+and the ARM test producer. Linux packages can run alongside their Node job:
+R31's Linux Node completion at +243s postponed package completion to +282s
+and acceptance preflight to +296s. Both package inputs were ready at +126s.
+Removing that unrelated dependency targets the measured tail; it does not
+establish a new native duration. This makes every ARM Go lane
+eligible before package
+gates claim runner slots, without adding jobs or test commands. Actual GitHub
+allocation, full native correctness and the strict overall budget remain
+required; the dependency graph does not guarantee a queue order.

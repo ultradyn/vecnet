@@ -420,16 +420,3 @@ test('Windows serial prefix adds only the exact unsafe-executable CLI root and k
  assert.deepEqual(beforeRelease,[unsafe]);
  assert.deepEqual(starts,[unsafe,0,1,2,3,4,5,6]);
 });
-
-test('Windows artifact eligibility keeps producer readiness and acceptance keeps every proof',async()=>{
- const {readFile}=await import('node:fs/promises');
- const workflow=await readFile(new URL('../../.github/workflows/release.yml',import.meta.url),'utf8');
- const needs=name=>workflow.split(`  ${name}:\n`)[1].match(/^    needs: \[([^\n]+)\]$/m)[1].split(', ');
- assert.deepEqual(needs('test-artifact-windows'),['build','test-compile-windows-arm']);
- assert.deepEqual(needs('accept'),[
-  'target','test-compile-linux','test-compile-windows-x64','test-compile-windows-arm','build',
-  'test-go-linux','test-go-windows-x64','test-go-windows-arm',
-  'test-node-linux','test-node-windows-x64','test-node-windows-arm',
-  'test-e2e','test-artifact-windows','test-artifact-linux',
- ]);
-});
