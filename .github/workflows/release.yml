@@ -51,6 +51,12 @@ jobs:
         timeout-minutes: 1
         with:
           persist-credentials: false
+          sparse-checkout: |
+            cmd
+            internal
+            scripts/ci
+            scripts/npm
+            npm
       - uses: actions/setup-node@v6
         timeout-minutes: 1
         with:
@@ -102,6 +108,13 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: ${{ startsWith(github.ref, 'refs/tags/v') && '0' || '1' }}
+          sparse-checkout: |
+            cmd
+            internal
+            connectors
+            scripts/ci
+            scripts/npm
+            npm
       - uses: actions/setup-node@v6
         timeout-minutes: 1
         with:
@@ -179,6 +192,14 @@ jobs:
         timeout-minutes: 1
         with:
           persist-credentials: false
+          sparse-checkout: |
+            bench
+            cmd
+            internal
+            connectors
+            docs/protocol
+            scripts/ci
+            scripts/npm
       - uses: actions/setup-node@v6
         timeout-minutes: 1
         with:
@@ -374,11 +395,9 @@ jobs:
         if: runner.os == 'Windows'
         run: node scripts/ci/budget.mjs 53000 pwsh -NoProfile -File scripts/windows/Get-ArtifactEvidence.Tests.ps1
       - name: node complete group 1 of 4
-        if: runner.os != 'Windows' || runner.arch == 'ARM64'
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs node 0 0
       - name: node complete group 2 of 4
-        if: runner.os != 'Windows' || runner.arch == 'ARM64'
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs node 0 1
       - name: node complete group 3 of 4
@@ -459,16 +478,8 @@ jobs:
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs e2e 0 3
 
-      # Release the x64 Node milestone before running these groups so native
-      # package validation can overlap the remaining test work.
-      - name: node complete group 1 of 4
-        if: runner.os == 'Windows' && runner.arch == 'X64'
-        timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs node 0 0
-      - name: node complete group 2 of 4
-        if: runner.os == 'Windows' && runner.arch == 'X64'
-        timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs node 0 1
+      # Balance the x64 Node milestone and E2E tail while package validation
+      # overlaps the last two Node groups.
       - name: node complete group 3 of 4
         if: runner.os == 'Windows' && runner.arch == 'X64'
         timeout-minutes: 1

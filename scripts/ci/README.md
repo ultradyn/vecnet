@@ -157,8 +157,8 @@ those exact bytes; installed runtime, schemas and the systemd template come
 from the tarball. Build stages this source archive beside the npm tool and
 tested tarball in `npm-release`, outside the published payload and checksums.
 Acceptance restores the same verified archive; the GitHub Release CLI uses
-explicit `GH_REPO` without requiring a checkout. Source producers retain full
-checkouts and the tag/master ancestry check.
+explicit `GH_REPO` without requiring a checkout. Source producers retain all
+build and test inputs and the tag/master ancestry check.
 
 The Linux build stages the already-pinned npm 12.0.1 package after packing
 vecnet. `npm-release` carries it as `npm-tool/npm.tgz` next to the exact
@@ -259,8 +259,15 @@ required; these focused comparisons do not establish the overall300s budget.
 Node/E2E checkouts retain complete connectors, internal, scripts, docs/protocol
 and npm directories plus root files. Discovery still sees all connector test
 files, backend fixtures, embedded protocol schemas and cross-platform scripts;
-unrelated documentation screenshots are omitted from these consumers. Source
-producers retain full checkout, so Go discovery cannot lose new package roots.
+unrelated documentation screenshots are omitted from these consumers. Target
+producers retain cmd, internal, scripts/ci, scripts/npm and npm; package assembly
+also retains connectors for runtime assets. Test producers retain bench, cmd,
+internal, connectors, docs/protocol, scripts/ci and scripts/npm. Every Go package
+and embedded asset remains present, and the source archive still selects from
+the complete committed Git tree. Root files and cone ancestors are retained.
+At R26 these producer checkouts contain 18–27 MB of the 155 MB tree; full
+checkout included 86 MB of documentation and 42 MB of scratch files. This
+reduces transferred input, without establishing a native runtime guarantee.
 
 
 R16 source staging replaces each native Go consumer checkout with a
@@ -282,13 +289,12 @@ steps took 29s and 22s. The change targets that startup variance and does not
 establish a median speedup or a successful overall budget.
 
 On Linux and Windows ARM64, Node groups 0, 1 and 2 run with the helper guards;
-only group 3 follows the four E2E groups. Windows x64 runs all four Node groups
-in its E2E job, so the helper guards can release the earlier Node completion
-milestone used for package admission. In R23 the two moved x64 steps took
-22s and 28s. Their relocation advances eligibility by about 50s in a fixed
-duration comparison; one freed runner cannot admit both package jobs at once.
-The longer E2E tail, healthy Go lane occupancy and acceptance still require
-native measurement. All groups,
+only group 3 follows the four E2E groups. Windows x64 runs groups 0 and 1 with
+the guards, and groups 2 and 3 after E2E. R26's previous x64 layout put all
+four Node groups after E2E, producing a 209s job and the final test completion
+at +314s. Returning groups 0 and 1 to the Node job moves 52s in that fixed
+duration comparison; package eligibility also moves later and runner queues
+still require native measurement. All groups,
 platforms, shards and assertions remain admitted once, without additional
 jobs. These changes enable overlap and remove repeated checkout work; actual
 native completion below 300 seconds and individual steps below 60 seconds
