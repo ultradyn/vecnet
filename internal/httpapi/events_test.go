@@ -3,6 +3,7 @@ package httpapi_test
 import (
 	"bufio"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -754,13 +755,54 @@ func (w *stalledDeliveryWriter) Write(p []byte) (int, error) {
 func TestStalledSSEWriterDoesNotBlockSend(t *testing.T) {
 	for _, mode := range deliveryModes {
 		t.Run(mode.name, func(t *testing.T) {
-			env := testhub.StartWith(t, func(cfg *hub.Config) {
+			env := testhub.StartFull(t, func(cfg *hub.Config) {
 				cfg.DeliveryReferences = mode.refs
 			})
 			a, aSec := env.NewPeer("grokbot", "a")
 			b, bSec := env.NewPeer("session", "b")
 			c, _ := env.NewPeer("dot", "c")
 			env.SetLimits(a, 10000, 10000)
+
+			// Checkpoint latency is independent of SSE backpressure. Keep FULL
+			// commit durability, but move checkpoints outside the timed sends.
+			// Configure every possible pool connection and retain them all so
+			// later sends cannot pick up the DSN's auto-checkpoint default.
+			poolSize := env.Hub.DB.Stats().MaxOpenConnections
+			env.Hub.DB.SetMaxIdleConns(poolSize)
+			var conns []*sql.Conn
+			configure := func() {
+				defer func() {
+					for _, conn := range conns {
+						conn.Close()
+					}
+				}()
+				for i := 0; i < poolSize; i++ {
+					conn, err := env.Hub.DB.Conn(context.Background())
+					if err != nil {
+						t.Fatal(err)
+					}
+					conns = append(conns, conn)
+					if _, err := conn.ExecContext(context.Background(), `PRAGMA wal_autocheckpoint=0`); err != nil {
+						t.Fatal(err)
+					}
+					var sync, auto int
+					if err := conn.QueryRowContext(context.Background(), `PRAGMA synchronous`).Scan(&sync); err != nil || sync != 2 {
+						t.Fatalf("connection %d: synchronous=%d, want FULL (2): %v", i, sync, err)
+					}
+					if err := conn.QueryRowContext(context.Background(), `PRAGMA wal_autocheckpoint`).Scan(&auto); err != nil || auto != 0 {
+						t.Fatalf("connection %d: wal_autocheckpoint=%d, want 0: %v", i, auto, err)
+					}
+				}
+			}
+			configure()
+			// Registered before stream cleanup: checkpoint only after the
+			// stalled handler and its writer have both exited.
+			t.Cleanup(func() {
+				var busy, frames, checkpointed int
+				if err := env.Hub.DB.QueryRow(`PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&busy, &frames, &checkpointed); err != nil || busy != 0 {
+					t.Errorf("final checkpoint: busy=%d frames=%d checkpointed=%d: %v", busy, frames, checkpointed, err)
+				}
+			})
 
 			// Serve the production handler against a controlled writer. Keep
 			// stall/heartbeat timers out of the test: only cancellation or
