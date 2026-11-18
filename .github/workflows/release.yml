@@ -307,6 +307,8 @@ jobs:
         lane: [0, 1, 2, 3, 4, 5]
     runs-on: windows-2025
     timeout-minutes: 5
+    env:
+      GOMAXPROCS: '1'
     steps: *native-go-steps
 
   test-go-windows-arm:
@@ -314,6 +316,8 @@ jobs:
     strategy: *windows-go-strategy
     runs-on: windows-11-arm
     timeout-minutes: 5
+    env:
+      GOMAXPROCS: '1'
     steps: *native-go-steps
 
   test-node:

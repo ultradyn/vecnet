@@ -100,7 +100,7 @@ Unset requests preserve the existing two-job default and inherited environment.
 All cold dependency build stages, six bundle compile groups and event-tool
 finalization use this policy; malformed overrides fail before producer work.
 Other target/assembly builds, discovery and native execution remain unchanged:
-native `GOMAXPROCS=2`, four Windows execution workers and two Linux workers.
+native Windows `GOMAXPROCS=1` per process, four Windows execution workers and two Linux workers (Linux `GOMAXPROCS=2`).
 Parent's actual ubuntu-24.04 capacity probe run44264657616, heada573c13b,
 `capacity-probe/capacity.json` verified availableParallelism4, cpus4 and
 16464306176 bytes totalMemory. This is allocation evidence, not speedup or memory
@@ -152,3 +152,16 @@ Five-minute job ceilings are cancellation guards, not a longer allowed overall
 budget. Native evidence and final acceptance audit must be green before release
 acceptance. Cold compilation, scheduling/queue limits and indivisible tests can
 still make a candidate RED; never raise user limits or drop coverage.
+
+R12 controlled comparison (run44268049956) replayed three previously failing
+Windows groups against the same R11 test bundle. With four workers, GOMAXPROCS1
+completed retention and OAuth groups below the existing deadline; GOMAXPROCS2
+timed out retention on x64. Two workers/GOMAXPROCS1 passed all three groups,
+but took longer. The four-worker runs exposed a separate fixture hardlink
+race: synthetic CLI helpers linked the shared running test image while managed
+repair correctly required a single-link image. Fixture helpers now copy their
+Windows image; guards and every original repair assertion remain intact.
+The Windows execution environment uses one Go scheduler thread per packet
+while retaining four independent workers. Producer compilation, Node/E2E, Linux
+and all time/coverage/source gates are unchanged. Full native acceptance is
+required; these focused comparisons do not establish the overall300s budget.
