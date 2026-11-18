@@ -308,6 +308,11 @@ func servedIdentity(t *testing.T, base string) envelope.HubIdentity {
 
 func TestIdentityShowAndRotate(t *testing.T) {
 	dir := t.TempDir()
+	// Exercise identity commands against a current-schema store. Migrations
+	// are covered separately and do not belong in bootHub's listening budget.
+	if err := testhub.FreshStore(t, filepath.Join(dir, "hub.db")).Close(); err != nil {
+		t.Fatal(err)
+	}
 	args := []string{"--listen", "127.0.0.1:0", "--data-dir", dir}
 	boot := bootHub(t, args, noEnv)
 	old := servedIdentity(t, boot.base)
