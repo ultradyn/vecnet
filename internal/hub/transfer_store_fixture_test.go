@@ -1,6 +1,10 @@
 package hub
 
 import (
+	"bytes"
+	"context"
+	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -67,4 +71,60 @@ func openTransferFixtureStore(t *testing.T, path string) *store.DB {
 		t.Fatal(err)
 	}
 	return db
+}
+
+// Check the fixture contract from the existing default-preference case rather
+// than starting a separate scheduled process and migrating another template.
+func checkTransferStoreIsolation(t *testing.T, first *transferTestEnv) {
+	t.Helper()
+	ctx := context.Background()
+	a := first.Hub.DB
+	b := newTransferTestEnv(t).Hub.DB
+	// The first fixture already persisted an operator before the second opened.
+	var exists int
+	if err := b.QueryRowContext(ctx, `SELECT 1 FROM peers WHERE peer_id=?`, first.OperatorPeer).Scan(&exists); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("second transfer fixture did not isolate the first operator row: %v", err)
+	}
+	stat := func(db *store.DB) os.FileInfo {
+		t.Helper()
+		var path string
+		if err := db.QueryRow(`SELECT file FROM pragma_database_list WHERE name='main'`).Scan(&path); err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return info
+	}
+	if os.SameFile(stat(a), stat(b)) {
+		t.Fatal("transfer fixtures share a database file")
+	}
+	readAuthority := func(db *store.DB, key string) []byte {
+		t.Helper()
+		v, err := db.Meta(ctx, key)
+		decoded, decodeErr := hex.DecodeString(v)
+		if err != nil || decodeErr != nil || len(decoded) != 32 {
+			t.Fatalf("transfer fixture lacks a valid %s", key)
+		}
+		return decoded
+	}
+	for _, key := range []string{"hub_key", "hub_identity_seed"} {
+		if bytes.Equal(readAuthority(a, key), readAuthority(b, key)) {
+			t.Fatalf("transfer fixtures share %s", key)
+		}
+	}
+
+	// Hold all four connections at once so Conn cannot reuse a checked one.
+	for i := range 4 {
+		conn, err := b.Conn(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+		var got int
+		if err := conn.QueryRowContext(ctx, `PRAGMA synchronous`).Scan(&got); err != nil || got != 2 {
+			t.Fatalf("transfer connection %d: synchronous=%d, want FULL (2): %v", i+1, got, err)
+		}
+	}
 }

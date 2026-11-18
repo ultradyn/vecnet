@@ -251,7 +251,9 @@ func TestR2PreferenceSnapshotsAndClasses(t *testing.T) {
 			}
 		})
 	}
+	t.Setenv("VECNET_SQLITE_SYNCHRONOUS", "")
 	f := newTransfers(t)
+	checkTransferStoreIsolation(t, f.env)
 	g := f.reserve(t, "default", 3)
 	if g.RetentionClass != "1d" {
 		t.Fatal("wrong default")
