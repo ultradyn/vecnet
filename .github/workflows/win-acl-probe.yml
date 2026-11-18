@@ -1,24 +1,62 @@
-name: Disposable Windows capacity probe
+name: Disposable Windows worker comparison
 on:
   push:
     branches: [ci80/r8-focused-probe]
 permissions:
   contents: read
+  actions: read
+concurrency:
+  group: ci80-r12-worker-probe
+  cancel-in-progress: true
 jobs:
-  capacity:
+  compare:
+    timeout-minutes: 5
     strategy:
       fail-fast: false
       matrix:
-        runner: [windows-2025, windows-11-arm]
+        include:
+          - {runner: windows-2025, workers: 2, gomax: 1}
+          - {runner: windows-2025, workers: 2, gomax: 2}
+          - {runner: windows-2025, workers: 4, gomax: 1}
+          - {runner: windows-2025, workers: 4, gomax: 2}
+          - {runner: windows-11-arm, workers: 4, gomax: 1}
+          - {runner: windows-11-arm, workers: 4, gomax: 2}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 1
+    env:
+      GOMAXPROCS: ${{ matrix.gomax }}
+      PROBE_GO_WORKERS: ${{ matrix.workers }}
     steps:
-      - name: Report actual CPU memory and scan state
+      - name: Preserve LF
         timeout-minutes: 1
-        run: |
-          node -e "const os=require('node:os'); console.log(JSON.stringify({availableParallelism:os.availableParallelism(),cpus:os.cpus().length,totalMemoryBytes:os.totalmem(),platform:process.platform,arch:process.arch}));"
-          if (Get-Command Get-MpComputerStatus -ErrorAction SilentlyContinue) {
-            Get-MpComputerStatus | Select-Object AMRunningMode, AntivirusEnabled, RealTimeProtectionEnabled, BehaviorMonitorEnabled, IoavProtectionEnabled | ConvertTo-Json -Compress
-          } else {
-            Write-Output 'Microsoft Defender cmdlet unavailable'
-          }
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v5
+        timeout-minutes: 1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        timeout-minutes: 1
+        with:
+          node-version: '24'
+      - uses: actions/download-artifact@v5
+        timeout-minutes: 1
+        with:
+          name: go-tests-win32-${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
+          path: dist/go-tests
+          run-id: 44264909941
+          github-token: ${{ github.token }}
+      - name: Verify R11 source and discover unchanged native tests
+        id: prepare
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/diagnostic-inbox.mjs prepare
+      - name: Retention packet group from x64 failure
+        if: ${{ !cancelled() && steps.prepare.outcome == 'success' }}
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs go 1 1
+      - name: Service-intent packet group from x64 failure
+        if: ${{ !cancelled() && steps.prepare.outcome == 'success' }}
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs go 3 0
+      - name: OAuth and pending-task packet group from x64 failure
+        if: ${{ !cancelled() && steps.prepare.outcome == 'success' }}
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs go 4 1

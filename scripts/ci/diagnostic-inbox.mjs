@@ -8,8 +8,8 @@ import {spawn} from 'node:child_process';
 if(process.argv[2]==='prepare'){
  const platform=`${process.platform}-${process.arch}`;
  const temporary=await mkdtemp(path.join(await realpath(os.tmpdir()),'vecnet-inbox-probe-'));await chmod(temporary,0o700);
- const sha='528f8b508b2b4fe42aa1ecc44f858fb9b2ed6e1b';
- console.log(JSON.stringify({expectedBundleMerge:sha,platform,branchHead:'1c05da91ba7b1306b4def2bb48c38d7c9aa0b7d6'}));
+ const sha='ece86459884729e32a1143ad451217d3db55380b';
+ console.log(JSON.stringify({expectedBundleMerge:sha,platform,branchHead:'f959711f2c5d81386a63c8120f1645bf7d049312'}));
  const bundle=await consumeBundle(path.resolve('dist/go-tests',platform),{sha,platform,temporary});
  await mkdir('.ci',{recursive:true});
  for(let i=0;i<6;i++)await writeFile(`.ci/go-${i}.json`,JSON.stringify(bundle.inventory.filter((_,n)=>n%6===i)));
