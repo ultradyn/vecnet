@@ -4,6 +4,8 @@
 
 **Answer.** Yes on Linux with Claude Code **2.1.322**, for a compatible session that exposes an inbox and accepts the post. We discovered a disposable headless session, posted a unique marker directly to its Unix socket, and got the exact marker back from the model. A second disposable session configured to refuse inbound messages did not run a turn, even though the socket write succeeded. The wire format and registry fields below are version-specific observations, not a stable API contract. Vecnet does not ship this adapter or the proposed TUI; see [the Claude Code connector guide](../connectors/claude-code.md) for the shipped Monitor and hook paths.
 
+The [compatibility follow-up](2026-11-19-claude-code-inbox-compatibility.md) captures terminal and model rendering, exercises exact-session checks and policy callbacks, and verifies native replies to a standalone local listener on the same build.
+
 ## Use from Claude Code
 
 Run `/list-agents` (documented alias: `/peers`) to see reachable sessions. Use `/rename NAME` in the target or launch it with `claude --name NAME`, then ask the sending session, for example, “Tell @api-worker the migration finished.” Claude Code uses `ListAgents` for discovery when needed and `SendMessage` for delivery. A picked `@` mention identifies the target; duplicate names may require the short identifier shown in the listing. You do not need an agent team, tmux, or Remote Control for same-machine messaging.
