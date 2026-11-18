@@ -646,7 +646,8 @@ type blockedSSESocket struct {
 	blocked  chan struct{}
 	draining chan struct{}
 
-	mu sync.Mutex
+	mu       sync.Mutex
+	deadline time.Time
 }
 
 func (w *blockedSSESocket) Unwrap() http.ResponseWriter { return w.ResponseWriter }
@@ -654,20 +655,23 @@ func (w *blockedSSESocket) Unwrap() http.ResponseWriter { return w.ResponseWrite
 func (w *blockedSSESocket) SetWriteDeadline(deadline time.Time) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	// The single writer sets each frame deadline before Write. Once the
-	// first Delivery is held, any nonzero update comes from teardown,
-	// even if it advances the deadline. The zero reset is not a signal.
-	if !deadline.IsZero() {
+	// Frame deadlines advance, but teardown can shorten the deadline
+	// between setting it and entering the first Delivery Write.
+	teardown := deadline.Before(w.deadline)
+	select {
+	case <-w.blocked:
+		// The held writer cannot set another frame deadline.
+		teardown = true
+	default:
+	}
+	if teardown && !deadline.IsZero() {
 		select {
-		case <-w.blocked:
-			select {
-			case <-w.draining:
-			default:
-				close(w.draining)
-			}
+		case <-w.draining:
 		default:
+			close(w.draining)
 		}
 	}
+	w.deadline = deadline
 	_ = w.sink.SetWriteDeadline(deadline)
 	return http.NewResponseController(w.ResponseWriter).SetWriteDeadline(deadline)
 }
