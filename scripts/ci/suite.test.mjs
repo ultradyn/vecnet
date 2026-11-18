@@ -37,10 +37,11 @@ test('real Go discovery and every scheduled command execute all roots exactly on
   }
   assert.equal(compiled.length,2);
   for(const p of compiled)assert.ok(p.binary && p.directory,'discovery retains original cwd and reusable test binary');
-  // A PATH shim rejects go test during execution: compilation belongs solely
-  // to discovery. Real binaries must still execute every case exactly once.
+  // A PATH shim rejects every Go driver invocation during packet execution:
+  // discovery must prepare both test binaries and the native event tool.
+  // Absolute Node/native tool paths must execute every case without Go.
   const shim=path.join(cwd,'shim');await mkdir(shim);
-  if(process.platform!=='win32')await writeFile(path.join(shim,'go'),'#!/bin/sh\nif [ "$1" = test ]; then echo repeated-compilation >&2; exit 99; fi\nexec '+JSON.stringify(execFileSync('which',['go'],{encoding:'utf8'}).trim())+' "$@"\n',{mode:0o755});
+  if(process.platform!=='win32')await writeFile(path.join(shim,'go'),'#!/bin/sh\necho unexpected-go-driver >&2\nexit 99\n',{mode:0o755});
 
   const passed = [], executions = [], homes = new Set();
   for (let lane = 0; lane < lanes; lane++) for (let group = 0; group < 4; group++) {
