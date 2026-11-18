@@ -108,9 +108,10 @@ lands around 352s. Linux 4/6 and Windows 8 lanes did not support a sub-300s
 run in the queue model, and alternative packet caps offered little ARM gain.
 Job count, packet caps, isolation and all deadlines are unchanged. These
 models are not a native pass or evidence that the clipboard failure is fixed.
-Sparse checkout retains the documented consumer inputs; producers retain full
-discovery. Accept uses only scripts/ci, scripts/npm and npm. Non-tag assembly
-checkout is shallow; pushed version tags retain full ancestry. Actual native
+Source producers retain full discovery. Native Go, package and acceptance
+consumers restore source from their producer artifacts; Node/E2E retain sparse
+checkouts. Non-tag assembly checkout is shallow; pushed version tags retain
+full ancestry. Actual native
 completion under 300s and every step under 60s remain mandatory and unproven.
 New roots/examples/fuzz seeds and small/no-test packages remain conserved.
 Disposable testhub/preference stores copy a closed fully migrated image into
@@ -141,11 +142,15 @@ BUILD_INFO. No-argument `build.mjs` still performs the original sequential local
 build. Every native package gate verifies the same tarball checksum; publish
 retains matching master/tag guard, npm12 trusted publishing/OIDC/provenance.
 
-The four package artifact consumers check out `scripts/ci`, `scripts/npm`,
-`npm` and the complete `connectors` tree. The package tests compare shipped
-launcher source against the checkout; the installed runtime and its schemas
-and systemd template come from the tarball. The tests do not read docs or
-screenshots. Source producers retain full checkouts.
+The four package artifact consumers restore the producer's committed
+`scripts/ci`, `scripts/npm`, `npm` and complete `connectors` trees, plus root
+and ancestor files. Package tests compare shipped launcher source against
+those exact bytes; installed runtime, schemas and the systemd template come
+from the tarball. Build stages this source archive beside the npm tool and
+tested tarball in `npm-release`, outside the published payload and checksums.
+Acceptance restores the same verified archive; the GitHub Release CLI uses
+explicit `GH_REPO` without requiring a checkout. Source producers retain full
+checkouts and the tag/master ancestry check.
 
 The Linux build stages the already-pinned npm 12.0.1 package after packing
 vecnet. `npm-release` carries it as `npm-tool/npm.tgz` next to the exact
@@ -228,8 +233,8 @@ but took longer. The four-worker runs exposed a separate fixture hardlink
 race: synthetic CLI helpers linked the shared running test image while managed
 repair correctly required a single-link image. Fixture helpers now copy their
 Windows image; guards and every original repair assertion remain intact.
-The Windows execution environment uses one Go scheduler thread per packet
-while retaining four independent workers. Producer compilation, Node/E2E, Linux
+That comparison used one Go scheduler thread per packet and four independent
+workers; the current hosted ordinary pool is documented above. Producer compilation, Node/E2E, Linux
 and all time/coverage/source gates are unchanged. Full native acceptance is
 required; these focused comparisons do not establish the overall300s budget.
 
@@ -255,3 +260,11 @@ platforms, shards and assertions remain admitted once, without additional
 jobs. These changes enable overlap and remove repeated checkout work; actual
 native completion below 300 seconds and individual steps below 60 seconds
 are still required.
+
+The three Node platform jobs keep identical steps but expose completion
+milestones for package admission. Windows package gates wait for build, the
+ARM test producer and x64 Node completion; Linux package gates wait for build
+and all Node platforms. This makes every ARM Go lane eligible before package
+gates claim runner slots, without adding jobs or test commands. Actual GitHub
+allocation, full native correctness and the strict overall budget remain
+required; the dependency graph does not guarantee a queue order.
