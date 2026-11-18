@@ -36,8 +36,16 @@ function onCleanup(t: CleanupContext, close: Cleanup): void {
     stack = []; cleanups.set(t, stack);
     t.after(async () => {
       const errors: unknown[] = [];
+      let cleanupStage = 0;
       for (const cleanup of stack!.reverse()) {
-        try { await cleanup(); } catch (error) { errors.push(error); }
+        cleanupStage++;
+        try { await cleanup(); } catch (error) {
+          const message = error instanceof Error ? error.message : "";
+          const code = ["EACCES", "EPERM", "ENOENT", "ENOTDIR"].find(code => (error as NodeJS.ErrnoException)?.code === code) ?? "OTHER";
+          const reason = ["fixture ACL operation failed", "all owned ACLs must be restored exactly", "secret file must be a regular file readable only by its owner"].find(known => message.startsWith(known)) ?? "other-assertion";
+          console.log(`SAFE_CLEANUP_PROBE stage=${cleanupStage} code=${code} reason=${reason}`);
+          errors.push(error);
+        }
       }
       if (errors.length) throw new AggregateError(errors, 'owned fixture cleanup failed');
     });
@@ -385,7 +393,13 @@ test('Windows embedded live helper loss stops the launcher nonzero, then a fresh
   onCleanup(t, async () => {
     // The harness owns its stop-before-delete callback, then its fake hub.
     const errors: unknown[] = [];
-    for (const close of daemonCleanup) { try { await close(); } catch (error) { errors.push(error); } }
+    for (const close of daemonCleanup) { try { await close(); } catch (error) {
+          const message = error instanceof Error ? error.message : "";
+          const code = ["EACCES", "EPERM", "ENOENT", "ENOTDIR"].find(code => (error as NodeJS.ErrnoException)?.code === code) ?? "OTHER";
+          const reason = ["fixture ACL operation failed", "all owned ACLs must be restored exactly", "secret file must be a regular file readable only by its owner"].find(known => message.startsWith(known)) ?? "other-assertion";
+          console.log(`SAFE_CLEANUP_PROBE stage=${cleanupStage} code=${code} reason=${reason}`);
+          errors.push(error);
+        } }
     if (errors.length) throw new AggregateError(errors, 'daemon fixture cleanup failed');
   });
   const h = await harness({ after: close => { daemonCleanup.push(() => close(t)); } }, { env: s.env });

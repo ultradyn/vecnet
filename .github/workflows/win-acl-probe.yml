@@ -1,0 +1,39 @@
+name: Disposable Windows ACL probe
+on:
+  push:
+    branches: [ci80/win-acl-probe]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [windows-2025, windows-11-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 4
+    steps:
+      - run: git config --global core.autocrlf false
+        timeout-minutes: 1
+      - uses: actions/checkout@v5
+        timeout-minutes: 1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        timeout-minutes: 1
+        with:
+          node-version: '24'
+      - uses: actions/download-artifact@v5
+        timeout-minutes: 1
+        with:
+          github-token: ${{ github.token }}
+          run-id: 44240225126
+          name: native-win32-${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
+          path: dist/targets
+      - name: Verify saved native binaries and bind fixture helper
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/probe-artifact.mjs
+      - name: Probe only real denied-read fixture and cleanup
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node --disable-warning=ExperimentalWarning --test --test-concurrency=1 --test-name-pattern='private fixture parent probes' connectors/launcher/test/windows-platform.test.ts
