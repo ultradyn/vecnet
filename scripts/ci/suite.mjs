@@ -9,26 +9,39 @@ import { partition, goInventory } from './partition.mjs';
 const [kind, laneText = '0', groupText = '0'] = process.argv.slice(2);
 const lane = Number(laneText), group = Number(groupText);
 const go = args => execFileSync('go', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] });
-if (kind === 'discover-go') {
-  const inventory = goInventory(go(['test', '-mod=readonly', '-p', '2', '-list', '.', './...']));
+if (kind === 'prepare-go') {
+  const stages = [
+    ['mod', 'download'],
+    ['build','-mod=readonly','-p','2','-trimpath','std'],
+    ['build','-mod=readonly','-p','2','-trimpath','modernc.org/sqlite'],
+    ['build','-mod=readonly','-p','2','-trimpath','charm.land/bubbletea/v2','github.com/santhosh-tekuri/jsonschema/v6','github.com/modelcontextprotocol/go-sdk/mcp'],
+  ];
+  if (!stages[lane]) throw new Error('invalid prepare stage');
+  process.stdout.write(go(stages[lane]));
+} else if (kind === 'discover-go') {
+  partition([], lane, 6);
+  const packages=go(['list','-mod=readonly','./...']).trim().split(/\r?\n/).filter(Boolean);
+  const selected=partition(packages,lane,6);
+  const inventory = selected.length ? goInventory(go(['test', '-mod=readonly', '-p', '2', '-trimpath', '-list', '.', ...selected])) : [];
   await mkdir('.ci', { recursive: true });
-  await writeFile('.ci/go.json', JSON.stringify(inventory));
+  await writeFile(`.ci/go-${lane}.json`, JSON.stringify(inventory));
   console.log(`Go inventory: ${inventory.length} packages, ${inventory.reduce((n, p) => n + p.names.length, 0)} root tests/examples/fuzz targets`);
 } else if (kind === 'go') {
-  partition([], lane, 2); partition([], group, 8);
-  const inventory = JSON.parse(await readFile('.ci/go.json', 'utf8'));
+  partition([], lane, 3); partition([], group, 8);
+  const inventory = (await Promise.all(Array.from({length:6},(_,i)=>readFile(`.ci/go-${i}.json`,'utf8')))).flatMap(JSON.parse).sort((a,b)=>a.pkg.localeCompare(b.pkg,'en'));
+  if(new Set(inventory.map(p=>p.pkg)).size!==inventory.length)throw new Error('duplicate package inventory');
   let roots = 0, packages = 0;
   for (const [ordinal, { pkg, names }] of inventory.entries()) {
     // Large packages are split by complete root name, never by subtest. Small
     // packages run unfiltered once, including packages with no test files.
     const split = names.length >= 100;
-    const selected = split ? partition(names, group * 2 + lane, 16) : names;
-    if (split ? !selected.length : ordinal % 16 !== group * 2 + lane) continue;
+    const selected = split ? partition(names, group * 3 + lane, 24) : names;
+    if (split ? !selected.length : ordinal % 24 !== group * 3 + lane) continue;
     const filter = split ? ['-run', `^(${selected.join('|')})$`] : [];
-    execFileSync('go', ['test', '-mod=readonly', '-p', '2', '-count=1', '-timeout=50s', '-json', ...filter, pkg], { stdio: 'inherit' });
+    execFileSync('go', ['test', '-mod=readonly', '-p', '2', '-trimpath', '-count=1', '-timeout=50s', '-json', ...filter, pkg], { stdio: 'inherit' });
     packages++; roots += selected.length;
   }
-  console.log(`Go lane=${lane}/2 group=${group}/8 packages=${packages} roots=${roots}`);
+  console.log(`Go lane=${lane}/3 group=${group}/8 packages=${packages} roots=${roots}`);
 } else if (kind === 'node' || kind === 'e2e') {
   const patterns = kind === 'node' ? ['connectors/hub-client/test/*.test.ts', 'connectors/launcher/test/*.test.ts', 'connectors/launcher/test/backends/*.test.ts'] : ['connectors/launcher/test/e2e/*.test.ts'];
   const all = patterns.flatMap(pattern => globSync(pattern));

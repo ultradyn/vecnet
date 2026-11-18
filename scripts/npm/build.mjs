@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { releaseInfo } from './release.mjs';
 import { nativeTargets } from './platforms.mjs';
+import { validateTargets } from './assemble.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const source = path.join(root, 'npm');
@@ -30,7 +31,11 @@ let revision = null;
 try {
   revision = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
 } catch { /* Build-box copies do not include .git. */ }
-const info = { version: manifest.version, revision, go: go(['version']), binaries: {} };
+const assemble = process.argv[2] === '--assemble' ? process.argv[3] : null;
+if (process.argv.length > 2 && (!assemble || process.argv.length !== 4)) throw new Error('usage: build.mjs [--assemble target-directory]');
+if(assemble && !revision)throw new Error('assembly requires exact Git source revision');
+const validated = assemble ? await validateTargets(path.resolve(assemble), {revision, version: manifest.version}) : null;
+const info = { version: manifest.version, revision, go: validated?.go || go(['version']), binaries: {} };
 
 const schemas = ['launch-input','launch-permission','launch-question','launch-answers','launch-approval-closed'];
 // The launcher loads builtins dynamically from config, so an import walk rooted
@@ -74,7 +79,10 @@ for (const { platform, goos, goarch, suffix } of nativeTargets) {
   const directory = path.join(destination, 'native', platform);
   await mkdir(directory, { recursive: true });
   console.log(`Building vecnet ${manifest.version} for ${platform}`);
-  execFileSync('go', [
+  if (validated) {
+    const target = validated.targets.find(target => target.platform === platform);
+    for (const command of ['vecnet','vecnet-hub']) await cp(path.join(target.dir, command + suffix), path.join(directory, command + suffix));
+  } else execFileSync('go', [
     'build', '-mod=readonly', '-p', workers, '-trimpath', '-buildvcs=false',
     '-ldflags', `-s -w -X github.com/XertroV/vecnet/internal/mcpserver.Version=${manifest.version} -X github.com/XertroV/vecnet/internal/buildinfo.Version=${manifest.version}`,
     '-o', `${directory}${path.sep}`, './cmd/vecnet', './cmd/vecnet-hub',

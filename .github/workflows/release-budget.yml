@@ -1,0 +1,23 @@
+name: Release budget acceptance
+on:
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 1
+    steps:
+      - uses: actions/checkout@v5
+        timeout-minutes: 1
+        with:
+          persist-credentials: false
+      # Audit policy comes from the trusted default branch, not PR code.
+      - name: Audit entire completed run including acceptance, publish and post steps
+        timeout-minutes: 1
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/ci/audit.mjs ${{ github.event.workflow_run.id }} ${{ github.event.workflow_run.head_sha }} completed

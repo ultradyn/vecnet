@@ -21,11 +21,11 @@ test('real Go discovery and every scheduled command execute all roots exactly on
   await mkdir(path.join(cwd, 'empty'));
   await writeFile(path.join(cwd, 'empty', 'empty.go'), 'package empty\n');
   const invoke = args => execFileSync(process.execPath, [suite, ...args], { cwd, encoding: 'utf8', timeout: 45_000, maxBuffer: 4 * 1024 * 1024 });
-  invoke(['discover-go']);
-  const inventory = JSON.parse(await readFile(path.join(cwd, '.ci', 'go.json')));
+  for(let i=0;i<6;i++)invoke(['discover-go',String(i)]);
+  const inventory=(await Promise.all(Array.from({length:6},(_,i)=>readFile(path.join(cwd,'.ci',`go-${i}.json`),'utf8')))).flatMap(JSON.parse);
   assert.equal(inventory.length, 3);
   const passed = [];
-  for (let lane = 0; lane < 2; lane++) for (let group = 0; group < 8; group++) {
+  for (let lane = 0; lane < 3; lane++) for (let group = 0; group < 8; group++) {
     const output = invoke(['go', String(lane), String(group)]);
     for (const line of output.split('\n')) {
       if (!line.startsWith('{')) continue;

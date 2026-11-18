@@ -20,51 +20,127 @@ env:
   GOMAXPROCS: '2'
 
 jobs:
-  # Packing is independent of all suites. Every native consumer tests these
-  # exact checksum-bound bytes; only publishing waits for every test job.
-  build:
+  target:
     runs-on: ubuntu-24.04
-    timeout-minutes: 4
-    outputs:
-      version: ${{ steps.package.outputs.version }}
-      tag: ${{ steps.package.outputs.tag }}
-      npm-tag: ${{ steps.package.outputs.npm-tag }}
-      tarball: ${{ steps.package.outputs.tarball }}
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x64
+            goos: linux
+            goarch: amd64
+          - platform: linux-arm64
+            goos: linux
+            goarch: arm64
+          - platform: win32-x64
+            goos: windows
+            goarch: amd64
+          - platform: win32-arm64
+            goos: windows
+            goarch: arm64
+    env:
+      GOOS: ${{ matrix.goos }}
+      GOARCH: ${{ matrix.goarch }}
     steps:
+      - name: Preserve LF bytes on Windows
+        if: runner.os == 'Windows'
+        timeout-minutes: 1
+        run: git config --global core.autocrlf false
       - uses: actions/checkout@v5
         timeout-minutes: 1
         with:
-          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@v6
         timeout-minutes: 1
         with:
           node-version: '24'
-      - name: Resolve package version
-        id: package
+      - name: Download and verify pinned Go archive
         timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/npm/release.mjs info
-      - name: Verify tag matches a version on master
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/toolchain.mjs download
+      - name: Extract Go with native tar (no .NET ZIP expansion)
         timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/npm/release.mjs check-tag "$GITHUB_REF_NAME"
-      - uses: actions/setup-go@v6
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/toolchain.mjs extract
+      - name: Cold dependency stage 1 of 4
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs prepare-go 0
+      - name: Cold dependency stage 2 of 4
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs prepare-go 1
+      - name: Cold dependency stage 3 of 4
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs prepare-go 2
+      - name: Cold dependency stage 4 of 4
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs prepare-go 3
+      - name: Build one source-bound native target
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/npm/target.mjs ${{ matrix.platform }}
+      - uses: actions/upload-artifact@v4
         timeout-minutes: 1
         with:
-          go-version: '1.27.4'
-          cache-dependency-path: go.sum
-      - name: Pin npm for repeatable packaging and OIDC support
+          name: native-${{ matrix.platform }}
+          path: dist/targets
+          if-no-files-found: error
+          retention-days: 7
+
+  build:
+    needs: target
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.package.outputs.tag }}
+      npm-tag: ${{ steps.package.outputs.npm-tag }}
+      tarball: ${{ steps.package.outputs.tarball }}
+    steps:
+      - name: Preserve LF bytes on Windows
+        if: runner.os == 'Windows'
+        timeout-minutes: 1
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v5
+        timeout-minutes: 1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@v6
+        timeout-minutes: 1
+        with:
+          node-version: '24'
+      - name: Download and verify pinned Go archive
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/toolchain.mjs download
+      - name: Extract Go with native tar (no .NET ZIP expansion)
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/toolchain.mjs extract
+      - uses: actions/download-artifact@v5
+        timeout-minutes: 1
+        with:
+          pattern: native-*
+          path: dist/targets
+          merge-multiple: true
+      - name: Resolve package version
+        timeout-minutes: 1
+        id: package
+        run: node scripts/ci/budget.mjs 53000 node scripts/npm/release.mjs info
+      - name: Verify version tag is on master
+        timeout-minutes: 1
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        run: node scripts/ci/budget.mjs 53000 node scripts/npm/release.mjs check-tag "$GITHUB_REF_NAME"
+      - name: Download license inventory modules
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 go mod download
+      - name: Assemble all8 verified binaries and runtime/licenses
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/npm/build.mjs --assemble dist/targets
+      - name: Pin npm for packaging
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 npm install --global npm@12.0.1 --ignore-scripts --no-audit --no-fund
-      - name: Build Linux and Windows x64 and ARM64 artifacts
-        timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/npm/build.mjs
-      - name: Pack release
+      - name: Pack tested release
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 npm pack ./dist/npm --pack-destination ./dist
       - name: Record release checksum
-        working-directory: dist
         timeout-minutes: 1
+        working-directory: dist
         env:
           TARBALL: ${{ steps.package.outputs.tarball }}
         run: sha256sum "$TARBALL" > SHA256SUMS
@@ -82,12 +158,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        lane: [0, 1]
         runner: [ubuntu-24.04, windows-2025, windows-11-arm]
+        lane: [0, 1, 2]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 4
+    timeout-minutes: 5
     steps:
-      - name: Preserve LF asset bytes on Windows
+      - name: Preserve LF bytes on Windows
         if: runner.os == 'Windows'
         timeout-minutes: 1
         run: git config --global core.autocrlf false
@@ -99,51 +175,83 @@ jobs:
         timeout-minutes: 1
         with:
           node-version: '24'
-          architecture: ${{ contains(matrix.runner, 'arm') && 'arm64' || 'x64' }}
-      - uses: actions/setup-go@v6
+      - name: Download and verify pinned Go archive
         timeout-minutes: 1
-        with:
-          go-version: '1.27.4'
-          cache-dependency-path: go.sum
-      - name: Discover complete native Go inventory
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/toolchain.mjs download
+      - name: Extract Go with native tar (no .NET ZIP expansion)
         timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs discover-go
-      - name: Go group 1 of 8 (complete roots, examples and fuzz seeds)
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/toolchain.mjs extract
+      - name: Cold dependency stage 1 of 4
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs prepare-go 0
+      - name: Cold dependency stage 2 of 4
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs prepare-go 1
+      - name: Cold dependency stage 3 of 4
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs prepare-go 2
+      - name: Cold dependency stage 4 of 4
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs prepare-go 3
+      - name: Discover package partition 1 of 6
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs discover-go 0
+      - name: Discover package partition 2 of 6
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs discover-go 1
+      - name: Discover package partition 3 of 6
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs discover-go 2
+      - name: Discover package partition 4 of 6
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs discover-go 3
+      - name: Discover package partition 5 of 6
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs discover-go 4
+      - name: Discover package partition 6 of 6
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs discover-go 5
+      - name: Test actual Go execution conservation
+        timeout-minutes: 1
+        if: matrix.lane == 0
+        run: node scripts/ci/budget.mjs 53000 node --test scripts/ci/suite.test.mjs
+      - name: Complete Go roots group 1 of 8
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs go ${{ matrix.lane }} 0
-      - name: Go group 2 of 8 (complete roots, examples and fuzz seeds)
+      - name: Complete Go roots group 2 of 8
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs go ${{ matrix.lane }} 1
-      - name: Go group 3 of 8 (complete roots, examples and fuzz seeds)
+      - name: Complete Go roots group 3 of 8
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs go ${{ matrix.lane }} 2
-      - name: Go group 4 of 8 (complete roots, examples and fuzz seeds)
+      - name: Complete Go roots group 4 of 8
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs go ${{ matrix.lane }} 3
-      - name: Go group 5 of 8 (complete roots, examples and fuzz seeds)
+      - name: Complete Go roots group 5 of 8
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs go ${{ matrix.lane }} 4
-      - name: Go group 6 of 8 (complete roots, examples and fuzz seeds)
+      - name: Complete Go roots group 6 of 8
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs go ${{ matrix.lane }} 5
-      - name: Go group 7 of 8 (complete roots, examples and fuzz seeds)
+      - name: Complete Go roots group 7 of 8
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs go ${{ matrix.lane }} 6
-      - name: Go group 8 of 8 (complete roots, examples and fuzz seeds)
+      - name: Complete Go roots group 8 of 8
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs go ${{ matrix.lane }} 7
 
   test-node:
+    needs: target
     strategy:
       fail-fast: false
       matrix:
         runner: [ubuntu-24.04, windows-2025, windows-11-arm]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 4
+    timeout-minutes: 5
     env:
       VECNET_BIN: ${{ github.workspace }}/bin/vecnet${{ startsWith(matrix.runner, 'windows') && '.exe' || '' }}
     steps:
-      - name: Preserve LF asset bytes on Windows
+      - name: Preserve LF bytes on Windows
         if: runner.os == 'Windows'
         timeout-minutes: 1
         run: git config --global core.autocrlf false
@@ -155,49 +263,50 @@ jobs:
         timeout-minutes: 1
         with:
           node-version: '24'
-          architecture: ${{ contains(matrix.runner, 'arm') && 'arm64' || 'x64' }}
-      - uses: actions/setup-go@v6
+      - uses: actions/download-artifact@v5
         timeout-minutes: 1
         with:
-          go-version: '1.27.4'
-          cache-dependency-path: go.sum
-      - name: Build fresh native binaries
+          pattern: native-${{ runner.os == 'Windows' && 'win32' || 'linux' }}-${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
+          path: dist/targets
+          merge-multiple: true
+      - name: Install matching native artifact for disposable tests
         timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 go build -mod=readonly -p 2 -o bin/ ./cmd/vecnet ./cmd/vecnet-hub
-      - name: Test CI scheduling and deadlines
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/native.mjs
+      - name: Test command ownership and acceptance policies
         timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node --test --test-concurrency=2 "scripts/ci/*.test.mjs"
+        run: node scripts/ci/budget.mjs 53000 node --test --test-concurrency=2 scripts/ci/budget.test.mjs scripts/ci/ownership.test.mjs scripts/ci/partition.test.mjs scripts/ci/audit.test.mjs scripts/npm/assemble.test.mjs
       - name: Test release guards and cross-platform wrappers
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node --test --test-concurrency=2 scripts/npm/release.test.mjs scripts/npm/npm-command.test.mjs scripts/npm/wrapper.test.mjs scripts/npm/verify-artifact.test.mjs
-      - name: Test read-only Windows artifact evidence helper
-        if: runner.os == 'Windows'
+      - name: Test Windows artifact evidence helper
         timeout-minutes: 1
+        if: runner.os == 'Windows'
         run: node scripts/ci/budget.mjs 53000 pwsh -NoProfile -File scripts/windows/Get-ArtifactEvidence.Tests.ps1
-      - name: node group 1 of 4
+      - name: node complete group 1 of 4
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs node 0 0
-      - name: node group 2 of 4
+      - name: node complete group 2 of 4
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs node 0 1
-      - name: node group 3 of 4
+      - name: node complete group 3 of 4
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs node 0 2
-      - name: node group 4 of 4
+      - name: node complete group 4 of 4
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs node 0 3
 
   test-e2e:
+    needs: target
     strategy:
       fail-fast: false
       matrix:
         runner: [ubuntu-24.04, windows-2025, windows-11-arm]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 4
+    timeout-minutes: 5
     env:
       VECNET_BIN: ${{ github.workspace }}/bin/vecnet${{ startsWith(matrix.runner, 'windows') && '.exe' || '' }}
     steps:
-      - name: Preserve LF asset bytes on Windows
+      - name: Preserve LF bytes on Windows
         if: runner.os == 'Windows'
         timeout-minutes: 1
         run: git config --global core.autocrlf false
@@ -209,25 +318,25 @@ jobs:
         timeout-minutes: 1
         with:
           node-version: '24'
-          architecture: ${{ contains(matrix.runner, 'arm') && 'arm64' || 'x64' }}
-      - uses: actions/setup-go@v6
+      - uses: actions/download-artifact@v5
         timeout-minutes: 1
         with:
-          go-version: '1.27.4'
-          cache-dependency-path: go.sum
-      - name: Build fresh native binaries
+          pattern: native-${{ runner.os == 'Windows' && 'win32' || 'linux' }}-${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
+          path: dist/targets
+          merge-multiple: true
+      - name: Install matching native artifact for disposable tests
         timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 go build -mod=readonly -p 2 -o bin/ ./cmd/vecnet ./cmd/vecnet-hub
-      - name: e2e group 1 of 4
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/native.mjs
+      - name: e2e complete group 1 of 4
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs e2e 0 0
-      - name: e2e group 2 of 4
+      - name: e2e complete group 2 of 4
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs e2e 0 1
-      - name: e2e group 3 of 4
+      - name: e2e complete group 3 of 4
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs e2e 0 2
-      - name: e2e group 4 of 4
+      - name: e2e complete group 4 of 4
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs e2e 0 3
 
@@ -236,19 +345,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - runner: ubuntu-24.04
-            arch: x64
-          - runner: ubuntu-24.04-arm
-            arch: arm64
-          - runner: windows-2025
-            arch: x64
-          - runner: windows-11-arm
-            arch: arm64
+        runner: [ubuntu-24.04, ubuntu-24.04-arm, windows-2025, windows-11-arm]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 2
+    timeout-minutes: 5
     steps:
-      - name: Preserve LF asset bytes on Windows
+      - name: Preserve LF bytes on Windows
         if: runner.os == 'Windows'
         timeout-minutes: 1
         run: git config --global core.autocrlf false
@@ -260,61 +361,74 @@ jobs:
         timeout-minutes: 1
         with:
           node-version: '24'
-          architecture: ${{ contains(matrix.runner, 'arm') && 'arm64' || 'x64' }}
-      - name: Pin npm to the packaging version
+      - name: Pin npm to packaging version
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 npm install --global npm@12.0.1 --ignore-scripts --no-audit --no-fund
       - uses: actions/download-artifact@v5
         timeout-minutes: 1
         with:
-          name: npm-release
+          pattern: npm-release
           path: dist
-      - name: Verify identical packed artifact checksum
+          merge-multiple: true
+      - name: Verify identical packed artifact
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/npm/verify-artifact.mjs
-      - name: Test the same package on the native platform
+      - name: Test same packed bytes on native platform
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node --test --test-concurrency=2 scripts/npm/package.test.mjs
 
-  publish:
-    needs: [build, test-go, test-node, test-e2e, test-artifact]
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+  accept:
+    # Always run the audit: skipped/failed dependencies must not become green.
+    if: always()
+    needs: [target, build, test-go, test-node, test-e2e, test-artifact]
     runs-on: ubuntu-24.04
-    timeout-minutes: 4
+    timeout-minutes: 5
     permissions:
+      actions: read
       contents: write
       id-token: write
     steps:
-      - timeout-minutes: 1
-        uses: actions/checkout@v5
+      - name: Preserve LF bytes on Windows
+        if: runner.os == 'Windows'
+        timeout-minutes: 1
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v5
+        timeout-minutes: 1
         with:
           persist-credentials: false
-      - timeout-minutes: 1
-        uses: actions/setup-node@v6
+      - uses: actions/setup-node@v6
+        timeout-minutes: 1
         with:
           node-version: '24'
-      - timeout-minutes: 1
-        name: Set up npm trusted publishing
-        run: node scripts/ci/budget.mjs 53000 npm install --global npm@12.0.1 --ignore-scripts --no-audit --no-fund
-      - timeout-minutes: 1
-        uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v5
+        timeout-minutes: 1
         with:
-          name: npm-release
+          pattern: npm-release
           path: dist
-      - timeout-minutes: 1
-        name: Verify the tested artifact checksum
-        run: node scripts/ci/budget.mjs 53000 node scripts/npm/verify-artifact.mjs
-      - timeout-minutes: 1
-        name: Publish the tested tarball through OIDC
+          merge-multiple: true
+      - name: Pin OIDC npm before acceptance
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 npm install --global npm@12.0.1 --ignore-scripts --no-audit --no-fund
+      - name: Audit source-bound jobs and reserve remaining overall time
+        timeout-minutes: 1
         env:
-          # npm provenance requires a public source repository.
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/audit.mjs ${{ github.run_id }} ${{ github.event.pull_request.head.sha || github.sha }} preflight
+      - name: Verify tested artifact before publication
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/npm/verify-artifact.mjs
+      - name: Publish tested tarball through OIDC
+        timeout-minutes: 1
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        env:
           NPM_CONFIG_PROVENANCE: ${{ github.event.repository.private == false }}
-        run: node scripts/ci/budget.mjs 53000 node scripts/npm/release.mjs publish
-      - timeout-minutes: 1
-        name: Create or finish the GitHub Release
+        run: node scripts/ci/budget.mjs 14000 node scripts/npm/release.mjs publish
+      - name: Create or finish GitHub Release
+        timeout-minutes: 1
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.build.outputs.tag }}
           TARBALL: ${{ needs.build.outputs.tarball }}
           NPM_TAG: ${{ needs.build.outputs.npm-tag }}
-        run: node scripts/ci/budget.mjs 53000 bash scripts/ci/github-release.sh
+        run: node scripts/ci/budget.mjs 14000 bash scripts/ci/github-release.sh
