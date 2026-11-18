@@ -403,7 +403,7 @@ function mockLiveProcesses(t: TestContext, pipe: string) {
   const closed: Promise<void>[] = [];
   onCleanup(t, async () => {
     for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill();
-    console.log('RECOVERY_CHILD_JOIN', JSON.stringify(children.map((child, index) => ({index, role: roles[index], settled: settled.has(index), exitCode: child.exitCode, signalCode: child.signalCode}))));
+    console.log('RECOVERY_CHILD_JOIN', JSON.stringify(children.map((child, index) => ({index, role: roles[index], settled: settled.has(index), exitCode: child.exitCode, signalCode: child.signalCode, streams: child.stdio.slice(0, 3).map(stream => stream && Object.fromEntries(['destroyed', 'readableEnded', 'writableFinished', 'closed'].map(key => [key, Reflect.get(stream, key) ?? null])))}))));
     await Promise.all(closed); console.log('RECOVERY_CHILD_JOIN_DONE');
   });
   const run = fixtureSpawn(childProcess.spawn, { pipe, onLock: (child: childProcess.ChildProcess) => helpers.push(child) });

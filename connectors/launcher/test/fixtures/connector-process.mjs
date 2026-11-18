@@ -16,11 +16,19 @@ export function fixtureSpawn(spawn, { pipe, onLock = () => {} }) {
       appendFileSync(plan.trace, JSON.stringify({ report: JSON.parse(readFileSync(0, 'utf8')) }) + '\\n');
     } else await import(${JSON.stringify(vecnet)});
   `;
+  let proxyIndex = 0;
   return function (...args) {
     const argv = args[1], options = args[2];
     if (argv[0] === 'app-server') {
       if (argv[1] !== 'proxy' || argv[2] !== '--sock' || argv.length !== 4) throw new Error('standalone app-server forbidden');
-      return spawn(process.execPath, [proxy], { ...options, env: { ...options.env, FAKE_CODEX_PROXY_PIPE: pipe } });
+      const child = spawn(process.execPath, [proxy], { ...options, env: { ...options.env, FAKE_CODEX_PROXY_PIPE: pipe } });
+      const index = proxyIndex++;
+      const snapshot = event => console.log('RECOVERY_PROXY_STREAM', JSON.stringify({index, event, exitCode: child.exitCode, signalCode: child.signalCode, streams: child.stdio.slice(0, 3).map(stream => stream && Object.fromEntries(['destroyed', 'readableEnded', 'writableFinished', 'closed'].map(key => [key, Reflect.get(stream, key) ?? null])))}));
+      for (const [streamIndex, stream] of child.stdio.slice(0, 3).entries()) if (stream) {
+        for (const event of ['close', 'end', 'finish']) stream.on(event, () => snapshot(String(streamIndex) + ':' + event));
+      }
+      child.on('exit', () => snapshot('exit')); child.on('close', () => snapshot('close'));
+      return child;
     }
     if (argv[0] === '--net') return spawn(process.execPath, ['--input-type=module', '-e', cli, '--', 'vecnet-fixture', ...argv], options);
     const child = Reflect.apply(spawn, childProcess, args);
