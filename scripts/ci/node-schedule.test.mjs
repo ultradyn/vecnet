@@ -48,7 +48,7 @@ test('actual Node registration shards execute dynamic roots, nested assertions a
  `);
  const events=[];
  const env={...process.env};delete env.NODE_TEST_CONTEXT;
- const preload=fileURLToPath(new URL('./node-shard-register.mjs',import.meta.url));
+ const preload=new URL('./node-shard-register.mjs',import.meta.url).href;
  for(let shard=0;shard<4;shard++){
   const output=execFileSync(process.execPath,['--import',preload,'--test','--test-reporter=tap',file],{env:{...env,CI_NODE_SHARD:String(shard),CI_NODE_SHARDS:'4'},encoding:'utf8'});
   const workerEvents=[...output.matchAll(/# EVENT (.+)/g)].map(m=>JSON.parse(m[1]));
@@ -75,7 +75,7 @@ test('imported nested test/it registration fails closed across shards, including
  const cwd=await mkdtemp(path.join(os.tmpdir(),'node imported nested '));t.after(()=>rm(cwd,{recursive:true,force:true}));
  const file=path.join(cwd,'cases.test.mjs');
  const env={...process.env};delete env.NODE_TEST_CONTEXT;
- const preload=fileURLToPath(new URL('./node-shard-register.mjs',import.meta.url));
+ const preload=new URL('./node-shard-register.mjs',import.meta.url).href;
  for(const registration of ['test','namedTest','namedIt'])for(const afterAwait of [false,true]){
   await t.test(registration+(afterAwait?' after await':' before await'),async()=>{
    await writeFile(file,`import test, {test as namedTest,it as namedIt} from 'node:test';
@@ -102,7 +102,7 @@ test('imported registration from exported async hooks fails closed across four s
  const cwd=await mkdtemp(path.join(os.tmpdir(),'node imported hook '));t.after(()=>rm(cwd,{recursive:true,force:true}));
  const file=path.join(cwd,'cases.test.mjs');
  const env={...process.env};delete env.NODE_TEST_CONTEXT;
- const preload=fileURLToPath(new URL('./node-shard-register.mjs',import.meta.url));
+ const preload=new URL('./node-shard-register.mjs',import.meta.url).href;
  for(const [hook,registration] of [['beforeEach','test'],['before','it'],['afterEach','it'],['after','test']]){
   await t.test(hook+' with imported '+registration,async()=>{
    await writeFile(file,`import test, {it,${hook}} from 'node:test';
