@@ -28,6 +28,7 @@ const isolated=async task=>{
 const rootName='TestLauncherWindowsManagedRepairPreservesServiceIntent';
 const neighbors=[{pkg:'cli',filter:'^TestStateConcurrentWriters$'},{pkg:'cli',filter:'^TestCodexHookWindowsInstalledCommandPreservesArgv$'},{pkg:'cli',filter:'^TestRouteStatsRelocationRefusals$'},{pkg:'store',filter:'^TestOpenSynchronousEnv$'}];
 const modes={neighbors,neighbors2:neighbors,startup:['^TestCodexHookWindowsInstalledCommandPreservesArgv$'],repair:[`^${rootName}$`],legacy:['^TestLocalStartupObservesWithoutInstallingAndAdoptsLegacyHooks$'],loaded:[`^${rootName}$`,'^TestLauncherWindowsRepairRejectsTaskAndPublicationDrift$','^TestCodexHookWindowsInstalledCommandPreservesArgv$','^TestInviteHubURLResponsePreservesSafeOutput$']};
+modes.storeguards=[{pkg:'store',filter:'^TestPayloadReferenceReplacementGuards$'},{pkg:'store',filter:'^TestMessageReplacementGuardCutoverAndIdenticalBytes$'}];
 const selected=modes[process.argv[2]];if(!selected)throw new Error('unknown diagnostic mode');
 const result=[];
 if(process.argv[2]==='neighbors2'){
