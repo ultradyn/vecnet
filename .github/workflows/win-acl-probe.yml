@@ -1,4 +1,4 @@
-name: Disposable Windows native probes
+name: Disposable Windows recovery probe
 on:
   push:
     branches: [ci80/win-acl-probe]
@@ -6,8 +6,7 @@ permissions:
   contents: read
   actions: read
 jobs:
-  probe:
-    if: contains(github.event.head_commit.message, '[FIXTURE]')
+  recovery:
     strategy:
       fail-fast: false
       matrix:
@@ -35,117 +34,12 @@ jobs:
       - name: Verify saved native binaries and bind fixture helper
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/probe-artifact.mjs
-      - name: Probe only real denied-read fixture and cleanup
+      - name: Verify private recovery creation and retained SQLite state
         timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node --disable-warning=ExperimentalWarning --test --test-concurrency=1 --test-name-pattern='private fixture parent probes' connectors/launcher/test/windows-platform.test.ts
-
-  abba:
-    if: contains(github.event.head_commit.message, '[ABBA]')
-    strategy:
-      fail-fast: false
-      matrix:
-        runner: [windows-2025, windows-11-arm]
-        package: [hub, cmdhub, cli]
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 5
-    env:
-      GOMAXPROCS: '2'
-      CGO_ENABLED: '0'
-      UV_THREADPOOL_SIZE: '1'
-    steps:
-      - run: git config --global core.autocrlf false
-        timeout-minutes: 1
-      - uses: actions/checkout@v5
-        timeout-minutes: 1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@v6
-        timeout-minutes: 1
-        with:
-          node-version: '24'
-      - uses: actions/download-artifact@v5
-        timeout-minutes: 1
-        with:
-          github-token: ${{ github.token }}
-          run-id: 44240225126
-          name: native-win32-${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
-          path: dist/targets
-      - name: Verify saved native binaries
-        timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/probe-artifact.mjs
-      - name: Private diagnostic HOME and temporary paths
-        timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/abba-env.ts
-      - name: Download pinned verified Go
-        timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/toolchain.mjs download
-      - name: Extract pinned Go
-        timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/toolchain.mjs extract
-      - name: Cold dependencies 1 of 4
-        timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs prepare-go 0
-      - name: Cold dependencies 2 of 4
-        timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs prepare-go 1
-      - name: Cold dependencies 3 of 4
-        timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs prepare-go 2
-      - name: Cold dependencies 4 of 4
-        timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs prepare-go 3
-      - name: Compile selected package once
-        timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/abba.mjs compile ${{ matrix.package }}
-      - name: Same-source trial 1 full
-        timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/abba.mjs run ${{ matrix.package }} full 1
-      - name: Same-source trial 2 normal
-        timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/abba.mjs run ${{ matrix.package }} normal 2
-      - name: Same-source trial 3 full
-        timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/abba.mjs run ${{ matrix.package }} full 3
-      - name: Same-source trial 4 normal
-        timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/abba.mjs run ${{ matrix.package }} normal 4
-      - name: Repeat go invocation overhead comparison
-        timeout-minutes: 1
-        if: matrix.package == 'hub'
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/abba.mjs overhead ${{ matrix.package }} full overhead
-      - name: Remove disposable private diagnostic files
-        timeout-minutes: 1
-        if: always()
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/abba.mjs cleanup ${{ matrix.package }}
-  live:
-    if: contains(github.event.head_commit.message, '[LIVE]')
-    strategy:
-      fail-fast: false
-      matrix:
-        runner: [windows-2025, windows-11-arm]
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 4
-    steps:
-      - run: git config --global core.autocrlf false
-        timeout-minutes: 1
-      - uses: actions/checkout@v5
-        timeout-minutes: 1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@v6
-        timeout-minutes: 1
-        with:
-          node-version: '24'
-      - uses: actions/download-artifact@v5
-        timeout-minutes: 1
-        with:
-          github-token: ${{ github.token }}
-          run-id: 44240225126
-          name: native-win32-${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
-          path: dist/targets
-      - name: Verify saved native binaries and bind fixture helper
-        timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/probe-artifact.mjs
-      - name: Probe isolated live connector lifecycle
+        run: node scripts/ci/budget.mjs 53000 node --disable-warning=ExperimentalWarning --test --test-concurrency=1 --test-name-pattern='Windows recovery precreates' connectors/launcher/test/windows-platform.test.ts
+      - name: Verify native helper loss and live replacement
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node --disable-warning=ExperimentalWarning --test --test-concurrency=1 --test-name-pattern='Windows live connector exposes' connectors/launcher/test/windows-platform.test.ts
+      - name: Verify standalone and embedded lifecycle cleanup
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node --disable-warning=ExperimentalWarning --test --test-concurrency=1 --test-name-pattern='Windows standalone|Windows embedded' connectors/launcher/test/windows-platform.test.ts

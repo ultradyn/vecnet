@@ -3,12 +3,15 @@ import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import childProcess from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
+import fs from 'node:fs';
+import type { PathLike } from 'node:fs';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, linkSync, existsSync, readFileSync, statSync, lstatSync, realpathSync, chmodSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { once } from 'node:events';
 import { createConnection } from 'node:net';
+import { openLedger } from '../src/ledger.ts';
 import { localPlatform, readPrivateFileSync } from '../src/private-files.ts';
 import { readCredential } from '../src/daemon.ts';
 import { CODEX_RELOAD_MS, codexBindingsPath, codexRecoveryPath, startCodexConnector } from '../src/codex/connector.ts';
@@ -259,6 +262,81 @@ test('Windows native private reads are bounded and fail closed without the helpe
   assert.throws(() => readPrivateFileSync(path, { env: { ...process.env, VECNET_BIN: join(dir, 'missing.exe') } }));
 });
 
+test('Windows recovery precreates a private database and preserves existing SQLite state on readmission', t => {
+  const dir = sandbox(t), env = { ...process.env, HOME: dir };
+  const recoveryPath = () => {
+    const descriptor = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    try {
+      // Exercise the Windows creation branch with the real private helper on
+      // Linux too; only native runs prove TokenUser ownership and DACLs.
+      Object.defineProperty(process, 'platform', { ...descriptor, value: 'win32' });
+      return codexRecoveryPath(env);
+    } finally { Object.defineProperty(process, 'platform', descriptor); }
+  };
+  const database = recoveryPath();
+  assert.equal(existsSync(database), true, 'private database must exist before SQLite opens it');
+  assert.equal(statSync(database).size, 0);
+  localPlatform('check-private', database, { env });
+  const clock = fakeClock(Date.now()), first = openLedger(database, clock);
+  try { first.kv('codex').set('restart-sentinel', 'retained recovery state'); }
+  finally { first.close(); }
+  const bytes = readFileSync(database), identity = statSync(database, { bigint: true });
+  assert.equal(recoveryPath(), database);
+  const admitted = statSync(database, { bigint: true });
+  assert.equal(admitted.ino, identity.ino); assert.equal(admitted.dev, identity.dev);
+  assert.deepEqual(readFileSync(database), bytes, 'readmission never replaces/truncates existing recovery');
+  localPlatform('check-private', database, { env });
+  const second = openLedger(database, clock);
+  try { assert.equal(second.kv('codex').get('restart-sentinel'), 'retained recovery state'); }
+  finally { second.close(); }
+  const restored = readFileSync(database), children = readdirSync(dirname(database));
+  makePublicReadable(database);
+  assert.throws(recoveryPath, 'public recovery database remains refused');
+  assert.deepEqual(readFileSync(database), restored);
+  makeOwnerPrivate(database);
+  const hardlink = join(dir, 'recovery-alias'); linkSync(database, hardlink);
+  assert.throws(recoveryPath, 'hard-linked recovery database remains refused');
+  rmSync(hardlink);
+  const parked = join(dir, 'parked-database'); fs.renameSync(database, parked);
+  symlinkSync(dirname(database), database); // Native directory junction needs no symlink privilege.
+  try {
+    assert.throws(recoveryPath, 'reparse/symlink recovery database remains refused');
+    assert.deepEqual(readFileSync(parked), restored);
+  } finally { rmSync(database); fs.renameSync(parked, database); }
+  const sidecar = database + '-wal'; writePrivate(sidecar, 'sidecar sentinel'); makePublicReadable(sidecar);
+  assert.throws(recoveryPath, 'public recovery sidecar remains refused');
+  assert.equal(readFileSync(sidecar, 'utf8'), 'sidecar sentinel'); rmSync(sidecar);
+  assert.deepEqual(readdirSync(dirname(database)), children, 'private creation leaves no seed files');
+  assert.equal(recoveryPath(), database);
+
+  // Interleave a real competing creator at the exclusive publication boundary.
+  // The losing initializer must validate, never replace, the winner's bytes.
+  rmSync(database);
+  const link = fs.linkSync;
+  const publication = t.mock.method(fs, 'linkSync', (source: PathLike, target: PathLike) => {
+    if (target === database) localPlatform('write-private', database, { env, input: 'concurrent recovery bytes' });
+    return link(source, target);
+  }); syncBuiltinESMExports();
+  try { assert.equal(recoveryPath(), database); }
+  finally { publication.mock.restore(); syncBuiltinESMExports(); }
+  assert.equal(readFileSync(database, 'utf8'), 'concurrent recovery bytes');
+  assert.equal(statSync(database).nlink, 1);
+  assert.deepEqual(readdirSync(dirname(database)), children, 'losing initializer removes only its private seed');
+
+  rmSync(database);
+  const unsafePublication = t.mock.method(fs, 'linkSync', (source: PathLike, target: PathLike) => {
+    if (target === database) {
+      localPlatform('write-private', database, { env, input: 'untrusted concurrent bytes' });
+      if (windows) makePublicReadable(database); else chmodSync(database, 0o644);
+    }
+    return link(source, target);
+  }); syncBuiltinESMExports();
+  try { assert.throws(recoveryPath, 'a concurrently created public database remains refused'); }
+  finally { unsafePublication.mock.restore(); syncBuiltinESMExports(); }
+  assert.equal(readFileSync(database, 'utf8'), 'untrusted concurrent bytes');
+  assert.deepEqual(readdirSync(dirname(database)), children);
+});
+
 test('Windows recovery selects explicit HOME, rejects public DACLs and junction descendants', { skip: !windows }, t => {
   const home = sandbox(t), env = { ...process.env, HOME: home, USERPROFILE: join(home, 'unselected') };
   const expected = join(home, '.local', 'state', 'vecnet', 'codex', 'bindings.json');
@@ -334,62 +412,35 @@ function mockLiveProcesses(t: TestContext, pipe: string) {
 }
 
 test('Windows live connector exposes fatal helper loss only after fencing, and a replacement regains readiness', { skip: !windows, timeout: 15000 }, async t => {
-  console.log('LIVE_PROBE connector stage=1 before');
   const s = await liveBinding(t), { helpers, children } = mockLiveProcesses(t, s.fake.socketPath);
-  console.log('LIVE_PROBE connector stage=1 after');
   const clock = fakeClock(Date.now()), log = memoryLog(), reports: { reason?: string }[] = [];
   const start = () => startCodexConnector({ env: s.env, log, clock, postRuntimeStatus: async (_b, snapshot) => { reports.push(snapshot); return true; } });
-  const liveWarnIDs = ['codex_recovery_refused', 'codex_connector_failed', 'codex_connector_duplicate', 'codex_bindings_refused', 'codex_bindings_invalid', 'codex_connector_disabled', 'codex_engine_operation_failed', 'codex_binding_auth_unverified', 'codex_watch_unreachable'];
-  const warnings = () => Object.fromEntries(liveWarnIDs.map(id => [id, log.entries.filter(e => e.msg === id).length]));
   const first = start(); onCleanup(t, () => first.stop());
-  console.log('LIVE_PROBE connector stage=2 before');
   await until(() => s.watches() === 1 && s.fake.subscribers(s.id).length === 1, 'live bound watch and subscription');
-  console.log('LIVE_PROBE connector stage=2 after');
-  console.log('LIVE_PROBE connector stage=3 before');
   clock.advance(CODEX_RELOAD_MS); await until(s.ready, 'ready live binding before helper death');
-  console.log('LIVE_PROBE connector stage=3 after');
   const oldSubscriber = s.fake.subscribers(s.id)[0], firstChildren = [...children]; assert.equal(helpers.length, 1);
   helpers[0].kill();
-  console.log('LIVE_PROBE connector stage=4 before');
   assert.deepEqual(await first.stopped, { reason: 'status_lock_lost' }); // no explicit stop/signal
-  console.log('LIVE_PROBE connector stage=4 after');
   assert.equal(s.fake.subscribers(s.id).length, 0, 'fatal outcome waits for unsubscribe');
-  console.log('LIVE_PROBE connector stage=5 before');
   await until(() => firstChildren.every(c => c.exitCode !== null || c.signalCode !== null), 'owned children exit after fenced transport close');
-  console.log('LIVE_PROBE connector stage=5 after');
   assert.equal(reports.some(r => r.reason === 'stopped'), false, 'no offline report after singleton loss');
+  const database = join(dirname(s.path), 'delivery.sqlite');
+  localPlatform('check-private', database, { env: s.env });
+  const recoveryBytes = readFileSync(database), recoveryIdentity = statSync(database, { bigint: true });
+  assert.equal(codexRecoveryPath(s.env), database, 'closed recovery database admits the replacement');
+  assert.deepEqual(readFileSync(database), recoveryBytes, 'replacement admission preserves recovery bytes');
+  assert.equal(statSync(database, { bigint: true }).ino, recoveryIdentity.ino);
   const count = children.length; clock.advance(CODEX_RELOAD_MS * 2);
   assert.equal(children.length, count, 'old connector never self-revives without a singleton');
-  console.log('LIVE_WARN_BEFORE_SECOND '+JSON.stringify(warnings()));
-  for (const [index, suffix] of ['', '-wal', '-shm', '-journal'].entries()) {
-    const candidate = join(dirname(s.path), 'delivery.sqlite' + suffix);
-    let exists = false, regular = false, singleLink = false, privateAccepted = false, metadataCode = 'NONE';
-    try { const st = lstatSync(candidate); exists = true; regular = st.isFile() && !st.isSymbolicLink(); singleLink = st.nlink === 1; }
-    catch (error) { metadataCode = ['ENOENT', 'EACCES', 'EPERM'].find(code => code === (error as NodeJS.ErrnoException)?.code) ?? 'OTHER'; }
-    if (exists) { try { localPlatform('check-private', candidate, { env: s.env }); privateAccepted = true; } catch {} }
-    console.log('LIVE_RECOVERY '+JSON.stringify({ index, exists, regular, singleLink, privateAccepted, metadataCode }));
-  }
   const second = start(); onCleanup(t, () => second.stop());
-  void second.stopped.then(outcome => console.log('LIVE_SECOND_STOP '+JSON.stringify({ reason: outcome.reason === 'stopped' ? 'stopped' : 'status_lock_lost' })));
-  const replacementProbe = setInterval(() => console.log('LIVE_REPLACEMENT '+JSON.stringify({ watches:s.watches(), subscribers:s.fake.subscribers(s.id).length, ready:s.ready(), helpers:helpers.length, states:children.map(child=>({exit:child.exitCode,signal:child.signalCode})), warnings:warnings() })), 1000);
-  replacementProbe.unref(); onCleanup(t, () => clearInterval(replacementProbe));
-  console.log('LIVE_PROBE connector stage=6 before');
   await until(() => s.watches() === 2 && s.fake.subscribers(s.id).length === 1, 'replacement live binding');
-  console.log('LIVE_PROBE connector stage=6 after');
   assert.notEqual(s.fake.subscribers(s.id)[0], oldSubscriber); assert.equal(helpers.length, 2);
-  console.log('LIVE_PROBE connector stage=7 before');
   clock.advance(CODEX_RELOAD_MS); await until(s.ready, 'replacement readiness');
-  console.log('LIVE_PROBE connector stage=7 after');
   const replacementStatus = readFileSync(s.path + '.status.json', 'utf8');
-  console.log('LIVE_PROBE connector stage=8 before');
   await first.stop(); assert.equal(readFileSync(s.path + '.status.json', 'utf8'), replacementStatus, 'old cleanup cannot delete successor readiness');
-  console.log('LIVE_PROBE connector stage=8 after');
-  console.log('LIVE_PROBE connector stage=9 before');
   await second.stop(); assert.deepEqual(await second.stopped, { reason: 'stopped' });
-  console.log('LIVE_PROBE connector stage=9 after');
   assert.equal(existsSync(s.path + '.status.json'), false); assert.equal(reports.at(-1)?.reason, 'stopped');
 });
-
 
 test('Windows standalone live runner exits 1 on actual helper death and restarts ready, normal stop remains exit 0', { skip: !windows, timeout: 15000 }, async t => {
   const s = await liveBinding(t), pidFile = join(s.home, 'helper.pid');
