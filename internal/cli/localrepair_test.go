@@ -294,6 +294,9 @@ func TestLocalRepairReportsUnregisteredProfileLauncher(t *testing.T) {
 	a, _, home := localRegistryFixture(t)
 	// This is a private filesystem/inventory fixture, not a native Task
 	// Scheduler contract test. It must not read or mutate host tasks.
+	// The project is a plain directory; host Git startup is not part of the
+	// bounded launcher-discovery check.
+	t.Setenv("PATH", t.TempDir())
 	home = filepath.Join(filepath.Dir(home), "operator[1]")
 	a.getenv = func(k string) string {
 		if k == "HOME" {
@@ -315,6 +318,19 @@ func TestLocalRepairReportsUnregisteredProfileLauncher(t *testing.T) {
 	if err := cliFixtureWriteFile(unit, before, 0600); err != nil {
 		t.Fatal(err)
 	}
+	// Capture identity from an opened file: on Windows, path-based Stat
+	// may defer reading the file ID until SameFile is called.
+	f, err := os.Open(unit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unitInfo, err := f.Stat()
+	closeErr := f.Close()
+	if err != nil || closeErr != nil {
+		t.Fatalf("snapshot unregistered unit: stat=%v close=%v", err, closeErr)
+	}
+	// Prepare the cached executable identity outside the launcher-discovery check.
+	localSoftwareVersion()
 	started := 0
 	a.localRepairStart = func(*exec.Cmd) error { started++; return nil }
 	a.localStartup([]string{"peers"})
@@ -326,6 +342,9 @@ func TestLocalRepairReportsUnregisteredProfileLauncher(t *testing.T) {
 	}
 	if got, err := os.ReadFile(unit); err != nil || !bytes.Equal(got, before) {
 		t.Fatalf("unregistered unit changed: %s %v", got, err)
+	}
+	if info, err := os.Stat(unit); err != nil || !os.SameFile(unitInfo, info) {
+		t.Fatalf("unregistered unit replaced: %v", err)
 	}
 }
 
