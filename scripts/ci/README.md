@@ -211,6 +211,16 @@ including existing npmInvocation resolution on Windows. Tests cover early
 exit0/7 with detached grandchildren, inherited/ignored pipes, cancellation,
 timeout, literal arguments, and actual discovered Go execution conservation.
 
+Windows target artifacts and Go bundles also carry a CI-only native Go owner,
+with separate source, SHA-256 and PE architecture checks. It is excluded from
+the npm package. Consumers stage validated bytes into a fresh temp directory
+and export `CI_WINDOWS_OWNER` before the first budgeted command. Go uses
+`windows-owner.mjs use-go`; Node/E2E and Windows package tests use
+`native.mjs --owner-only`. The same containment and drain contract applies.
+Only an unset owner selects the PowerShell bootstrap; an invalid configured
+owner fails. This removes repeated PowerShell and C# compilation from those
+steps; exact native lifecycle and full-run timing still require validation.
+
 `accept` audits finished source-bound jobs/steps including setup/post/action
 and queue time, fails on any missing/failed/incomplete evidence, reserves8s
 after non-tag preflight (R5 audit4s/posts0s; verification unmeasured) or35s for tags
@@ -261,6 +271,15 @@ a standalone Node bootstrap and a receipt binding the archive's revision and
 SHA-256; restore rejects mismatches before native tar extraction. Git remains
 installed for tests which create their own repositories and worktrees. The
 source checkout's `.git` directory is not required by the native Go tests.
+
+Windows Go consumers use the runner's existing Node for this plain JavaScript
+source restore, then `native-node.mjs` selects a cached canonical Node 24 and
+verifies its actual version, native architecture and platform before publishing
+PATH. This avoids npm/yarn version discovery in jobs that only require Node.
+A missing or mismatched cache fails explicitly. Earlier unloaded measurements
+were 8–9s for selection versus 6–7s for setup-node; R23's critical setup-node
+steps took 29s and 22s. The change targets that startup variance and does not
+establish a median speedup or a successful overall budget.
 
 On Linux and Windows ARM64, Node groups 0, 1 and 2 run with the helper guards;
 only group 3 follows the four E2E groups. Windows x64 runs all four Node groups
