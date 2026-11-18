@@ -32,16 +32,18 @@ type user struct {
 	conf string
 }
 
-// newUser returns a user with no config file yet.
+// newUser returns a command fixture with no config file yet. Automatic
+// maintenance has its own fixtures; command tests do not inventory the CWD.
 func newUser(t *testing.T) *user {
 	t.Helper()
 	dir := t.TempDir()
 	u := &user{t: t, conf: filepath.Join(dir, "config", "vecnet.toml")}
 	u.env = map[string]string{
-		"VECNET_CONFIG":   u.conf,
-		"XDG_CACHE_HOME":  filepath.Join(dir, "cache"),
-		"XDG_CONFIG_HOME": filepath.Join(dir, "config"),
-		"HOME":            filepath.Join(dir, "home"),
+		"VECNET_CONFIG":            u.conf,
+		"VECNET_LOCAL_MAINTENANCE": "0",
+		"XDG_CACHE_HOME":           filepath.Join(dir, "cache"),
+		"XDG_CONFIG_HOME":          filepath.Join(dir, "config"),
+		"HOME":                     filepath.Join(dir, "home"),
 	}
 	return u
 }
