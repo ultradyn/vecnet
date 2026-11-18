@@ -334,29 +334,50 @@ function mockLiveProcesses(t: TestContext, pipe: string) {
 }
 
 test('Windows live connector exposes fatal helper loss only after fencing, and a replacement regains readiness', { skip: !windows, timeout: 15000 }, async t => {
+  console.log('LIVE_PROBE connector stage=1 before');
   const s = await liveBinding(t), { helpers, children } = mockLiveProcesses(t, s.fake.socketPath);
+  console.log('LIVE_PROBE connector stage=1 after');
   const clock = fakeClock(Date.now()), log = memoryLog(), reports: { reason?: string }[] = [];
   const start = () => startCodexConnector({ env: s.env, log, clock, postRuntimeStatus: async (_b, snapshot) => { reports.push(snapshot); return true; } });
   const first = start(); onCleanup(t, () => first.stop());
+  console.log('LIVE_PROBE connector stage=2 before');
   await until(() => s.watches() === 1 && s.fake.subscribers(s.id).length === 1, 'live bound watch and subscription');
+  console.log('LIVE_PROBE connector stage=2 after');
+  console.log('LIVE_PROBE connector stage=3 before');
   clock.advance(CODEX_RELOAD_MS); await until(s.ready, 'ready live binding before helper death');
+  console.log('LIVE_PROBE connector stage=3 after');
   const oldSubscriber = s.fake.subscribers(s.id)[0], firstChildren = [...children]; assert.equal(helpers.length, 1);
   helpers[0].kill();
+  console.log('LIVE_PROBE connector stage=4 before');
   assert.deepEqual(await first.stopped, { reason: 'status_lock_lost' }); // no explicit stop/signal
+  console.log('LIVE_PROBE connector stage=4 after');
   assert.equal(s.fake.subscribers(s.id).length, 0, 'fatal outcome waits for unsubscribe');
+  console.log('LIVE_PROBE connector stage=5 before');
   await until(() => firstChildren.every(c => c.exitCode !== null || c.signalCode !== null), 'owned children exit after fenced transport close');
+  console.log('LIVE_PROBE connector stage=5 after');
   assert.equal(reports.some(r => r.reason === 'stopped'), false, 'no offline report after singleton loss');
   const count = children.length; clock.advance(CODEX_RELOAD_MS * 2);
   assert.equal(children.length, count, 'old connector never self-revives without a singleton');
   const second = start(); onCleanup(t, () => second.stop());
+  const replacementProbe = setInterval(() => console.log('LIVE_REPLACEMENT '+JSON.stringify({ watches:s.watches(), subscribers:s.fake.subscribers(s.id).length, ready:s.ready(), helpers:helpers.length, states:children.map(child=>({exit:child.exitCode,signal:child.signalCode})) })), 1000);
+  replacementProbe.unref(); onCleanup(t, () => clearInterval(replacementProbe));
+  console.log('LIVE_PROBE connector stage=6 before');
   await until(() => s.watches() === 2 && s.fake.subscribers(s.id).length === 1, 'replacement live binding');
+  console.log('LIVE_PROBE connector stage=6 after');
   assert.notEqual(s.fake.subscribers(s.id)[0], oldSubscriber); assert.equal(helpers.length, 2);
+  console.log('LIVE_PROBE connector stage=7 before');
   clock.advance(CODEX_RELOAD_MS); await until(s.ready, 'replacement readiness');
+  console.log('LIVE_PROBE connector stage=7 after');
   const replacementStatus = readFileSync(s.path + '.status.json', 'utf8');
+  console.log('LIVE_PROBE connector stage=8 before');
   await first.stop(); assert.equal(readFileSync(s.path + '.status.json', 'utf8'), replacementStatus, 'old cleanup cannot delete successor readiness');
+  console.log('LIVE_PROBE connector stage=8 after');
+  console.log('LIVE_PROBE connector stage=9 before');
   await second.stop(); assert.deepEqual(await second.stopped, { reason: 'stopped' });
+  console.log('LIVE_PROBE connector stage=9 after');
   assert.equal(existsSync(s.path + '.status.json'), false); assert.equal(reports.at(-1)?.reason, 'stopped');
 });
+
 
 test('Windows standalone live runner exits 1 on actual helper death and restarts ready, normal stop remains exit 0', { skip: !windows, timeout: 15000 }, async t => {
   const s = await liveBinding(t), pidFile = join(s.home, 'helper.pid');
