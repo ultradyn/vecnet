@@ -117,18 +117,29 @@ type launcherFixtureNodeMode uint8
 const (
 	preparedLauncherNode launcherFixtureNodeMode = iota
 	coldLauncherNode
+	preparedMutableLauncherNode
 )
 
 // Read-only callers share one prepared, private, single-link image per job in
 // Windows CI, or per process locally. The real install still validates and
-// executes it. Cold admission and mutation cases instead receive a never-executed,
-// independently owned copy.
+// executes it. Cold admission receives a never-executed independent copy.
+// Mutation cases prepare their own independent copy before the real install;
+// they must never borrow or mutate the shared image.
 func launcherFixtureNode(home string, mode launcherFixtureNodeMode) (string, error) {
 	switch mode {
 	case preparedLauncherNode:
 		return launcherFixtureSharedNode()
-	case coldLauncherNode:
-		return copyLauncherFixtureNode(filepath.Join(home, "private node"))
+	case coldLauncherNode, preparedMutableLauncherNode:
+		node, err := copyLauncherFixtureNode(filepath.Join(home, "private node"))
+		if err != nil {
+			return "", err
+		}
+		if mode == preparedMutableLauncherNode {
+			if err := prepareLauncherFixtureNode(node); err != nil {
+				return "", err
+			}
+		}
+		return node, nil
 	default:
 		return "", fmt.Errorf("unknown launcher Node fixture mode %d", mode)
 	}
@@ -220,23 +231,26 @@ func TestLauncherFixtureNodeIsolation(t *testing.T) {
 	if !os.SameFile(firstID, after) || !os.SameFile(firstID, secondID) {
 		t.Fatal("read-only launcher fixtures did not reuse the same Node image")
 	}
-	fresh := get(secondHome, coldLauncherNode)
-	freshID, freshDigest := identity(fresh)
-	if freshDigest != sourceDigest {
-		t.Fatal("cold Node is not a byte-for-byte copy of the source image")
-	}
-	if os.SameFile(freshID, firstID) || os.SameFile(freshID, sourceID) {
-		t.Fatal("mutable Node aliases the shared or source image")
-	}
-	private(fresh)
-	if err := os.WriteFile(fresh, []byte("test-local mutation"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.RemoveAll(secondHome); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(fresh); !os.IsNotExist(err) {
-		t.Errorf("mutable Node cleanup: want absence, got %v", err)
+	for _, mode := range []launcherFixtureNodeMode{coldLauncherNode, preparedMutableLauncherNode} {
+		mutableHome := filepath.Join(secondHome, fmt.Sprint(mode))
+		fresh := get(mutableHome, mode)
+		freshID, freshDigest := identity(fresh)
+		if freshDigest != sourceDigest {
+			t.Fatal("independent Node is not a byte-for-byte copy of the source image")
+		}
+		if os.SameFile(freshID, firstID) || os.SameFile(freshID, sourceID) {
+			t.Fatal("mutable Node aliases the shared or source image")
+		}
+		private(fresh)
+		if err := os.WriteFile(fresh, []byte("test-local mutation"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.RemoveAll(mutableHome); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(fresh); !os.IsNotExist(err) {
+			t.Errorf("mutable Node cleanup: want absence, got %v", err)
+		}
 	}
 	for _, unchanged := range []struct {
 		path string
@@ -248,4 +262,24 @@ func TestLauncherFixtureNodeIsolation(t *testing.T) {
 		}
 	}
 	private(first)
+}
+
+// An invalid executable is a negative control, never a successful Node stand-in.
+// Cold copies must defer admission; mutable security setup must really probe it.
+func TestLauncherFixtureNodeMutableRequiresPreparation(t *testing.T) {
+	parent := launcherFixturePhysicalTemp(t)
+	sourceDir := filepath.Join(parent, "invalid source")
+	if err := platform.MkdirAll(sourceDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceDir, platform.Exe("node")), []byte("invalid executable image"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", sourceDir)
+	if _, err := launcherFixtureNode(filepath.Join(parent, "cold"), coldLauncherNode); err != nil {
+		t.Fatalf("cold staging unexpectedly probed the image: %v", err)
+	}
+	if _, err := launcherFixtureNode(filepath.Join(parent, "mutable"), preparedMutableLauncherNode); err == nil || !strings.Contains(err.Error(), "prepare private Node --version") {
+		t.Fatalf("mutable staging must reject an invalid image during preparation: %v", err)
+	}
 }

@@ -106,7 +106,7 @@ func launcherWindowsFixture(t *testing.T, nodeMode launcherFixtureNodeMode) (lau
 	args := []string{"install", "--source", launcherTestSource(t), "--node", nodeCopy, "--vecnet-bin", bin}
 	start := time.Now()
 	code, _, errs := f.run(t, append(args, "--write")...)
-	t.Logf("launcher fixture initial install: prepared=%t elapsed=%s exit=%d", nodeMode == preparedLauncherNode, time.Since(start), code)
+	t.Logf("launcher fixture initial install: prepared=%t elapsed=%s exit=%d", nodeMode != coldLauncherNode, time.Since(start), code)
 	if code != 0 {
 		t.Fatal(errs)
 	}
@@ -787,7 +787,9 @@ func TestLauncherWindowsUnregisteredProfileDiscovery(t *testing.T) {
 func TestLauncherWindowsInstallRejectsUnsafeExecutableBeforeExecution(t *testing.T) {
 	for _, kind := range []string{"node-file", "node-parent", "cli-file", "cli-parent", "node-hardlink"} {
 		t.Run(kind, func(t *testing.T) {
-			f, _, manager, args := launcherWindowsFixture(t, coldLauncherNode)
+			// Initial valid installation is setup, not cold-admission coverage.
+			// Prepare this case's own mutable image; never mutate the job image.
+			f, _, manager, args := launcherWindowsFixture(t, preparedMutableLauncherNode)
 			var installed launcherInstall
 			if err := launcherReadJSON(f.paths.Manifest, &installed); err != nil {
 				t.Fatal(err)
