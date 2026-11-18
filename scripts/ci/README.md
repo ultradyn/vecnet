@@ -214,6 +214,36 @@ native-tar extraction are distinct bounded steps, avoiding ARM .NET ZIP
 extraction. Reproduce cold state with private empty GOCACHE/GOMODCACHE, never
 by deleting shared caches. Native cold/ARM timings still require actual CI.
 
+The four target producers and three Linux-hosted test-bundle producers use
+private `GOCACHE` and `GOMODCACHE` directories under `runner.temp/ci-go-cache`
+(`build` and `modules`). Explicit `actions/cache/restore@v4` runs after pinned
+Go extraction and before all four unchanged dependency stages. Keys separate
+schema `go-compile-v1`, Linux host OS/architecture, exact Go 1.27.4, target
+GOOS/GOARCH, target versus tests role, `go.mod`/`go.sum` hash and checked-out
+Go source hash. The first fallback retains the full dependency prefix for
+source edits; a second fallback drops only the dependency hash so updates reuse
+standard-library and other unchanged build objects. Go module download/build
+validates input versions and checksums, and Go checks actual changed inputs,
+including embedded files, before reuse. The source hash is deliberately coarse;
+it does not replace Go input validation. Neither fallback crosses compiler,
+host, target or role boundaries.
+
+Explicit `actions/cache/save@v4` runs only after successful artifact production
+and upload, and only without an exact hit; it saves the restored primary key
+and the same two paths. Restore and save each have a one-minute cancellation
+guard, with no automatic cache-save post step. Compilation/module entries are
+reused; passing test results and source-bound final artifacts are not used to
+replace any build, compile, discovery or native execution command. Native
+consumers, assembly, publication and source/artifact policies are unchanged.
+
+A source-key miss can save a new full cache for each of seven producers;
+immutable exact hits are not refreshed. These caches have no configured size
+cap or retention period: repository cache quota/eviction limits availability,
+and cold misses still pay all compilation plus cache compression/upload costs.
+The schema can be bumped to invalidate entries. Neither warm-cache speedup nor
+cold-cache compliance is established here; actual native runs must still pass
+strict overall <300s and every-step <60s acceptance, including cache steps.
+
 `budget.mjs 53000 command [args...]` owns the complete command, not one child
 at a time. Linux uses a kernel child-subreaper: adopted descendants are killed
 and reaped on early success/failure, deadline or cancellation. Windows creates

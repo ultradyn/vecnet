@@ -42,6 +42,7 @@ jobs:
     env:
       GOOS: ${{ matrix.goos }}
       GOARCH: ${{ matrix.goarch }}
+      CI_GO_CACHE_ROLE: target
     steps:
       - name: Preserve LF bytes on Windows
         if: runner.os == 'Windows'
@@ -68,6 +69,22 @@ jobs:
       - name: Extract Go with native tar (no .NET ZIP expansion)
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/toolchain.mjs extract
+      - name: Set private Go cache paths
+        timeout-minutes: 1
+        run: |
+          printf 'GOCACHE=%s/ci-go-cache/build\nGOMODCACHE=%s/ci-go-cache/modules\n' "$RUNNER_TEMP" "$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - name: Restore Go compilation and module caches
+        id: go-cache
+        uses: actions/cache/restore@v4
+        timeout-minutes: 1
+        with:
+          path: |
+            ${{ runner.temp }}/ci-go-cache/build
+            ${{ runner.temp }}/ci-go-cache/modules
+          key: go-compile-v1-${{ runner.os }}-${{ runner.arch }}-go1.27.4-${{ env.GOOS }}-${{ env.GOARCH }}-${{ env.CI_GO_CACHE_ROLE }}-${{ hashFiles('go.mod', 'go.sum') }}-${{ hashFiles('**/*.go') }}
+          restore-keys: |
+            go-compile-v1-${{ runner.os }}-${{ runner.arch }}-go1.27.4-${{ env.GOOS }}-${{ env.GOARCH }}-${{ env.CI_GO_CACHE_ROLE }}-${{ hashFiles('go.mod', 'go.sum') }}-
+            go-compile-v1-${{ runner.os }}-${{ runner.arch }}-go1.27.4-${{ env.GOOS }}-${{ env.GOARCH }}-${{ env.CI_GO_CACHE_ROLE }}-
       - name: Cold dependency stage 1 of 4
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs prepare-go 0
@@ -90,6 +107,16 @@ jobs:
           path: dist/targets
           if-no-files-found: error
           retention-days: 7
+
+      - name: Save Go compilation and module caches
+        if: steps.go-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        timeout-minutes: 1
+        with:
+          path: |
+            ${{ runner.temp }}/ci-go-cache/build
+            ${{ runner.temp }}/ci-go-cache/modules
+          key: ${{ steps.go-cache.outputs.cache-primary-key }}
 
   build:
     needs: target
@@ -183,6 +210,7 @@ jobs:
       GOOS: linux
       GOARCH: amd64
       CI_GO_PLATFORM: linux-x64
+      CI_GO_CACHE_ROLE: tests
       CI_GO_COMPILE_JOBS: '4'
     steps: &compile-go-steps
       - name: Preserve LF bytes on Windows
@@ -211,6 +239,22 @@ jobs:
       - name: Extract Go with native tar (no .NET ZIP expansion)
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/toolchain.mjs extract
+      - name: Set private Go cache paths
+        timeout-minutes: 1
+        run: |
+          printf 'GOCACHE=%s/ci-go-cache/build\nGOMODCACHE=%s/ci-go-cache/modules\n' "$RUNNER_TEMP" "$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - name: Restore Go compilation and module caches
+        id: go-cache
+        uses: actions/cache/restore@v4
+        timeout-minutes: 1
+        with:
+          path: |
+            ${{ runner.temp }}/ci-go-cache/build
+            ${{ runner.temp }}/ci-go-cache/modules
+          key: go-compile-v1-${{ runner.os }}-${{ runner.arch }}-go1.27.4-${{ env.GOOS }}-${{ env.GOARCH }}-${{ env.CI_GO_CACHE_ROLE }}-${{ hashFiles('go.mod', 'go.sum') }}-${{ hashFiles('**/*.go') }}
+          restore-keys: |
+            go-compile-v1-${{ runner.os }}-${{ runner.arch }}-go1.27.4-${{ env.GOOS }}-${{ env.GOARCH }}-${{ env.CI_GO_CACHE_ROLE }}-${{ hashFiles('go.mod', 'go.sum') }}-
+            go-compile-v1-${{ runner.os }}-${{ runner.arch }}-go1.27.4-${{ env.GOOS }}-${{ env.GOARCH }}-${{ env.CI_GO_CACHE_ROLE }}-
       - name: Cold dependency stage 1 of 4
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs prepare-go 0
@@ -262,6 +306,16 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      - name: Save Go compilation and module caches
+        if: steps.go-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        timeout-minutes: 1
+        with:
+          path: |
+            ${{ runner.temp }}/ci-go-cache/build
+            ${{ runner.temp }}/ci-go-cache/modules
+          key: ${{ steps.go-cache.outputs.cache-primary-key }}
+
   test-compile-windows-x64:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -269,6 +323,7 @@ jobs:
       GOOS: windows
       GOARCH: amd64
       CI_GO_PLATFORM: win32-x64
+      CI_GO_CACHE_ROLE: tests
       CI_GO_COMPILE_JOBS: '4'
     steps: *compile-go-steps
 
@@ -279,6 +334,7 @@ jobs:
       GOOS: windows
       GOARCH: arm64
       CI_GO_PLATFORM: win32-arm64
+      CI_GO_CACHE_ROLE: tests
       CI_GO_COMPILE_JOBS: '4'
     steps: *compile-go-steps
 
