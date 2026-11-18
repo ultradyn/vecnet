@@ -1,0 +1,80 @@
+name: R25 native owner contracts and timings
+on:
+  push:
+    branches: [ci80/r25-native-owner-probe]
+permissions:
+  contents: read
+jobs:
+  producer:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    env:
+      CGO_ENABLED: '0'
+      GOMAXPROCS: '2'
+      GOOS: windows
+      GOARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v5
+        timeout-minutes: 1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        timeout-minutes: 1
+        with:
+          node-version: '24'
+      - name: Download pinned build toolchain
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/toolchain.mjs download
+      - name: Extract pinned build toolchain
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/toolchain.mjs extract
+      - name: Build exact source owner and native unit tests
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/probe-r25-owner.mjs build
+      - uses: actions/upload-artifact@v4
+        timeout-minutes: 1
+        with:
+          name: owner-${{ matrix.arch }}
+          path: dist/owner
+          if-no-files-found: error
+  native:
+    needs: producer
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {runner: windows-2025, arch: amd64}
+          - {runner: windows-11-arm, arch: arm64}
+    env:
+      NODE_OPTIONS: --max-old-space-size=512
+    steps:
+      - uses: actions/checkout@v5
+        timeout-minutes: 1
+        with:
+          persist-credentials: false
+      - name: Select actual cached native Node
+        timeout-minutes: 1
+        run: node scripts/ci/native-node.mjs
+      - uses: actions/download-artifact@v5
+        timeout-minutes: 1
+        with:
+          name: owner-${{ matrix.arch }}
+          path: dist/owner
+      - name: Verify and stage source-bound native owner
+        timeout-minutes: 1
+        run: node scripts/ci/probe-r25-owner.mjs stage
+      - name: Execute native owner unit contracts
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 "${{ github.workspace }}/dist/owner/owner.test.exe" -test.v -test.timeout=50s
+      - name: Execute actual owner lifecycle and literal argv contracts
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node --test --test-concurrency=1 scripts/ci/budget.test.mjs scripts/ci/ownership.test.mjs scripts/ci/native-node.test.mjs
+      - name: Compare actual fallback and native owner startup
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/probe-r25-owner.mjs benchmark
