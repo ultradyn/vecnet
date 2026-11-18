@@ -21,7 +21,7 @@ jobs:
     env:
       GOMAXPROCS: '1'
       WIDTH: ${{ matrix.width }}
-      BUNDLE_SHA: 06033790bab371b3fb687243c744704aa472fa52
+      BUNDLE_SHA: 401a8214e2484846854727bf0e8897cc46257362
     steps:
       - uses: actions/checkout@v5
         timeout-minutes: 1

@@ -23,6 +23,6 @@ try {
  const elapsedMs=performance.now()-start;
  const roots=result.inventory.flatMap(p=>p.names.map(n=>p.pkg+'/'+n)).sort();
  const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
- const receipt={helperRevision:execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim(),helperHash:hash(await readFile(new URL('./go-bundle.mjs',import.meta.url))),bundleRevision:sha,width,cpus:availableParallelism(),platform:process.platform,arch:process.arch,node:process.version,GOMAXPROCS:process.env.GOMAXPROCS,packages:result.inventory.length,roots:roots.length,rootHash:hash(JSON.stringify(roots)),elapsedMs};
+ const receipt={helperRevision:execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim(),helperHash:hash(await readFile(new URL('./go-bundle.mjs',import.meta.url))),bundleRevision:sha,width,cpus:availableParallelism(),platform:process.platform,arch:process.arch,node:process.version,GOMAXPROCS:process.env.GOMAXPROCS,packages:result.inventory.length,roots:roots.length,inventory:result.inventory.map(({pkg,names})=>({pkg,names})),rootHash:hash(JSON.stringify(roots)),elapsedMs};
  await writeFile('discovery-result.json',JSON.stringify(receipt,null,2));console.log(JSON.stringify(receipt));
 } finally {await rm(work,{recursive:true,force:true});}
