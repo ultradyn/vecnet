@@ -2,9 +2,10 @@
 // the original suites. Run this whole command under budget.mjs, not each child
 // separately: discovery/compilation and all packages share the step deadline.
 import { execFileSync } from 'node:child_process';
-import { mkdir, readFile, writeFile, access } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, chmod, readFile, writeFile, access } from 'node:fs/promises';
 import { globSync } from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import { performance } from 'node:perf_hooks';
 import { consumeBundle } from './go-bundle.mjs';
 import { partition } from './partition.mjs';
@@ -12,6 +13,11 @@ import { partition } from './partition.mjs';
 const [kind, laneText = '0', groupText = '0'] = process.argv.slice(2);
 const lane = Number(laneText), group = Number(groupText);
 const go = args => execFileSync('go', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] });
+async function privateTemporary(prefix) {
+  const directory = await mkdtemp(path.join(await realpath(os.tmpdir()), prefix));
+  await chmod(directory, 0o700);
+  return directory;
+}
 if (kind === 'prepare-go') {
   const stages = [
     ['mod', 'download'],
@@ -22,10 +28,10 @@ if (kind === 'prepare-go') {
   if (!stages[lane]) throw new Error('invalid prepare stage');
   process.stdout.write(go(stages[lane]));
 } else if (kind === 'consume-go') {
-  const platform=`${process.platform}-${process.arch}`,base=process.env.TMPDIR||process.env.TEMP||process.env.TMP;
-  const bundle=await consumeBundle(path.resolve('dist/go-tests',platform),{sha:process.env.GITHUB_SHA,platform,temporary:path.join(base,'ci80-go-native')});
+  const platform=`${process.platform}-${process.arch}`,temporary=await privateTemporary('vecnet-ci-go-native-');
+  const bundle=await consumeBundle(path.resolve('dist/go-tests',platform),{sha:process.env.GITHUB_SHA,platform,temporary});
   await mkdir('.ci',{recursive:true});
-  for(let i=0;i<6;i++)await writeFile(`.ci/go-${i}.json`,JSON.stringify(bundle.inventory.filter((_,n)=>n%6===i)));
+  for(let i=0;i<6;i++)await writeFile(`.ci/go-${i}.json`,JSON.stringify(bundle.inventory.filter((_,n)=>n%6===i).map(row=>({...row,temporary}))));
   await writeFile('.ci/test2json',bundle.test2json);
   console.log(`Go native bundle: ${bundle.inventory.length} packages, ${bundle.inventory.reduce((n,p)=>n+p.names.length,0)} roots`);
 } else if (kind === 'discover-go') {
@@ -35,10 +41,7 @@ if (kind === 'prepare-go') {
   const selected=partition(packages,lane,6);
   // The batch compile keeps Go's parallel package scheduler and avoids one
   // toolchain invocation/relink per package per root group.
-  const base=process.env.TMPDIR||process.env.TEMP||process.env.TMP;
-  if(!base)throw new Error('private test TMPDIR required');
-  const output=path.join(base,'ci80-go-tests',String(lane));
-  await mkdir(output,{recursive:true});
+  const output=selected.length ? await privateTemporary('vecnet-ci-go-discovery-') : undefined;
   const basenames=selected.map(pkg=>path.basename(pkg));
   const unique=basenames.filter((name,i)=>basenames.indexOf(name)===i);
   const batch=unique.length===selected.length;
@@ -49,14 +52,14 @@ if (kind === 'prepare-go') {
     const binary=path.join(output,(batch?path.basename(pkg):pkg.replace(/[^A-Za-z0-9_-]/g,'_'))+'.test'+(process.platform==='win32'?'.exe':''));
     if(!batch)go(['test','-mod=readonly','-p','2','-trimpath','-c','-o',binary,pkg]);
     const hasTests=meta.hasTests;
-    if(!hasTests){inventory.push({pkg,names:[],directory,binary:null});continue;}
+    if(!hasTests){inventory.push({pkg,names:[],directory,binary:null,temporary:output});continue;}
     // A missing binary for a package with test files must be RED, not a silent
     // empty-inventory success. Compilation has just returned successfully.
     await access(binary);
     const listing=execFileSync(binary,['-test.list','.'],{cwd:directory,encoding:'utf8'});
     const names=listing.trim().split(/\r?\n/).filter(Boolean);
     if(names.some(name=>!/^(?:Test\w+|Example\w*|Fuzz\w+)$/.test(name)))throw new Error('invalid binary discovery');
-    inventory.push({pkg,names,directory,binary});
+    inventory.push({pkg,names,directory,binary,temporary:output});
   }
   await mkdir('.ci', { recursive: true });
   await writeFile(`.ci/go-${lane}.json`, JSON.stringify(inventory));

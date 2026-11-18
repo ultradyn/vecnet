@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, stat, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -20,11 +20,19 @@ test('real Go discovery and every scheduled command execute all roots exactly on
   await writeFile(path.join(cwd, 'small', 'one_test.go'), 'package small\nimport "testing"\nfunc TestSmall(t *testing.T) {}\n');
   await mkdir(path.join(cwd, 'empty'));
   await writeFile(path.join(cwd, 'empty', 'empty.go'), 'package empty\n');
-  const invoke = args => execFileSync(process.execPath, [suite, ...args], { cwd, encoding: 'utf8', timeout: 45_000, maxBuffer: 4 * 1024 * 1024 });
+  // Hosted Linux runners may omit all three temporary-directory variables.
+  // Discovery must allocate its own private physical directory in that case.
+  const env = { ...process.env }; delete env.TMPDIR; delete env.TEMP; delete env.TMP;
+  const invoke = args => execFileSync(process.execPath, [suite, ...args], { cwd, env, encoding: 'utf8', timeout: 45_000, maxBuffer: 4 * 1024 * 1024 });
   for(let i=0;i<6;i++)invoke(['discover-go',String(i)]);
   const inventory=(await Promise.all(Array.from({length:6},(_,i)=>readFile(path.join(cwd,'.ci',`go-${i}.json`),'utf8')))).flatMap(JSON.parse);
   assert.equal(inventory.length, 3);
   const compiled=inventory.filter(p=>p.names.length);
+  t.after(() => Promise.all([...new Set(inventory.map(p=>p.temporary).filter(Boolean))].map(dir=>rm(dir,{recursive:true,force:true}))));
+  for(const directory of new Set(inventory.map(p=>p.temporary))) {
+    assert.equal(await realpath(directory),directory);
+    if(process.platform!=='win32')assert.equal((await stat(directory)).mode & 0o777,0o700);
+  }
   assert.equal(compiled.length,2);
   for(const p of compiled)assert.ok(p.binary && p.directory,'discovery retains original cwd and reusable test binary');
   // A PATH shim rejects go test during execution: compilation belongs solely

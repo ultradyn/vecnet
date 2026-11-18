@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import test from 'node:test';
@@ -24,6 +24,29 @@ test('real compiled bundle conserves platform packages and rejects wrong source/
  const rowNative=result.inventory.find(p=>p.binary);
  const events=execFileSync(result.test2json,['-t','-p',rowNative.pkg,rowNative.binary,'-test.v=test2json','-test.count=1'],{cwd:rowNative.directory,encoding:'utf8'}).trim().split('\n').map(JSON.parse);
  assert.equal(events.filter(e=>e.Action==='pass'&&e.Test==='TestOne').length,1);
+
+ // The real CI entry point must also work without runner-specific TMP vars.
+ const env={...process.env,GITHUB_SHA:sha};delete env.TMPDIR;delete env.TEMP;delete env.TMP;
+ execFileSync(process.execPath,[fileURLToPath(new URL('./suite.mjs',import.meta.url)),'consume-go'],{cwd:root,env});
+ const consumed=(await Promise.all(Array.from({length:6},(_,i)=>readFile(path.join(root,'.ci',`go-${i}.json`),'utf8')))).flatMap(JSON.parse);
+ assert.deepEqual(consumed.flatMap(p=>p.names),['TestOne']);
+ t.after(()=>Promise.all([...new Set(consumed.map(p=>p.temporary))].map(dir=>rm(dir,{recursive:true,force:true}))));
+
+ if(process.platform!=='win32'){
+  // Linux can execute these real ELF fixtures under Windows-style filenames;
+  // this checks relocation identity, not native Windows execution.
+  const winDirectory=path.join(root,'windows-names');await cp(directory,winDirectory,{recursive:true});
+  const winReceipt=JSON.parse(await readFile(path.join(winDirectory,'bundle.json'),'utf8'));
+  winReceipt.platform='win32-x64';
+  await rename(path.join(winDirectory,'test2json'),path.join(winDirectory,'test2json.exe'));
+  for(const row of winReceipt.groups.flat())if(row.file){
+   await rename(path.join(winDirectory,String(row.group),row.file),path.join(winDirectory,String(row.group),row.file+'.exe'));
+   row.file+='.exe';
+  }
+  await writeFile(path.join(winDirectory,'bundle.json'),JSON.stringify(winReceipt));
+  const win=await consumeBundle(winDirectory,{...options,platform:'win32-x64',temporary:path.join(root,'private-windows')});
+  assert.ok(win.inventory.find(p=>p.binary).binary.endsWith('.test.exe'),'Windows relocation must preserve test-executable identity');
+ }
 
  await assert.rejects(consumeBundle(directory,{...options,sha:'bad'}),/source/);
  const receipt=JSON.parse(await readFile(path.join(directory,'bundle.json'),'utf8'));

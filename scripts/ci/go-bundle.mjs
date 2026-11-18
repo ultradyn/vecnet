@@ -38,7 +38,8 @@ export async function consumeBundle(directory,{sha,platform,root=process.cwd(),t
   if(!Number.isInteger(row.group)||row.group<0||row.group>=6||path.basename(row.file)!==row.file)throw new Error('unsafe binary path');
   const source=path.join(directory,String(row.group),row.file);
   const bytes=await readFile(source);if(hash(bytes)!==row.sha256)throw new Error('test binary hash mismatch');
-  const binary=path.join(temporary,row.pkg.replace(/[^A-Za-z0-9_-]/g,'_')+path.extname(row.file));await writeFile(binary,bytes,{mode:0o700});await chmod(binary,0o700);
+  const suffix=platform.startsWith('win32')?'.test.exe':'.test';
+  const binary=path.join(temporary,row.pkg.replace(/[^A-Za-z0-9_-]/g,'_')+suffix);await writeFile(binary,bytes,{mode:0o700});await chmod(binary,0o700);
   const listing=execFileSync(binary,['-test.list','.'],{cwd,encoding:'utf8'});
   const names=listing.trim().split(/\r?\n/).filter(Boolean);
   if(names.some(name=>!/^(?:Test\w+|Example\w*|Fuzz\w+)$/.test(name)))throw new Error('bad native test list');
