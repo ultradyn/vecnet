@@ -61,3 +61,7 @@ test('scheduled partitions distribute all no-test packages, not just packages wi
  const tasks=planGo(empty).flat();
  assert.equal(tasks.length,46);assert.equal(new Set(tasks.map(t=>t.pkg)).size,46);
 });
+test('package launch overhead is counted once after batching, including no-test scheduling',()=>{
+ const plan=planGo([{pkg:'p',names:Array.from({length:48},(_,i)=>`Test${i}`)}],{packages:{p:1},startup:0.25});
+ for(const task of plan.flat())assert.equal(task.cost,task.selected.length+0.25);
+});

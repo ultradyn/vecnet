@@ -9,9 +9,9 @@ import (
 	"github.com/XertroV/vecnet/internal/testhub"
 )
 
-// Catches shared fixture state/identity, missing migrations and a non-FULL
+// Catches shared fixture state/identity, missing migrations and a non-NORMAL
 // connection returned to the pool after copying the closed database image.
-func TestFreshStoreIsIndependentAndFull(t *testing.T) {
+func TestFreshStoreIsIndependentAndNormal(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	var keys, seeds []string
@@ -41,8 +41,8 @@ func TestFreshStoreIsIndependentAndFull(t *testing.T) {
 			conns = append(conns, conn)
 			var sync, fk int
 			var mode string
-			if err := conn.QueryRowContext(ctx, `PRAGMA synchronous`).Scan(&sync); err != nil || sync != 2 {
-				t.Fatalf("FULL: %d %v", sync, err)
+			if err := conn.QueryRowContext(ctx, `PRAGMA synchronous`).Scan(&sync); err != nil || sync != 1 {
+				t.Fatalf("disposable NORMAL: %d %v", sync, err)
 			}
 			if err := conn.QueryRowContext(ctx, `PRAGMA foreign_keys`).Scan(&fk); err != nil || fk != 1 {
 				t.Fatalf("foreign_keys: %d %v", fk, err)
@@ -76,5 +76,32 @@ func TestFreshStoreParallelIsolation(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+// Reopening a fixture must not silently restore FULL and its per-commit cost.
+// Production Open's default is asserted independently by internal/store tests.
+func TestFixtureReopenAndCloneKeepExplicitPolicy(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "hub.db")
+	db := testhub.FreshStore(t, path)
+	if err := db.SetMeta(context.Background(), "reopen_marker", "kept"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened := testhub.OpenFixtureStore(t, path)
+	value, err := reopened.Meta(context.Background(), "reopen_marker")
+	if err != nil || value != "kept" {
+		t.Fatalf("reopen lost state: %s %v", value, err)
+	}
+	env := testhub.Start(t)
+	clone := env.CloneDB(t)
+	for _, db := range []*sql.DB{reopened.DB, env.Hub.DB.DB, clone.Hub.DB.DB} {
+		var got int
+		if err := db.QueryRow(`PRAGMA synchronous`).Scan(&got); err != nil || got != 1 {
+			t.Fatalf("fixture policy reverted: %d %v", got, err)
+		}
 	}
 }

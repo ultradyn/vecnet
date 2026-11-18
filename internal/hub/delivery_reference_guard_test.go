@@ -76,7 +76,7 @@ func guardEnv(t *testing.T) (*testhub.Env, []guardFixture) {
 	}
 	env.Now.Advance(fixed.Sub(env.Now.Now()))
 	// One transaction for the whole seed: each autocommit statement would be
-	// its own synchronous=FULL commit, and these fixtures are rebuilt by most
+	// its own commit, and these fixtures are rebuilt by most
 	// tests in the package. Rows and bytes are identical either way.
 	tx, err := env.Hub.DB.Begin()
 	if err != nil {

@@ -42,7 +42,7 @@ func t2Exec(t *testing.T, e *testhub.Env, q string, args ...any) {
 	}
 }
 
-// t2Seed commits a raw reader fixture as one FULL transaction. It preserves
+// t2Seed commits a raw reader fixture as one transaction. It preserves
 // insert order and triggers; production writes and all reader assertions stay
 // outside the setup transaction.
 func t2Seed(t *testing.T, e *testhub.Env, seed func(*sql.Tx)) {

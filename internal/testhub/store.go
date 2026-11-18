@@ -21,7 +21,7 @@ var emptyStoreImage = sync.OnceValues(func() ([]byte, error) {
 	}
 	defer os.RemoveAll(dir)
 	path := filepath.Join(dir, "hub.db")
-	db, err := store.Open(path)
+	db, err := store.OpenWithSynchronous(path, "normal")
 	if err != nil {
 		return nil, err
 	}
@@ -32,8 +32,9 @@ var emptyStoreImage = sync.OnceValues(func() ([]byte, error) {
 })
 
 // FreshStore opens an independent disposable store without reapplying every
-// migration for every fixture. It still uses store.Open's connection policy
-// (FULL by default); migration, restart and durability tests use Open directly.
+// migration for every fixture. Disposable logical fixtures explicitly use
+// NORMAL; production defaults, migrations and power-loss/durability contracts
+// use store.Open directly (FULL by default).
 // The caller owns the path; the handle is closed at test cleanup.
 func FreshStore(t *testing.T, path string) *store.DB {
 	t.Helper()
@@ -54,11 +55,7 @@ func FreshStore(t *testing.T, path string) *store.DB {
 	if closeErr != nil {
 		t.Fatal(closeErr)
 	}
-	db, err := store.Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := OpenFixtureStore(t, path)
 	// These normally come from migrations. Never share signing/sealing material
 	// between independent hubs just because they share a schema image.
 	if err := db.Tx(context.Background(), func(tx *sql.Tx) error {
@@ -67,5 +64,19 @@ func FreshStore(t *testing.T, path string) *store.DB {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	return db
+}
+
+// OpenFixtureStore opens or reopens an existing disposable logical fixture with
+// per-database NORMAL policy. It must not be used for fsync/power-loss contract
+// tests; those use store.Open. Every pooled connection gets the same explicit
+// policy without modifying the process environment, including parallel tests.
+func OpenFixtureStore(t *testing.T, path string) *store.DB {
+	t.Helper()
+	db, err := store.OpenWithSynchronous(path, "normal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
 	return db
 }

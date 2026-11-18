@@ -39,7 +39,7 @@ export function planGo(inventory, profile = {}) {
     else bin.tasks.set(item.row.pkg,{...item.row,selected:[...item.selected],split:item.split,cost:item.cost});
     bin.load+=item.cost;
   }
-  return bins.map(bin=>[...bin.tasks.values()].map(task=>({...task,selected:task.split?task.selected.sort(compare):task.selected})).sort((a,b)=>b.cost-a.cost || compare(a.pkg,b.pkg)));
+  return bins.map(bin=>[...bin.tasks.values()].map(task=>({...task,cost:task.cost+(profile.startup??0),selected:task.split?task.selected.sort(compare):task.selected})).sort((a,b)=>b.cost-a.cost || compare(a.pkg,b.pkg)));
 }
 
 // Do not return on the first error with live children still running. Stop

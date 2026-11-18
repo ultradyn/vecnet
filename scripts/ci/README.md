@@ -9,9 +9,10 @@ native test2json. Consumers validate/copy to private physical temp, discover
 root names natively, then execute binaries with original package cwd—no native
 toolchain setup, relinking or repeated go test driver. Packages with20+roots
 are partitioned whole-root; smaller/no-test packages remain complete.
-`go-timings.json` records complete R5 PASS root maxima across all native Go
-logs, Windows maximum of x64/ARM, with positive R4 package fallbacks for
-unobserved roots. Censored package failures are not root duration observations.
+`go-timings.json` records complete R6 PASS root maxima across all native Go
+logs, Windows maximum of x64/ARM, with positive prior package fallbacks for
+unobserved roots. Measured per-package process overhead is counted once after
+batching (Windows0.10s/Linux0.02s). Censored package failures are not root duration observations.
 These pre-fixture-correction costs are placement hints, not runtime forecasts. Deterministic weighted
 placement balances whole roots, then batches each package's roots within a
 partition. It is not a coverage allowlist: discovery alone supplies the inventory,
@@ -30,12 +31,24 @@ and ARM until280s. Fewer consumers cut artifact/setup work and queue waves,
 while retaining all24partitions. Actual native timings still must satisfy all limits.
 New roots/examples/fuzz seeds and small/no-test packages remain conserved.
 Disposable testhub/preference stores copy a closed fully migrated image into
-independent files, then regenerate identity material. They still use store.Open
-and its default FULL policy. Two measured retention stress fixtures explicitly
-select per-database NORMAL: the interval model and100/10000-boundary policy
-history startup/SQL-page guard. No process environment override, skips, or
-assertion changes. Default/migration/reopen/compaction contracts and real
-packaged E2E still exercise FULL; production store.Open is unchanged.
+independent files, then regenerate identity material. FreshStore and the named
+OpenFixtureStore explicitly select per-database NORMAL, including testhub clone
+reopens: these fixtures assert logical state/rollback, not power-loss durability.
+StartFull is reserved for FULL maintenance/diagnostic contracts; those assertions
+remain unchanged. Direct store/default/migration/compaction and real packaged
+binary E2E retain FULL. Production store.Open and operator policy are unchanged;
+no process environment override or t.Setenv under parallel tests.
+
+Node file discovery remains exhaustive. R6 measured file costs place whole files
+across four groups with two workers and positive unknown fallback. One measured
+indivisible file, backends/paseo.test.ts (x6446s, ARM incomplete at50s), has four
+registration shards. The CI-only loader wraps actual node:test registration,
+including parameterized/new roots; ordinal modulo selects each root once, while
+nested assertions and hooks stay with the selected root. No source-name parser,
+case allowlist, connector edits or suite timeout changes. A future suite-shaped
+registration fails closed for review, not silently losing coverage. Each child
+reports registered/selected counts and file elapsed time; all errors drain the
+other worker and propagate. E2E files retain original whole-file grouping.
 
 Four independent target builds produce exact-source/version/toolchain/hash
 receipts and all eight CLI/hub binaries. Node/E2E reuse those fresh matching

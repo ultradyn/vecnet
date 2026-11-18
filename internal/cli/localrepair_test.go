@@ -292,6 +292,8 @@ func TestLocalRepairPrefersStandaloneWithLeftoverLauncherUnit(t *testing.T) {
 
 func TestLocalRepairReportsUnregisteredProfileLauncher(t *testing.T) {
 	a, _, home := localRegistryFixture(t)
+	// This is a private filesystem/inventory fixture, not a native Task
+	// Scheduler contract test. It must not read or mutate host tasks.
 	home = filepath.Join(filepath.Dir(home), "operator[1]")
 	a.getenv = func(k string) string {
 		if k == "HOME" {

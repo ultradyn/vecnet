@@ -10,6 +10,8 @@ import { performance } from 'node:perf_hooks';
 import { consumeBundle } from './go-bundle.mjs';
 import { partition } from './partition.mjs';
 import { bounded, planGo, goLanes, goGroups } from './schedule.mjs';
+import {planNode} from './node-schedule.mjs';
+import {fileURLToPath} from 'node:url';
 
 const [kind, laneText = '0', groupText = '0'] = process.argv.slice(2);
 const lane = Number(laneText), group = Number(groupText);
@@ -86,8 +88,27 @@ if (kind === 'prepare-go') {
   const patterns = kind === 'node' ? ['connectors/hub-client/test/*.test.ts', 'connectors/launcher/test/*.test.ts', 'connectors/launcher/test/backends/*.test.ts'] : ['connectors/launcher/test/e2e/*.test.ts'];
   const all = patterns.flatMap(pattern => globSync(pattern));
   if (!all.length) throw new Error('empty Node inventory');
-  const files = partition(all, group, 4);
-  if (!files.length) throw new Error('empty Node group');
-  console.log(`${kind} group=${group}/4 files=${files.length}/${all.length}: ${files.join(', ')}`);
-  execFileSync(process.execPath, ['--disable-warning=ExperimentalWarning', '--test', '--test-reporter=tap', '--test-concurrency=2', ...files], { stdio: 'inherit' });
+  if(kind==='e2e'){
+    const files=partition(all,group,4);
+    if(!files.length)throw new Error('empty Node group');
+    console.log(`${kind} group=${group}/4 files=${files.length}/${all.length}: ${files.join(', ')}`);
+    execFileSync(process.execPath,['--disable-warning=ExperimentalWarning','--test','--test-reporter=tap','--test-concurrency=2',...files],{stdio:'inherit'});
+  }else{
+    partition([],group,4);
+    const timings=JSON.parse(await readFile(new URL('./node-timings.json',import.meta.url),'utf8'));
+    const tasks=planNode(all,timings.profiles[process.platform==='win32'?'windows':'linux'])[group];
+    console.log(`node group=${group}/4 tasks=${tasks.length} discoveredFiles=${all.length}`);
+    await bounded(tasks,async task=>{
+      const started=performance.now();
+      const preload=task.shards>1?['--import',fileURLToPath(new URL('./node-shard-register.mjs',import.meta.url))]:[];
+      await new Promise((resolve,reject)=>{
+        const child=spawn(process.execPath,[...preload,'--disable-warning=ExperimentalWarning','--test','--test-reporter=tap',task.file],{
+          stdio:'inherit',env:{...process.env,CI_NODE_SHARD:String(task.shard),CI_NODE_SHARDS:String(task.shards)},
+        });
+        child.once('error',reject);
+        child.once('close',(code,signal)=>code===0?resolve():reject(new Error(`${task.file} failed: exit=${code} signal=${signal}`)));
+      });
+      console.log(`ci-node-file file=${task.file} shard=${task.shard}/${task.shards} elapsed_ms=${Math.round(performance.now()-started)}`);
+    });
+  }
 } else throw new Error(`unknown suite: ${kind}`);

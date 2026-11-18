@@ -33,7 +33,9 @@ func localRegistryFixture(t *testing.T) (*app, string, string) {
 		t.Fatal(err)
 	}
 	cliFixtureChdir(t, root)
-	return &app{ctx: context.Background(), getenv: func(k string) string {
+	// These fixtures model private registry/filesystem state. Native scheduler
+	// contract tests supply their own task manager; never inspect host tasks here.
+	return &app{ctx: context.Background(), localLauncherTasks: func(context.Context) ([]string, error) { return nil, nil }, getenv: func(k string) string {
 		if k == "HOME" {
 			return home
 		}
