@@ -210,3 +210,20 @@ and npm directories plus root files. Discovery still sees all connector test
 files, backend fixtures, embedded protocol schemas and cross-platform scripts;
 unrelated documentation screenshots are omitted from these consumers. Source
 producers retain full checkout, so Go discovery cannot lose new package roots.
+
+
+R16 source staging replaces each native Go consumer checkout with a
+producer-created archive of the same sparse source trees, ancestor files and
+root files. The archive uses the immutable source revision and preserves Git
+blob bytes, including hidden root fixtures. The same-run test artifact carries
+a standalone Node bootstrap and a receipt binding the archive's revision and
+SHA-256; restore rejects mismatches before native tar extraction. Git remains
+installed for tests which create their own repositories and worktrees. The
+source checkout's `.git` directory is not required by the native Go tests.
+
+Node groups 0 and 1 remain with the Node helper guards; groups 2 and 3 run
+after the four E2E groups on the existing matching native runners. All groups,
+platforms, shards and assertions remain admitted once, without additional
+jobs. These changes enable overlap and remove repeated checkout work; actual
+native completion below 300 seconds and individual steps below 60 seconds
+are still required.
