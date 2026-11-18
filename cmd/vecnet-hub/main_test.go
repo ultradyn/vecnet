@@ -32,6 +32,12 @@ import (
 // Existing stores (including their identity, state and WAL) are never replaced.
 func bootHub(t *testing.T, args []string, getenv func(string) string) *bootedHub {
 	t.Helper()
+	prepareBootHubStore(t, args, getenv)
+	return bootHubFromDisk(t, args, getenv)
+}
+
+func prepareBootHubStore(t *testing.T, args []string, getenv func(string) string) {
+	t.Helper()
 	// Operation callers must explicitly select their private data directory.
 	// Accept both flag spellings and = forms, with flags winning over the env.
 	dir := getenv("VECNET_DATA_DIR")
@@ -49,7 +55,6 @@ func bootHub(t *testing.T, args []string, getenv func(string) string) *bootedHub
 		t.Fatal("bootHub requires an explicit private data directory")
 	}
 	prepareHubSchema(t, dir)
-	return bootHubFromDisk(t, args, getenv)
 }
 
 func prepareHubSchema(t *testing.T, dir string) {
@@ -68,8 +73,9 @@ func prepareHubSchema(t *testing.T, dir string) {
 	}
 }
 
-// Catch fixture path-selection mistakes and accidental identity sharing or
-// replacement by observing real serving hubs, including a stopped-hub restart.
+// Exercise fixture preparation directly; real serving/restart coverage lives in
+// the OAuth, identity and raw-startup tests. Existing database/WAL bytes and
+// identity material must survive repeated preparation, including while open.
 func TestBootHubOperationStoreIsolation(t *testing.T) {
 	seen := map[string]bool{}
 	for _, form := range []string{"env", "--data-dir", "-data-dir="} {
@@ -92,18 +98,58 @@ func TestBootHubOperationStoreIsolation(t *testing.T) {
 				}
 				return ""
 			}
-			h := bootHub(t, args, getenv)
-			first := servedIdentity(t, h.base).Pubkey
-			if seen[first] {
-				t.Fatal("independent stores shared an identity")
+			prepareBootHubStore(t, args, getenv)
+			path := filepath.Join(dir, "hub.db")
+			if _, err := os.Stat(path); err != nil {
+				t.Fatalf("fixture did not create the selected database: %v", err)
 			}
-			seen[first] = true
-			if err := h.stop(); err != nil {
+			db := testhub.OpenFixtureStore(t, path)
+			readSeed := func(name string) string {
+				t.Helper()
+				value, err := db.Meta(context.Background(), name)
+				if err != nil || value == "" {
+					t.Fatalf("read %s: %v", name, err)
+				}
+				return value
+			}
+			seed, seal := readSeed("hub_identity_seed"), readSeed("hub_key")
+			key, err := hubid.KeyFromSeedHex(seed)
+			if err != nil {
 				t.Fatal(err)
 			}
-			h = bootHub(t, args, getenv)
-			if got := servedIdentity(t, h.base).Pubkey; got != first {
-				t.Fatal("restart replaced the existing identity")
+			if seen[key.Pubkey()] || seen[seal] {
+				t.Fatal("independent stores shared identity material")
+			}
+			seen[key.Pubkey()], seen[seal] = true, true
+			if err := db.SetMeta(context.Background(), "isolation_marker", form); err != nil {
+				t.Fatal(err)
+			}
+			readFile := func(name string) []byte {
+				t.Helper()
+				data, err := os.ReadFile(name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return data
+			}
+			before, wal := readFile(path), readFile(path+"-wal")
+			if len(wal) == 0 {
+				t.Fatal("preservation check requires a real nonempty WAL")
+			}
+			prepareBootHubStore(t, args, getenv)
+			if !bytes.Equal(readFile(path), before) || !bytes.Equal(readFile(path+"-wal"), wal) {
+				t.Fatal("preparation changed existing database or WAL bytes")
+			}
+			if readSeed("hub_identity_seed") != seed || readSeed("hub_key") != seal || readSeed("isolation_marker") != form {
+				t.Fatal("preparation changed existing identity or state")
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			before = readFile(path)
+			prepareBootHubStore(t, args, getenv)
+			if !bytes.Equal(readFile(path), before) {
+				t.Fatal("preparation replaced the closed database on restart")
 			}
 			if _, err := os.Stat(unused); !os.IsNotExist(err) {
 				t.Fatalf("unused environment directory was touched: %v", err)
