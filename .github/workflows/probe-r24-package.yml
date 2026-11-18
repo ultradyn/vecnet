@@ -1,0 +1,58 @@
+name: R24 native packed smoke timings
+on:
+  push:
+    branches: [ci80/r24-package-probe]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  native:
+    if: github.repository == 'ultradyn/vecnet' && github.ref == 'refs/heads/ci80/r24-package-probe'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2025, windows-11-arm]
+    env:
+      CGO_ENABLED: '0'
+      GOMAXPROCS: '2'
+      NODE_OPTIONS: --max-old-space-size=512
+    steps:
+      - uses: actions/checkout@v5
+        timeout-minutes: 1
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/ci
+      - uses: actions/setup-node@v6
+        timeout-minutes: 1
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - uses: actions/download-artifact@v5
+        timeout-minutes: 1
+        with:
+          name: npm-release
+          path: dist
+          run-id: 44348810024
+          github-token: ${{ github.token }}
+      - name: Restore exact tested package source
+        timeout-minutes: 1
+        run: node dist/npm-source/restore-source.mjs restore dist/npm-source 18d53d491d6d120c01056723ed4f782395821190
+      - name: Add timing only diagnostics
+        timeout-minutes: 1
+        run: node scripts/ci/package-probe.mjs
+      - name: Time actual checksum verification
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/npm/verify-artifact.mjs
+      - name: Use actual packaged npm version
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/npm-tool.mjs use 12.0.1
+      - name: Time original whole installed package smoke
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node --test --test-name-pattern="^packed npm installation" scripts/npm/package.test.mjs
+      - name: Time other original package roots
+        if: always()
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node --test --test-skip-pattern="^packed npm installation" scripts/npm/package.test.mjs
