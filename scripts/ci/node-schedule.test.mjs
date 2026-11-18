@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {execFileSync,spawnSync} from 'node:child_process';
+import {globSync,readFileSync} from 'node:fs';
 import {mkdtemp,writeFile,rm} from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -21,6 +22,44 @@ test('weighted dynamic files and case shards conserve new files without duplicat
  assert.deepEqual(planNode([...files].reverse(),profile),plan);
  assert.throws(()=>planNode(['a','a'],profile),/duplicate/);
  assert.throws(()=>planNode(['a'],{a:{seconds:1,shards:5}}),/invalid/);
+});
+
+test('discovered inventory keeps Windows platform shards in separate groups only on Windows',()=>{
+ const cwd=fileURLToPath(new URL('../../',import.meta.url));
+ const profiles=JSON.parse(readFileSync(new URL('./node-timings.json',import.meta.url),'utf8')).profiles;
+ const files=['connectors/hub-client/test/*.test.ts','connectors/launcher/test/*.test.ts',
+  'connectors/launcher/test/backends/*.test.ts'].flatMap(pattern=>globSync(pattern,{cwd}));
+ const normalize=file=>file.replaceAll('\\','/');
+ const windowsFile='connectors/launcher/test/windows-platform.test.ts';
+ const paseo='connectors/launcher/test/backends/paseo.test.ts';
+ const added='connectors/launcher/test/new-unprofiled-file.test.ts';
+ const discovered=new Set(files.map(normalize));
+ assert.ok(discovered.has(windowsFile)&&discovered.has(paseo),'both real sharded files must be discovered');
+ assert.ok(!discovered.has(added),'the simulated new file must not exist');
+ for(const platform of ['windows','linux']){
+  const plan=planNode([...files,added],profiles[platform]);
+  assert.equal(plan.length,4);
+  const byFile=new Map();
+  for(const [group,tasks] of plan.entries()){
+   const allocated=new Set();
+   for(const task of tasks){
+    const file=normalize(task.file);
+    assert.ok(!allocated.has(file),`${platform}: ${file} duplicated in group ${group}`);
+    allocated.add(file);
+    if(!byFile.has(file))byFile.set(file,[]);
+    byFile.get(file).push(task);
+   }
+  }
+  assert.equal(byFile.size,discovered.size+1,`${platform}: distinct files`);
+  for(const file of [...discovered,added]){
+   const count=file===paseo||(file===windowsFile&&platform==='windows')?4:1;
+   const tasks=byFile.get(file)??[];
+   assert.equal(tasks.length,count,`${platform}: ${file} task count`);
+   assert.deepEqual(tasks.map(task=>task.shard).sort(),Array.from({length:count},(_,i)=>i),`${platform}: ${file} shard identities`);
+   assert.ok(tasks.every(task=>task.shards===count),`${platform}: ${file} shard total`);
+  }
+  assert.equal(byFile.get(added)[0].seconds,5,`${platform}: unknown-file fallback`);
+ }
 });
 
 test('actual Node registration shards execute dynamic roots, nested assertions and hooks exactly once, and propagate failure',async t=>{
