@@ -640,38 +640,44 @@ func TestLocalRepairPreservesConcurrentSamePathInstallation(t *testing.T) {
 	}
 }
 func TestLocalStartupDefersFileIntegrityToPeriodicRepair(t *testing.T) {
-	a, root, _ := localRegistryFixture(t)
-	if _, err := a.observeLocalProject(localSoftwareVersion(), time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	if err := a.updateLocalProject(root, func(p *localProject) error {
-		// Deliberately inaccessible/missing managed targets: foreground must not
-		// inspect every registered file before dispatching an ordinary command.
-		for i := 0; i < 100; i++ {
-			p.Artifacts = append(p.Artifacts, localArtifact{Path: filepath.Join(root, "missing", time.Unix(int64(i), 0).Format("150405")), Kind: "codex-hooks", Version: localSoftwareVersion(), Hash: strings.Repeat("a", 64), Schema: 1, InstalledAt: time.Now()})
+	// Test checkpoint decisions with logical time so cold private filesystem
+	// work cannot consume the production 200ms startup budget.
+	synctest.Test(t, func(t *testing.T) {
+		a, root, _ := localRegistryFixture(t)
+		// This private project is a plain directory, so host Git is unnecessary.
+		t.Setenv("PATH", t.TempDir())
+		if _, err := a.observeLocalProject(localSoftwareVersion(), time.Now()); err != nil {
+			t.Fatal(err)
 		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	last := localRepairReport{localSetupResult: localSetupResult{State: "ready"}, Version: localSoftwareVersion(), BinarySHA256: localBinarySHA256, AttemptedAt: time.Now()}
-	if err := a.writeLocalState("repair-status.json", mustLocalJSON(last)); err != nil {
-		t.Fatal(err)
-	}
-	var starts int
-	a.localRepairStart = func(*exec.Cmd) error { starts++; return nil }
-	a.localStartup([]string{"peers"})
-	if starts != 0 {
-		t.Fatal("foreground scanned registered files despite a fresh repair checkpoint")
-	}
-	last.AttemptedAt = time.Now().Add(-11 * time.Minute)
-	if err := a.writeLocalState("repair-status.json", mustLocalJSON(last)); err != nil {
-		t.Fatal(err)
-	}
-	a.localStartup([]string{"peers"})
-	if starts != 1 {
-		t.Fatal("periodic integrity work was not scheduled")
-	}
+		if err := a.updateLocalProject(root, func(p *localProject) error {
+			// Deliberately inaccessible/missing managed targets: foreground must not
+			// inspect every registered file before dispatching an ordinary command.
+			for i := 0; i < 100; i++ {
+				p.Artifacts = append(p.Artifacts, localArtifact{Path: filepath.Join(root, "missing", time.Unix(int64(i), 0).Format("150405")), Kind: "codex-hooks", Version: localSoftwareVersion(), Hash: strings.Repeat("a", 64), Schema: 1, InstalledAt: time.Now()})
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		last := localRepairReport{localSetupResult: localSetupResult{State: "ready"}, Version: localSoftwareVersion(), BinarySHA256: localBinarySHA256, AttemptedAt: time.Now()}
+		if err := a.writeLocalState("repair-status.json", mustLocalJSON(last)); err != nil {
+			t.Fatal(err)
+		}
+		var starts int
+		a.localRepairStart = func(*exec.Cmd) error { starts++; return nil }
+		a.localStartup([]string{"peers"})
+		if starts != 0 {
+			t.Fatal("foreground scanned registered files despite a fresh repair checkpoint")
+		}
+		last.AttemptedAt = time.Now().Add(-11 * time.Minute)
+		if err := a.writeLocalState("repair-status.json", mustLocalJSON(last)); err != nil {
+			t.Fatal(err)
+		}
+		a.localStartup([]string{"peers"})
+		if starts != 1 {
+			t.Fatal("periodic integrity work was not scheduled")
+		}
+	})
 }
 
 // Exercise the complete caller, including publication of the helper's new
