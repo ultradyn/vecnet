@@ -824,6 +824,9 @@ func TestStalledSSEWriterDoesNotBlockSend(t *testing.T) {
 				req.Header.Set("Authorization", "Bearer "+aSec)
 				resp, err := http.DefaultClient.Do(req)
 				if err != nil {
+					stacks := make([]byte, 256<<10)
+					n := runtime.Stack(stacks, true)
+					t.Logf("store stats after send failure: %+v\ngoroutines (up to %d bytes):\n%s", env.Hub.DB.Stats(), len(stacks), stacks[:n])
 					t.Fatalf("send %s blocked while SSE writer was stalled: %v", key, err)
 				}
 				_, err = io.Copy(io.Discard, resp.Body)
