@@ -4,7 +4,7 @@ export const goLanes = 6;
 export const goGroups = 4;
 export const nativeGoLanes = platform => platform==='linux'?2:goLanes;
 // Only the hosted native Go execution step opts into the wider pool.
-export const nativeGoWorkers = platform => platform==='win32'?6:platform==='linux'?4:2;
+export const nativeGoWorkers = platform => platform==='win32'||platform==='linux'?4:2;
 export const goPartitions = goLanes * goGroups;
 // target4 + compile3 + build1 + Go(2+6+6) + Node3 + E2E3 + artifact4 + accept1.
 export const releaseJobCount = () => 4 + 3 + 1 + nativeGoLanes('linux') + 2 * goLanes + 3 + 3 + 4 + 1;
@@ -20,16 +20,33 @@ export function goCompileEnvironment(env, available=availableParallelism()) {
   return env.CI_GO_COMPILE_JOBS===undefined?env:{...env,GOMAXPROCS:jobs};
 }
 const compare = (a, b) => a < b ? -1 : a > b ? 1 : 0;
+const packetOrder = (a,b) => b.cost-a.cost || compare(a.pkg,b.pkg) || compare(a.selected[0]??'',b.selected[0]??'');
+function windowsGroupCost(tasks) {
+  // Simulate the same packet order and four ordinary admissions as runGoGroup.
+  const loads=Array(nativeGoWorkers('win32')).fill(0);
+  let prefix=0, ordinary=0;
+  for(const task of tasks.toSorted(packetOrder)){
+    if(task.exclusive){prefix+=task.cost;continue;}
+    loads[loads.indexOf(Math.min(...loads))]+=task.cost;
+    ordinary+=task.cost;
+  }
+  return [prefix+Math.max(...loads),prefix+ordinary/loads.length];
+}
 const cost = n => {
   if (!Number.isFinite(n) || n <= 0) throw new Error('invalid scheduling cost');
   return n;
 };
 // Resource admission for discovered Windows roots, not coverage selection.
+const repairRoot = 'TestLauncherWindowsManagedRepairPreservesServiceIntent';
 const exclusiveGoRoots = new Map([
   ['github.com/XertroV/vecnet/internal/httpapi',['TestSlowSSEConsumerDoesNotBlockSend']],
   ['github.com/XertroV/vecnet/internal/cli',[
     'TestCodexHookWindowsInstalledCommandPreservesArgv',
-    'TestLauncherWindowsManagedRepairPreservesServiceIntent',
+    // These three real Node admissions overlapped and timed out on ARM64.
+    'TestLauncherWindowsInstallPreviewAndExplicitIntent',
+    'TestLauncherWindowsInstallRejectsUnsafeDACLAndHardlinks',
+    'TestLauncherWindowsRepairPendingDriftUnit',
+    repairRoot,
   ]],
 ]);
 export function planGo(inventory, profile = {}, {lanes=goLanes,platform=process.platform} = {}) {
@@ -55,30 +72,50 @@ export function planGo(inventory, profile = {}, {lanes=goLanes,platform=process.
       for (const name of row.names) work.push({row, selected:[name], split:true, exclusive:exclusive(name), cost:weight(name)});
     }
   }
-  work.sort((a,b)=>b.cost-a.cost || compare(a.row.pkg,b.row.pkg) || compare(a.selected[0]??'',b.selected[0]??''));
+  const windows=platform==='win32';
+  work.sort((a,b)=>(windows?Number(!!b.exclusive)-Number(!!a.exclusive):0) ||
+    b.cost-a.cost || compare(a.row.pkg,b.row.pkg) || compare(a.selected[0]??'',b.selected[0]??''));
   const bins = Array.from({length:lanes*goGroups},()=>({load:0, tasks:[]}));
+  const laneLoad = lane => Array.from({length:goGroups},(_,group)=>bins[group*lanes+lane].load).reduce((a,b)=>a+b,0);
   for (const item of work) {
-    // Partition n belongs to lane n%lanes, group floor(n/lanes). Balance lane
-    // totals as a tie breaker so early stragglers do not share a native runner.
-    const laneLoad = lane => Array.from({length:goGroups},(_,group)=>bins[group*lanes+lane].load).reduce((a,b)=>a+b,0);
-    let index = 0;
-    for (let i=1;i<bins.length;i++) {
-      if (bins[i].load < bins[index].load || (bins[i].load===bins[index].load && laneLoad(i%lanes)<laneLoad(index%lanes))) index=i;
+    const startup=item.measured?0:(profile.startup===undefined?0:cost(profile.startup));
+    const task={...item.row,selected:[...item.selected],split:item.split,...(item.exclusive?{exclusive:true}:{}),rootCost:item.cost,cost:item.cost+startup};
+    const add = tasks => {
+      // Keep the packet caps: an indivisible root can exceed the cost cap.
+      const previous=item.split && !item.exclusive ? tasks.findLastIndex(t=>t.pkg===task.pkg&&t.split&&!t.exclusive&&t.selected.length+task.selected.length<=8&&t.rootCost+item.cost<=4) : -1;
+      if(previous===-1)return {tasks:[...tasks,task],newPacket:true};
+      const old=tasks[previous], next=tasks.slice();
+      next[previous]={...old,selected:[...old.selected,...task.selected].sort(compare),rootCost:old.rootCost+item.cost,cost:old.cost+item.cost};
+      return {tasks:next,newPacket:false};
+    };
+    if(windows){
+      let best;
+      for(const [i,bin] of bins.entries()){
+        const candidate=add(bin.tasks), [elapsed,pressure]=windowsGroupCost(candidate.tasks);
+        const sharesRepair=candidate.tasks.length>1&&candidate.tasks.some(t=>t.exclusive&&t.selected[0]===repairRoot);
+        // Keep one existing group for the whole repair root. It passed at 28s
+        // while its remaining pool hit the owner; even 50s must leave no tail.
+        // The 37s soft target leaves residual/noise headroom, never omits work.
+        const score=[Number(sharesRepair),Math.max(0,elapsed-37),laneLoad(i%lanes)+elapsed-bin.load,elapsed,pressure];
+        // Compare lexicographically; the first equal slot wins deterministically.
+        const diff=best?.score.findIndex((v,j)=>v!==score[j]);
+        if(!best||(diff>=0&&score[diff]<best.score[diff]))best={bin,tasks:candidate.tasks,elapsed,score};
+      }
+      best.bin.tasks=best.tasks;best.bin.load=best.elapsed;
+    } else {
+      // Keep non-Windows placement unchanged: scalar load, then lane totals.
+      let index=0;
+      for(let i=1;i<bins.length;i++){
+        if(bins[i].load<bins[index].load||(bins[i].load===bins[index].load&&laneLoad(i%lanes)<laneLoad(index%lanes)))index=i;
+      }
+      const bin=bins[index], candidate=add(bin.tasks);
+      bin.tasks=candidate.tasks;
+      // Retain the historical addition order for exact Linux ties.
+      if(candidate.newPacket)bin.load+=startup;
+      bin.load+=item.cost;
     }
-    const bin=bins[index];
-    // Do not coalesce an unbounded package batch: spare workers must be able
-    // to execute multiple packets. Limits are placement hints, not timeouts;
-    // one indivisible root may exceed the cost cap. Discovery remains authority.
-    const previous=item.split && !item.exclusive && bin.tasks.findLast(task=>task.pkg===item.row.pkg && task.split && !task.exclusive && task.selected.length+item.selected.length<=8 && task.rootCost+item.cost<=4);
-    if(previous){previous.selected.push(...item.selected);previous.rootCost+=item.cost;previous.cost+=item.cost;}
-    else {
-      const startup=item.measured?0:(profile.startup===undefined?0:cost(profile.startup));
-      bin.tasks.push({...item.row,selected:[...item.selected],split:item.split,...(item.exclusive?{exclusive:true}:{}),rootCost:item.cost,cost:item.cost+startup});
-      bin.load+=startup;
-    }
-    bin.load+=item.cost;
   }
-  return bins.map(bin=>bin.tasks.map(({rootCost,...task})=>({...task,selected:task.split?task.selected.sort(compare):task.selected})).sort((a,b)=>b.cost-a.cost || compare(a.pkg,b.pkg) || compare(a.selected[0]??'',b.selected[0]??'')));
+  return bins.map(bin=>bin.tasks.map(({rootCost,...task})=>({...task,selected:task.split?task.selected.sort(compare):task.selected})).sort(packetOrder));
 }
 
 // Do not return on the first error with live children still running. Stop

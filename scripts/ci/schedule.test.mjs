@@ -271,18 +271,15 @@ test('Windows admits the whole repair root and PowerShell root as separate seria
  const ordinary=repair+'Extended';
  const inv=[{pkg,names:[hook,repair,ordinary],binary:'cli',directory:'original'},
   ...['a','b','c'].map(pkg=>({pkg,names:[repair],binary:pkg}))];
- // Fill three of the four groups so the two cheap CLI roots share the fourth.
- // Both fit the ordinary packet caps, so accidental coalescing is observable.
  const profile={packages:{a:4,b:4,c:4},roots:{[pkg]:{[repair]:2,[hook]:1}}};
  const plan=planGo(inv,profile,{platform:'win32',lanes:1});
  const roots=groups=>groups.flat().flatMap(t=>t.selected.map(name=>`${t.pkg}/${name}`)).sort();
  const discovered=inv.flatMap(p=>p.names.map(name=>`${p.pkg}/${name}`)).sort();
  assert.deepEqual(roots(plan),discovered);
- assert.equal(plan.flat().filter(t=>t.exclusive).length,2);
- const group=plan.find(tasks=>tasks.some(t=>t.pkg===pkg&&t.selected.includes(repair)));
- const exclusive=group.filter(t=>t.exclusive);
+ const exclusive=plan.flat().filter(t=>t.exclusive).sort((a,b)=>b.cost-a.cost);
  assert.deepEqual(exclusive.map(t=>t.selected),[[repair],[hook]]);
  assert.ok(exclusive.every(t=>t.split&&t.pkg===pkg&&t.binary==='cli'&&t.directory==='original'));
+ const group=[plan.flat().find(t=>t.pkg===pkg&&!t.exclusive),...exclusive];
 
  const starts=[],release=new Map();
  const run=runGoGroup(group,async task=>{
@@ -305,7 +302,7 @@ test('Windows admits the whole repair root and PowerShell root as separate seria
  assert.equal(linux.flat().filter(t=>t.pkg===pkg).length,1);
 });
 
-test('native Go worker policy admits six Windows and four Linux packets, with a two-worker fallback',async()=>{
+test('native Go worker policy admits four Windows and Linux packets, with a two-worker fallback',async()=>{
  const starts=[];
  for(const platform of ['win32','linux','darwin']){
   const items=Array.from({length:8},(_,id)=>({id}));
@@ -318,5 +315,58 @@ test('native Go worker policy admits six Windows and four Linux packets, with a 
   for(let i=0;i<items.length;i++){for(const release of releases)release?.();await turn();}
   await running;
  }
- assert.deepEqual(starts,[6,4,2]);
+ assert.deepEqual(starts,[4,4,2]);
+});
+
+test('Windows isolates the three observed cold Node admission failures, scoped to exact CLI roots',async()=>{
+ const pkg='github.com/XertroV/vecnet/internal/cli';
+ const names=['TestLauncherWindowsInstallRejectsUnsafeDACLAndHardlinks','TestLauncherWindowsRepairPendingDriftUnit','TestLauncherWindowsInstallPreviewAndExplicitIntent'];
+ const ordinary=['TestLauncherWindowsRepairPendingDriftTask',names[0]+'Extended','TestNew','Example','FuzzSeed'];
+ const input=[{pkg,names:[...names,...ordinary],binary:'real-cli',directory:'original'},
+  {pkg:'other',names:[names[0]]},{pkg:'empty',names:[],binary:null}];
+ const plan=planGo(input,{}, {platform:'win32',lanes:2});
+ const packets=plan.flat();
+ assert.equal(packets.filter(t=>t.exclusive).length,names.length);
+ assert.deepEqual(packets.filter(t=>t.exclusive).flatMap(t=>t.selected).sort(),names.toSorted());
+ assert.ok(packets.filter(t=>t.exclusive).every(t=>t.pkg===pkg&&t.split&&t.selected.length===1&&t.binary==='real-cli'&&t.directory==='original'));
+ const discovered=input.flatMap(t=>(t.names.length?t.names:['']).map(n=>`${t.pkg}/${n}`)).sort();
+ const roots=tasks=>tasks.flatMap(t=>(t.selected.length?t.selected:['']).map(n=>`${t.pkg}/${n}`)).sort();
+ assert.deepEqual(roots(packets),discovered);
+ const linux=planGo(input,{}, {platform:'linux',lanes:2}).flat();
+ assert.deepEqual(roots(linux),discovered);
+ assert.ok(linux.every(t=>!t.exclusive));
+ for(const group of plan){
+  const starts=[];
+  await runGoGroup(group,async t=>{starts.push(!!t.exclusive);},4);
+  assert.deepEqual(starts,group.map(t=>!!t.exclusive).sort((a,b)=>Number(b)-Number(a)));
+ }
+});
+
+test('Windows keeps an existing group free of any repair tail even with cheap ordinary work',()=>{
+ const pkg='github.com/XertroV/vecnet/internal/cli';
+ const repair='TestLauncherWindowsManagedRepairPreservesServiceIntent';
+ const input=[{pkg,names:[repair]},...Array.from({length:12},(_,i)=>({pkg:`other${i}`,names:['TestOrdinary']}))];
+ const profile={roots:{[pkg]:{[repair]:2}}};
+ const bins=planGo(input,profile,{platform:'win32',lanes:1});
+ const repairBin=bins.find(g=>g.some(t=>t.selected.includes(repair)));
+ assert.equal(repairBin.length,1);
+ assert.equal(repairBin[0].exclusive,true);
+});
+
+test('Windows placement prices the serial prefix separately and leaves whole repair no queued remainder',()=>{
+ const pkg='github.com/XertroV/vecnet/internal/cli';
+ const repair='TestLauncherWindowsManagedRepairPreservesServiceIntent';
+ const dacl='TestLauncherWindowsInstallRejectsUnsafeDACLAndHardlinks';
+ const input=[{pkg,names:[repair,dacl],binary:'real-cli'},
+  ...Array.from({length:12},(_,j)=>({pkg:`p${j}`,names:['TestHeavy']}))];
+ const profile={roots:{[pkg]:{[repair]:28,[dacl]:28}},packages:Object.fromEntries(input.slice(1).map(t=>[t.pkg,14]))};
+ const bins=planGo(input,profile,{platform:'win32',lanes:1});
+ const repairBin=bins.find(g=>g.some(t=>t.selected.includes(repair)));
+ assert.equal(repairBin.length,1);
+ assert.equal(repairBin[0].exclusive,true);
+ const daclBin=bins.find(g=>g.some(t=>t.selected.includes(dacl)));
+ assert.equal(daclBin.length,1,'ordinary workers should use the low-makespan bins, not load up an expensive serial prefix');
+ assert.equal(bins.flat().filter(t=>t.selected[0]==='TestHeavy').length,12);
+ assert.ok(bins.filter(g=>g!==repairBin&&g!==daclBin).every(g=>g.length<=8));
+ assert.equal(JSON.stringify(bins),JSON.stringify(planGo([...input].reverse(),profile,{platform:'win32',lanes:1})));
 });
