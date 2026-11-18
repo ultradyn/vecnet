@@ -274,6 +274,7 @@ func (a *app) exit(err error) int {
 		fmt.Fprintf(a.stderr, "vecnet: %s\n", ue.msg)
 		return exitUsage
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		fmt.Fprintf(a.stderr, "R27_TRACE context type=%T cause=%v\n", err, err)
 		fmt.Fprintln(a.stderr, "vecnet: interrupted")
 		return exitUsage
 	default:

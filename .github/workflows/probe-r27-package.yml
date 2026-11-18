@@ -1,0 +1,128 @@
+name: Disposable R27 ARM package trace (never publish)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ci81/r27-package-trace]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: disposable-r27-package-trace
+  cancel-in-progress: false
+
+env:
+  CGO_ENABLED: '0'
+  GOMAXPROCS: '2'
+  GOFLAGS: '-p=2'
+
+jobs:
+  producer:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      GOOS: windows
+      GOARCH: arm64
+      GOARM64: v8.0
+    steps:
+      - uses: actions/checkout@v5
+        timeout-minutes: 1
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - uses: actions/setup-node@v6
+        timeout-minutes: 1
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Share strict overall probe deadline
+        timeout-minutes: 1
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/package-trace.mjs deadline
+      - name: Download pinned Go 1.27.4
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/toolchain.mjs download
+      - name: Extract verified Go archive
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/toolchain.mjs extract
+      - name: Cold dependency stage 1 of 4
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs prepare-go 0
+      - name: Cold dependency stage 2 of 4
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs prepare-go 1
+      - name: Cold dependency stage 3 of 4
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs prepare-go 2
+      - name: Cold dependency stage 4 of 4
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs prepare-go 3
+      - name: Verify exact R26 artifact and actual merge source
+        timeout-minutes: 1
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/package-trace.mjs prepare
+      - name: Build only diagnostic Windows ARM64 CLI
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/package-trace.mjs build
+      - name: Repack trace-mixed bytes and stage frozen package source
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/package-trace.mjs pack
+      - uses: actions/upload-artifact@v4
+        timeout-minutes: 1
+        with:
+          name: r27-trace-mixed
+          path: dist/r27-trace
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 7
+
+  arm:
+    needs: producer
+    runs-on: windows-11-arm
+    timeout-minutes: 5
+    steps:
+      - name: Preserve committed source bytes
+        timeout-minutes: 1
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v5
+        timeout-minutes: 1
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/ci
+            scripts/npm
+      - uses: actions/setup-node@v6
+        timeout-minutes: 1
+        with:
+          node-version: '24'
+          architecture: arm64
+          package-manager-cache: false
+      - name: Share strict overall probe deadline
+        timeout-minutes: 1
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/package-trace.mjs deadline
+      - name: API verify exact same-run SHA-bound diagnostic artifact
+        timeout-minutes: 1
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/package-trace.mjs download
+      - name: Verify mixed receipts and restore staged committed source
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/package-trace.mjs consume
+      - name: Verify and use original staged npm 12.0.1
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/npm-tool.mjs use 12.0.1
+      - name: Run unchanged packed integration with visible phase trace
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/package-trace.mjs test
+      - name: Check completed step and whole-probe budgets
+        if: always()
+        timeout-minutes: 1
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/package-trace.mjs audit

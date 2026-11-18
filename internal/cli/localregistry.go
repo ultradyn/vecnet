@@ -284,6 +284,12 @@ func (a *app) localProjects() ([]localProject, error) {
 func (a *app) mutateLocalRegistry(create bool, fn func(*localRegistryDocument) error) error {
 	ctx, cancel := context.WithTimeout(a.localRegistryContext(), 2*time.Second)
 	defer cancel()
+	traceStarted := time.Now()
+	defer func() {
+		if ctx.Err() != nil {
+			fmt.Fprintf(os.Stderr, "R27_TRACE inventory elapsed=%s context=%v\n", time.Since(traceStarted), ctx.Err())
+		}
+	}()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -381,6 +387,7 @@ func (a *app) localProjectIdentity() (localProject, error) {
 			return p, err
 		}
 	} else if ctx.Err() != nil {
+		fmt.Fprintf(os.Stderr, "R27_TRACE git-identity context=%v\n", ctx.Err())
 		return p, ctx.Err()
 	} // Non-Git directories also work without git installed.
 	return p, nil

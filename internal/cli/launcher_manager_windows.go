@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -124,7 +125,10 @@ func (c *launcherScheduler) command(ctx context.Context, op string, task launche
 	cmd.WaitDelay = 100 * time.Millisecond
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
+	traceStart := time.Now()
+	fmt.Fprintf(os.Stderr, "R27_TRACE scheduler begin op=%s\n", op)
 	raw, err := cmd.Output()
+	fmt.Fprintf(os.Stderr, "R27_TRACE scheduler end op=%s elapsed=%s context=%v failed=%t\n", op, time.Since(traceStart), ctx.Err(), err != nil)
 	if err != nil {
 		if ctx.Err() != nil {
 			return launcherSchedulerReply{}, ctx.Err()

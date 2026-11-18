@@ -477,6 +477,7 @@ func launcherUnit(template []byte, m launcherInstall, config, vecnetConfig, home
 }
 
 func (a *app) launcherInstall(p launcherPaths, o opts) error {
+	traceStarted := time.Now()
 	if runtime.GOOS != "linux" && runtime.GOOS != "windows" {
 		return usageErr("launcher install requires Linux/systemd or Windows Task Scheduler")
 	}
@@ -620,10 +621,12 @@ func (a *app) launcherInstall(p launcherPaths, o opts) error {
 	} else if e != nil && !errors.Is(e, os.ErrNotExist) {
 		return e
 	}
+	fmt.Fprintf(os.Stderr, "R27_TRACE install prepare-manager elapsed=%s\n", time.Since(traceStarted))
 	applyManager, err := a.launcherPrepareManagerInstall(p, []byte(unit), o.has("enable"), o.has("start"))
 	if err != nil {
 		return err
 	}
+	fmt.Fprintf(os.Stderr, "R27_TRACE install snapshot elapsed=%s\n", time.Since(traceStarted))
 	if err = launcherSnapshot(snapshots, filepath.Base(snapshot), files); err != nil {
 		return err
 	}
@@ -637,12 +640,15 @@ func (a *app) launcherInstall(p launcherPaths, o opts) error {
 	if err = launcherAtomicWrite(manifestRoot, filepath.Base(p.Manifest), append(raw, '\n')); err != nil {
 		return err
 	}
+	fmt.Fprintf(os.Stderr, "R27_TRACE install apply-manager elapsed=%s\n", time.Since(traceStarted))
 	if err = applyManager(); err != nil {
 		return err
 	}
 
+	fmt.Fprintf(os.Stderr, "R27_TRACE install inventory elapsed=%s\n", time.Since(traceStarted))
 	if err = a.registerLauncherInstallation(p, m, []byte(unit), vecnetConfig, searchPath, !o.has("vecnet-bin") && a.getenv("VECNET_BIN") == "", !o.has("source")); err != nil {
 		return err
 	}
+	fmt.Fprintf(os.Stderr, "R27_TRACE install done elapsed=%s\n", time.Since(traceStarted))
 	return a.emitValue(plan)
 }
