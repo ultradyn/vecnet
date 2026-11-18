@@ -67,16 +67,12 @@ func launcherUseFakeTasks(t *testing.T) *launcherFakeTasks {
 	t.Cleanup(func() { newLauncherTaskController = original })
 	return manager
 }
-func launcherWindowsFixture(t *testing.T) (launcherFixture, *app, *launcherFakeTasks, []string) {
+func launcherWindowsFixture(t *testing.T, nodeMode launcherFixtureNodeMode) (launcherFixture, *app, *launcherFakeTasks, []string) {
 	t.Helper()
 	manager := launcherUseFakeTasks(t)
 	f := newLauncherFixture(t, "launcher")
 	if code, _, errs := f.run(t, append(f.setup, "--write")...); code != 0 {
 		t.Fatal(errs)
-	}
-	node, err := exec.LookPath("node.exe")
-	if err != nil {
-		t.Fatal("native Windows Node is required for launcher install tests: ", err)
 	}
 	executable, err := os.Executable()
 	if err != nil {
@@ -94,7 +90,7 @@ func launcherWindowsFixture(t *testing.T) (launcherFixture, *app, *launcherFakeT
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = io.Copy(file, source)
+	_, err = copyFixtureImage(file, source)
 	source.Close()
 	closeErr := file.Close()
 	if err != nil {
@@ -103,32 +99,15 @@ func launcherWindowsFixture(t *testing.T) (launcherFixture, *app, *launcherFakeT
 	if closeErr != nil {
 		t.Fatal(closeErr)
 	}
-	// Stage a genuine Node image into this private fixture, so software/repair
-	// tests are independent of the machine's package-manager install ACLs.
-	nodeCopy := filepath.Join(f.env["HOME"], "private node", "node.exe")
-	if err = platform.MkdirAll(filepath.Dir(nodeCopy), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	input, err := os.Open(node)
+	nodeCopy, err := launcherFixtureNode(f.env["HOME"], nodeMode)
 	if err != nil {
-		t.Fatal(err)
-	}
-	output, err := platform.OpenFile(nodeCopy, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o700)
-	if err != nil {
-		input.Close()
-		t.Fatal(err)
-	}
-	_, err = io.Copy(output, input)
-	input.Close()
-	closeErr = output.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if closeErr != nil {
-		t.Fatal(closeErr)
+		t.Fatal("stage genuine Windows Node for launcher install tests: ", err)
 	}
 	args := []string{"install", "--source", launcherTestSource(t), "--node", nodeCopy, "--vecnet-bin", bin}
-	if code, _, errs := f.run(t, append(args, "--write")...); code != 0 {
+	start := time.Now()
+	code, _, errs := f.run(t, append(args, "--write")...)
+	t.Logf("launcher fixture initial install: prepared=%t elapsed=%s exit=%d", nodeMode == preparedLauncherNode, time.Since(start), code)
+	if code != 0 {
 		t.Fatal(errs)
 	}
 	a := &app{ctx: context.Background(), getenv: func(k string) string { return f.env[k] }, stdout: io.Discard, stderr: io.Discard}
@@ -136,7 +115,7 @@ func launcherWindowsFixture(t *testing.T) (launcherFixture, *app, *launcherFakeT
 }
 func launcherWindowsRepairFixture(t *testing.T, active, enabled bool) (launcherFixture, *app, *launcherFakeTasks, string, localArtifact) {
 	t.Helper()
-	f, a, manager, _ := launcherWindowsFixture(t)
+	f, a, manager, _ := launcherWindowsFixture(t, preparedLauncherNode)
 	path := filepath.Join(filepath.Dir(f.paths.Manifest), "managed.json")
 	var meta launcherManaged
 	if err := json.Unmarshal(launcherTestRead(t, path), &meta); err != nil {
@@ -241,7 +220,9 @@ func TestLauncherWindowsTaskDefinitionIsLiteralAndComplete(t *testing.T) {
 	}
 }
 func TestLauncherWindowsInstallPreviewAndExplicitIntent(t *testing.T) {
-	f, _, manager, args := launcherWindowsFixture(t)
+	// This existing exclusive root covers cold admission through the real
+	// install's five-second probe. Do not prepare this image in the fixture.
+	f, _, manager, args := launcherWindowsFixture(t, coldLauncherNode)
 	if manager.state.Active || manager.state.Enabled {
 		t.Fatal("implicit install enabled/started task")
 	}
@@ -429,7 +410,7 @@ func TestLauncherWindowsRepairRejectsTaskAndPublicationDrift(t *testing.T) {
 func TestLauncherWindowsInstallRejectsUnsafeDACLAndHardlinks(t *testing.T) {
 	for _, kind := range []string{"credential", "snapshot", "unit", "lock", "hardlink", "data-ancestor", "manifest-ancestor"} {
 		t.Run(kind, func(t *testing.T) {
-			f, _, manager, args := launcherWindowsFixture(t)
+			f, _, manager, args := launcherWindowsFixture(t, preparedLauncherNode)
 			var runtime launcherInstall
 			json.Unmarshal(launcherTestRead(t, f.paths.Manifest), &runtime)
 			path := map[string]string{"credential": f.paths.Credential, "snapshot": runtime.Entry, "unit": f.paths.Unit, "lock": f.paths.Manifest + ".lock", "hardlink": runtime.Entry, "data-ancestor": f.env["XDG_DATA_HOME"], "manifest-ancestor": f.env["XDG_CONFIG_HOME"]}[kind]
@@ -639,7 +620,7 @@ func TestLauncherWindowsLiveTaskScheduler(t *testing.T) {
 }
 
 func TestLauncherWindowsTaskControllerRejectsConcurrentChanges(t *testing.T) {
-	f, _, manager, args := launcherWindowsFixture(t)
+	f, _, manager, args := launcherWindowsFixture(t, preparedLauncherNode)
 	raw := launcherTestRead(t, f.paths.Unit)
 	prepare, err := (&app{ctx: context.Background(), getenv: func(k string) string { return f.env[k] }}).launcherWindowsPrepareInstall(f.paths, raw, false, false)
 	if err != nil {
@@ -664,40 +645,61 @@ func TestLauncherWindowsTaskControllerRejectsConcurrentChanges(t *testing.T) {
 		t.Fatal("custom task refusal republished profile")
 	}
 }
-func TestLauncherWindowsRepairPendingIntentAndEnablementDrift(t *testing.T) {
-	for _, kind := range []string{"enabled", "active", "task", "intent", "metadata", "unit", "manifest"} {
-		t.Run(kind, func(t *testing.T) {
-			f, a, manager, project, art := launcherWindowsRepairFixture(t, false, false)
-			manager.failRegister = true
-			if _, err := a.repairLauncherArtifact(project, art); err == nil {
-				t.Fatal("did not leave pending repair")
-			}
-			manager.failRegister = false
-			manager.calls = nil
-			switch kind {
-			case "enabled":
-				manager.state.Enabled = true
-			case "active":
-				manager.state.Active = true
-			case "task":
-				manager.state.Definition.Executable = `C:\custom\node.exe`
-			default:
-				path := map[string]string{"intent": filepath.Join(filepath.Dir(art.Path), "repair-pending.json"), "metadata": art.Path, "unit": f.paths.Unit, "manifest": f.paths.Manifest}[kind]
-				if err := os.WriteFile(path, []byte("custom pending\n"), 0o600); err != nil {
-					t.Fatal(err)
-				}
-			}
-			unit, manifest, meta := launcherTestRead(t, f.paths.Unit), launcherTestRead(t, f.paths.Manifest), launcherTestRead(t, art.Path)
-			if _, err := a.repairLauncherArtifact(project, art); err == nil {
-				t.Fatal("pending drift accepted")
-			}
-			if !bytes.Equal(unit, launcherTestRead(t, f.paths.Unit)) || !bytes.Equal(manifest, launcherTestRead(t, f.paths.Manifest)) || !bytes.Equal(meta, launcherTestRead(t, art.Path)) {
-				t.Fatal("pending drift overwritten")
-			}
-			if strings.Contains(strings.Join(manager.calls, "\n"), "register ") || strings.Contains(strings.Join(manager.calls, "\n"), "restart ") {
-				t.Fatal("drift activated task")
-			}
-		})
+
+// Each drift case is an independent root so native whole-root scheduling can
+// place it without a seven-fixture indivisible straggler. Assertions stay shared.
+func TestLauncherWindowsRepairPendingDriftEnabled(t *testing.T) {
+	launcherWindowsRepairPendingDrift(t, "enabled")
+}
+func TestLauncherWindowsRepairPendingDriftActive(t *testing.T) {
+	launcherWindowsRepairPendingDrift(t, "active")
+}
+func TestLauncherWindowsRepairPendingDriftTask(t *testing.T) {
+	launcherWindowsRepairPendingDrift(t, "task")
+}
+func TestLauncherWindowsRepairPendingDriftIntent(t *testing.T) {
+	launcherWindowsRepairPendingDrift(t, "intent")
+}
+func TestLauncherWindowsRepairPendingDriftMetadata(t *testing.T) {
+	launcherWindowsRepairPendingDrift(t, "metadata")
+}
+func TestLauncherWindowsRepairPendingDriftUnit(t *testing.T) {
+	launcherWindowsRepairPendingDrift(t, "unit")
+}
+func TestLauncherWindowsRepairPendingDriftManifest(t *testing.T) {
+	launcherWindowsRepairPendingDrift(t, "manifest")
+}
+func launcherWindowsRepairPendingDrift(t *testing.T, kind string) {
+	t.Helper()
+	f, a, manager, project, art := launcherWindowsRepairFixture(t, false, false)
+	manager.failRegister = true
+	if _, err := a.repairLauncherArtifact(project, art); err == nil {
+		t.Fatal("did not leave pending repair")
+	}
+	manager.failRegister = false
+	manager.calls = nil
+	switch kind {
+	case "enabled":
+		manager.state.Enabled = true
+	case "active":
+		manager.state.Active = true
+	case "task":
+		manager.state.Definition.Executable = `C:\custom\node.exe`
+	default:
+		path := map[string]string{"intent": filepath.Join(filepath.Dir(art.Path), "repair-pending.json"), "metadata": art.Path, "unit": f.paths.Unit, "manifest": f.paths.Manifest}[kind]
+		if err := os.WriteFile(path, []byte("custom pending\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	unit, manifest, meta := launcherTestRead(t, f.paths.Unit), launcherTestRead(t, f.paths.Manifest), launcherTestRead(t, art.Path)
+	if _, err := a.repairLauncherArtifact(project, art); err == nil {
+		t.Fatal("pending drift accepted")
+	}
+	if !bytes.Equal(unit, launcherTestRead(t, f.paths.Unit)) || !bytes.Equal(manifest, launcherTestRead(t, f.paths.Manifest)) || !bytes.Equal(meta, launcherTestRead(t, art.Path)) {
+		t.Fatal("pending drift overwritten")
+	}
+	if strings.Contains(strings.Join(manager.calls, "\n"), "register ") || strings.Contains(strings.Join(manager.calls, "\n"), "restart ") {
+		t.Fatal("drift activated task")
 	}
 }
 func TestLauncherWindowsTaskHostRoundTripAndTamperRefusal(t *testing.T) {
@@ -785,7 +787,7 @@ func TestLauncherWindowsUnregisteredProfileDiscovery(t *testing.T) {
 func TestLauncherWindowsInstallRejectsUnsafeExecutableBeforeExecution(t *testing.T) {
 	for _, kind := range []string{"node-file", "node-parent", "cli-file", "cli-parent", "node-hardlink"} {
 		t.Run(kind, func(t *testing.T) {
-			f, _, manager, args := launcherWindowsFixture(t)
+			f, _, manager, args := launcherWindowsFixture(t, coldLauncherNode)
 			var installed launcherInstall
 			if err := launcherReadJSON(f.paths.Manifest, &installed); err != nil {
 				t.Fatal(err)
@@ -832,8 +834,8 @@ func TestLauncherWindowsInstallRejectsUnsafeExecutableBeforeExecution(t *testing
 			}
 			beforeUnit, beforeManifest := launcherTestRead(t, f.paths.Unit), launcherTestRead(t, f.paths.Manifest)
 			manager.calls = nil
-			if code, _, errs := f.run(t, append(args, "--write", "--start")...); code == 0 {
-				t.Fatalf("accepted unsafe %s: %s", kind, errs)
+			if code, _, errs := f.run(t, append(args, "--write", "--start")...); code == 0 || !strings.Contains(errs, "unsafe launcher executable") {
+				t.Fatalf("want executable trust rejection before Node version admission for %s, exit=%d: %s", kind, code, errs)
 			}
 			if len(manager.calls) != 0 {
 				t.Fatalf("unsafe executable reached Task Scheduler: %v", manager.calls)

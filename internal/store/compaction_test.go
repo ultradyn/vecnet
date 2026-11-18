@@ -288,31 +288,70 @@ func TestCompactionRejectsUnboundedLimitsAndCancellation(t *testing.T) {
 }
 
 func TestCompactionPhysicalPageCapAcrossPointerMaps(t *testing.T) {
-	db := openTemp(t)
+	// This disposable disk fixture tests page geometry, not power-loss durability.
+	path := filepath.Join(t.TempDir(), "hub.db")
+	db, err := store.OpenWithSynchronous(path, "normal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
 	freedPages(t, db)
-	for i := 0; i < 1000; i++ {
-		r, err := db.Maintain(context.Background(), store.MaintenanceOptions{ReclaimPages: 1, Target: time.Second})
+	pageSize := pragmaInt(t, db, "page_size")
+	pages := pragmaInt(t, db, "page_count")
+	// This newly created SQLite fixture has no reserved bytes. Pointer maps
+	// occupy page 2 and every pageSize/5+1 pages thereafter.
+	stride := pageSize/5 + 1
+	boundary := 2 + (pages-3)/stride*stride
+	if boundary <= 2 || pages < boundary+2 || pragmaInt(t, db, "freelist_count") <= pages-boundary {
+		t.Fatalf("fixture does not cross a pointer map: size=%d pages=%d map=%d", pageSize, pages, boundary)
+	}
+	maintain := func(limit int) store.MaintenanceResult {
+		t.Helper()
+		before := pragmaInt(t, db, "page_count")
+		r, err := db.Maintain(context.Background(), store.MaintenanceOptions{ReclaimPages: limit, Target: time.Second})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if r.ReclaimedPages > 1 {
-			t.Fatalf("one-page cap exceeded: %+v", r)
+		after := pragmaInt(t, db, "page_count")
+		if r.ReclaimedPages < 0 || r.ReclaimedPages > int64(limit) || before-after != r.ReclaimedPages || r.Before.PageCount != before || r.After.PageCount != after {
+			t.Fatalf("%d-page physical cap/accounting: before=%d after=%d result=%+v", limit, before, after, r)
 		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Size() != after*pageSize || r.After.DBBytes != info.Size() || r.After.FreelistCount != pragmaInt(t, db, "freelist_count") {
+			t.Fatalf("committed disk geometry: bytes=%d result=%+v", info.Size(), r)
+		}
+		return r
+	}
+	// Position immediately above the real structural edge using bounded slices.
+	for i := 0; i < 20 && pragmaInt(t, db, "page_count") > boundary+2; i++ {
+		remaining := pragmaInt(t, db, "page_count") - (boundary + 2)
+		r := maintain(int(min(int64(128), remaining)))
 		if r.ReclaimedPages == 0 {
-			break
+			t.Fatalf("could not approach pointer map %d: %+v", boundary, r)
 		}
 	}
-	for i := 0; i < 20; i++ {
-		r, err := db.Maintain(context.Background(), store.MaintenanceOptions{ReclaimPages: 128, Target: time.Second})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if r.ReclaimedPages > 128 {
-			t.Fatalf("128-page cap exceeded: %+v", r)
-		}
-		if r.After.FreelistCount == 0 {
-			return
-		}
+	if got := pragmaInt(t, db, "page_count"); got != boundary+2 {
+		t.Fatalf("pointer-map approach not encountered: pages=%d map=%d", got, boundary)
 	}
-	t.Fatal("bounded slices did not finish reclaim")
+	r := maintain(1)
+	if r.ReclaimedPages != 1 || r.After.PageCount != boundary+1 || r.After.FreelistCount == 0 {
+		t.Fatalf("one-page approach to pointer map %d not encountered: %+v", boundary, r)
+	}
+	r = maintain(1)
+	if r.ReclaimedPages != 0 || r.After.PageCount != boundary+1 || r.After.FreelistCount == 0 || r.After.FreelistCount != r.Before.FreelistCount {
+		t.Fatalf("one-page budget did not stop at pointer map %d: %+v", boundary, r)
+	}
+	r = maintain(128)
+	if r.ReclaimedPages < 2 || r.After.PageCount >= boundary {
+		t.Fatalf("128-page slice did not cross pointer map %d: %+v", boundary, r)
+	}
+	for i := 0; i < 20 && r.After.FreelistCount != 0; i++ {
+		r = maintain(128)
+	}
+	if r.After.FreelistCount != 0 {
+		t.Fatal("bounded slices did not finish reclaim")
+	}
 }

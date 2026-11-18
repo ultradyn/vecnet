@@ -3,12 +3,10 @@ package store_test
 import (
 	"context"
 	"database/sql"
-	"path/filepath"
 	"testing"
 
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/eventpayload"
-	"github.com/XertroV/vecnet/internal/store"
 )
 
 // Exercise the real driver and default connection pragmas: REPLACE must be safe
@@ -30,11 +28,7 @@ func TestPayloadReferenceReplacementGuards(t *testing.T) {
 		{"snapshot_alternate_body", `INSERT OR REPLACE INTO event_message_snapshots SELECT 'snap_other',msg_id,body_sha256,'{}' FROM event_message_snapshots`, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			db, err := store.Open(filepath.Join(t.TempDir(), "replace.db"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer db.Close()
+			db := openMigratedFixture(t)
 			ctx := context.Background()
 			msgID := "msg_test"
 			body := `{"message_id":"msg_test","attachments":[],"text":"synthetic-original"}`
@@ -57,7 +51,7 @@ func TestPayloadReferenceReplacementGuards(t *testing.T) {
 			}
 			wire := `{"message":` + body + `}`
 			var p eventpayload.StoredPayload
-			err = db.Tx(ctx, func(tx *sql.Tx) error {
+			err := db.Tx(ctx, func(tx *sql.Tx) error {
 				var err error
 				p, err = eventpayload.EncodeDelivery(ctx, tx, msgID, []byte(wire))
 				if err != nil {
@@ -99,11 +93,7 @@ func nullableSnapshot(id string) any {
 func TestMessageReplacementGuardCutoverAndIdenticalBytes(t *testing.T) {
 	for _, enabled := range []bool{false, true} {
 		t.Run(map[bool]string{false: "before_cutover", true: "after_cutover"}[enabled], func(t *testing.T) {
-			db, err := store.Open(filepath.Join(t.TempDir(), "cutover.db"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer db.Close()
+			db := openMigratedFixture(t)
 			if _, err := db.Exec(`INSERT INTO messages(msg_id,thr_id,seq,sender,kind,created_at,body) VALUES ('msg_test','thr_test',1,'hub','message','now','{}')`); err != nil {
 				t.Fatal(err)
 			}
@@ -115,7 +105,7 @@ func TestMessageReplacementGuardCutoverAndIdenticalBytes(t *testing.T) {
 			if _, err := db.Exec(`INSERT OR REPLACE INTO messages SELECT * FROM messages`); err != nil {
 				t.Fatal("identical replacement rejected", err)
 			}
-			_, err = db.Exec(`INSERT OR REPLACE INTO messages(msg_id,thr_id,seq,sender,kind,created_at,body,job_id,approval_id) SELECT msg_id,thr_id,seq,sender,kind,created_at,' { } ',job_id,approval_id FROM messages`)
+			_, err := db.Exec(`INSERT OR REPLACE INTO messages(msg_id,thr_id,seq,sender,kind,created_at,body,job_id,approval_id) SELECT msg_id,thr_id,seq,sender,kind,created_at,' { } ',job_id,approval_id FROM messages`)
 			if (err != nil) != enabled {
 				t.Fatal("replacement guard did not follow cutover flag")
 			}

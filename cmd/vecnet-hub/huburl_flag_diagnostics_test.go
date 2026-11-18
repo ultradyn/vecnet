@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/XertroV/vecnet/internal/testhub"
 )
 
 func TestHubURLFlagDiagnosticsExcludeEnvironment(t *testing.T) {
@@ -111,7 +113,13 @@ func TestHubURLFlagOverridesEnvironment(t *testing.T) {
 		} {
 			t.Run(setting.envKey+"/"+tc.name, func(t *testing.T) {
 				env := map[string]string{setting.envKey: tc.raw}
-				args := []string{"--listen", "127.0.0.1:0", "--data-dir", t.TempDir()}
+				dir := t.TempDir()
+				// URL selection does not depend on first-install migrations. Close
+				// the private fixture before the normal startup reopens it.
+				if err := testhub.FreshStore(t, filepath.Join(dir, "hub.db")).Close(); err != nil {
+					t.Fatal(err)
+				}
+				args := []string{"--listen", "127.0.0.1:0", "--data-dir", dir}
 				const ownURL = "https://old.example/vecnet"
 				if setting.flagName == "relocated-to" {
 					args = append(args, "--public-url", ownURL)

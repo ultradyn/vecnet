@@ -30,7 +30,7 @@ async function eventually(fn: () => boolean, what: string, ms = 8000) {
   }
 }
 
-async function setup(t: TestContext, o: { threads?: { id: string; status?: unknown; approvalPolicy?: string }[]; maxBindings?: string; startAt?: number; unsubscribeDelayMs?: number; source?: string; blockHooks?: boolean; holdReadyReport?: boolean; onResume?: () => Promise<void> } = {}) {
+async function setup(t: TestContext, o: { threads?: { id: string; status?: unknown; approvalPolicy?: string }[]; maxBindings?: string; startAt?: number; unsubscribeDelayMs?: number; source?: string; blockHooks?: boolean; holdReadyReport?: boolean; onResume?: () => Promise<void>; onTurnsList?: () => Promise<void> } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'vn-cc-'));
   const fake = await startFakeCodexAppServer({ dir: join(dir, 'fake'), unsubscribeDelayMs: o.unsubscribeDelayMs });
   const home = join(dir, 'fake', 'home');
@@ -118,6 +118,7 @@ esac
         const response = await rpc.call<any>(method, params, timeout);
         if (method === 'thread/read') response.thread.source = o.source ?? 'cli';
         if (method === 'thread/resume' && o.onResume) await o.onResume();
+        if (method === 'thread/turns/list' && o.onTurnsList) await o.onTurnsList();
         return response;
       } };
     } }), stop = c.stop;
@@ -697,15 +698,36 @@ test('global authority runs every config namespace using each row config', { ski
 });
 
 test('unverified root source never publishes live readiness or starts a watch', { skip: process.platform === 'win32' && 'Unix socket/mode fixture; native Windows proxy covered in windows-platform.test.ts' }, async t => {
-  const id = uuid(180), s = await setup(t, { threads: [{ id }], source: 'unknown' });
-  s.writeBindings([s.binding(id, 1)]); s.start();
-  await eventually(() => s.logged('codex_thread_source_unverified').length > 0, 'source refused');
-  await s.reload();
-  const row = JSON.parse(readFileSync(s.bindingsPath + '.status.json', 'utf8')).bindings[0];
-  assert.deepEqual(row.liveness, { live: false, reason: 'unverified_thread' });
-  assert.equal(s.subscribed(id), false);
-  assert.ok(readFileSync(s.trace, 'utf8').trim().split('\n').every(line => line.includes(' codex report-status ')), 'only metadata reports may run');
-  const reports = readFileSync(s.reportTrace, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
-  assert.ok(reports.every(r => r.delivery !== 'ready'));
-  await eventually(() => readFileSync(s.reportTrace, 'utf8').includes('unverified_thread'), 'unverified runtime report');
+  let releaseHistory!: () => void, historyHeld = false;
+  const history = new Promise<void>(resolve => { releaseHistory = resolve; });
+  const id = uuid(180), s = await setup(t, { threads: [{ id }], source: 'unknown',
+    onTurnsList: async () => { historyHeld = true; await history; },
+  });
+  try {
+    s.writeBindings([s.binding(id, 1)]); s.start();
+    await eventually(() => s.logged('codex_thread_source_unverified').length > 0, 'source refused');
+    await eventually(() => historyHeld, 'startup history RPC held after source refused');
+    // The source warning precedes completion of connect(). There is no watch
+    // to wait for here. Observe the immediate engine timer armed after connect
+    // finishes; the earlier idle-status timer was armed before the history RPC.
+    let connected = false;
+    const timer = s.clock.timer;
+    s.clock.timer = (ms, fn) => {
+      if (ms === 0) connected = true;
+      return timer(ms, fn);
+    };
+    releaseHistory();
+    await eventually(() => connected, 'engine initialized after source refusal');
+    await s.reload();
+    const row = JSON.parse(readFileSync(s.bindingsPath + '.status.json', 'utf8')).bindings[0];
+    assert.equal(row.state, 'ready', 'RPC initialization completed, not delivery admission');
+    assert.deepEqual(row.liveness, { live: false, reason: 'unverified_thread' });
+    await eventually(() => readFileSync(s.reportTrace, 'utf8').includes('unverified_thread'), 'unverified runtime report');
+    assert.equal(s.subscribed(id), false);
+    assert.ok(readFileSync(s.trace, 'utf8').trim().split('\n').every(line => line.includes(' codex report-status ')), 'only metadata reports may run');
+    const reports = s.reports();
+    assert.ok(reports.every(r => r.delivery !== 'ready'));
+    assert.ok(reports.some(r => r.state === 'blocked' && r.delivery === 'unavailable' && r.reason === 'unverified_thread'));
+  } catch (error) { t.diagnostic(JSON.stringify(s.runtimeDiagnostics())); throw error; }
+  finally { releaseHistory(); }
 });

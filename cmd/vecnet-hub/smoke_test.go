@@ -89,11 +89,11 @@ type bootedHub struct {
 	stop       func() error // cancel and wait (≤ smokeShutdownBudget); later calls return the first result
 }
 
-// bootHub runs run(ctx, args, getenv) in a goroutine and waits for its
+// bootHubFromDisk runs run(ctx, args, getenv) in a goroutine and waits for its
 // listening line. A t.Cleanup, registered at once (so it runs before the
 // caller's earlier t.TempDir removal), stops the hub and waits for it, so no
 // failure path leaks a serving hub that holds the data dir.
-func bootHub(t *testing.T, args []string, getenv func(string) string) *bootedHub {
+func bootHubFromDisk(t *testing.T, args []string, getenv func(string) string) *bootedHub {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	out := &lockedBuffer{}
@@ -140,7 +140,8 @@ func bootHub(t *testing.T, args []string, getenv func(string) string) *bootedHub
 // the old harness deadline. A second connection's completed request proves
 // the listener has accepted the first one; no scheduler sleeps are needed.
 func TestBootHubShutdownWaitsForAcceptedConnection(t *testing.T) {
-	h := bootHub(t, []string{"--listen", "127.0.0.1:0", "--data-dir", t.TempDir()}, noEnv)
+	// Keep a real first-install startup inside the original readiness budget.
+	h := bootHubFromDisk(t, []string{"--listen", "127.0.0.1:0", "--data-dir", t.TempDir()}, noEnv)
 	conn, err := net.Dial("tcp", "127.0.0.1:"+h.port)
 	if err != nil {
 		t.Fatal(err)

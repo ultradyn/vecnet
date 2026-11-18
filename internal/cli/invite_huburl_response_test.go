@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 )
@@ -54,7 +55,19 @@ var inviteURLPolicies = []inviteURLPolicy{
 	{name: "environment-opt-in", env: "1"},
 }
 
+type inviteURLClipboardMode uint8
+
+const (
+	inviteURLClipboardHelper inviteURLClipboardMode = iota
+	inviteURLClipboardRefusal
+)
+
 type inviteURLResponseFixture struct {
+	responseMu sync.Mutex
+	received   string
+	responseT  *testing.T
+	close      func()
+
 	getenv         func(string) string
 	hub            string
 	config         string
@@ -66,14 +79,17 @@ type inviteURLResponseFixture struct {
 	pathLookups                                            atomic.Int32
 }
 
-func newInviteURLResponseFixture(t *testing.T, verb, received, profileHub string, policy inviteURLPolicy) *inviteURLResponseFixture {
+func newInviteURLResponseFixture(t *testing.T, verb, received, profileHub string, policy inviteURLPolicy, clipboard inviteURLClipboardMode) *inviteURLResponseFixture {
 	t.Helper()
-	f := &inviteURLResponseFixture{}
+	f := &inviteURLResponseFixture{received: received, responseT: t}
 	issuancePath := inviteURLPrefix + "/v1/admin/peers"
 	if verb == "reissue" {
 		issuancePath += "/" + inviteURLPeer + "/enrol-token"
 	}
 	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.responseMu.Lock()
+		defer f.responseMu.Unlock()
+		t, received := f.responseT, f.received
 		w.Header().Set("Content-Type", "application/json")
 		if r.Method == http.MethodGet && r.URL.Path == inviteURLPrefix+"/v1/hub/identity" {
 			f.probes.Add(1)
@@ -123,7 +139,8 @@ func newInviteURLResponseFixture(t *testing.T, verb, received, profileHub string
 		}
 		f.completed.Add(1)
 	}))
-	t.Cleanup(source.Close)
+	closeSource := sync.OnceFunc(source.Close)
+	t.Cleanup(closeSource)
 	f.hub = source.URL + inviteURLPrefix
 	if profileHub == "" {
 		profileHub = f.hub
@@ -137,16 +154,20 @@ func newInviteURLResponseFixture(t *testing.T, verb, received, profileHub string
 	}
 	f.clipboard = filepath.Join(filepath.Dir(f.config), "clipboard.txt")
 	f.clipboardCalls = filepath.Join(filepath.Dir(f.config), "clipboard-calls.txt")
-	quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
-	// Only shell builtins: this fixture PATH cannot find a real clipboard tool.
-	// Invitation blocks end in a newline; read/printf preserves their bytes.
-	script := "#!/bin/sh\nprintf 'called\\n' >> " + quote(f.clipboardCalls) + "\n" +
-		"while IFS= read -r line; do printf '%s\\n' \"$line\"; done > " + quote(f.clipboard) + "\n"
-	tool := "wl-copy"
-	if runtime.GOOS == "windows" {
-		tool = "clip.exe"
+	// Refusal cases keep an empty private PATH and the same lookup and
+	// artifact checks; a premature copy attempt cannot reach a real tool.
+	if clipboard != inviteURLClipboardRefusal {
+		quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
+		// Only shell builtins: this fixture PATH cannot find a real clipboard tool.
+		// Invitation blocks end in a newline; read/printf preserves their bytes.
+		script := "#!/bin/sh\nprintf 'called\\n' >> " + quote(f.clipboardCalls) + "\n" +
+			"while IFS= read -r line; do printf '%s\\n' \"$line\"; done > " + quote(f.clipboard) + "\n"
+		tool := "wl-copy"
+		if runtime.GOOS == "windows" {
+			tool = "clip.exe"
+		}
+		cliFixtureProgram(t, bin, tool, script, cliFixtureProgramSpec{Kind: "clipboard", Log: f.clipboard, Calls: f.clipboardCalls})
 	}
-	cliFixtureProgram(t, bin, tool, script, cliFixtureProgramSpec{Kind: "clipboard", Log: f.clipboard, Calls: f.clipboardCalls})
 	f.getenv = func(k string) string {
 		switch k {
 		case "PATH":
@@ -172,8 +193,27 @@ func newInviteURLResponseFixture(t *testing.T, verb, received, profileHub string
 		}
 		return wire.RoundTrip(r)
 	})
-	t.Cleanup(func() { http.DefaultTransport = previous })
+	f.close = sync.OnceFunc(func() {
+		http.DefaultTransport = previous
+		wire.CloseIdleConnections()
+		closeSource()
+	})
+	t.Cleanup(f.close)
 	return f
+}
+
+// Reused refusal fixtures change only the next real response and counters.
+// Keep config and clipboard artifacts intact so earlier side effects stay visible.
+func (f *inviteURLResponseFixture) prepareResponse(t *testing.T, received string) {
+	f.responseMu.Lock()
+	defer f.responseMu.Unlock()
+	f.responseT, f.received = t, received
+	f.issuances.Store(0)
+	f.completed.Store(0)
+	f.probes.Store(0)
+	f.unexpected.Store(0)
+	f.destinations.Store(0)
+	f.pathLookups.Store(0)
 }
 
 func (f *inviteURLResponseFixture) run(verb string, mode inviteURLMode) (int, string, string) {
@@ -193,6 +233,10 @@ func (f *inviteURLResponseFixture) run(verb string, mode inviteURLMode) (int, st
 	}
 	var out, errs bytes.Buffer
 	code := RunContext(context.Background(), args, strings.NewReader(""), &out, &errs, f.getenv)
+	// Reading the response can finish before the handler increments completed.
+	// Join that handler before checking or resetting per-case counters.
+	f.responseMu.Lock()
+	f.responseMu.Unlock()
 	return code, out.String(), errs.String()
 }
 
@@ -244,31 +288,36 @@ func TestInviteHubURLResponseRefusesUnsafe(t *testing.T) {
 		{"public-http", "http://returned.example/" + inviteURLCanary, true},
 	}
 	for _, verb := range []string{"create", "reissue"} {
-		for _, tc := range cases {
-			for _, policy := range inviteURLPolicies {
-				if tc.publicHTTP && policy.name != "no-opt-in" {
-					continue // Explicit HTTP opt-ins are preservation controls below.
-				}
-				for _, mode := range inviteURLModes {
-					t.Run(verb+"/"+tc.name+"/"+policy.name+"/"+mode.name, func(t *testing.T) {
-						f := newInviteURLResponseFixture(t, verb, tc.hub, "", policy)
-						code, out, errs := f.run(verb, mode)
-						if code != exitUsage || errs != "vecnet: invalid invitation hub URL\n" {
-							t.Errorf("want fixed invalid invitation hub URL refusal/exit 1; got exit %d, stderr %q", code, errs)
-						}
-						if out != "" {
-							t.Error("refused invitation emitted stdout/JSON/a paste block")
-						}
-						for _, banned := range []string{tc.hub, inviteURLCanary, inviteURLToken, "You're invited to vecnet", "vecnet enrol"} {
-							if strings.Contains(out+errs, banned) {
-								t.Error("rejected URL/canary/token/invitation reached output")
+		for _, policy := range inviteURLPolicies {
+			// Finish each fixture before installing another DefaultTransport.
+			func() {
+				f := newInviteURLResponseFixture(t, verb, "", "", policy, inviteURLClipboardRefusal)
+				defer f.close()
+				for _, tc := range cases {
+					if tc.publicHTTP && policy.name != "no-opt-in" {
+						continue // Explicit HTTP opt-ins are preservation controls below.
+					}
+					for _, mode := range inviteURLModes {
+						t.Run(verb+"/"+tc.name+"/"+policy.name+"/"+mode.name, func(t *testing.T) {
+							f.prepareResponse(t, tc.hub)
+							code, out, errs := f.run(verb, mode)
+							if code != exitUsage || errs != "vecnet: invalid invitation hub URL\n" {
+								t.Errorf("want fixed invalid invitation hub URL refusal/exit 1; got exit %d, stderr %q", code, errs)
 							}
-						}
-						f.checkRequests(t, 1) // Refusal cannot undo or repeat issuance.
-						f.checkNoCopy(t)
-					})
+							if out != "" {
+								t.Error("refused invitation emitted stdout/JSON/a paste block")
+							}
+							for _, banned := range []string{tc.hub, inviteURLCanary, inviteURLToken, "You're invited to vecnet", "vecnet enrol"} {
+								if strings.Contains(out+errs, banned) {
+									t.Error("rejected URL/canary/token/invitation reached output")
+								}
+							}
+							f.checkRequests(t, 1) // Refusal cannot undo or repeat issuance.
+							f.checkNoCopy(t)
+						})
+					}
 				}
-			}
+			}()
 		}
 	}
 }
@@ -290,7 +339,7 @@ func TestInviteHubURLResponsePreservesSafeOutput(t *testing.T) {
 		for _, tc := range cases {
 			for _, mode := range inviteURLModes {
 				t.Run(verb+"/"+tc.name+"/"+mode.name, func(t *testing.T) {
-					f := newInviteURLResponseFixture(t, verb, tc.hub, "", tc.policy)
+					f := newInviteURLResponseFixture(t, verb, tc.hub, "", tc.policy, inviteURLClipboardHelper)
 					code, out, errs := f.run(verb, mode)
 					if code != exitOK {
 						t.Errorf("safe response failed: exit %d, stderr %q", code, errs)
@@ -328,15 +377,23 @@ func TestInviteHubURLResponsePreservesSafeOutput(t *testing.T) {
 						t.Error("paste block changed the exact accepted hub or one-time token command")
 					}
 					if mode.copy && !mode.json {
-						if f.pathLookups.Load() != 1 || string(pinRead(t, f.clipboardCalls)) != "called\n" || string(pinRead(t, f.clipboard)) != block {
-							t.Error("--copy did not invoke exactly the fixture tool with the full paste block")
+						if got := f.pathLookups.Load(); got != 1 {
+							t.Errorf("--copy clipboard PATH lookups = %d, want 1", got)
+						}
+						// Read independently so a missing artifact does not mask the
+						// subprocess diagnostic or later request/output checks.
+						if got, err := os.ReadFile(f.clipboardCalls); err != nil || string(got) != "called\n" {
+							t.Errorf("--copy did not invoke the fixture exactly once: call log %q, error %v", got, err)
+						}
+						if got, err := os.ReadFile(f.clipboard); err != nil || string(got) != block {
+							t.Errorf("--copy did not send the full paste block to the fixture: %v", err)
 						}
 						tool := "wl-copy"
 						if runtime.GOOS == "windows" {
 							tool = "clip.exe"
 						}
 						if !strings.Contains(errs, "copied to the clipboard ("+tool+")\n") {
-							t.Error("--copy did not report the fixture clipboard tool")
+							t.Errorf("--copy did not report the fixture clipboard tool: stderr %q", errs)
 						}
 					} else {
 						f.checkNoCopy(t) // Includes --json --copy: no lookup or invocation.
@@ -360,7 +417,7 @@ func TestInviteHubURLResponseUnsafeFallbackStopsBeforeIssuance(t *testing.T) {
 		for _, verb := range []string{"create", "reissue"} {
 			for _, mode := range inviteURLModes {
 				t.Run(verb+"/"+hub.name+"/"+mode.name, func(t *testing.T) {
-					f := newInviteURLResponseFixture(t, verb, "", hub.url, inviteURLPolicies[0])
+					f := newInviteURLResponseFixture(t, verb, "", hub.url, inviteURLPolicies[0], inviteURLClipboardHelper)
 					code, out, errs := f.run(verb, mode)
 					if code != exitUsage || out != "" || !strings.Contains(errs, "profile \"p\" is unusable; edit the config:") {
 						t.Errorf("want earlier selected-profile refusal, got exit %d, stdout %q, stderr %q", code, out, errs)

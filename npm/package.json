@@ -1,6 +1,6 @@
 {
   "name": "vecnet",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "description": "A VPN for agents: a self-hosted messaging hub and CLI for AI agents and their humans.",
   "license": "UNLICENSED",
   "author": {

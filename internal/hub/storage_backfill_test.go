@@ -28,7 +28,12 @@ import (
 
 func backfillEnv(t *testing.T) (*testhub.Env, []guardFixture) {
 	t.Helper()
-	env, fs := guardEnv(t)
+	return configureBackfillEnv(t, guardEnv)
+}
+
+func configureBackfillEnv(t *testing.T, fixture func(*testing.T) (*testhub.Env, []guardFixture)) (*testhub.Env, []guardFixture) {
+	t.Helper()
+	env, fs := fixture(t)
 	env.Hub.Cfg.BackfillEnabled = true
 	env.Hub.Cfg.BackfillCapacity = func(context.Context) (hub.BackfillCapacity, error) {
 		return hub.BackfillCapacity{AvailableBytes: 1 << 40}, nil
@@ -232,8 +237,15 @@ func TestBackfillCancellationRollsBackWholeSlice(t *testing.T) {
 func TestBackfillRealReaderCheckpointPressure(t *testing.T) {
 	for _, transientYield := range []bool{false, true} {
 		t.Run(fmt.Sprintf("transient_yield_%t", transientYield), func(t *testing.T) {
-			env, fs := backfillEnv(t)
+			env, fs := configureBackfillEnv(t, func(t *testing.T) (*testhub.Env, []guardFixture) {
+				return seedGuardEnv(t, testhub.StartFull(t, func(c *hub.Config) { c.PublicURL = "https://frozen.example" }))
+			})
 			h := env.Hub
+			// This is a real maintenance/checkpoint contract, not a logical fixture.
+			var synchronous int
+			if err := h.DB.QueryRow(`PRAGMA synchronous`).Scan(&synchronous); err != nil || synchronous != 2 {
+				t.Fatalf("checkpoint fixture must use FULL: synchronous=%d err=%v", synchronous, err)
+			}
 			// Only the checkpoint probe is real: the injected 1 TiB capacity probe
 			// stays, so low host disk can never produce this pause instead of the
 			// reader holding the WAL.

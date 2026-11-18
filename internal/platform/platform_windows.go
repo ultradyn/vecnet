@@ -223,6 +223,14 @@ func openDir(path string, create bool) (*os.File, error) {
 	return dir, nil
 }
 func OpenDir(path string) (*os.File, error) { return openDir(path, false) }
+
+// OpenWindowsDirAt opens one existing directory component relative to a held parent.
+// It refuses reparse points and omits delete sharing, like OpenDir. The caller
+// must check the returned handle's owner/permissions for its trust policy.
+func OpenWindowsDirAt(parent *os.File, name string) (*os.File, error) {
+	return openAt(parent, name, os.O_RDONLY, true, false)
+}
+
 func MkdirAll(path string, mode os.FileMode) error {
 	dir, e := openDir(path, true)
 	if e != nil {

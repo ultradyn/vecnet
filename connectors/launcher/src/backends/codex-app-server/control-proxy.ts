@@ -77,7 +77,13 @@ export function connectControlProxy(home: string, env: NodeJS.ProcessEnv = proce
   child.stderr.resume();
   child.once('spawn', () => tunnel.emit('connect'));
   child.once('error', () => tunnel.destroy(new Error('codex_proxy_failed')));
-  child.once('exit', () => tunnel.destroy());
+  child.once('exit', () => {
+    tunnel.destroy();
+    // Duplex destruction alone can leave the Windows stdout pipe open after
+    // process exit, preventing ChildProcess.close and the owner's exact join.
+    // The transport is fenced now; release its underlying readable explicitly.
+    child.stdout.destroy();
+  });
   tunnel.once('close', () => terminateProcess(child));
   return connectStreamWebSocket(tunnel, options);
 }

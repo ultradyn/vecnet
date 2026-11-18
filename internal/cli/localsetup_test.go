@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -197,35 +199,60 @@ func TestAutomaticEnrollmentReadyUsesSavedRootAndPreservesGeneration(t *testing.
 }
 
 func TestAutomaticEnrollmentCannotTransferOrRenewExpiredOwner(t *testing.T) {
+	// This plain project must give the hook guard Git's explicit non-repository
+	// answer. A missing git (empty PATH) would refuse setup before binding.
+	bin := t.TempDir()
+	cliFixtureProgram(t, bin, "git", "#!/bin/sh\nprintf 'fatal: not a git repository\\n' >&2\nexit 128\n", cliFixtureProgramSpec{Kind: "git-non-repository", Exit: 128})
+	t.Setenv("PATH", bin)
+	t.Setenv("NoDefaultCurrentDirectoryInExePath", "1")
+	t.Setenv("PATHEXT", ".EXE")
 	for _, expired := range []bool{false, true} {
 		t.Run(map[bool]string{false: "different-root", true: "expired"}[expired], func(t *testing.T) {
+			// Keep the listener outside the bubble and invoke its handler inline:
+			// socket I/O inside the bubble would prevent virtual time advancing.
 			f := newBindFixture(t)
-			if err := cliFixtureChmod(f.env["HOME"], 0700); err != nil {
-				t.Fatal(err)
-			}
-			f.now = time.Now().UTC()
-			if expired {
-				f.now = f.now.Add(-48 * time.Hour)
-			}
-			f.bind("p", bindT1)
-			before := append([]byte(nil), f.raw()...)
-			f.env["CODEX_THREAD_ID"] = bindT1
-			if !expired {
-				f.env["CODEX_THREAD_ID"] = bindT2
-			}
-			t.Chdir(t.TempDir())
-			a := &app{ctx: context.Background(), stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{}, getenv: func(k string) string { return f.env[k] }, localRuntime: func(context.Context) error { return nil }}
-			intent, err := a.prepareLocalEnrollment("p")
-			if err != nil {
-				t.Fatal(err)
-			}
-			commitEnrollmentFixture(t, a, intent, "peer_A")
-			if r := a.reconcileLocalEnrollment(*intent); r.State != "pending" {
-				t.Fatalf("%#v", r)
-			}
-			if !bytes.Equal(before, f.raw()) {
-				t.Fatal("automatic setup changed protected ownership")
-			}
+			synctest.Test(t, func(t *testing.T) {
+				transport := http.DefaultTransport
+				http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					if req.URL.Scheme+"://"+req.URL.Host != f.hub {
+						return nil, errors.New("unexpected enrollment fixture hub")
+					}
+					w := httptest.NewRecorder()
+					f.server.Config.Handler.ServeHTTP(w, req)
+					return w.Result(), nil
+				})
+				t.Cleanup(func() { http.DefaultTransport = transport })
+				if err := cliFixtureChmod(f.env["HOME"], 0700); err != nil {
+					t.Fatal(err)
+				}
+				f.now = time.Now().UTC()
+				if expired {
+					f.now = f.now.Add(-48 * time.Hour)
+				}
+				f.bind("p", bindT1)
+				before := append([]byte(nil), f.raw()...)
+				f.env["CODEX_THREAD_ID"] = bindT1
+				if !expired {
+					f.env["CODEX_THREAD_ID"] = bindT2
+				}
+				t.Chdir(t.TempDir())
+				a := &app{ctx: context.Background(), stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{}, getenv: func(k string) string { return f.env[k] }, localRuntime: func(context.Context) error { return nil }}
+				intent, err := a.prepareLocalEnrollment("p")
+				if err != nil {
+					t.Fatal(err)
+				}
+				commitEnrollmentFixture(t, a, intent, "peer_A")
+				wantReason := "already bound: p to Codex thread " + bindT1
+				if expired {
+					wantReason = "no matching active binding; run codex setup"
+				}
+				if r := a.reconcileLocalEnrollment(*intent); r.State != "pending" || r.Reason != wantReason {
+					t.Fatalf("expected pending because %q, got %#v", wantReason, r)
+				}
+				if !bytes.Equal(before, f.raw()) {
+					t.Fatal("automatic setup changed protected ownership")
+				}
+			})
 		})
 	}
 }

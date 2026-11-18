@@ -14,6 +14,7 @@ import (
 
 	"github.com/XertroV/vecnet/internal/hub"
 	"github.com/XertroV/vecnet/internal/prefs"
+	"github.com/XertroV/vecnet/internal/testhub"
 )
 
 func r2TestEnv(key string) string {
@@ -61,7 +62,13 @@ func TestBlobExpiryBootstrapProductionPreferences(t *testing.T) {
 				t.Error("constructor or preference preview contacted provider")
 				return nil, fmt.Errorf("provider calls forbidden")
 			})}
-			h, db, err := openHub(t.TempDir(), "", false, cfg)
+			dir := t.TempDir()
+			// Bootstrap preferences on an empty schema, then use the normal
+			// production open; repeated first-install migrations are unrelated.
+			if err := testhub.FreshStore(t, filepath.Join(dir, "hub.db")).Close(); err != nil {
+				t.Fatal(err)
+			}
+			h, db, err := openHub(dir, "", false, cfg)
 			if err != nil {
 				t.Fatal(err)
 			}

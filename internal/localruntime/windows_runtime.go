@@ -224,10 +224,22 @@ func pinWindowsExecutable(path string) (func(), error) {
 	return closeAll, nil
 }
 
+// Include preflight: its no-share-delete metadata handles must not overlap
+// another goroutine's atomic replacement or removal during activation. Keep the
+// filesystem lock below, after all trust checks, for cross-process mutation.
+var windowsOperations operationGuard
+
 func ensureWindows(parent context.Context, o Options) (Result, error) {
 	if e := parent.Err(); e != nil {
 		return Result{}, e
 	}
+	ctx, cancel := context.WithTimeout(parent, 60*time.Second)
+	defer cancel()
+	releaseOperation, e := windowsOperations.acquire(ctx)
+	if e != nil {
+		return Result{}, e
+	}
+	defer releaseOperation()
 	native := o.Run == nil
 	o, binary, e := prepareWindows(o)
 	if e != nil {
@@ -240,8 +252,6 @@ func ensureWindows(parent context.Context, o Options) (Result, error) {
 		}
 		defer release()
 	}
-	ctx, cancel := context.WithTimeout(parent, 60*time.Second)
-	defer cancel()
 	if e = nodeCapabilities(ctx, o); e != nil {
 		return Result{}, e
 	}

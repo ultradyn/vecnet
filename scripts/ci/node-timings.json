@@ -1,0 +1,342 @@
+{
+  "evidence": "R6 run44250215246 sourcee22bf3e all3Node raw logs, top-level TAP title/duration attribution to discovered files; +0.5sstartup,5sunknown. ARM Paseo censored after50s with remaining cases:80s conservative scheduling estimate split4 registration shards, not measured completion. Discovery, never profile, supplies files. Windows-platform only: R13 run44277980493 sourcef72529e26f6301ca81fb5341ab03ea437d6748f1, both successful Windows Node jobs (134711588845, 134711588967), 20 complete TAP roots per job. Four registration shards; 19s each is a placement estimate rounded up from the largest ordinal-modulo-4 root sum (16.692s) plus 0.563s maximum whole-file residual and 1s extra startup, not measured shard completion.",
+  "profiles": {
+    "linux": {
+      "connectors/hub-client/test/client.test.ts": {
+        "seconds": 0.599
+      },
+      "connectors/hub-client/test/retry.test.ts": {
+        "seconds": 0.503
+      },
+      "connectors/launcher/test/acp-backend.test.ts": {
+        "seconds": 2.872
+      },
+      "connectors/launcher/test/acp-workspace.test.ts": {
+        "seconds": 0.572
+      },
+      "connectors/launcher/test/boundary.test.ts": {
+        "seconds": 0.566
+      },
+      "connectors/launcher/test/codex-connector.test.ts": {
+        "seconds": 5.847
+      },
+      "connectors/launcher/test/codex-engine-4.test.ts": {
+        "seconds": 27.843
+      },
+      "connectors/launcher/test/codex-recovery.test.ts": {
+        "seconds": 0.597
+      },
+      "connectors/launcher/test/config.test.ts": {
+        "seconds": 0.517
+      },
+      "connectors/launcher/test/fake-backend.test.ts": {
+        "seconds": 0.512
+      },
+      "connectors/launcher/test/launch-input.test.ts": {
+        "seconds": 0.506
+      },
+      "connectors/launcher/test/outbox.test.ts": {
+        "seconds": 0.529
+      },
+      "connectors/launcher/test/policy.test.ts": {
+        "seconds": 0.587
+      },
+      "connectors/launcher/test/relay.test.ts": {
+        "seconds": 0.502
+      },
+      "connectors/launcher/test/windows-platform.test.ts": {
+        "seconds": 4.375
+      },
+      "connectors/hub-client/test/fake-hub.test.ts": {
+        "seconds": 0.605
+      },
+      "connectors/hub-client/test/sse.test.ts": {
+        "seconds": 0.681
+      },
+      "connectors/launcher/test/backends/codex-app-server.test.ts": {
+        "seconds": 5.051
+      },
+      "connectors/launcher/test/codex-compatibility.test.ts": {
+        "seconds": 0.629
+      },
+      "connectors/launcher/test/codex-delivery-main.test.ts": {
+        "seconds": 1.824
+      },
+      "connectors/launcher/test/codex-engine.test.ts": {
+        "seconds": 31.782
+      },
+      "connectors/launcher/test/codex-rpc.test.ts": {
+        "seconds": 0.559
+      },
+      "connectors/launcher/test/daemon.test.ts": {
+        "seconds": 2.889
+      },
+      "connectors/launcher/test/idle.test.ts": {
+        "seconds": 0.524
+      },
+      "connectors/launcher/test/launch.test.ts": {
+        "seconds": 0.534
+      },
+      "connectors/launcher/test/parent-bridge.test.ts": {
+        "seconds": 0.654
+      },
+      "connectors/launcher/test/presence.test.ts": {
+        "seconds": 0.51
+      },
+      "connectors/launcher/test/route-check.test.ts": {
+        "seconds": 0.527
+      },
+      "connectors/hub-client/test/platform.test.ts": {
+        "seconds": 0.979
+      },
+      "connectors/hub-client/test/stream.test.ts": {
+        "seconds": 0.541
+      },
+      "connectors/launcher/test/acp-permission.test.ts": {
+        "seconds": 0.505
+      },
+      "connectors/launcher/test/backends/paseo.test.ts": {
+        "seconds": 12,
+        "shards": 4
+      },
+      "connectors/launcher/test/codex-connector-authority.test.ts": {
+        "seconds": 0.521
+      },
+      "connectors/launcher/test/codex-engine-2.test.ts": {
+        "seconds": 27.143
+      },
+      "connectors/launcher/test/codex-runtime-status.test.ts": {
+        "seconds": 0.542
+      },
+      "connectors/launcher/test/directory.test.ts": {
+        "seconds": 0.503
+      },
+      "connectors/launcher/test/input-plan.test.ts": {
+        "seconds": 0.501
+      },
+      "connectors/launcher/test/ledger.test.ts": {
+        "seconds": 0.532
+      },
+      "connectors/launcher/test/permission.test.ts": {
+        "seconds": 0.537
+      },
+      "connectors/launcher/test/reattach.test.ts": {
+        "seconds": 0.545
+      },
+      "connectors/launcher/test/session.test.ts": {
+        "seconds": 0.787
+      },
+      "connectors/hub-client/test/r2-transfer.test.ts": {
+        "seconds": 0.765
+      },
+      "connectors/hub-client/test/wire.test.ts": {
+        "seconds": 0.756
+      },
+      "connectors/launcher/test/acp-recovery.test.ts": {
+        "seconds": 0.644
+      },
+      "connectors/launcher/test/backends/t3.test.ts": {
+        "seconds": 4.718
+      },
+      "connectors/launcher/test/codex-connector-status.test.ts": {
+        "seconds": 0.595
+      },
+      "connectors/launcher/test/codex-engine-3.test.ts": {
+        "seconds": 27.025
+      },
+      "connectors/launcher/test/codex-protocol.test.ts": {
+        "seconds": 0.517
+      },
+      "connectors/launcher/test/codex-ws.test.ts": {
+        "seconds": 0.664
+      },
+      "connectors/launcher/test/dispatch.test.ts": {
+        "seconds": 1.303
+      },
+      "connectors/launcher/test/jobs.test.ts": {
+        "seconds": 0.508
+      },
+      "connectors/launcher/test/metadata.test.ts": {
+        "seconds": 0.506
+      },
+      "connectors/launcher/test/plugins.test.ts": {
+        "seconds": 0.646
+      },
+      "connectors/launcher/test/redact.test.ts": {
+        "seconds": 0.502
+      },
+      "connectors/launcher/test/sweep.test.ts": {
+        "seconds": 0.512
+      }
+    },
+    "windows": {
+      "connectors/hub-client/test/client.test.ts": {
+        "seconds": 0.776
+      },
+      "connectors/hub-client/test/retry.test.ts": {
+        "seconds": 0.504
+      },
+      "connectors/launcher/test/acp-backend.test.ts": {
+        "seconds": 12.73
+      },
+      "connectors/launcher/test/acp-workspace.test.ts": {
+        "seconds": 1.667
+      },
+      "connectors/launcher/test/boundary.test.ts": {
+        "seconds": 0.579
+      },
+      "connectors/launcher/test/codex-connector.test.ts": {
+        "seconds": 0.51
+      },
+      "connectors/launcher/test/codex-engine-4.test.ts": {
+        "seconds": 0.506
+      },
+      "connectors/launcher/test/codex-recovery.test.ts": {
+        "seconds": 0.503
+      },
+      "connectors/launcher/test/config.test.ts": {
+        "seconds": 0.854
+      },
+      "connectors/launcher/test/fake-backend.test.ts": {
+        "seconds": 0.535
+      },
+      "connectors/launcher/test/launch-input.test.ts": {
+        "seconds": 0.511
+      },
+      "connectors/launcher/test/outbox.test.ts": {
+        "seconds": 0.895
+      },
+      "connectors/launcher/test/policy.test.ts": {
+        "seconds": 0.802
+      },
+      "connectors/launcher/test/relay.test.ts": {
+        "seconds": 0.503
+      },
+      "connectors/launcher/test/windows-platform.test.ts": {
+        "seconds": 76,
+        "shards": 4
+      },
+      "connectors/hub-client/test/fake-hub.test.ts": {
+        "seconds": 0.638
+      },
+      "connectors/hub-client/test/sse.test.ts": {
+        "seconds": 1.097
+      },
+      "connectors/launcher/test/backends/codex-app-server.test.ts": {
+        "seconds": 0.515
+      },
+      "connectors/launcher/test/codex-compatibility.test.ts": {
+        "seconds": 0.508
+      },
+      "connectors/launcher/test/codex-delivery-main.test.ts": {
+        "seconds": 0.502
+      },
+      "connectors/launcher/test/codex-engine.test.ts": {
+        "seconds": 0.508
+      },
+      "connectors/launcher/test/codex-rpc.test.ts": {
+        "seconds": 0.504
+      },
+      "connectors/launcher/test/daemon.test.ts": {
+        "seconds": 10.472
+      },
+      "connectors/launcher/test/idle.test.ts": {
+        "seconds": 0.528
+      },
+      "connectors/launcher/test/launch.test.ts": {
+        "seconds": 0.541
+      },
+      "connectors/launcher/test/parent-bridge.test.ts": {
+        "seconds": 0.795
+      },
+      "connectors/launcher/test/presence.test.ts": {
+        "seconds": 0.512
+      },
+      "connectors/launcher/test/route-check.test.ts": {
+        "seconds": 0.562
+      },
+      "connectors/hub-client/test/platform.test.ts": {
+        "seconds": 1.522
+      },
+      "connectors/hub-client/test/stream.test.ts": {
+        "seconds": 0.581
+      },
+      "connectors/launcher/test/acp-permission.test.ts": {
+        "seconds": 0.509
+      },
+      "connectors/launcher/test/backends/paseo.test.ts": {
+        "seconds": 80,
+        "shards": 4
+      },
+      "connectors/launcher/test/codex-connector-authority.test.ts": {
+        "seconds": 5.188
+      },
+      "connectors/launcher/test/codex-engine-2.test.ts": {
+        "seconds": 1.787
+      },
+      "connectors/launcher/test/codex-runtime-status.test.ts": {
+        "seconds": 0.656
+      },
+      "connectors/launcher/test/directory.test.ts": {
+        "seconds": 0.504
+      },
+      "connectors/launcher/test/input-plan.test.ts": {
+        "seconds": 0.502
+      },
+      "connectors/launcher/test/ledger.test.ts": {
+        "seconds": 0.937
+      },
+      "connectors/launcher/test/permission.test.ts": {
+        "seconds": 0.572
+      },
+      "connectors/launcher/test/reattach.test.ts": {
+        "seconds": 1.55
+      },
+      "connectors/launcher/test/session.test.ts": {
+        "seconds": 1.09
+      },
+      "connectors/hub-client/test/r2-transfer.test.ts": {
+        "seconds": 0.77
+      },
+      "connectors/hub-client/test/wire.test.ts": {
+        "seconds": 1.108
+      },
+      "connectors/launcher/test/acp-recovery.test.ts": {
+        "seconds": 1.103
+      },
+      "connectors/launcher/test/backends/t3.test.ts": {
+        "seconds": 8.286
+      },
+      "connectors/launcher/test/codex-connector-status.test.ts": {
+        "seconds": 2.415
+      },
+      "connectors/launcher/test/codex-engine-3.test.ts": {
+        "seconds": 0.505
+      },
+      "connectors/launcher/test/codex-protocol.test.ts": {
+        "seconds": 0.524
+      },
+      "connectors/launcher/test/codex-ws.test.ts": {
+        "seconds": 0.701
+      },
+      "connectors/launcher/test/dispatch.test.ts": {
+        "seconds": 6.544
+      },
+      "connectors/launcher/test/jobs.test.ts": {
+        "seconds": 0.51
+      },
+      "connectors/launcher/test/metadata.test.ts": {
+        "seconds": 0.506
+      },
+      "connectors/launcher/test/plugins.test.ts": {
+        "seconds": 1.266
+      },
+      "connectors/launcher/test/redact.test.ts": {
+        "seconds": 0.503
+      },
+      "connectors/launcher/test/sweep.test.ts": {
+        "seconds": 0.519
+      }
+    }
+  }
+}

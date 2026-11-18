@@ -2,11 +2,14 @@ package hub_test
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/XertroV/vecnet/internal/eventlog"
 	"github.com/XertroV/vecnet/internal/hub"
+	"github.com/XertroV/vecnet/internal/store"
+	"github.com/XertroV/vecnet/internal/testhub"
 )
 
 func TestRetentionOneRowSliceIndependentOfExpiredSubscriptions(t *testing.T) {
@@ -55,7 +58,20 @@ func TestRetentionOneRowSliceIndependentOfPolicyHistory(t *testing.T) {
 	for _, n := range []int{100, 10000} {
 		cfg := hub.DefaultConfig()
 		cfg.EventRetentionLimits = eventlog.RetentionLimits{Rows: 1, Target: time.Hour}
-		h, _, clock := preferencesHubClock(t, cfg)
+		// Exercise the real 100/10000-boundary startup upgrade, including
+		// every transaction, without measuring power-loss fsync latency. The
+		// independent upgrade/reopen contract tests still use FULL.
+		cfg.DataDir = t.TempDir()
+		db, err := store.OpenWithSynchronous(filepath.Join(cfg.DataDir, "hub.db"), "normal")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { db.Close() })
+		clock := testhub.NewFakeClock(prefsEpoch)
+		h, err := hub.New(db, cfg, clock.Now)
+		if err != nil {
+			t.Fatal(err)
+		}
 		c := retentionEvent(t, h, "peer_target", clock.Now().Add(-24*time.Hour))
 		retentionAck(t, h, "peer_target", "*", c)
 		// Model a populated pre-upgrade policy ledger. All entries are valid and
@@ -85,7 +101,6 @@ func TestRetentionOneRowSliceIndependentOfPolicyHistory(t *testing.T) {
 			t.Fatal(err)
 		}
 		// Startup upgrades historical projections before allowing pruning.
-		var err error
 		h, err = hub.New(h.DB, h.Cfg, clock.Now)
 		if err != nil {
 			t.Fatal(err)
