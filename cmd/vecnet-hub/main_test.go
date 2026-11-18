@@ -764,6 +764,11 @@ func TestEventsRefreshIntervalFlagAndEnv(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
+			// Only prebuild the schema; runInit still creates the operator and
+			// bootHub reopens through the normal production startup path.
+			if err := testhub.FreshStore(t, filepath.Join(dir, "hub.db")).Close(); err != nil {
+				t.Fatal(err)
+			}
 			var out bytes.Buffer
 			if err := runInit(dir, "Max", &out); err != nil {
 				t.Fatal(err)
