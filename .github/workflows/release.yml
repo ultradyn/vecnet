@@ -248,12 +248,17 @@ jobs:
       - name: Finalize source-bound test bundle and native event tool
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/go-bundle.mjs finalize ${{ env.CI_GO_PLATFORM }}
+      - name: Compress finalized Go test bundle
+        timeout-minutes: 1
+        run: |
+          mkdir -p dist/go-test-archive
+          node scripts/ci/budget.mjs 53000 tar -I 'zstd -9 --long=27 -T2' -cf dist/go-test-archive/go-tests.tar.zst -C dist/go-tests .
       - uses: actions/upload-artifact@v4
         timeout-minutes: 1
         with:
           name: go-tests-${{ env.CI_GO_PLATFORM }}
-          compression-level: 1
-          path: dist/go-tests
+          compression-level: 0
+          path: dist/go-test-archive/go-tests.tar.zst
           if-no-files-found: error
           retention-days: 7
 
@@ -297,7 +302,12 @@ jobs:
         timeout-minutes: 1
         with:
           name: go-tests-${{ runner.os == 'Windows' && 'win32' || 'linux' }}-${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
-          path: dist/go-tests
+          path: dist/go-test-archive
+      - name: Expand native Go test bundle
+        timeout-minutes: 1
+        run: |
+          node -e "require('node:fs').mkdirSync('dist/go-tests', {recursive:true})"
+          tar -xf dist/go-test-archive/go-tests.tar.zst -C dist/go-tests
       - name: Restore producer source and fixtures at the tested revision
         timeout-minutes: 1
         run: node dist/go-tests/restore-source.mjs restore dist/go-tests "${{ github.sha }}"
