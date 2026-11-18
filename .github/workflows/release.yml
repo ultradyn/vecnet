@@ -378,6 +378,10 @@ jobs:
       - name: Validate and discover matching native Go test binaries
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs consume-go
+      - name: Prepare one private launcher Node image for Windows Go packets
+        if: runner.os == 'Windows'
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs prepare-launcher-node
       - name: Complete Go roots group 1 of 4
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs go ${{ matrix.lane }} 0
@@ -390,6 +394,10 @@ jobs:
       - name: Complete Go roots group 4 of 4
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs go ${{ matrix.lane }} 3
+      - name: Remove job-owned private launcher Node image
+        if: always() && runner.os == 'Windows'
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs cleanup-launcher-node
 
   test-go-windows-x64:
     needs: test-compile-windows-x64

@@ -84,6 +84,19 @@ the first rejection. Compilation and bundle discovery have separate
 capacity policies. The enclosing budget owns the
 entire group and all descendants; no per-child budget multiplication.
 
+Windows Go jobs prepare one genuine private, single-link Node image after native
+bundle discovery, before the packet pool. An explicit CLI test-binary utility
+copies the source, checks private ownership and independent source-matching
+bytes, and runs the original real `--version` preparation with its 12s context.
+Only success publishes a path. Read-only packet fixtures validate and borrow
+that job image; they never remove it or fall back after an invalid path. Real
+installation admission and its 5s version probe still run. Cold admission and
+mutation cases retain independent never-executed copies. An `always()` step
+removes only the fixed fixture child of the native bundle, ignoring the published
+path as a cleanup target. Both new Windows-only steps retain the 53s owner and
+one-minute step deadline. This deduplicates preparation; the cause of the R35 ARM
+and R36 x64 stalls and a native performance benefit remain unproven.
+
 On Windows only, these discovered roots use exclusive singleton packets:
 `TestSlowSSEConsumerDoesNotBlockSend`,
 `TestCodexHookWindowsInstalledCommandPreservesArgv`, and

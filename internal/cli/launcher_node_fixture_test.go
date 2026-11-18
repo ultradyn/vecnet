@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -19,6 +20,9 @@ import (
 var (
 	launcherFixtureNodeDir    string // created by OnceValues; cleaned by TestMain
 	launcherFixtureSharedNode = sync.OnceValues(func() (string, error) {
+		if node, configured := os.LookupEnv("CI_LAUNCHER_NODE_FIXTURE"); configured {
+			return borrowLauncherFixtureNode(node)
+		}
 		base, err := filepath.EvalSymlinks(os.TempDir())
 		if err != nil {
 			return "", err
@@ -31,26 +35,82 @@ var (
 		if err != nil {
 			return "", err
 		}
-		// One real execution on the just-created, unmodified private image.
-		// The enclosing test/owner still owns this fixture work; this is not
-		// a retry or an extension of any install/repair probe's deadline.
-		ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
-		defer cancel()
-		start := time.Now()
-		version, err := launcherNodeOutput(ctx, node)
-		elapsed := time.Since(start)
-		if err != nil || ctx.Err() != nil || !launcherNodeVersion(string(version)) {
-			var exitErr *exec.ExitError
-			var stderr []byte
-			if errors.As(err, &exitErr) {
-				stderr = exitErr.Stderr[:min(len(exitErr.Stderr), 1024)]
-			}
-			return "", fmt.Errorf("prepare private Node --version after %s: command=%v context=%v output=%.80q stderr=%q", elapsed, err, ctx.Err(), version, stderr)
+		if err := prepareLauncherFixtureNode(node); err != nil {
+			return "", err
 		}
-		fmt.Fprintf(os.Stderr, "launcher Node fixture: prepared private image in %s, version=%.80q\n", elapsed, version)
 		return node, nil
 	})
 )
+
+func prepareLauncherFixtureNode(node string) error {
+	// One real execution on the just-created, unmodified private image.
+	// The enclosing test/owner still owns this fixture work; this is not
+	// a retry or an extension of any install/repair probe's deadline.
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancel()
+	start := time.Now()
+	version, err := launcherNodeOutput(ctx, node)
+	elapsed := time.Since(start)
+	if err != nil || ctx.Err() != nil || !launcherNodeVersion(string(version)) {
+		var exitErr *exec.ExitError
+		var stderr []byte
+		if errors.As(err, &exitErr) {
+			stderr = exitErr.Stderr[:min(len(exitErr.Stderr), 1024)]
+		}
+		return fmt.Errorf("prepare private Node --version after %s: command=%v context=%v output=%.80q stderr=%q", elapsed, err, ctx.Err(), version, stderr)
+	}
+	fmt.Fprintf(os.Stderr, "launcher Node fixture: prepared private image in %s, version=%.80q\n", elapsed, version)
+	return nil
+}
+
+// The job owns this image. Borrowers must not set launcherFixtureNodeDir: their
+// TestMain cleanup owns only images created by that process.
+func borrowLauncherFixtureNode(node string) (string, error) {
+	if !filepath.IsAbs(node) || filepath.Clean(node) != node || strings.ContainsAny(node, "\r\n") || filepath.Base(node) != platform.Exe("node") {
+		return "", errors.New("invalid shared launcher Node fixture path")
+	}
+	if err := platform.CheckPath(filepath.Dir(node), true, true); err != nil {
+		return "", err
+	}
+	if err := platform.PrivateFile(node); err != nil {
+		return "", err
+	}
+	release, err := launcherPinExecutable(node)
+	if err != nil {
+		return "", err
+	}
+	defer release()
+	source, err := exec.LookPath(platform.Exe("node"))
+	if err != nil {
+		return "", err
+	}
+	identity := func(path string) (os.FileInfo, [sha256.Size]byte, error) {
+		f, err := os.Open(path)
+		if err != nil {
+			return nil, [sha256.Size]byte{}, err
+		}
+		defer f.Close()
+		info, err := f.Stat()
+		if err != nil {
+			return nil, [sha256.Size]byte{}, err
+		}
+		h := sha256.New()
+		_, err = io.Copy(h, f)
+		return info, [sha256.Size]byte(h.Sum(nil)), err
+	}
+	sourceID, sourceHash, err := identity(source)
+	if err != nil {
+		return "", err
+	}
+	privateID, privateHash, err := identity(node)
+	if err != nil {
+		return "", err
+	}
+	if os.SameFile(sourceID, privateID) || sourceHash != privateHash {
+		return "", errors.New("shared launcher Node fixture must be an independent copy of genuine Node")
+	}
+	return node, nil
+}
 
 type launcherFixtureNodeMode uint8
 
@@ -59,9 +119,10 @@ const (
 	coldLauncherNode
 )
 
-// Read-only callers share one prepared, private, single-link image per test
-// process. The real install still validates and executes it. Cold admission
-// and mutation cases instead receive a never-executed, independently owned copy.
+// Read-only callers share one prepared, private, single-link image per job in
+// Windows CI, or per process locally. The real install still validates and
+// executes it. Cold admission and mutation cases instead receive a never-executed,
+// independently owned copy.
 func launcherFixtureNode(home string, mode launcherFixtureNodeMode) (string, error) {
 	switch mode {
 	case preparedLauncherNode:
@@ -140,6 +201,9 @@ func TestLauncherFixtureNodeIsolation(t *testing.T) {
 	sourceID, sourceDigest := identity(source)
 	firstHome := t.TempDir()
 	first := get(firstHome, preparedLauncherNode)
+	if shared, configured := os.LookupEnv("CI_LAUNCHER_NODE_FIXTURE"); configured && first != shared {
+		t.Fatal("prepared fixture did not borrow the configured job image")
+	}
 	firstID, got := identity(first)
 	if got != sourceDigest || firstID.Size() != sourceID.Size() || os.SameFile(firstID, sourceID) {
 		t.Fatal("shared Node is not an independent copy of the source image")

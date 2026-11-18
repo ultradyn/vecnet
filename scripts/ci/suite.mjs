@@ -9,6 +9,7 @@ import os from 'node:os';
 import { performance } from 'node:perf_hooks';
 import { consumeBundle } from './go-bundle.mjs';
 import { exportWindowsOwner } from './windows-owner.mjs';
+import {prepareLauncherNode, borrowedLauncherNode, cleanupLauncherNode} from './launcher-node-fixture.mjs';
 import { partition } from './partition.mjs';
 import { bounded, runGoGroup, planGo, nativeGoLanes, nativeGoWorkers, goGroups, goCompileJobs, goCompileEnvironment } from './schedule.mjs';
 import {planNode} from './node-schedule.mjs';
@@ -51,6 +52,18 @@ if (kind === 'prepare-go') {
     throw error;
   }
   console.log(`Go native bundle: ${bundle.inventory.length} packages, ${bundle.inventory.reduce((n,p)=>n+p.names.length,0)} roots`);
+} else if (kind === 'prepare-launcher-node' || kind === 'cleanup-launcher-node') {
+  if(process.platform!=='win32')throw new Error('job launcher Node staging is Windows Go only');
+  let inventory;
+  try {
+    inventory=(await Promise.all(Array.from({length:6},(_,i)=>readFile(`.ci/go-${i}.json`,'utf8')))).flatMap(JSON.parse);
+  } catch(error) {
+    // Bundle consumption may have failed before any staging was possible.
+    if(kind==='cleanup-launcher-node'&&error.code==='ENOENT')process.exit(0);
+    throw error;
+  }
+  if(kind==='prepare-launcher-node')await prepareLauncherNode(inventory);
+  else await cleanupLauncherNode(inventory);
 } else if (kind === 'discover-go') {
   partition([], lane, 6);
   const metadata=go(['list','-mod=readonly','-f','{{.ImportPath}}\t{{.Dir}}\t{{len .TestGoFiles}}\t{{len .XTestGoFiles}}','./...']).trim().split(/\r?\n/).map(line=>{const [ImportPath,Dir,internal,external]=line.split('\t');return {ImportPath,Dir,hasTests:Number(internal)+Number(external)>0};});
@@ -102,6 +115,7 @@ if (kind === 'prepare-go') {
   catch(error){if(requireCLIFixture||error.code!=='ENOENT')throw error;}
   if(requireCLIFixture&&!cliFixture)throw new Error('missing native CLI fixture');
   if(cliFixture&&(!path.isAbsolute(cliFixture)||/[\r\n]/.test(cliFixture)))throw new Error('invalid native CLI fixture path');
+  const launcherNode=requireCLIFixture?await borrowedLauncherNode(inventory):undefined;
   await runGoGroup(tasks,async ({pkg,selected,split,binary,directory,cost,exclusive})=>{
     if(exclusive)console.log(`ci-exclusive-go pkg=${pkg} root=${selected[0]}`);
     const filter=split?['-test.run',`^(${selected.join('|')})$`]:[];
@@ -111,6 +125,7 @@ if (kind === 'prepare-go') {
       try {
         const env={...process.env};
         if(cliFixture)env.CI_CLI_FIXTURE_HELPER=cliFixture;
+        if(launcherNode)env.CI_LAUNCHER_NODE_FIXTURE=launcherNode;
         for(const [key,leaf] of Object.entries({HOME:'home',USERPROFILE:'home',APPDATA:'config',LOCALAPPDATA:'data',TMPDIR:'tmp',TMP:'tmp',TEMP:'tmp',XDG_CONFIG_HOME:'config',XDG_CACHE_HOME:'cache',XDG_DATA_HOME:'data',XDG_STATE_HOME:'state',XDG_RUNTIME_DIR:'run'})){
           env[key]=path.join(privateRoot,leaf);await mkdir(env[key],{recursive:true,mode:0o700});
         }

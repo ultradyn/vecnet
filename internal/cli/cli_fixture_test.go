@@ -128,6 +128,13 @@ var (
 )
 
 func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && os.Args[1] == "--ci-launcher-node-fixture" {
+		if err := launcherFixtureNodeUtility(os.Args[2:], os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	code := m.Run()
 	for _, dir := range []string{cliFixtureSnapshotDir, launcherFixtureNodeDir} {
 		if dir == "" {
