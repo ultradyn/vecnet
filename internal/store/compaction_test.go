@@ -288,7 +288,12 @@ func TestCompactionRejectsUnboundedLimitsAndCancellation(t *testing.T) {
 }
 
 func TestCompactionPhysicalPageCapAcrossPointerMaps(t *testing.T) {
-	db := openTemp(t)
+	// This disposable disk fixture tests page geometry, not power-loss durability.
+	db, err := store.OpenWithSynchronous(filepath.Join(t.TempDir(), "hub.db"), "normal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
 	freedPages(t, db)
 	for i := 0; i < 1000; i++ {
 		r, err := db.Maintain(context.Background(), store.MaintenanceOptions{ReclaimPages: 1, Target: time.Second})
