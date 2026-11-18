@@ -16,6 +16,19 @@ available, the sum of root hints is used instead. Cheap, unknown-small,
 single-root and no-test packages remain whole. The 8s split threshold and
 packet caps are scheduling policy,
 not a measured speedup or a claim that the native budget passes.
+
+Finalized Go test bundles travel as one solid `go-tests.tar.zst` archive of the
+contents of `dist/go-tests`, encoded on Linux with `zstd -9 --long=27 -T2`
+inside the existing 53s command owner. Artifact upload uses compression level 0
+to avoid recompressing it. Consumers download to `dist/go-test-archive`, then
+expand with native `tar` in a separate one-minute step before source restore;
+the restore bootstrap is inside the archive. Source/hash validation, native
+discovery and execution retain their existing order. The parent's R31 Linux
+probe reduced the 275,969,980-byte R30 ZIP to 117,595,459 bytes in 4.190s;
+decoding took 0.644s with all 55 files byte-identical, and a truncated archive
+failed. These are local codec measurements; network savings, native Windows
+tar support and the strict full-run <300s / step <60s acceptance remain unproven.
+
 `go-timings.json` started with complete PASS root maxima from all 14 native Go jobs
 in R12 (run 44271362850, attempt 1, source `6845842d`): Windows used four
 workers with `GOMAXPROCS=1` and independent fixture executable copies. Windows
