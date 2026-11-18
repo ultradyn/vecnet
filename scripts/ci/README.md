@@ -41,15 +41,17 @@ Startup uses the median nonnegative package PASS elapsed minus summed root
 elapsed, excluding overlapping same-package processes because test2json does
 not identify which process emitted an event.
 
-The Windows placement profile refresh uses R16 run 44305065506 PASS values.
-When a root has no ARM64 PASS in that run, it also considers the latest
-same-architecture PASS from R14 (44292345778), or R12 if absent, retaining the
-larger cost. Whole-package costs require a successful non-overlapping process
-covering the exact discovered root set. If only filtered or ambiguous samples
-exist in R16, keep a verified R12 whole-package sample when available.
-Failures, skips and unfinished roots do not contribute PASS root timings.
-Linux keeps its R12
-profile. The file retains source/run/attempt and SHA256 log receipts.
+Windows root weights retain the prior refreshes, including R31's measured
+replacement of the interrupted-publication root after its directory-walk fix.
+The R38 refresh takes the maximum of each retained hint and complete PASS root
+times from R37 runs 44415327162 and 44416023762 at source `9645a20c` (x64/ARM64).
+It adds nine previously unweighted roots and raises 733 existing hints; no hint
+decreases. Failed, skipped and unfinished observations contribute no timing.
+Linux, package fallbacks, whole-package costs and startup hints remain unchanged.
+Whole-package costs require a successful non-overlapping process covering the
+exact discovered root set; these new imports supply root costs only.
+The file retains source/run/attempt, log SHA256 and metadata receipts. Placement
+estimates do not establish native throughput or waive the strict acceptance gates.
 
 Replay with `node scripts/ci/go-profile.mjs DIRECTORY OUTPUT SOURCE_SHA RUN_ID
 ATTEMPT [INVENTORY_JSON]`. Without inventory the importer emits root costs only,
