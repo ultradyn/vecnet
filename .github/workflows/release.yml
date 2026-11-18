@@ -366,6 +366,10 @@ jobs:
       - name: node complete group 2 of 4
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs node 0 1
+      - name: node complete group 3 of 4
+        if: runner.os != 'Windows' || runner.arch == 'ARM64'
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs node 0 2
 
   test-node-windows-x64:
     name: test-node (windows-2025)
@@ -437,6 +441,7 @@ jobs:
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs e2e 0 3
 
       - name: node complete group 3 of 4
+        if: runner.os == 'Windows' && runner.arch == 'X64'
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs node 0 2
       - name: node complete group 4 of 4
@@ -485,7 +490,7 @@ jobs:
 
   test-artifact-linux:
     name: test-artifact (${{ matrix.runner }})
-    needs: [build, test-node-linux, test-node-windows-x64, test-node-windows-arm]
+    needs: [build, test-compile-windows-arm, test-node-linux]
     strategy:
       fail-fast: false
       matrix:

@@ -254,8 +254,10 @@ SHA-256; restore rejects mismatches before native tar extraction. Git remains
 installed for tests which create their own repositories and worktrees. The
 source checkout's `.git` directory is not required by the native Go tests.
 
-Node groups 0 and 1 remain with the Node helper guards; groups 2 and 3 run
-after the four E2E groups on the existing matching native runners. All groups,
+Node groups 0 and 1 remain with the Node helper guards. On Linux and Windows
+ARM64, group 2 also runs there; only group 3 follows the four E2E groups.
+Windows x64 retains groups 2 and 3 in its E2E job, keeping its earlier Node
+completion milestone available for package admission. All groups,
 platforms, shards and assertions remain admitted once, without additional
 jobs. These changes enable overlap and remove repeated checkout work; actual
 native completion below 300 seconds and individual steps below 60 seconds
@@ -263,8 +265,9 @@ are still required.
 
 The three Node platform jobs keep identical steps but expose completion
 milestones for package admission. Windows package gates wait for build, the
-ARM test producer and x64 Node completion; Linux package gates wait for build
-and all Node platforms. This makes every ARM Go lane eligible before Windows package
+ARM test producer and x64 Node completion; Linux package gates wait for build,
+the ARM test producer and Linux Node completion. This makes every ARM Go lane
+eligible before package
 gates claim runner slots, without adding jobs or test commands. Actual GitHub
 allocation, full native correctness and the strict overall budget remain
 required; the dependency graph does not guarantee a queue order.
