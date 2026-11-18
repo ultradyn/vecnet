@@ -8,7 +8,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
+	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -519,7 +523,19 @@ func slowSSEConsumerDoesNotBlockSend(t *testing.T, refs bool) {
 	// stalls; the absolute budget also catches stalls shared by both paths.
 	// The stream must still be open at the end, so the sends finished
 	// while its consumer was stuck rather than after the hub dropped it.
-	env.Configure(func(d *httpapi.Deps) { d.SSEStall = time.Hour })
+	var completed atomic.Int64
+	env.Configure(func(d *httpapi.Deps) {
+		d.SSEStall = time.Hour
+		kick := d.Kick
+		d.Kick = func() {
+			// postMessages reaches Kick only after Hub.SendVia has returned,
+			// including commit, log notification and activity publication.
+			completed.Add(1)
+			if kick != nil {
+				kick()
+			}
+		}
+	})
 	a, aSec := env.NewPeer("grokbot", "a")
 	b, bSec := env.NewPeer("session", "b")
 	c, _ := env.NewPeer("dot", "c")
@@ -549,6 +565,8 @@ func slowSSEConsumerDoesNotBlockSend(t *testing.T, refs bool) {
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), budget)
 		defer cancel()
+		ctx, diagnosis := observeSlowSSESend(ctx, env, budget, &completed)
+		defer diagnosis() // joins the probe before fixture cleanup, also on Fatal
 		req, err := http.NewRequestWithContext(ctx, "POST", env.URL+"/v1/messages", strings.NewReader(string(j)))
 		if err != nil {
 			t.Fatal(err)
@@ -557,13 +575,13 @@ func slowSSEConsumerDoesNotBlockSend(t *testing.T, refs bool) {
 		req.Header.Set("Authorization", "Bearer "+aSec)
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
-			t.Fatalf("send %s did not finish within %v: %v", key, budget, err)
+			t.Fatalf("send %s did not finish within %v: %v\n%s", key, budget, err, diagnosis())
 		}
 		raw, err := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		took := time.Since(start)
 		if err != nil {
-			t.Fatalf("send %s: read body: %v", key, err)
+			t.Fatalf("send %s: read body: %v\n%s", key, err, diagnosis())
 		}
 		if resp.StatusCode != http.StatusAccepted {
 			t.Fatalf("send %s = %d; %s", key, resp.StatusCode, raw)
@@ -590,6 +608,46 @@ func slowSSEConsumerDoesNotBlockSend(t *testing.T, refs bool) {
 	s.cancel()
 	s.resp.Body.Close()
 	waitStreams(t, 0)
+}
+
+// observeSlowSSESend samples only this test process before the request watchdog
+// cancels the server work. Client milestones distinguish connection/response
+// observation from server progress; stacks distinguish SSE queue/publication,
+// SQLite lock/pool waits and durable I/O. Timer lateness is evidence of delayed
+// observation, not proof of its cause. Nothing here changes the send verdict.
+func observeSlowSSESend(ctx context.Context, env *testhub.Env, budget time.Duration, completed *atomic.Int64) (context.Context, func() string) {
+	start := time.Now()
+	var connected, written, firstByte atomic.Int64
+	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+		GotConn:              func(httptrace.GotConnInfo) { connected.Store(time.Since(start).Nanoseconds()) },
+		WroteRequest:         func(httptrace.WroteRequestInfo) { written.Store(time.Since(start).Nanoseconds()) },
+		GotFirstResponseByte: func() { firstByte.Store(time.Since(start).Nanoseconds()) },
+	})
+	before := env.Hub.DB.Stats()
+	beforeCompleted := completed.Load()
+	// Leave one fifth of the existing watchdog for the snapshot. Use a timer,
+	// not a sleep, and join it so no probe can outlive its private fixture.
+	at := budget * 4 / 5
+	done := make(chan struct{})
+	var sample string
+	timer := time.AfterFunc(at, func() {
+		defer close(done)
+		observed := time.Since(start)
+		stack := make([]byte, 256<<10)
+		n := runtime.Stack(stack, true)
+		sample = fmt.Sprintf("slow SSE send probe: sample_at=%v timer_lateness=%v connected_at=%v wrote_at=%v first_byte_at=%v completed=%d->%d active_streams=%d db_before=%+v db_sample=%+v stack_bytes=%d capacity=%d\n%s",
+			observed, observed-at, time.Duration(connected.Load()), time.Duration(written.Load()), time.Duration(firstByte.Load()),
+			beforeCompleted, completed.Load(), httpapi.ActiveStreams(), before, env.Hub.DB.Stats(), n, len(stack), stack[:n])
+	})
+	var once sync.Once
+	return ctx, func() string {
+		once.Do(func() {
+			if !timer.Stop() {
+				<-done
+			}
+		})
+		return sample
+	}
 }
 
 // stalledDeliveryWriter lets the real SSE handler prime the stream, then

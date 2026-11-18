@@ -49,7 +49,8 @@ func CheckPath(path string, directory, private bool) error {
 	defer f.Close()
 	return CheckFile(f, directory, private)
 }
-func MkdirAll(path string, mode os.FileMode) error { return os.MkdirAll(path, mode) }
+func MkdirAll(path string, mode os.FileMode) error  { return os.MkdirAll(path, mode) }
+func MkdirTemp(dir, pattern string) (string, error) { return os.MkdirTemp(dir, pattern) }
 func TryLock(f *os.File) (bool, error) {
 	e := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 	if errors.Is(e, syscall.EWOULDBLOCK) || errors.Is(e, syscall.EAGAIN) || errors.Is(e, syscall.EINTR) {

@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -120,21 +121,172 @@ func TestLocalRepairReportsLauncherUpgradePending(t *testing.T) {
 		t.Fatalf("launcher software incorrectly marked upgraded: %#v %v", projects, err)
 	}
 }
-func TestLocalRepairPrefersStandaloneWithLeftoverLauncherUnit(t *testing.T) {
-	a, _, home := localRegistryFixture(t)
-	for _, name := range []string{"vecnet-launcher.service", "vecnet-codex-delivery.service"} {
-		path := filepath.Join(home, ".config/systemd/user", name)
-		if err := cliFixtureMkdirAll(filepath.Dir(path), 0700); err != nil {
-			t.Fatal(err)
-		}
-		if err := cliFixtureWriteFile(path, []byte("[Service]\nExecStart=/private/old-runtime\n"), 0600); err != nil {
-			t.Fatal(err)
-		}
+
+// Windows pathname Stat may defer file identity lookup until SameFile. Stat an
+// open handle so the identity is captured before repair can replace the path.
+func localRepairFileIdentity(path string) (os.FileInfo, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
 	}
-	calls := 0
-	a.localRuntime = func(context.Context) error { calls++; return nil }
-	if err := a.cmdLocalRepair(nil); err != nil || calls != 1 {
-		t.Fatalf("standalone repair was blocked by leftover launcher: calls=%d error=%v", calls, err)
+	info, statErr := file.Stat()
+	closeErr := file.Close()
+	if statErr != nil {
+		return nil, statErr
+	}
+	if closeErr != nil {
+		return nil, closeErr
+	}
+	return info, nil
+}
+
+func TestLocalRepairFileIdentityRejectsSameContentReplacement(t *testing.T) {
+	for _, name := range []string{"vecnet-launcher.service", "vecnet-codex-delivery.service"} {
+		t.Run(name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "leftovers")
+			if err := cliFixtureMkdir(dir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, name)
+			raw := []byte("[Service]\nExecStart=/private/old-runtime\n")
+			if err := cliFixtureWriteFile(path, raw, 0600); err != nil {
+				t.Fatal(err)
+			}
+			before, err := localRepairFileIdentity(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			permissions, err := cliFixturePermissions(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Keep the old object alive so identity cannot be reused, while
+			// replacing its pathname with identical content and security.
+			if err := os.Rename(path, path+".original"); err != nil {
+				t.Fatal(err)
+			}
+			if err := cliFixtureWriteFile(path, raw, 0600); err != nil {
+				t.Fatal(err)
+			}
+			after, err := localRepairFileIdentity(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if os.SameFile(before, after) {
+				t.Error("saved leftover identity followed a same-content replacement")
+			}
+			if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, raw) {
+				t.Fatalf("replacement content differs: %q %v", got, err)
+			}
+			if got, err := cliFixturePermissions(path); err != nil || got != permissions {
+				t.Fatalf("replacement security differs: %q want=%q err=%v", got, permissions, err)
+			}
+		})
+	}
+}
+
+func TestLocalRepairPrefersStandaloneWithLeftoverLauncherUnit(t *testing.T) {
+	uncertain := errors.New("fixture task inventory is uncertain")
+	for _, tc := range []struct {
+		name       string
+		tasks      []string
+		inspectErr error
+		wantReason string
+	}{
+		{name: "empty foreground"},
+		{name: "uncertain", inspectErr: uncertain, wantReason: uncertain.Error()},
+		{name: "unregistered", tasks: []string{"vecnet-launcher-p-0123456789abcdef"}, wantReason: "Windows profile launcher task is not registered"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, _, home := localRegistryFixture(t)
+			before := []byte("[Service]\nExecStart=/private/old-runtime\n")
+			type unitSnapshot struct {
+				info        os.FileInfo
+				permissions string
+			}
+			units := map[string]unitSnapshot{}
+			for _, name := range []string{"vecnet-launcher.service", "vecnet-codex-delivery.service"} {
+				path := filepath.Join(home, ".config/systemd/user", name)
+				if err := cliFixtureMkdirAll(filepath.Dir(path), 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := cliFixtureWriteFile(path, before, 0600); err != nil {
+					t.Fatal(err)
+				}
+				info, err := localRepairFileIdentity(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				permissions, err := cliFixturePermissions(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				units[path] = unitSnapshot{info, permissions}
+			}
+			type contextKey struct{}
+			parent := context.WithValue(t.Context(), contextKey{}, "private repair")
+			a.ctx = parent
+			var runtimeCtx context.Context
+			runtimeCalls, inventoryCalls := 0, 0
+			a.localRuntime = func(ctx context.Context) error {
+				runtimeCalls++
+				runtimeCtx = ctx
+				return nil
+			}
+			a.localLauncherTasks = func(ctx context.Context) ([]string, error) {
+				inventoryCalls++
+				if runtimeCalls != 1 || ctx != runtimeCtx || ctx.Value(contextKey{}) != "private repair" || ctx.Err() != nil {
+					t.Errorf("inventory lost runtime selection/context: runtime=%d same=%t error=%v", runtimeCalls, ctx == runtimeCtx, ctx.Err())
+				}
+				if ctx != parent {
+					t.Error("foreground inventory context changed")
+				}
+				return tc.tasks, tc.inspectErr
+			}
+			err := a.cmdLocalRepair(nil)
+			if runtimeCalls != 1 || inventoryCalls != 1 || a.ctx != parent || parent.Err() != nil {
+				t.Errorf("repair selection/worker copy: runtime=%d inventory=%d error=%v", runtimeCalls, inventoryCalls, err)
+			}
+			wantState := "ready"
+			if tc.wantReason == "" {
+				if err != nil {
+					t.Errorf("standalone repair was blocked by leftover launcher: %v", err)
+				}
+			} else {
+				wantState = "pending"
+				if err == nil || !strings.Contains(err.Error(), tc.wantReason) {
+					t.Errorf("inventory refusal lost: error=%v want=%q", err, tc.wantReason)
+				}
+			}
+			if tc.inspectErr != nil && !errors.Is(err, tc.inspectErr) {
+				t.Errorf("inventory error identity lost: %v", err)
+			}
+			raw, err := a.readLocalState("repair-status.json")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var report localRepairReport
+			if err := json.Unmarshal(raw, &report); err != nil {
+				t.Fatal(err)
+			}
+			if report.State != wantState || tc.wantReason == "" && report.Reason != "" || tc.wantReason != "" && !strings.Contains(report.Reason, tc.wantReason) {
+				t.Errorf("durable repair state=%q reason=%q want=%q/%q", report.State, report.Reason, wantState, tc.wantReason)
+			}
+			for path, snapshot := range units {
+				got, err := os.ReadFile(path)
+				if err != nil || !bytes.Equal(got, before) {
+					t.Errorf("repair changed leftover unit %s: %q %v", path, got, err)
+				}
+				info, err := os.Stat(path)
+				if err != nil || !os.SameFile(info, snapshot.info) {
+					t.Errorf("repair replaced leftover unit %s: %v", path, err)
+				}
+				permissions, err := cliFixturePermissions(path)
+				if err != nil || permissions != snapshot.permissions {
+					t.Errorf("repair changed leftover unit permissions %s: %v", path, err)
+				}
+			}
+		})
 	}
 }
 

@@ -6,11 +6,52 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"golang.org/x/sys/windows"
 )
+
+func TestTemporaryDirectoryOwnerMatchesPrivateStateContract(t *testing.T) {
+	parent := filepath.Join(t.TempDir(), "private")
+	if err := MkdirAll(parent, 0700); err != nil {
+		t.Fatal(err)
+	}
+	// Inheritance supplies a DACL, not an owner. An elevated token may default
+	// ordinary MkdirTemp to Administrators; it must still fail private ownership.
+	ordinary, err := os.MkdirTemp(parent, "ordinary-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sd, err := windows.GetNamedSecurityInfo(ordinary, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, _, err := sd.Owner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, err := currentSID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = CheckPath(ordinary, true, true)
+	if windows.EqualSid(owner, user) {
+		if err != nil {
+			t.Fatal(err)
+		}
+	} else if err == nil || !strings.Contains(err.Error(), "owned by another Windows user") {
+		t.Fatalf("foreign owner accepted or wrong refusal: %v", err)
+	}
+	private, err := MkdirTemp(parent, "private-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckPath(private, true, true); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestPrivateStateAndKernelLock(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "private state", "nested")

@@ -42,6 +42,26 @@ func t2Exec(t *testing.T, e *testhub.Env, q string, args ...any) {
 	}
 }
 
+// t2Seed commits a raw reader fixture as one FULL transaction. It preserves
+// insert order and triggers; production writes and all reader assertions stay
+// outside the setup transaction.
+func t2Seed(t *testing.T, e *testhub.Env, seed func(*sql.Tx)) {
+	t.Helper()
+	tx, err := e.Hub.DB.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	seed(tx)
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type t2FixtureWriter interface {
+	Exec(string, ...any) (sql.Result, error)
+}
+
 func t2Caller(t *testing.T, e *testhub.Env, secret string) auth.Caller {
 	t.Helper()
 	c, err := e.Hub.Auth.Resolve(context.Background(), secret)
@@ -68,8 +88,14 @@ func t2Sub(t *testing.T, e *testhub.Env, id, peer string) {
 // cannot rely on the insert/prune writer to pre-correct their populations.
 func t2Attempt(t *testing.T, e *testhub.Env, route, delivery string, at time.Time, outcome string, status, class any, body, latency int) {
 	t.Helper()
-	t2Exec(t, e, "INSERT INTO route_attempts(route_id,delivery_id,at,outcome,http_status,error_class,body_bytes,latency_ms) VALUES(?,?,?,?,?,?,?,?)",
+	t2AttemptOn(t, e.Hub.DB, route, delivery, at, outcome, status, class, body, latency)
+}
+
+func t2AttemptOn(t *testing.T, q t2FixtureWriter, route, delivery string, at time.Time, outcome string, status, class any, body, latency int) {
+	t.Helper()
+	_, err := q.Exec("INSERT INTO route_attempts(route_id,delivery_id,at,outcome,http_status,error_class,body_bytes,latency_ms) VALUES(?,?,?,?,?,?,?,?)",
 		route, delivery, envelope.FormatTime(at), outcome, status, class, body, latency)
+	t2Must(t, err)
 }
 
 func t2JSON(t *testing.T, v any) map[string]any {
@@ -233,9 +259,11 @@ func TestRouteStatsPercentilesNullsAndLastFields(t *testing.T) {
 	route := t2ID("route", 1)
 	t2Route(t, e, route, "peer", peer, "http", "https://stats.example:8443/hook")
 	now := e.Now.Now()
-	for i := 1; i <= 300; i++ {
-		t2Attempt(t, e, route, t2ID("dly", i), now.Add(-time.Minute), "ok", 200, nil, i, i)
-	}
+	t2Seed(t, e, func(tx *sql.Tx) {
+		for i := 1; i <= 300; i++ {
+			t2AttemptOn(t, tx, route, t2ID("dly", i), now.Add(-time.Minute), "ok", 200, nil, i, i)
+		}
+	})
 	row := t2One(t, t2Stats(t, e, route))
 	t2Equal(t, row["requests"], 300)
 	t2Equal(t, row["ok"], 300)
@@ -310,12 +338,16 @@ func TestRouteStatsPercentilesNullsAndLastFields(t *testing.T) {
 	t2Attempt(t, e, route, "old", cutoff.Add(-time.Millisecond), "fail", 503, "http_5xx", 999, 999)
 	t2Attempt(t, e, route, "boundary", cutoff, "ok", 200, nil, 7, 7)
 	t2Equal(t, t2One(t, t2Stats(t, e, route))["requests"], 1)
-	for i := 0; i < 1005; i++ {
-		t2Attempt(t, e, route, fmt.Sprint("cap-", i), now, "ok", 201, nil, 2, 2)
-	}
-	for i := 0; i < 1001; i++ {
-		t2Attempt(t, e, route, fmt.Sprint("future-", i), now.Add(time.Millisecond), "fail", 500, "http_5xx", 900, 900)
-	}
+	t2Seed(t, e, func(tx *sql.Tx) {
+		for i := 0; i < 1005; i++ {
+			t2AttemptOn(t, tx, route, fmt.Sprint("cap-", i), now, "ok", 201, nil, 2, 2)
+		}
+	})
+	t2Seed(t, e, func(tx *sql.Tx) {
+		for i := 0; i < 1001; i++ {
+			t2AttemptOn(t, tx, route, fmt.Sprint("future-", i), now.Add(time.Millisecond), "fail", 500, "http_5xx", 900, 900)
+		}
+	})
 	row = t2One(t, t2Stats(t, e, route))
 	for key, want := range map[string]any{"requests": 1000, "ok": 1000, "fail": 0, "distinct_ids": 1000, "last_error": nil, "last_status": 201} {
 		t2Equal(t, row[key], want)
@@ -325,9 +357,11 @@ func TestRouteStatsPercentilesNullsAndLastFields(t *testing.T) {
 	// a global 1000-row budget between the two routes.
 	second := t2ID("route", 2)
 	t2Route(t, e, second, "peer", peer, "http", "https://second.example")
-	for i := 0; i < 1001; i++ {
-		t2Attempt(t, e, second, fmt.Sprint("second-", i), now, "ok", 200, nil, 4, 4)
-	}
+	t2Seed(t, e, func(tx *sql.Tx) {
+		for i := 0; i < 1001; i++ {
+			t2AttemptOn(t, tx, second, fmt.Sprint("second-", i), now, "ok", 200, nil, 4, 4)
+		}
+	})
 	rows := t2Rows(t, t2Stats(t, e, peer))
 	if len(rows) != 2 {
 		t.Fatal("peer lost a saturated route")
@@ -425,11 +459,17 @@ func TestRouteStatsSelectorsAndSharedPrincipalScope(t *testing.T) {
 
 func t2Delivery(t *testing.T, e *testhub.Env, id, recipient, route, state string, attempt int, at time.Time) {
 	t.Helper()
+	t2DeliveryOn(t, e.Hub.DB, id, recipient, route, state, attempt, at)
+}
+
+func t2DeliveryOn(t *testing.T, q t2FixtureWriter, id, recipient, route, state string, attempt int, at time.Time) {
+	t.Helper()
 	// No message body is necessary for this read population. Real Send and
 	// retention fixtures below independently exercise retained body deletion.
 	stamp := envelope.FormatTime(at)
-	t2Exec(t, e, "INSERT INTO deliveries(dly_id,msg_id,thr_id,recipient,priority,state,attempt,attempts_left,route_id,expires_at,created_at,updated_at,body_sha256) VALUES(?,?,?,?,'wake',?,?,3,?,?,?,?,?)",
+	_, err := q.Exec("INSERT INTO deliveries(dly_id,msg_id,thr_id,recipient,priority,state,attempt,attempts_left,route_id,expires_at,created_at,updated_at,body_sha256) VALUES(?,?,?,?,'wake',?,?,3,?,?,?,?,?)",
 		id, t2ID("msg", 80), t2ID("thr", 80), recipient, state, attempt, route, envelope.FormatTime(at.Add(24*time.Hour)), stamp, stamp, strings.Repeat("a", 64))
+	t2Must(t, err)
 }
 
 func TestRouteStatsDistinctIDsAndRetainedDeliveryEvidence(t *testing.T) {
@@ -463,9 +503,11 @@ func TestRouteStatsDistinctIDsAndRetainedDeliveryEvidence(t *testing.T) {
 	// than every cap-filling row. It cannot gain evidence via s1 or s2.
 	t2Delivery(t, e, "outside-all-selected", a, r, "accepted", 0, now)
 	t2Attempt(t, e, r, "outside-all-selected", now.Add(-time.Millisecond), "ok", 200, nil, 9, 9)
-	for i := 0; i < 1001; i++ {
-		t2Attempt(t, e, r, "retry-only", now, "ok", 200, nil, 1, 1)
-	}
+	t2Seed(t, e, func(tx *sql.Tx) {
+		for i := 0; i < 1001; i++ {
+			t2AttemptOn(t, tx, r, "retry-only", now, "ok", 200, nil, 1, 1)
+		}
+	})
 	t2Delivery(t, e, "retry-only", a, r, "accepted", 0, now)
 	wantA := map[string]any{"peer_ids": []string{a}, "total": 6, "with_push_evidence": 4, "accepted_without_push_evidence": 1}
 	t2Equal(t, t2Stats(t, e, a)["retained_deliveries"], wantA)
@@ -499,9 +541,11 @@ func TestRouteStatsDistinctIDsAndRetainedDeliveryEvidence(t *testing.T) {
 	// Restore principal ownership for the existing empty-membership oracle.
 	t2Exec(t, e, "UPDATE routes SET owner_kind='principal',owner_id=? WHERE route_id=?", prn, r)
 	// No 1000-row cap applies to delivery context.
-	for i := 0; i < 1001; i++ {
-		t2Delivery(t, e, fmt.Sprint("context-", i), b, r, "queued", 0, now)
-	}
+	t2Seed(t, e, func(tx *sql.Tx) {
+		for i := 0; i < 1001; i++ {
+			t2DeliveryOn(t, tx, fmt.Sprint("context-", i), b, r, "queued", 0, now)
+		}
+	})
 	t2Equal(t, t2Stats(t, e, r)["retained_deliveries"].(map[string]any)["total"], 1008)
 	t2Exec(t, e, "UPDATE peers SET route_id=NULL WHERE route_id=?", r)
 	t2Equal(t, t2Stats(t, e, r)["retained_deliveries"], map[string]any{"peer_ids": []any{}, "total": 0, "with_push_evidence": 0, "accepted_without_push_evidence": 0})
@@ -1093,18 +1137,23 @@ func TestCoalescedFirstCoverageDistinctWindowAndMove(t *testing.T) {
 		cover(id, r, at)
 	}
 	// More first-cover rows than the sample cap; no attempt evidence required.
-	for i := 0; i < 1001; i++ {
-		id := t2ID("dly", 800+i)
-		t2Delivery(t, e, id, a, r, "queued", 0, now)
-		cover(id, r, now.Add(-time.Hour))
-	}
+	t2Seed(t, e, func(tx *sql.Tx) {
+		for i := 0; i < 1001; i++ {
+			id := t2ID("dly", 800+i)
+			t2DeliveryOn(t, tx, id, a, r, "queued", 0, now)
+			_, err := tx.Exec(`INSERT INTO grokbot_covers(route_id,delivery_id,recipient,first_covered_at) VALUES(?,?,?,?) ON CONFLICT DO NOTHING`, r, id, a, envelope.FormatTime(now.Add(-time.Hour)))
+			t2Must(t, err)
+		}
+	})
 	// Re-cover cannot slide an old first time into this window.
 	cover(t2ID("dly", 710), r, now)
 	// A covered ID may also genuinely have attempted evidence; it counts once
 	// in coverage independently of repeated attempts and their sample cap.
-	for i := 0; i < 1001; i++ {
-		t2Attempt(t, e, r, t2ID("dly", 800), now, "ok", 200, nil, 1, 1)
-	}
+	t2Seed(t, e, func(tx *sql.Tx) {
+		for i := 0; i < 1001; i++ {
+			t2AttemptOn(t, tx, r, t2ID("dly", 800), now, "ok", 200, nil, 1, 1)
+		}
+	})
 	// Current owner, peer membership and delivery routing no longer match the
 	// historical first-covered route. Attribution must remain historical.
 	t2Exec(t, e, `UPDATE routes SET owner_id=? WHERE route_id=?`, b, r)

@@ -16,7 +16,10 @@ import (
 
 func hookTestEnv(t *testing.T) map[string]string {
 	t.Helper()
-	d := t.TempDir()
+	d, err := canonicalCodexPath(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := cliFixtureMkdirAll(filepath.Join(d, "home"), 0700); err != nil {
 		t.Fatal(err)
 	}

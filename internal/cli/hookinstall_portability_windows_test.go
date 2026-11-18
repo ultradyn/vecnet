@@ -51,14 +51,24 @@ func TestCodexHookWindowsInstalledCommandPreservesArgv(t *testing.T) {
 		if command != want {
 			t.Fatalf("command=%q want=%q", command, want)
 		}
-		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+		// The cold hosted ARM64 runner hit the old 10s process deadline at
+		// 10.02s with no output. Allow bounded native PowerShell/process startup;
+		// this does not change the timeout in the installed hook stanza.
+		const startupBudget = 30 * time.Second
+		if err := os.Remove(log); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(t.Context(), startupBudget)
 		cmd := exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command)
 		platform.Background(cmd)
+		started := time.Now()
 		out, err := cmd.CombinedOutput()
+		elapsed, contextErr := time.Since(started), ctx.Err()
 		cancel()
 		if err != nil {
-			t.Fatalf("PowerShell: %v: %s", err, out)
+			t.Fatalf("PowerShell event=%s elapsed=%s budget=%s context=%v: %v: %s", event.name, elapsed, startupBudget, contextErr, err, out)
 		}
+		t.Logf("PowerShell event=%s elapsed=%s context=%v", event.name, elapsed, contextErr)
 		raw, err := os.ReadFile(log)
 		if err != nil {
 			t.Fatal(err)

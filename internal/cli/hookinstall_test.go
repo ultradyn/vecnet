@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/XertroV/vecnet/internal/platform"
 )
 
 func installUser(t *testing.T) *user {
@@ -477,6 +479,10 @@ func TestHookInstallDefaultsToLocalAtGitRoot(t *testing.T) {
 	cmd := exec.Command("git", "init", root)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v %s", err, out)
+	}
+	root, err := platform.Canonical(root)
+	if err != nil {
+		t.Fatal(err)
 	}
 	sub := filepath.Join(root, "sub")
 	if err := cliFixtureMkdir(sub, 0755); err != nil {
@@ -1113,6 +1119,10 @@ func codexInstallRepo(t *testing.T) (*user, string) {
 	}
 	root := filepath.Join(t.TempDir(), name)
 	gitT(t, "init", "--quiet", root)
+	root, err := platform.Canonical(root)
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Chdir(root)
 	return u, root
 }

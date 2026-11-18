@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, readdirSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -16,17 +16,21 @@ test('validateLaunchPermission accepts every valid fixture and rejects every inv
   }
 });
 test('finishPermission: in-workspace enforced edit → outside_workspace false; a command line → unknown; a path outside → true; symlink escape resolved by realpath → true',()=>{
-  const root=mkdtempSync(join(tmpdir(),'vl-permission-'));mkdirSync(join(root,'ws'));mkdirSync(join(root,'outside'));writeFileSync(join(root,'outside','file'),'');symlinkSync(join(root,'outside'),join(root,'ws','escape'));
+  const temporary=mkdtempSync(join(tmpdir(),'vl-permission-')), root=realpathSync.native(temporary);mkdirSync(join(root,'ws'));mkdirSync(join(root,'outside'));writeFileSync(join(root,'outside','file'),'');symlinkSync(join(root,'outside'),join(root,'ws','escape'));
   try {
     const c={...ctx,workspaceRoot:join(root,'ws')};
     const p=finishPermission({...draft(),paths:[{path:'file',access:'write'}]},c);assert.equal(p.outside_workspace,false);assert.equal(p.paths![0].in_workspace,true);assert.equal(p.paths![0].path,join(root,'ws','file'));assert.deepEqual(validateLaunchPermission(p),[]);
+    const alias=join(root,'ws-alias'), distinct=join(root,'ws-other');symlinkSync(join(root,'ws'),alias);mkdirSync(distinct);
+    const aliased=finishPermission({...draft(),paths:[{path:join(alias,'file'),access:'write'}]},c);
+    assert.equal(aliased.outside_workspace,false);assert.equal(aliased.paths![0].path,p.paths![0].path);
+    assert.equal(finishPermission({...draft(),paths:[{path:join(distinct,'file'),access:'write'}]},c).outside_workspace,true);
     assert.equal(finishPermission({...draft(),command:{line:'cat file'},paths:[]},c).outside_workspace,'unknown');
     assert.equal(finishPermission({...draft(),paths:[{path:join(root,'outside','file'),access:'read'}]},c).outside_workspace,true);
     for(const path of ['escape/file','escape/new-file','escape/missing/child']) { const escaped=finishPermission({...draft(),paths:[{path,access:'write'}]},c);assert.equal(escaped.outside_workspace,true);assert.equal(escaped.paths![0].in_workspace,false);assert.ok(escaped.paths![0].path.startsWith(join(root,'outside'))); }
     assert.equal(finishPermission({...draft(),command:{cwd:join(root,'outside')},paths:[]},c).outside_workspace,true);
     assert.equal(finishPermission({...draft(),paths:[],fidelity:{kind:'reported',command:'none',paths:'none',host:'none'}},c).outside_workspace,'unknown');
     const redacted=finishPermission({...draft(),reason:'Bearer token123',command:{line:'echo crsr_123'},backend_raw:{token:'whsec_123'}},c);assert.equal(redacted.redacted,true);assert.ok(!JSON.stringify(redacted).includes('token123'));assert.ok(!JSON.stringify(redacted).includes('whsec_123'));
-  } finally {rmSync(root,{recursive:true,force:true});}
+  } finally {rmSync(temporary,{recursive:true,force:true});}
 });
 test('finishPermission: backend_raw over 4 KiB is truncated with sha256; an object still over 6 KiB truncates command.line and paths and sets redacted',()=>{
   const raw={value:'α'.repeat(5000)}, p=finishPermission({...draft(),backend_raw:raw},ctx);

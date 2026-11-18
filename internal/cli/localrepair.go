@@ -97,7 +97,9 @@ func (a *app) localStartup(args []string) {
 			continue
 		}
 		if raw, err := readLocalHooks(path); err == nil && hasOwnedCodexHooks(raw, localBinary()) {
-			_ = worker.registerLocalArtifact(path, "codex-hooks", "legacy", time.Now())
+			// Adoption belongs to the identity just observed. Rediscovering it
+			// runs Git twice inside the bounded foreground startup budget.
+			_ = worker.registerLocalArtifactForProject(p.Root, path, "codex-hooks", "legacy", time.Now())
 		}
 	}
 	projects, err := worker.localProjects()
@@ -522,7 +524,7 @@ func (a *app) unregisteredLocalLaunchers() error {
 	if err != nil {
 		return err
 	}
-	if runtime.GOOS != "windows" && len(units) == 0 {
+	if runtime.GOOS != "windows" && a.localLauncherTasks == nil && len(units) == 0 {
 		return nil
 	}
 	projects, err := a.localProjects()
@@ -544,8 +546,12 @@ func (a *app) unregisteredLocalLaunchers() error {
 			}
 		}
 	}
-	if runtime.GOOS == "windows" {
-		tasks, e := localWindowsProfileLauncherTasks(a.localRegistryContext())
+	if runtime.GOOS == "windows" || a.localLauncherTasks != nil {
+		inventory := a.localLauncherTasks
+		if inventory == nil {
+			inventory = localWindowsProfileLauncherTasks
+		}
+		tasks, e := inventory(a.localRegistryContext())
 		if e != nil {
 			return e
 		}

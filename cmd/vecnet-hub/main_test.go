@@ -997,7 +997,10 @@ func TestHubURLRefusedAtStartup(t *testing.T) {
 
 func TestHubLogsCheckedPublicURL(t *testing.T) {
 	ipv6 := "https://[2001:db8::7]/vecnet"
-	h := bootHub(t, []string{"--listen", "127.0.0.1:0", "--data-dir", t.TempDir(), "--public-url", ipv6}, noEnv)
+	// This checks the announced URL. Complete real init/migrations before
+	// bootHub's listening deadline, just as the other initialized smoke hubs do.
+	dataDir, _ := initHub(t)
+	h := bootHub(t, []string{"--listen", "127.0.0.1:0", "--data-dir", dataDir, "--public-url", ipv6}, noEnv)
 	if !strings.Contains(h.out.String(), "public url "+ipv6) {
 		t.Fatalf("log dropped the public URL: %s", h.out.String())
 	}

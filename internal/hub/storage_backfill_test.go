@@ -230,34 +230,74 @@ func TestBackfillCancellationRollsBackWholeSlice(t *testing.T) {
 }
 
 func TestBackfillRealReaderCheckpointPressure(t *testing.T) {
-	env, _ := backfillEnv(t)
-	h := env.Hub
-	// Only the checkpoint probe is real: the injected 1 TiB capacity probe
-	// stays, so low host disk can never produce this pause instead of the
-	// reader holding the WAL.
-	h.Cfg.BackfillCheckpoint = nil
-	conn, err := h.DB.Conn(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
-	if _, err = conn.ExecContext(context.Background(), `BEGIN DEFERRED`); err != nil {
-		t.Fatal(err)
-	}
-	var n int
-	if err = conn.QueryRowContext(context.Background(), `SELECT count(*) FROM events`).Scan(&n); err != nil {
-		t.Fatal(err)
-	}
-	guardExec(t, env, `INSERT INTO events(owner,type,at,data) VALUES (?,'presence',?,'{}')`, guardB, guardAt)
-	p := slice(t, h, hub.BackfillLimits{Rows: 1})
-	if p.PausedReason != "wal_pressure" || p.Converted != 0 || p.AvailableBytes != 1<<40 || p.WALBytes != 0 {
-		t.Fatalf("reader did not pause the checkpoint probe: %+v", p)
-	}
-	if _, err = conn.ExecContext(context.Background(), `ROLLBACK`); err != nil {
-		t.Fatal(err)
-	}
-	if p = slice(t, h, hub.BackfillLimits{Rows: 1}); p.Converted != 1 {
-		t.Fatalf("reader relief did not resume: %+v", p)
+	for _, transientYield := range []bool{false, true} {
+		t.Run(fmt.Sprintf("transient_yield_%t", transientYield), func(t *testing.T) {
+			env, fs := backfillEnv(t)
+			h := env.Hub
+			// Only the checkpoint probe is real: the injected 1 TiB capacity probe
+			// stays, so low host disk can never produce this pause instead of the
+			// reader holding the WAL.
+			h.Cfg.BackfillCheckpoint = nil
+			conn, err := h.DB.Conn(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.Close()
+			if _, err = conn.ExecContext(context.Background(), `BEGIN DEFERRED`); err != nil {
+				t.Fatal(err)
+			}
+			var n int
+			if err = conn.QueryRowContext(context.Background(), `SELECT count(*) FROM events`).Scan(&n); err != nil {
+				t.Fatal(err)
+			}
+			guardExec(t, env, `INSERT INTO events(owner,type,at,data) VALUES (?,'presence',?,'{}')`, guardB, guardAt)
+			p := slice(t, h, hub.BackfillLimits{Rows: 1})
+			if p.PausedReason != "wal_pressure" || p.Converted != 0 || p.AvailableBytes != 1<<40 || p.WALBytes != 0 {
+				t.Fatalf("reader did not pause the checkpoint probe: %+v", p)
+			}
+			if _, err = conn.ExecContext(context.Background(), `ROLLBACK`); err != nil {
+				t.Fatal(err)
+			}
+			// A bounded probe can yield once after reader relief, before the real
+			// checkpoint gets its next opportunity to finish.
+			if transientYield {
+				h.Cfg.BackfillCheckpoint = func(context.Context) (hub.BackfillCheckpoint, error) {
+					h.Cfg.BackfillCheckpoint = nil
+					return hub.BackfillCheckpoint{}, context.DeadlineExceeded
+				}
+			}
+			// Reader relief permits work again, but does not guarantee a disk
+			// checkpoint completes within the next bounded probe. Require eventual
+			// conversion, allowing only the documented transient pressure yields.
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			retry := time.NewTicker(10 * time.Millisecond)
+			defer retry.Stop()
+			for {
+				p, err = h.BackfillDeliverySlice(ctx, hub.BackfillLimits{Rows: 1})
+				if err != nil {
+					t.Fatalf("reader relief did not resume: progress=%+v err=%v", p, err)
+				}
+				if p.Processed != p.Converted+p.Skipped+p.Failed {
+					t.Fatal("slice row counts do not balance")
+				}
+				if p.Converted != 0 {
+					break
+				}
+				if (p.PausedReason != "lock_pressure" && p.PausedReason != "wal_pressure") || p.Processed != 0 || p.LastSeq != 0 {
+					t.Fatalf("unexpected reader relief yield: %+v", p)
+				}
+				select {
+				case <-ctx.Done():
+					t.Fatalf("reader relief did not resume within 5 s: %+v", p)
+				case <-retry.C:
+				}
+			}
+			if p.Converted != 1 || p.Processed != 1 || p.LastSeq != 1 || p.TotalConverted != 1 {
+				t.Fatalf("reader relief resumed with unexpected progress: %+v", p)
+			}
+			assertBackfillBytes(t, h, fs)
+		})
 	}
 }
 

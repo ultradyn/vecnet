@@ -32,7 +32,10 @@ type bindFixture struct {
 
 func newBindFixture(t *testing.T) *bindFixture {
 	t.Helper()
-	d := t.TempDir()
+	d, err := canonicalCodexPath(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	f := &bindFixture{t: t, home: filepath.Join(d, "codex-home"), path: filepath.Join(d, ".local", "state", "vecnet", "codex", "bindings.json"), now: time.Date(2026, 11, 6, 0, 0, 0, 0, time.UTC)}
 	f.peer.Store("peer_A")
 	f.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

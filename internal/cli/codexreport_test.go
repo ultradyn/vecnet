@@ -262,19 +262,44 @@ func TestCodexReportWaitsForBindingLock(t *testing.T) {
 	}
 	assertReportLeavesBinding(t, f, before)
 }
+
+// This context is passed only to cmdCodex's real binding lock, never to HTTP.
+// Both lockPath's Unix retry and platform.Lock's Windows retry consult Done
+// only after an OS lock attempt reports contention. All cancellation behavior
+// is delegated unchanged to the command's context.
+type codexReportLockContext struct {
+	context.Context
+	contended chan struct{}
+	once      sync.Once
+}
+
+func (c *codexReportLockContext) Done() <-chan struct{} {
+	c.once.Do(func() { close(c.contended) })
+	return c.Context.Done()
+}
+
 func TestCodexReportHoldsBindingLockUntilPostCompletes(t *testing.T) {
 	f := newBindFixture(t)
 	entered, release := make(chan struct{}), make(chan struct{})
-	var once sync.Once
+	identityEntered, identityRelease := make(chan struct{}), make(chan struct{})
+	var handoffStarted atomic.Bool
+	var postOnce, identityOnce, releaseIdentityOnce sync.Once
+	releaseIdentity := func() { releaseIdentityOnce.Do(func() { close(identityRelease) }) }
 	capture := newCodexReportEndpoint(f, func(r *http.Request) {
 		if r.URL.Path == "/v1/runtime-status" {
-			once.Do(func() { close(entered); <-release })
+			postOnce.Do(func() { close(entered); <-release })
+		}
+		if r.URL.Path == "/v1/peers/me" && handoffStarted.Load() {
+			identityOnce.Do(func() { close(identityEntered) })
+			<-identityRelease
 		}
 	})
 	defer close(release)
+	defer releaseIdentity()
 	f.bind("p", bindT1)
-	args := reportArgs(f)
+	before, args := f.raw(), reportArgs(f)
 	generation := bindValue[string](t, f.entries()[0], "generation")
+
 	done := make(chan error, 1)
 	go func() { _, err := reportRun(f, validCodexReport, args); done <- err }()
 	select {
@@ -284,12 +309,62 @@ func TestCodexReportHoldsBindingLockUntilPostCompletes(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("report never reached endpoint")
 	}
-	ctx, cancel := context.WithTimeout(t.Context(), 80*time.Millisecond)
+	// Keep the native HTTP/setup allowance separate from lock observations.
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
+	lockCtx := &codexReportLockContext{Context: ctx, contended: make(chan struct{})}
 	a := &app{ctx: ctx, stdin: strings.NewReader(""), stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{}, getenv: func(k string) string { return f.env[k] }}
-	if err := a.cmdCodex([]string{"bind", "--thread", bindT2, "--expect-generation", generation}, func() time.Time { return f.now }); !errors.Is(err, errStateBusy) {
-		t.Fatalf("handoff passed an in-flight report: %v", err)
+	handoffDone := make(chan error, 1)
+	handoffStarted.Store(true)
+	go func() {
+		handoffDone <- a.cmdCodexWithBindingLockContext([]string{"bind", "--thread", bindT2, "--expect-generation", generation}, func() time.Time { return f.now }, lockCtx)
+	}()
+	select {
+	case <-identityEntered:
+	case err := <-handoffDone:
+		t.Fatalf("handoff ended before authentication: %v", err)
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
 	}
+	// Intentionally withhold the identity body throughout the independent 80ms
+	// OS-lock probe. Endpoint entry cannot count as completed authentication or
+	// as a waiting handoff, however long identity resolution takes.
+	probeCtx, probeCancel := context.WithTimeout(t.Context(), 80*time.Millisecond)
+	unlock, err := lockPath(probeCtx, f.path+".lock")
+	probeCancel()
+	if err == nil {
+		unlock()
+	}
+	if !errors.Is(err, errStateBusy) {
+		t.Fatalf("report released binding lock before POST completed: %v", err)
+	}
+	select {
+	case <-lockCtx.contended:
+		t.Fatal("handoff reached binding lock before identity response was released")
+	case err := <-handoffDone:
+		t.Fatalf("handoff ended with identity response withheld: %v", err)
+	default:
+	}
+	assertReportLeavesBinding(t, f, before)
+	t.Log("phase: POST blocked, independent OS lock busy, identity response withheld")
+	releaseIdentity()
+	// This signal comes from a failed acquisition by this command's actual
+	// binding lock, after codexBindCaller has decoded and validated identity.
+	// A bypassed lock ends the handoff instead of satisfying this phase.
+	select {
+	case <-lockCtx.contended:
+	case err := <-handoffDone:
+		t.Fatalf("handoff ended before real binding lock contention: %v", err)
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	select {
+	case err := <-handoffDone:
+		t.Fatalf("handoff passed an in-flight report: %v", err)
+	default:
+	}
+	assertReportLeavesBinding(t, f, before)
+	t.Log("phase: authenticated handoff contended on real binding lock, POST still blocked")
 	// Release the one blocked handler; the deferred close also covers failures.
 	select {
 	case release <- struct{}{}:
@@ -304,11 +379,25 @@ func TestCodexReportHoldsBindingLockUntilPostCompletes(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("report did not finish after POST release")
 	}
-	f.bind("p", bindT2, "--expect-generation", generation)
+	select {
+	case err := <-handoffDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	entries := f.entries()
+	if len(entries) != 1 || bindValue[string](t, entries[0], "thread_id") != bindT2 || bindValue[string](t, entries[0], "generation") == generation || bindValue[string](t, entries[0], "caller") != "peer_A" {
+		t.Fatalf("waiting handoff did not replace the exact owner: %s", f.raw())
+	}
+	before = f.raw()
 	out, err := reportRun(f, validCodexReport, args)
 	if err == nil || strings.Contains(out, `"reported":true`) || len(capture.snapshot()) != 1 {
 		t.Fatalf("old owner reported after serialized handoff: out=%q err=%v reports=%+v", out, err, capture.snapshot())
 	}
+	assertReportLeavesBinding(t, f, before)
+	t.Log("phase: same waiting handoff completed after POST release; obsolete report refused without authority changes")
 }
 func TestCodexReportRechecksLeaseAfterAuthentication(t *testing.T) {
 	f := newBindFixture(t)
