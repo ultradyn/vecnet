@@ -315,8 +315,12 @@ are still required.
 
 The three Node platform jobs keep identical steps but expose completion
 milestones for package admission. Windows package gates wait for build, the
-ARM test producer and x64 Node completion; Linux package gates wait for build,
-the ARM test producer and Linux Node completion. This makes every ARM Go lane
+ARM test producer and x64 Node completion; Linux package gates wait for build
+and the ARM test producer. Linux packages can run alongside their Node job:
+R31's Linux Node completion at +243s postponed package completion to +282s
+and acceptance preflight to +296s. Both package inputs were ready at +126s.
+Removing that unrelated dependency targets the measured tail; it does not
+establish a new native duration. This makes every ARM Go lane
 eligible before package
 gates claim runner slots, without adding jobs or test commands. Actual GitHub
 allocation, full native correctness and the strict overall budget remain

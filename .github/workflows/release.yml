@@ -500,7 +500,7 @@ jobs:
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs node 0 3
 
   # Let every ARM Go lane become runnable before package tests claim slots.
-  # Existing Node completion milestones defer packages without adding jobs.
+  # Windows packages additionally wait for the x64 Node completion milestone.
   test-artifact-windows:
     name: test-artifact (${{ matrix.runner }})
     needs: [build, test-compile-windows-arm, test-node-windows-x64]
@@ -556,7 +556,7 @@ jobs:
 
   test-artifact-linux:
     name: test-artifact (${{ matrix.runner }})
-    needs: [build, test-compile-windows-arm, test-node-linux]
+    needs: [build, test-compile-windows-arm]
     strategy:
       fail-fast: false
       matrix:
