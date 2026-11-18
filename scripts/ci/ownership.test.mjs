@@ -7,6 +7,7 @@ import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 const budget = fileURLToPath(new URL('./budget.mjs', import.meta.url));
+const native = process.platform === 'win32' && Boolean(process.env.CI_WINDOWS_OWNER);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 async function gone(pid) { try { process.kill(pid, 0); return false; } catch { return true; } }
 for (const exit of [0, 7]) for (const stdio of ['ignore', 'inherit']) {
@@ -18,12 +19,14 @@ for (const exit of [0, 7]) for (const stdio of ['ignore', 'inherit']) {
     // actually existed, rather than testing a failed spawn.
     const leader = `const fs=require('node:fs');const c=require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(payload)}],{detached:true,stdio:${JSON.stringify(stdio)}});c.unref();const timer=setInterval(()=>{if(fs.existsSync(${JSON.stringify(marker)})){clearInterval(timer);process.exit(${exit})}},5)`;
     const runner = spawn(process.execPath, [budget, '2000', process.execPath, '-e', leader], { stdio: ['ignore', 'pipe', 'pipe'] });
-    runner.stdout.resume();runner.stderr.resume();
+    let stderr = '';
+    runner.stdout.resume();runner.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk; });
     let watchdog;
     const result = await Promise.race([new Promise(resolve => runner.once('close', code => resolve(code))), new Promise(resolve => {watchdog=setTimeout(()=>{runner.kill('SIGTERM');resolve('hung');},3500);})]);
     clearTimeout(watchdog);
     const pid = Number(await readFile(marker, 'utf8'));t.after(() => {try {process.kill(pid,'SIGKILL')} catch {}});
-    assert.equal(result, exit, 'leader exit must not turn into an inherited-pipe timeout');
+    assert.equal(result, exit, `leader exit must not turn into an inherited-pipe timeout: ${stderr}`);
+    if (native) assert.match(stderr, /owner=windows-native/);
     for(let i=0;i<100 && !await gone(pid);i++)await sleep(10);
     assert.equal(await gone(pid), true, 'owned detached descendant remains alive or unreaped');
   });

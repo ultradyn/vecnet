@@ -5,6 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { ownerFixture } from './windows-owner.test-fixture.mjs';
 import { consumeBundle } from './go-bundle.mjs';
 import { planGo } from './schedule.mjs';
 const entry=fileURLToPath(new URL('./go-bundle.mjs',import.meta.url));
@@ -57,8 +58,26 @@ test('real compiled bundle conserves platform packages and rejects wrong source/
    await rename(path.join(winDirectory,String(row.group),row.file),path.join(winDirectory,String(row.group),row.file+'.exe'));
    row.file+='.exe';
   }
+  Object.assign(winReceipt,await ownerFixture(winDirectory,winReceipt.platform));
   await writeFile(path.join(winDirectory,'bundle.json'),JSON.stringify(winReceipt));
-  const win=await consumeBundle(winDirectory,{...options,platform:'win32-x64',takeOwnership:true});
+  const winOptions={...options,platform:'win32-x64',takeOwnership:true};
+  for(const [name,pattern,alter] of [
+   ['missing metadata',/owner metadata/,async (dir,receipt)=>{delete receipt.ciWindowsOwner;}],
+   ['metadata path',/owner metadata/,async (dir,receipt)=>{receipt.ciWindowsOwner.file='../other.exe';}],
+   ['owner hash',/owner hash/,async dir=>writeFile(path.join(dir,'ci-windows-owner.exe'),'corrupt')],
+   ['helper from wrong architecture',/PE architecture/,async (dir,receipt)=>Object.assign(receipt,await ownerFixture(dir,'win32-arm64'))],
+   ['wrong source',/source\/platform/,async (dir,receipt)=>{receipt.revision='0'.repeat(40);}],
+  ])await t.test(`Windows bundle rejects ${name} before executing a test binary`,async()=>{
+   const dir=await mkdtemp(path.join(root,'win-invalid-'));
+   await cp(winDirectory,dir,{recursive:true});
+   const receipt=structuredClone(winReceipt);
+   await alter(dir,receipt);
+   await writeFile(path.join(dir,'bundle.json'),JSON.stringify(receipt));
+   await assert.rejects(consumeBundle(dir,winOptions),pattern);
+  });
+  const win=await consumeBundle(winDirectory,winOptions);
+  assert.equal(path.dirname(win.owner),win.temporary);
+  assert.deepEqual(await readFile(win.owner),await readFile(path.join(winDirectory,'ci-windows-owner.exe')));
   assert.ok(win.inventory.find(p=>p.binary).binary.endsWith('.test.exe'),'Windows relocation must preserve test-executable identity');
  }
 
@@ -119,7 +138,7 @@ test('real compiled bundle conserves platform packages and rejects wrong source/
  }
 
  const original=await stat(nativeBinary,{bigint:true});
- const env={...process.env,GITHUB_SHA:sha};
+ const env={...process.env,GITHUB_SHA:sha,GITHUB_ENV:path.join(root,'actions-env')};
  const copyTemp=path.join(root,'system-temp');
  if(process.platform==='linux'){
   // Linux staging must also work without runner-specific TMP vars.
@@ -145,6 +164,9 @@ test('real compiled bundle conserves platform packages and rejects wrong source/
   assert.equal(path.dirname(executed.binary),executed.temporary);
   assert.equal(path.dirname(executed.temporary),await realpath(copyTemp),
    'the copied executable must live under system temp, not the artifact workspace');
+  const owner=path.join(executed.temporary,'ci-windows-owner.exe');
+  assert.equal((await readFile(env.GITHUB_ENV,'utf8')).trim(),`CI_WINDOWS_OWNER=${owner}`);
+  assert.deepEqual(await readFile(owner),await readFile(path.join(directory,'ci-windows-owner.exe')));
   assert.notDeepEqual([staged.dev,staged.ino],[original.dev,original.ino]);
   assert.deepEqual(await readFile(nativeBinary),binaryBytes,'copying must preserve the artifact executable');
  }

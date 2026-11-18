@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { buildWindowsOwner } from '../ci/windows-owner.mjs';
 import { nativeTargets } from './platforms.mjs';
 const root=fileURLToPath(new URL('../../',import.meta.url));
 export async function buildTarget(platform,{destination=path.join(root,'dist','targets',platform)}={}) {
@@ -15,7 +16,8 @@ export async function buildTarget(platform,{destination=path.join(root,'dist','t
  execFileSync('go',['build','-mod=readonly','-p','2','-trimpath','-buildvcs=false','-ldflags',`-s -w -X github.com/XertroV/vecnet/internal/mcpserver.Version=${version} -X github.com/XertroV/vecnet/internal/buildinfo.Version=${version}`,'-o',destination+path.sep,'./cmd/vecnet','./cmd/vecnet-hub'],{cwd:root,env,stdio:'inherit'});
  const binaries={};
  for(const name of ['vecnet','vecnet-hub']){const file=name+target.suffix;await chmod(path.join(destination,file),0o755);binaries[file]=createHash('sha256').update(await readFile(path.join(destination,file))).digest('hex');}
+ const helper=await buildWindowsOwner(path.resolve(destination),platform,env);
  const go=execFileSync('go',['version'],{encoding:'utf8'}).trim();
- await writeFile(path.join(destination,'target.json'),JSON.stringify({platform,version,revision,go,binaries},null,2)+'\n');
+ await writeFile(path.join(destination,'target.json'),JSON.stringify({platform,version,revision,go,binaries,...helper},null,2)+'\n');
 }
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url))await buildTarget(process.argv[2]);
