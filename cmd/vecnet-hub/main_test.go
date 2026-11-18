@@ -239,6 +239,11 @@ func TestRelocatedRefusesOwnURL(t *testing.T) {
 	}
 	t.Run("environment", func(t *testing.T) {
 		dir := t.TempDir()
+		// This case checks relocation, not fresh migrations. Prepare a private
+		// migrated store before starting the listening budget.
+		if err := testhub.FreshStore(t, filepath.Join(dir, "hub.db")).Close(); err != nil {
+			t.Fatal(err)
+		}
 		env := func(k string) string {
 			if k == "VECNET_RELOCATED_TO" {
 				return "https://next.example"
