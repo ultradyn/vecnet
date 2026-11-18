@@ -13,7 +13,9 @@ jobs:
         timeout-minutes: 1
         with:
           persist-credentials: false
-          sparse-checkout: scripts/ci
+          sparse-checkout: |
+            scripts/ci
+            .github/workflows
       - name: Create bounded codec fixture
         timeout-minutes: 1
         run: |
