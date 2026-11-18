@@ -4,7 +4,7 @@ export const goLanes = 6;
 export const goGroups = 4;
 export const nativeGoLanes = platform => platform==='linux'?2:goLanes;
 // Only the hosted native Go execution step opts into the wider pool.
-export const nativeGoWorkers = platform => platform==='win32'||platform==='linux'?4:2;
+export const nativeGoWorkers = platform => platform==='win32'?6:platform==='linux'?4:2;
 export const goPartitions = goLanes * goGroups;
 // target4 + compile3 + build1 + Go(2+6+6) + Node3 + E2E3 + artifact4 + accept1.
 export const releaseJobCount = () => 4 + 3 + 1 + nativeGoLanes('linux') + 2 * goLanes + 3 + 3 + 4 + 1;
@@ -22,7 +22,7 @@ export function goCompileEnvironment(env, available=availableParallelism()) {
 const compare = (a, b) => a < b ? -1 : a > b ? 1 : 0;
 const packetOrder = (a,b) => b.cost-a.cost || compare(a.pkg,b.pkg) || compare(a.selected[0]??'',b.selected[0]??'');
 function windowsGroupCost(tasks) {
-  // Simulate the same packet order and four ordinary admissions as runGoGroup.
+  // Simulate the same packet order and the configured ordinary width as runGoGroup.
   const loads=Array(nativeGoWorkers('win32')).fill(0);
   let prefix=0, ordinary=0;
   for(const task of tasks.toSorted(packetOrder)){
@@ -64,10 +64,11 @@ export function planGo(inventory, profile = {}, {lanes=goLanes,platform=process.
     // ~70s remaining across four groups gives ~17.5s/group. An 8s threshold
     // leaves placement headroom; it is policy, not a measured runtime forecast.
     const exclusive = name => platform==='win32' && exclusiveGoRoots.get(row.pkg)?.includes(name);
-    const split = row.names.some(exclusive) || row.names.length >= 20 || (row.names.length >= 2 && measured > 8);
+    const rootSum = row.names.reduce((n,name)=>n+weight(name),0);
+    const split = row.names.some(exclusive) || row.names.length >= 20 || (row.names.length >= 2 && (measured ?? (platform==='win32'?rootSum:0)) > 8);
     if (!split) {
       // Whole packages use process elapsed; summed roots overcount parallel tests.
-      work.push({row, selected:row.names, split:false, cost:measured === undefined ? Math.max(fallback,row.names.reduce((n,name)=>n+weight(name),0)) : cost(measured), measured:measured!==undefined});
+      work.push({row, selected:row.names, split:false, cost:measured === undefined ? Math.max(fallback,rootSum) : cost(measured), measured:measured!==undefined});
     } else {
       for (const name of row.names) work.push({row, selected:[name], split:true, exclusive:exclusive(name), cost:weight(name)});
     }

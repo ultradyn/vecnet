@@ -11,14 +11,16 @@ toolchain setup, relinking or repeated go test driver. Test binaries and native
 test2json use normal Go linker stripping (`-s -w`), without changing production
 binaries or weakening source/hash receipts. Packages with20+roots are partitioned
 whole-root. Smaller packages also split when they have at least two roots and
-complete measured process elapsed >8s. Cheap, unknown-small, single-root and
-no-test packages remain whole. The8s split threshold and packet caps are scheduling policy,
+whole-package process elapsed >8s. On Windows, if no whole measurement is
+available, the sum of root hints is used instead. Cheap, unknown-small,
+single-root and no-test packages remain whole. The 8s split threshold and
+packet caps are scheduling policy,
 not a measured speedup or a claim that the native budget passes.
 `go-timings.json` started with complete PASS root maxima from all 14 native Go jobs
 in R12 (run 44271362850, attempt 1, source `6845842d`): Windows used four
 workers with `GOMAXPROCS=1` and independent fixture executable copies. Windows
-weights use the maximum observed PASS across x64 and ARM64. Complete package
-process elapsed maxima are retained separately for small whole packages.
+weights use the maximum observed PASS across x64 and ARM64. Whole-package
+elapsed is distinct from filtered packet elapsed.
 Unknown roots use the median complete PASS root cost for their package, or
 0.1s when entirely unobserved. Failed, skipped and unfinished observations are
 censored; a root that passed on x64 can still have a censored ARM64 record.
@@ -29,12 +31,18 @@ not identify which process emitted an event.
 The Windows placement profile refresh uses R16 run 44305065506 PASS values.
 When a root has no ARM64 PASS in that run, it also considers the latest
 same-architecture PASS from R14 (44292345778), or R12 if absent, retaining the
-larger cost. Missing R16 weights retain prior R12 observations; failures, skips
-and unfinished roots never contribute fast timings. Linux keeps its R12
+larger cost. Whole-package costs require a successful non-overlapping process
+covering the exact discovered root set. If only filtered or ambiguous samples
+exist in R16, keep a verified R12 whole-package sample when available.
+Failures, skips and unfinished roots do not contribute PASS root timings.
+Linux keeps its R12
 profile. The file retains source/run/attempt and SHA256 log receipts.
 
 Replay with `node scripts/ci/go-profile.mjs DIRECTORY OUTPUT SOURCE_SHA RUN_ID
-ATTEMPT`. The importer requires the exact Go lane names and unique job IDs of
+ATTEMPT [INVENTORY_JSON]`. Without inventory the importer emits root costs only,
+not whole-package elapsed. Inventory JSON binds `sha`, `run`, `attempt` and a
+`platforms` map (`linux`, `windows-x64`, `windows-arm` → package/root arrays).
+The importer requires the exact Go lane names and unique job IDs of
 one complete geometry: historical 6+6+6 or current 2+6+6. Job metadata must
 match source/run/attempt and completion; the current archive also requires
 matching `run.json` and each indexed log's SHA256 and byte length. The output
@@ -52,12 +60,15 @@ Every process receives independent private physical HOME/USERPROFILE, APPDATA/LO
 TMPDIR/TMP/TEMP and XDG config/cache/data/state/runtime directories, removed after it exits.
 Original cwd, binary filenames and native assertions/hooks/cleanup remain intact. It is not a coverage allowlist: discovery alone supplies the inventory,
 and unknown/new roots always receive a positive cost. Only the GitHub Actions
-native Go group opts into four ordinary packets on Windows and Linux. R16
-showed genuine Node admission contention at six ordinary Windows packets;
-Linux passed at four. The hosted runners were observed with four CPUs.
+native Go group opts into six ordinary packets on Windows and four on Linux.
+R16 showed genuine Node admission contention at six Windows packets before
+the three exact caller exclusions below. The remaining ordinary callers and
+throughput at this width still require native validation. The hosted runners
+were observed with four CPUs.
 Local Go execution, Node and other default pool callers use two.
 A failure stops all queued work, drains every already-running worker and preserves
-the first rejection. Compilation and native copy/list discovery retain two workers. The enclosing budget owns the
+the first rejection. Compilation and bundle discovery have separate
+capacity policies. The enclosing budget owns the
 entire group and all descendants; no per-child budget multiplication.
 
 On Windows only, these discovered roots use exclusive singleton packets:
@@ -71,7 +82,7 @@ before the ordinary packet pool in its assigned group, with the same process
 isolation, root filter and deadlines. The repair root still runs all four
 original cases together, alone in its existing group slot: R16 recorded a
 27.95s repair PASS, then the ordinary tail ran out of the 53s group budget.
-Windows placement evaluates the serial prefix plus a four-worker packet
+Windows placement evaluates the serial prefix plus a six-worker packet
 makespan, with a soft 37s target and lane-total balancing. This is not a limit
 or a forecast. All-15 launcher-fixture caller serialization was rejected in
 replay because its stressed bins exceed the owner. Untested contention and

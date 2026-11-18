@@ -227,20 +227,20 @@ test('Windows makes the discovered SSE root a singleton even in a small, cheap p
  assert.equal(linux.filter(t=>t.pkg===ssePackage).length,1);
 });
 
-test('Windows Go group finishes its exclusive packet before using all four ordinary workers',async()=>{
- const packets=Array.from({length:6},(_,id)=>({id,...(id===1?{exclusive:true}:{})}));
+test('Windows Go group finishes its exclusive packet before using all six ordinary workers',async()=>{
+ const packets=Array.from({length:8},(_,id)=>({id,...(id===1?{exclusive:true}:{})}));
  const starts=[],release=[];
  const run=runGoGroup(packets,async ({id})=>{
   starts.push(id);await new Promise(resolve=>{release[id]=resolve;});
- },4);
+ },nativeGoWorkers('win32'));
  const initial=[...starts];
  release[1]?.();await turn();
  const afterExclusive=[...starts];
- for(let i=0;i<6;i++){for(const finish of release)finish?.();await turn();}
+ for(let i=0;i<8;i++){for(const finish of release)finish?.();await turn();}
  await run;
  assert.deepEqual(initial,[1]);
- assert.deepEqual(afterExclusive,[1,0,2,3,4]);
- assert.deepEqual(starts,[1,0,2,3,4,5]);
+ assert.deepEqual(afterExclusive,[1,0,2,3,4,5,6]);
+ assert.deepEqual(starts,[1,0,2,3,4,5,6,7]);
 });
 
 test('an exclusive Go packet failure prevents every ordinary launch and propagates unchanged',async()=>{
@@ -302,7 +302,7 @@ test('Windows admits the whole repair root and PowerShell root as separate seria
  assert.equal(linux.flat().filter(t=>t.pkg===pkg).length,1);
 });
 
-test('native Go worker policy admits four Windows and Linux packets, with a two-worker fallback',async()=>{
+test('native Go worker policy admits six Windows and four Linux packets, with a two-worker fallback',async()=>{
  const starts=[];
  for(const platform of ['win32','linux','darwin']){
   const items=Array.from({length:8},(_,id)=>({id}));
@@ -315,7 +315,7 @@ test('native Go worker policy admits four Windows and Linux packets, with a two-
   for(let i=0;i<items.length;i++){for(const release of releases)release?.();await turn();}
   await running;
  }
- assert.deepEqual(starts,[4,4,2]);
+ assert.deepEqual(starts,[6,4,2]);
 });
 
 test('Windows isolates the three observed cold Node admission failures, scoped to exact CLI roots',async()=>{

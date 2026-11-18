@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { observeGo, buildGoProfile } from './go-profile.mjs';
+import { planGo } from './schedule.mjs';
 const event = e => `2026-11-18T00:00:00Z ${JSON.stringify({Time:'2026-11-18T00:00:00Z', ...e})}`;
 test('only completed PASS roots and packages are measurements; failed and unfinished work is censored', () => {
  const log = [
@@ -13,7 +14,7 @@ test('only completed PASS roots and packages are measurements; failed and unfini
   {Action:'start',Package:'r'}, {Action:'run',Package:'r',Test:'TestZero'},
   {Action:'pass',Package:'r',Test:'TestZero',Elapsed:0}, {Action:'pass',Package:'r',Elapsed:0.02},
  ].map(event).join('\n');
- const obs=observeGo(log);
+ const obs=observeGo(log,{p:['TestA','TestB'],r:['TestZero']});
  assert.deepEqual(obs.roots,{p:{TestA:2},r:{TestZero:0.01}});
  assert.deepEqual(obs.packageElapsed,{r:0.02});
  assert.deepEqual(obs.censored.map(x=>[x.pkg,x.test??null,x.action]),[
@@ -24,13 +25,33 @@ test('Windows combines native complete maxima, never stale or subtest durations'
  const sample=(n)=>[{Action:'start',Package:'p'},{Action:'run',Package:'p',Test:'TestA'},
   {Action:'pass',Package:'p',Test:'TestA',Elapsed:n},{Action:'pass',Package:'p',Elapsed:n+0.1}].map(event).join('\n');
  const profile=buildGoProfile([{name:'test-go-windows-x64 (0)',log:sample(2)},
-  {name:'test-go-windows-arm (0)',log:sample(4)}, {name:'test-go-linux (0)',log:sample(1)}]);
+  {name:'test-go-windows-arm (0)',log:sample(4)}, {name:'test-go-linux (0)',log:sample(1)}],{'windows-x64':{p:['TestA']},'windows-arm':{p:['TestA']},linux:{p:['TestA']}});
  assert.equal(profile.windows.roots.p.TestA,4);
  assert.equal(profile.windows.packageElapsed.p,4.1);
  assert.equal(profile.linux.roots.p.TestA,1);
  assert.equal(profile.windows.packages.p,4);
  assert.throws(()=>buildGoProfile([{name:'test-node (x)',log:sample(1)}]),/Go job/);
 });
+test('singleton PASS refresh cannot turn a formerly expensive small package into a cheap whole packet',()=>{
+ const names=['TestA','TestB','TestC'];
+ const packet=(selected,seconds)=>[
+  {Action:'start',Package:'p'},...selected.flatMap(Test=>[{Action:'run',Package:'p',Test},{Action:'pass',Package:'p',Test,Elapsed:seconds/selected.length}]),
+  {Action:'pass',Package:'p',Elapsed:seconds},
+ ].map(event).join('\n');
+ const profile=(log,inventory={'windows-arm':{p:names}})=>buildGoProfile([{name:'test-go-windows-arm (0)',log}],inventory).windows;
+ const previous=profile(packet(names,12)), fresh=profile(names.map(n=>packet([n],3)).join('\n'));
+ const refreshed={...fresh,packageElapsed:{...previous.packageElapsed,...fresh.packageElapsed}};
+ assert.equal(previous.packageElapsed.p,12);
+ assert.equal(fresh.packageElapsed.p,undefined);
+ assert.equal(profile(packet(names,7),{}).packageElapsed.p,undefined,'no inventory cannot prove scope');
+ assert.equal(profile(packet(names,7),{'windows-arm':{p:[...names,'TestNew']}}).packageElapsed.p,undefined);
+ assert.equal(profile(packet(names,7)).packageElapsed.p,7,'a genuine new whole PASS may replace the old cost');
+ assert.deepEqual(fresh.roots.p,{TestA:3,TestB:3,TestC:3});
+ const tasks=planGo([{pkg:'p',names}],refreshed,{platform:'win32'}).flat();
+ assert.equal(tasks.length,3);assert.ok(tasks.every(t=>t.split));
+ assert.deepEqual(tasks.flatMap(t=>t.selected).sort(),names);
+});
+
 test('unfinished roots and package executions never become zero-time observations',()=>{
  const log=[{Action:'start',Package:'p'},{Action:'run',Package:'p',Test:'TestPending'}].map(event).join('\n');
  const obs=observeGo(log);
@@ -47,9 +68,9 @@ test('overlapping packets keep root state and exclude ambiguous startup samples'
   {Action:'start',Package:'p'},{Action:'run',Package:'p',Test:'TestOther'},
   {Action:'pass',Package:'p',Test:'TestOther',Elapsed:2},{Action:'pass',Package:'p',Elapsed:2.5},
  ].map(event).join('\n');
- const obs=observeGo(log);
+ const obs=observeGo(log,{p:['TestShort','TestLong']});
  assert.deepEqual(obs.roots,{p:{TestShort:1,TestLong:3,TestOther:2}});
- assert.deepEqual(obs.packageElapsed,{p:4});
+ assert.deepEqual(obs.packageElapsed,{});
  assert.deepEqual(obs.censored,[]);
  assert.deepEqual(obs.overhead,[0.5]);
 });
@@ -89,10 +110,27 @@ for(const linuxLanes of [6,2])test(`archive binding requires all ${linuxLanes+12
  const job=jobs[1];jobs[1]={...jobs[0]};await save();assert.throws(run,/native Go logs|binding mismatch/);jobs[1]=job;await save();
  const file=path.join(dir,'1.log');await rename(file,`${file}.missing`);assert.throws(run,/ENOENT/);await rename(`${file}.missing`,file);
  if(current){
+  assert.equal(result.windows.packageElapsed.p,undefined);
+  const inventoryFile=path.join(dir,'inventory.json');
+  const inventory={sha,run:123,attempt:2,platforms:Object.fromEntries(['linux','windows-x64','windows-arm'].map(k=>[k,{p:['TestObserved']}]))};
+  const importWhole=()=>execFileSync(process.execPath,[entry,dir,out,sha,'123','2',inventoryFile],{encoding:'utf8',stdio:'pipe'});
+  await writeFile(inventoryFile,JSON.stringify({...inventory,attempt:1}));
+  assert.throws(importWhole,/inventory source\/run binding mismatch/);
+  await writeFile(inventoryFile,JSON.stringify(inventory));
+  importWhole();
+  const whole=JSON.parse(await readFile(out,'utf8'));
+  assert.equal(whole.windows.packageElapsed.p,count+0.1);
   const runFile=path.join(dir,'run.json');
   await writeFile(runFile,JSON.stringify({...runMeta,run_attempt:1}));assert.throws(run,/binding mismatch/);
   await writeFile(runFile,JSON.stringify(runMeta));
   const log=await readFile(file,'utf8');
   await writeFile(file,log.replace('Elapsed\":1}', 'Elapsed\":2}'));assert.throws(run,/log hash\/length mismatch/);
  }
+});
+
+test('a small package without a whole measurement still splits if root costs exceed the threshold',()=>{
+ const names=['TestA','TestB','TestC'];
+ const plan=planGo([{pkg:'p',names}],{roots:{p:{TestA:6,TestB:5,TestC:4}}},{platform:'win32'});
+ assert.equal(plan.flat().length,3);
+ assert.ok(plan.flat().every(t=>t.split));
 });
