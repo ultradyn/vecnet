@@ -88,7 +88,7 @@ func copyLauncherFixtureNode(dir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	_, err = io.Copy(output, input)
+	_, err = copyFixtureImage(output, input)
 	return path, errors.Join(err, output.Close())
 }
 
