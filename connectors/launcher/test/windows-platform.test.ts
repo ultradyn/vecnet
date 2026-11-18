@@ -399,16 +399,20 @@ async function liveBinding(t: TestContext) {
 
 function mockLiveProcesses(t: TestContext, pipe: string) {
   const helpers: childProcess.ChildProcess[] = [], children: childProcess.ChildProcess[] = [];
+  const roles: string[] = []; const settled = new Set<number>();
   const closed: Promise<void>[] = [];
   onCleanup(t, async () => {
     for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill();
-    console.log('RECOVERY_CHILD_JOIN', JSON.stringify(children.map((child, index) => ({index, exitCode: child.exitCode, signalCode: child.signalCode}))));
+    console.log('RECOVERY_CHILD_JOIN', JSON.stringify(children.map((child, index) => ({index, role: roles[index], settled: settled.has(index), exitCode: child.exitCode, signalCode: child.signalCode}))));
     await Promise.all(closed); console.log('RECOVERY_CHILD_JOIN_DONE');
   });
   const run = fixtureSpawn(childProcess.spawn, { pipe, onLock: (child: childProcess.ChildProcess) => helpers.push(child) });
   const mock = t.mock.method(childProcess, 'spawn', (...args: Parameters<typeof childProcess.spawn>) => {
-    const child = run(...args); children.push(child);
-    closed.push(new Promise(resolve => child.once('close', () => resolve()))); return child;
+    const argv = args[1] ?? [], file = String(args[0]);
+    const role = argv[0] === 'app-server' ? 'proxy' : argv[0] === '--net' ? (argv.includes('watch') ? 'watch' : argv.includes('report-status') ? 'report' : 'hub-cli') : argv[0] === 'local-platform' ? (argv[1] === 'lock' ? 'lock' : 'native-other') : /taskkill(?:\.exe)?$/i.test(file) ? 'taskkill' : 'other';
+    const child = run(...args); const index = children.length; children.push(child); roles.push(role);
+    child.once('error', () => console.log('RECOVERY_CHILD_ERROR=' + index));
+    closed.push(new Promise(resolve => child.once('close', () => { settled.add(index); console.log('RECOVERY_CHILD_CLOSED=' + index); resolve(); }))); return child;
   }); syncBuiltinESMExports();
   onCleanup(t, () => { mock.mock.restore(); syncBuiltinESMExports(); });
   return { helpers, children };
