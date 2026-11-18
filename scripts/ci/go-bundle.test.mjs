@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { cp, mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { cp, link, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import test from 'node:test';
@@ -11,7 +11,7 @@ const entry=fileURLToPath(new URL('./go-bundle.mjs',import.meta.url));
 test('real compiled bundle conserves platform packages and rejects wrong source/corruption',async t=>{
  const root=await mkdtemp(path.join(os.tmpdir(),'ci-bundle-'));t.after(()=>rm(root,{recursive:true,force:true}));
  await writeFile(path.join(root,'go.mod'),'module fixture\n\ngo 1.26\n');
- await writeFile(path.join(root,'one_test.go'),'package fixture\nimport ("testing";"os")\nfunc TestOne(t *testing.T){}\nfunc TestNew(t *testing.T){if os.Getenv("CI_BUNDLE_FAIL")=="1" {t.Fatal("new root assertion")}}\n');
+ await writeFile(path.join(root,'one_test.go'),'package fixture\nimport ("testing";"os")\nfunc TestOne(t *testing.T){if _,err:=os.Stat("one_test.go"); err!=nil {t.Fatal(err)}}\nfunc TestNew(t *testing.T){if os.Getenv("CI_BUNDLE_FAIL")=="1" {t.Fatal("new root assertion")}}\n');
  await mkdir(path.join(root,'empty'));await writeFile(path.join(root,'empty/empty.go'),'package empty\n');
  execFileSync('git',['init','-q'],{cwd:root});execFileSync('git',['add','.'],{cwd:root});execFileSync('git',['-c','core.hooksPath=/dev/null','-c','commit.gpgsign=false','-c','user.name=CI','-c','user.email=ci@example.invalid','commit','-qm','fixture'],{cwd:root});
  const sha=execFileSync('git',['rev-parse','HEAD'],{cwd:root,encoding:'utf8'}).trim();
@@ -46,14 +46,6 @@ test('real compiled bundle conserves platform packages and rejects wrong source/
  const binarySymbols=spawnSync('go',['tool','nm',rowNative.binary],{encoding:'utf8'});
  assert.notEqual(binarySymbols.status,0);assert.match(binarySymbols.stderr,/no symbol/);
 
-
- // The real CI entry point must also work without runner-specific TMP vars.
- const env={...process.env,GITHUB_SHA:sha};delete env.TMPDIR;delete env.TEMP;delete env.TMP;
- execFileSync(process.execPath,[fileURLToPath(new URL('./suite.mjs',import.meta.url)),'consume-go'],{cwd:root,env});
- const consumed=(await Promise.all(Array.from({length:6},(_,i)=>readFile(path.join(root,'.ci',`go-${i}.json`),'utf8')))).flatMap(JSON.parse);
- assert.deepEqual(consumed.flatMap(p=>p.names).sort(),['TestNew','TestOne']);
- t.after(()=>Promise.all([...new Set(consumed.map(p=>p.temporary))].map(dir=>rm(dir,{recursive:true,force:true}))));
-
  if(process.platform!=='win32'){
   // Linux can execute these real ELF fixtures under Windows-style filenames;
   // this checks relocation identity, not native Windows execution.
@@ -66,7 +58,7 @@ test('real compiled bundle conserves platform packages and rejects wrong source/
    row.file+='.exe';
   }
   await writeFile(path.join(winDirectory,'bundle.json'),JSON.stringify(winReceipt));
-  const win=await consumeBundle(winDirectory,{...options,platform:'win32-x64',temporary:path.join(root,'private-windows')});
+  const win=await consumeBundle(winDirectory,{...options,platform:'win32-x64',takeOwnership:true});
   assert.ok(win.inventory.find(p=>p.binary).binary.endsWith('.test.exe'),'Windows relocation must preserve test-executable identity');
  }
 
@@ -78,6 +70,71 @@ test('real compiled bundle conserves platform packages and rejects wrong source/
 
  const receipt=JSON.parse(await readFile(path.join(directory,'bundle.json'),'utf8'));
  const row=receipt.groups.flat().find(p=>p.file);
- await writeFile(path.join(directory,String(row.group),row.file),'corrupt');
+ const nativeBinary=path.join(directory,String(row.group),row.file);
+ const binaryBytes=await readFile(nativeBinary);await writeFile(nativeBinary,'corrupt');
  await assert.rejects(consumeBundle(directory,options),/hash/);
+ await writeFile(nativeBinary,binaryBytes);
+
+ for(const [name,pattern,alter] of [
+  ['wrong source',/source\/platform/,async ({receipt})=>{receipt.revision='bad';}],
+  ['wrong platform',/source\/platform/,async ({receipt})=>{receipt.platform='wrong';}],
+  ['binary traversal',/unsafe binary path/,async ({row})=>{row.file=`../${row.file}`;}],
+  ['binary alternate stream',/unsafe binary path/,async ({row})=>{row.file=`alias:${row.file}`;}],
+  ['wrong executable suffix',/unsafe binary path/,async ({row,file})=>{
+   row.file+='-other';await rename(file,file+'-other');
+  }],
+  ['source alias',/aliased bundle binary/,async ({receipt,row})=>{
+   receipt.groups[row.group].push({...row,pkg:'other/fixture'});
+  }],
+  ['destination alias',/aliased bundle binary/,async ({receipt,row,file,input})=>{
+   const group=(row.group+1)%6,alias='FIXTURE'+row.file.slice('fixture'.length);
+   await mkdir(path.join(input,String(group)),{recursive:true});
+   await cp(file,path.join(input,String(group),alias));
+   receipt.groups[group].push({...row,group,pkg:'FIXTURE',file:alias});
+  }],
+  ['cwd traversal',/unsafe package directory/,async ({row})=>{row.directory='..';}],
+  ['binary hash',/test binary hash mismatch/,async ({file})=>writeFile(file,'corrupt')],
+  ['tool hash',/test2json hash mismatch/,async ({tool})=>writeFile(tool,'corrupt')],
+  ['binary hard link',/unsafe bundle file/,async ({file})=>link(file,`${file}-alias`)],
+  ['tool hard link',/unsafe bundle file/,async ({tool})=>link(tool,`${tool}-alias`)],
+  ['receipt hard link',/unsafe bundle file/,async ({receiptPath})=>link(receiptPath,`${receiptPath}-alias`)],
+  ['binary symlink',/unsafe bundle file/,async ({file})=>{await rename(file,`${file}-alias`);await symlink(`${file}-alias`,file);}],
+  ['group symlink',/unsafe bundle group directory/,async ({file})=>{
+   const dir=path.dirname(file);await rename(dir,`${dir}-alias`);await symlink(`${dir}-alias`,dir,'junction');
+  }],
+  ['bundle symlink',/unsafe bundle directory/,async ({input})=>{
+   await rename(input,`${input}-alias`);await symlink(`${input}-alias`,input,'junction');
+  }],
+ ]){
+  await t.test(`owned staging rejects ${name} and leaves no private output`,{skip:process.platform==='win32'&&name==='binary symlink'},async()=>{
+   const parent=await mkdtemp(path.join(root,'invalid-')),input=path.join(parent,'artifact');
+   await cp(directory,input,{recursive:true});
+   const receiptPath=path.join(input,'bundle.json');
+   const receipt=JSON.parse(await readFile(receiptPath,'utf8')),row=receipt.groups.flat().find(p=>p.file);
+   await alter({receipt,row,input,receiptPath,file:path.join(input,String(row.group),row.file),tool:path.join(input,path.basename(nativeTool))});
+   await writeFile(receiptPath,JSON.stringify(receipt));
+   await assert.rejects(consumeBundle(input,{...options,takeOwnership:true}),pattern);
+   assert.ok((await readdir(parent)).every(entry=>!entry.startsWith('vecnet-ci-go-native-')));
+  });
+ }
+
+ const original=await stat(nativeBinary,{bigint:true});
+ // The real CI entry point must also work without runner-specific TMP vars.
+ const env={...process.env,GITHUB_SHA:sha};delete env.TMPDIR;delete env.TEMP;delete env.TMP;
+ execFileSync(process.execPath,[fileURLToPath(new URL('./suite.mjs',import.meta.url)),'consume-go'],{cwd:root,env});
+ const consumed=(await Promise.all(Array.from({length:6},(_,i)=>readFile(path.join(root,'.ci',`go-${i}.json`),'utf8')))).flatMap(JSON.parse);
+ assert.deepEqual(consumed.flatMap(p=>p.names).sort(),['TestNew','TestOne']);
+ t.after(()=>Promise.all([...new Set(consumed.map(p=>p.temporary))].map(dir=>rm(dir,{recursive:true,force:true}))));
+ const executed=consumed.find(p=>p.binary);
+ assert.equal(executed.directory,root);
+ assert.equal(executed.binary.endsWith(process.platform==='win32'?'.test.exe':'.test'),true);
+ if(process.platform!=='win32')assert.equal((await stat(executed.temporary)).mode&0o777,0o700);
+ await assert.rejects(stat(nativeBinary),{code:'ENOENT'});
+ const staged=await stat(executed.binary,{bigint:true});
+ assert.deepEqual([staged.dev,staged.ino],[original.dev,original.ino],
+  'the CI consumer must stage the existing executable, not write a copy');
+ const stagedTool=await readFile(path.join(root,'.ci/test2json'),'utf8');
+ const stagedEvents=execFileSync(stagedTool,['-t','-p',executed.pkg,executed.binary,'-test.v=test2json','-test.run','^TestOne$'],
+  {cwd:executed.directory,encoding:'utf8'}).trim().split('\n').map(JSON.parse);
+ assert.deepEqual(stagedEvents.filter(e=>e.Action==='pass'&&e.Test).map(e=>e.Test),['TestOne']);
 });

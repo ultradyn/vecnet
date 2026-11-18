@@ -32,11 +32,17 @@ if (kind === 'prepare-go') {
   if (!stages[lane]) throw new Error('invalid prepare stage');
   process.stdout.write(go(stages[lane],goCompileEnvironment(process.env)));
 } else if (kind === 'consume-go') {
-  const platform=`${process.platform}-${process.arch}`,temporary=await privateTemporary('vecnet-ci-go-native-');
-  const bundle=await consumeBundle(path.resolve('dist/go-tests',platform),{sha:process.env.GITHUB_SHA,platform,temporary});
-  await mkdir('.ci',{recursive:true});
-  for(let i=0;i<6;i++)await writeFile(`.ci/go-${i}.json`,JSON.stringify(bundle.inventory.filter((_,n)=>n%6===i).map(row=>({...row,temporary}))));
-  await writeFile('.ci/test2json',bundle.test2json);
+  const platform=`${process.platform}-${process.arch}`;
+  const bundle=await consumeBundle(path.resolve('dist/go-tests',platform),{sha:process.env.GITHUB_SHA,platform,takeOwnership:true});
+  const {temporary}=bundle;
+  try {
+    await mkdir('.ci',{recursive:true});
+    for(let i=0;i<6;i++)await writeFile(`.ci/go-${i}.json`,JSON.stringify(bundle.inventory.filter((_,n)=>n%6===i).map(row=>({...row,temporary}))));
+    await writeFile('.ci/test2json',bundle.test2json);
+  } catch(error) {
+    await rm(temporary,{recursive:true,force:true});
+    throw error;
+  }
   console.log(`Go native bundle: ${bundle.inventory.length} packages, ${bundle.inventory.reduce((n,p)=>n+p.names.length,0)} roots`);
 } else if (kind === 'discover-go') {
   partition([], lane, 6);

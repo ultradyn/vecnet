@@ -5,7 +5,7 @@ import { promisify } from 'node:util';
 import { bounded, goCompileJobs, goCompileEnvironment } from './schedule.mjs';
 const exec = promisify(execFile);
 import { createHash } from 'node:crypto';
-import { chmod, copyFile, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { nativeTargets } from '../npm/platforms.mjs';
@@ -26,30 +26,76 @@ export async function compileGroup(platform,index){
  for(const pkg of chosen){const meta=all.find(p=>p.pkg===pkg),file=path.basename(pkg)+'.test'+target.suffix;rows.push({pkg,directory:path.relative(process.cwd(),meta.dir).split(path.sep).join('/'),file:meta.tests?file:null,sha256:meta.tests?hash(await readFile(path.join(out,file))):null});}
  await writeFile(path.join(out,'packages.json'),JSON.stringify(rows));
 }
-export async function consumeBundle(directory,{sha,platform,root=process.cwd(),temporary}){
- const receipt=JSON.parse(await readFile(path.join(directory,'bundle.json'),'utf8'));
- if(receipt.revision!==sha||receipt.platform!==platform||!temporary)throw new Error('bundle source/platform mismatch');
+// The job owns this artifact exclusively; no other process may write it.
+// Only transfer plain, unaliased files into the new directory, never sidecars
+// or the entire artifact tree. Validate the bytes at their execution path.
+async function requireUnaliasedFile(file){
+ const info=await lstat(file);
+ if(!info.isFile()||info.nlink!==1)throw new Error('unsafe bundle file');
+}
+async function takeFile(source,destination){
+ await requireUnaliasedFile(source);
+ await rename(source,destination);
+}
+const validGroup=group=>Number.isInteger(group)&&group>=0&&group<6;
+// takeOwnership consumes the artifact's executables. On success the caller
+// owns the returned temporary directory for the remaining native steps.
+export async function consumeBundle(directory,{sha,platform,root=process.cwd(),temporary,takeOwnership=false}){
+ directory=path.resolve(directory);
+ if(takeOwnership){
+  const info=await lstat(directory);
+  if(!info.isDirectory()||path.relative(directory,await realpath(directory))!=='')throw new Error('unsafe bundle directory');
+ }
+ const manifest=path.join(directory,'bundle.json');
+ if(takeOwnership)await requireUnaliasedFile(manifest);
+ const receipt=JSON.parse(await readFile(manifest,'utf8'));
+ if(receipt.revision!==sha||receipt.platform!==platform||(takeOwnership?!/^[a-f0-9]{40}$/.test(sha??''):!temporary))throw new Error('bundle source/platform mismatch');
  if(!Array.isArray(receipt.groups)||receipt.groups.length!==6)throw new Error('incomplete bundle groups');
  const targets=receipt.groups.flat();
  if(new Set(targets.map(t=>t.pkg)).size!==targets.length)throw new Error('duplicate bundle package');
- const files=await readdir(directory);if(!files.includes('test2json'+(platform.startsWith('win32')?'.exe':'')))throw new Error('missing native test2json');
+ const suffix=platform.startsWith('win32')?'.test.exe':'.test';
  const tool='test2json'+(platform.startsWith('win32')?'.exe':'');
- if(hash(await readFile(path.join(directory,tool)))!==receipt.toolHash)throw new Error('test2json hash mismatch');
- await mkdir(temporary,{recursive:true});await copyFile(path.join(directory,tool),path.join(temporary,tool));await chmod(path.join(temporary,tool),0o755);
- const inventory=await bounded(targets,async row=>{
-  const cwd=path.resolve(root,row.directory);if(path.relative(root,cwd).startsWith('..'))throw new Error('unsafe package directory');
-  if(!row.file)return {pkg:row.pkg,names:[],directory:cwd,binary:null};
-  if(!Number.isInteger(row.group)||row.group<0||row.group>=6||path.basename(row.file)!==row.file)throw new Error('unsafe binary path');
-  const source=path.join(directory,String(row.group),row.file);
-  const bytes=await readFile(source);if(hash(bytes)!==row.sha256)throw new Error('test binary hash mismatch');
-  const suffix=platform.startsWith('win32')?'.test.exe':'.test';
-  const binary=path.join(temporary,row.pkg.replace(/[^A-Za-z0-9_-]/g,'_')+suffix);await writeFile(binary,bytes,{mode:0o700});await chmod(binary,0o700);
-  const {stdout:listing}=await exec(binary,['-test.list','.'],{cwd,encoding:'utf8'});
-  const names=listing.trim().split(/\r?\n/).filter(Boolean);
-  if(names.some(name=>!/^(?:Test\w+|Example\w*|Fuzz\w+)$/.test(name)))throw new Error('bad native test list');
-  return {pkg:row.pkg,names,directory:cwd,binary};
- });
- return {inventory,test2json:path.join(temporary,tool)};
+ const files=await readdir(directory);if(!files.includes(tool))throw new Error('missing native test2json');
+ const outputName=row=>row.pkg.replace(/[^A-Za-z0-9_-]/g,'_')+suffix;
+ if(takeOwnership){
+  const sources=new Set(),outputs=new Set(),groups=new Set();
+  for(const row of targets){
+   if(!row.file)continue;
+   if(!validGroup(row.group)||!/^[-\w]+\.test(?:\.exe)?$/.test(row.file)||row.file!==path.posix.basename(row.pkg)+suffix)throw new Error('unsafe binary path');
+   const source=`${row.group}/${row.file.toLowerCase()}`,output=outputName(row).toLowerCase();
+   if(sources.has(source)||outputs.has(output))throw new Error('aliased bundle binary');
+   sources.add(source);outputs.add(output);groups.add(row.group);
+  }
+  for(const group of groups)if(!(await lstat(path.join(directory,String(group)))).isDirectory())throw new Error('unsafe bundle group directory');
+  // Sibling placement keeps rename on the artifact volume (including Windows).
+  temporary=await mkdtemp(path.join(path.dirname(directory),'vecnet-ci-go-native-'));
+ }
+ const test2json=path.join(temporary,tool);
+ try{
+  if(takeOwnership)await takeFile(path.join(directory,tool),test2json);
+  if(hash(await readFile(takeOwnership?test2json:path.join(directory,tool)))!==receipt.toolHash)throw new Error('test2json hash mismatch');
+  if(!takeOwnership){await mkdir(temporary,{recursive:true});await copyFile(path.join(directory,tool),test2json);}
+  await chmod(test2json,0o755);
+  const inventory=await bounded(targets,async row=>{
+   const cwd=path.resolve(root,row.directory),relative=path.relative(root,cwd);
+   if(relative.startsWith('..')||path.isAbsolute(relative)||(takeOwnership&&path.isAbsolute(row.directory)))throw new Error('unsafe package directory');
+   if(!row.file)return {pkg:row.pkg,names:[],directory:cwd,binary:null};
+   if(!validGroup(row.group)||path.basename(row.file)!==row.file)throw new Error('unsafe binary path');
+   const source=path.join(directory,String(row.group),row.file),binary=path.join(temporary,outputName(row));
+   if(takeOwnership)await takeFile(source,binary);
+   const bytes=await readFile(takeOwnership?binary:source);if(hash(bytes)!==row.sha256)throw new Error('test binary hash mismatch');
+   if(!takeOwnership)await writeFile(binary,bytes,{mode:0o700});
+   await chmod(binary,0o700);
+   const {stdout:listing}=await exec(binary,['-test.list','.'],{cwd,encoding:'utf8'});
+   const names=listing.trim().split(/\r?\n/).filter(Boolean);
+   if(names.some(name=>!/^(?:Test\w+|Example\w*|Fuzz\w+)$/.test(name)))throw new Error('bad native test list');
+   return {pkg:row.pkg,names,directory:cwd,binary};
+  });
+  return takeOwnership?{inventory,test2json,temporary}:{inventory,test2json};
+ }catch(error){
+  if(takeOwnership)await rm(temporary,{recursive:true,force:true});
+  throw error;
+ }
 }
 async function finalize(platform){
  const jobs=goCompileJobs(process.env.CI_GO_COMPILE_JOBS);
