@@ -320,14 +320,9 @@ func TestLocalRepairReportsUnregisteredProfileLauncher(t *testing.T) {
 	}
 	// Capture identity from an opened file: on Windows, path-based Stat
 	// may defer reading the file ID until SameFile is called.
-	f, err := os.Open(unit)
+	unitInfo, err := localRepairFileIdentity(unit)
 	if err != nil {
 		t.Fatal(err)
-	}
-	unitInfo, err := f.Stat()
-	closeErr := f.Close()
-	if err != nil || closeErr != nil {
-		t.Fatalf("snapshot unregistered unit: stat=%v close=%v", err, closeErr)
 	}
 	// Prepare the cached executable identity outside the launcher-discovery check.
 	localSoftwareVersion()
