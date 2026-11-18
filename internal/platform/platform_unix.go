@@ -17,6 +17,12 @@ func OpenFile(path string, flags int, mode os.FileMode) (*os.File, error) {
 	return os.OpenFile(path, flags|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, mode)
 }
 func OpenDir(path string) (*os.File, error) { return os.Open(path) }
+
+// OpenWindowsDirAt is only supported by the Windows namespace pinning path.
+func OpenWindowsDirAt(parent *os.File, name string) (*os.File, error) {
+	return nil, errors.ErrUnsupported
+}
+
 func OpenAt(dir *os.File, name string, flags int, mode os.FileMode) (*os.File, error) {
 	return OpenFile(filepath.Join(dir.Name(), name), flags, mode)
 }
