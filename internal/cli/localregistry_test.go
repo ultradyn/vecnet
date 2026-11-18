@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -12,6 +13,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -295,20 +297,90 @@ func TestLocalRegistryInterprocessUpdates(t *testing.T) {
 	if _, err := a.observeLocalProject("v1", localRegistryNow()); err != nil {
 		t.Fatal(err)
 	}
+	// Pin the exact inventory lock before any child starts. The first child
+	// warms up before its separate two-second acquisition budget begins.
+	dir, err := a.localRegistryDirectory(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dir.Close()
+	unlock, err := localRegistryLock(t.Context(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { unlock() }()
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
 	const workers = 6
 	const concurrent = 2
 	cmds := make([]*exec.Cmd, workers)
 	outputs := make([]bytes.Buffer, workers)
 	for i := range cmds {
-		cmds[i] = exec.Command(os.Args[0], "-test.run=^TestLocalRegistryProcessWorker$")
+		cmds[i] = exec.CommandContext(ctx, os.Args[0], "-test.run=^TestLocalRegistryProcessWorker$")
+		cmds[i].WaitDelay = time.Second
 		cmds[i].Env = append(os.Environ(), "VECNET_REGISTRY_TEST_HOME="+home, "VECNET_REGISTRY_TEST_ROOT="+root)
 		cmds[i].Stdout = &outputs[i]
 		cmds[i].Stderr = &outputs[i]
+		var start io.WriteCloser
+		var phases chan string
+		if i == 0 {
+			cmds[i].Env = append(cmds[i].Env, "VECNET_REGISTRY_TEST_PROBE=1")
+			start, err = cmds[i].StdinPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer start.Close()
+			cmds[i].Stdout = nil
+			out, err := cmds[i].StdoutPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			phases = make(chan string, 4)
+			go func() {
+				defer close(phases)
+				scanner := bufio.NewScanner(out)
+				for scanner.Scan() {
+					select {
+					case phases <- scanner.Text():
+					case <-ctx.Done():
+						return
+					}
+				}
+			}()
+		}
 		if err := cmds[i].Start(); err != nil {
 			t.Fatal(err)
 		}
-		// Keep all six independent processes and 60 updates, with two writers
-		// contending at once. Six cold Windows writers exceeded the production
+		cmd := cmds[i]
+		t.Cleanup(func() {
+			if cmd.ProcessState == nil {
+				_ = cmd.Process.Kill()
+				_ = cmd.Wait()
+			}
+		})
+		if i == 0 {
+			for _, want := range []string{"ready", "contended"} {
+				select {
+				case got := <-phases:
+					if got != want {
+						t.Fatalf("worker lock phase: got %q, want %q", got, want)
+					}
+				case <-ctx.Done():
+					t.Fatalf("worker lock phase %s: %v", want, ctx.Err())
+				}
+				if want == "ready" {
+					if _, err := start.Write([]byte{1}); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			unlock()
+			unlock = func() {}
+			t.Log("worker 0 failed acquisition of held inventory.lock; released for six workers / 60 updates")
+		}
+		// Keep all six independent processes and 60 updates, two at a time.
+		// The first worker's explicit OS-lock retry above proves contention.
+		// Six cold Windows writers exceeded the production
 		// two-second lock budget; the test must not change that user-facing cap.
 		if (i+1)%concurrent == 0 {
 			for j := i + 1 - concurrent; j <= i; j++ {
@@ -323,6 +395,20 @@ func TestLocalRegistryInterprocessUpdates(t *testing.T) {
 		t.Fatalf("lost concurrent writes: %+v %v", rows, err)
 	}
 }
+
+// Passed directly to the production lock, not to WithTimeout: context setup
+// must not count as contention. On Unix and Windows Done is consulted only
+// after the OS lock attempt fails; cancellation and deadline remain unchanged.
+type localRegistryWorkerLockContext struct {
+	context.Context
+	once sync.Once
+}
+
+func (c *localRegistryWorkerLockContext) Done() <-chan struct{} {
+	c.once.Do(func() { fmt.Println("contended") })
+	return c.Context.Done()
+}
+
 func TestLocalRegistryProcessWorker(t *testing.T) {
 	home := os.Getenv("VECNET_REGISTRY_TEST_HOME")
 	if home == "" {
@@ -334,6 +420,25 @@ func TestLocalRegistryProcessWorker(t *testing.T) {
 		}
 		return ""
 	}}
+	if os.Getenv("VECNET_REGISTRY_TEST_PROBE") == "1" {
+		dir, err := a.localRegistryDirectory(false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer dir.Close()
+		fmt.Println("ready")
+		var start [1]byte
+		if _, err := io.ReadFull(os.Stdin, start[:]); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+		defer cancel()
+		unlock, err := localRegistryLock(&localRegistryWorkerLockContext{Context: ctx}, dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		unlock()
+	}
 	for range 10 {
 		if err := a.updateLocalProject(os.Getenv("VECNET_REGISTRY_TEST_ROOT"), func(p *localProject) error {
 			n, _ := strconv.Atoi(p.LastMigration)
