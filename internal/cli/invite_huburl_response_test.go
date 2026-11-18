@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 )
@@ -62,6 +63,11 @@ const (
 )
 
 type inviteURLResponseFixture struct {
+	responseMu sync.Mutex
+	received   string
+	responseT  *testing.T
+	close      func()
+
 	getenv         func(string) string
 	hub            string
 	config         string
@@ -75,12 +81,15 @@ type inviteURLResponseFixture struct {
 
 func newInviteURLResponseFixture(t *testing.T, verb, received, profileHub string, policy inviteURLPolicy, clipboard inviteURLClipboardMode) *inviteURLResponseFixture {
 	t.Helper()
-	f := &inviteURLResponseFixture{}
+	f := &inviteURLResponseFixture{received: received, responseT: t}
 	issuancePath := inviteURLPrefix + "/v1/admin/peers"
 	if verb == "reissue" {
 		issuancePath += "/" + inviteURLPeer + "/enrol-token"
 	}
 	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.responseMu.Lock()
+		defer f.responseMu.Unlock()
+		t, received := f.responseT, f.received
 		w.Header().Set("Content-Type", "application/json")
 		if r.Method == http.MethodGet && r.URL.Path == inviteURLPrefix+"/v1/hub/identity" {
 			f.probes.Add(1)
@@ -130,7 +139,8 @@ func newInviteURLResponseFixture(t *testing.T, verb, received, profileHub string
 		}
 		f.completed.Add(1)
 	}))
-	t.Cleanup(source.Close)
+	closeSource := sync.OnceFunc(source.Close)
+	t.Cleanup(closeSource)
 	f.hub = source.URL + inviteURLPrefix
 	if profileHub == "" {
 		profileHub = f.hub
@@ -183,8 +193,27 @@ func newInviteURLResponseFixture(t *testing.T, verb, received, profileHub string
 		}
 		return wire.RoundTrip(r)
 	})
-	t.Cleanup(func() { http.DefaultTransport = previous })
+	f.close = sync.OnceFunc(func() {
+		http.DefaultTransport = previous
+		wire.CloseIdleConnections()
+		closeSource()
+	})
+	t.Cleanup(f.close)
 	return f
+}
+
+// Reused refusal fixtures change only the next real response and counters.
+// Keep config and clipboard artifacts intact so earlier side effects stay visible.
+func (f *inviteURLResponseFixture) prepareResponse(t *testing.T, received string) {
+	f.responseMu.Lock()
+	defer f.responseMu.Unlock()
+	f.responseT, f.received = t, received
+	f.issuances.Store(0)
+	f.completed.Store(0)
+	f.probes.Store(0)
+	f.unexpected.Store(0)
+	f.destinations.Store(0)
+	f.pathLookups.Store(0)
 }
 
 func (f *inviteURLResponseFixture) run(verb string, mode inviteURLMode) (int, string, string) {
@@ -204,6 +233,10 @@ func (f *inviteURLResponseFixture) run(verb string, mode inviteURLMode) (int, st
 	}
 	var out, errs bytes.Buffer
 	code := RunContext(context.Background(), args, strings.NewReader(""), &out, &errs, f.getenv)
+	// Reading the response can finish before the handler increments completed.
+	// Join that handler before checking or resetting per-case counters.
+	f.responseMu.Lock()
+	f.responseMu.Unlock()
 	return code, out.String(), errs.String()
 }
 
@@ -255,31 +288,36 @@ func TestInviteHubURLResponseRefusesUnsafe(t *testing.T) {
 		{"public-http", "http://returned.example/" + inviteURLCanary, true},
 	}
 	for _, verb := range []string{"create", "reissue"} {
-		for _, tc := range cases {
-			for _, policy := range inviteURLPolicies {
-				if tc.publicHTTP && policy.name != "no-opt-in" {
-					continue // Explicit HTTP opt-ins are preservation controls below.
-				}
-				for _, mode := range inviteURLModes {
-					t.Run(verb+"/"+tc.name+"/"+policy.name+"/"+mode.name, func(t *testing.T) {
-						f := newInviteURLResponseFixture(t, verb, tc.hub, "", policy, inviteURLClipboardRefusal)
-						code, out, errs := f.run(verb, mode)
-						if code != exitUsage || errs != "vecnet: invalid invitation hub URL\n" {
-							t.Errorf("want fixed invalid invitation hub URL refusal/exit 1; got exit %d, stderr %q", code, errs)
-						}
-						if out != "" {
-							t.Error("refused invitation emitted stdout/JSON/a paste block")
-						}
-						for _, banned := range []string{tc.hub, inviteURLCanary, inviteURLToken, "You're invited to vecnet", "vecnet enrol"} {
-							if strings.Contains(out+errs, banned) {
-								t.Error("rejected URL/canary/token/invitation reached output")
+		for _, policy := range inviteURLPolicies {
+			// Finish each fixture before installing another DefaultTransport.
+			func() {
+				f := newInviteURLResponseFixture(t, verb, "", "", policy, inviteURLClipboardRefusal)
+				defer f.close()
+				for _, tc := range cases {
+					if tc.publicHTTP && policy.name != "no-opt-in" {
+						continue // Explicit HTTP opt-ins are preservation controls below.
+					}
+					for _, mode := range inviteURLModes {
+						t.Run(verb+"/"+tc.name+"/"+policy.name+"/"+mode.name, func(t *testing.T) {
+							f.prepareResponse(t, tc.hub)
+							code, out, errs := f.run(verb, mode)
+							if code != exitUsage || errs != "vecnet: invalid invitation hub URL\n" {
+								t.Errorf("want fixed invalid invitation hub URL refusal/exit 1; got exit %d, stderr %q", code, errs)
 							}
-						}
-						f.checkRequests(t, 1) // Refusal cannot undo or repeat issuance.
-						f.checkNoCopy(t)
-					})
+							if out != "" {
+								t.Error("refused invitation emitted stdout/JSON/a paste block")
+							}
+							for _, banned := range []string{tc.hub, inviteURLCanary, inviteURLToken, "You're invited to vecnet", "vecnet enrol"} {
+								if strings.Contains(out+errs, banned) {
+									t.Error("rejected URL/canary/token/invitation reached output")
+								}
+							}
+							f.checkRequests(t, 1) // Refusal cannot undo or repeat issuance.
+							f.checkNoCopy(t)
+						})
+					}
 				}
-			}
+			}()
 		}
 	}
 }
