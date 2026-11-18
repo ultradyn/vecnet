@@ -36,10 +36,11 @@ jobs:
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/probe-artifact.mjs
       - name: Verify private recovery creation and retained SQLite state
         timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node --disable-warning=ExperimentalWarning --test --test-concurrency=1 --test-name-pattern='Windows recovery precreates' connectors/launcher/test/windows-platform.test.ts
+        run: node scripts/ci/budget.mjs 53000 node --disable-warning=ExperimentalWarning --test --test-reporter=tap --test-concurrency=1 --test-name-pattern='Windows recovery precreates' connectors/launcher/test/windows-platform.test.ts
       - name: Verify native helper loss and live replacement
         timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node --disable-warning=ExperimentalWarning --test --test-concurrency=1 --test-name-pattern='Windows live connector exposes' connectors/launcher/test/windows-platform.test.ts
+        run: node scripts/ci/budget.mjs 53000 node --disable-warning=ExperimentalWarning --test --test-reporter=tap --test-concurrency=1 --test-name-pattern='Windows live connector exposes' connectors/launcher/test/windows-platform.test.ts
       - name: Verify standalone and embedded lifecycle cleanup
+        if: always()
         timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node --disable-warning=ExperimentalWarning --test --test-concurrency=1 --test-name-pattern='Windows standalone|Windows embedded' connectors/launcher/test/windows-platform.test.ts
+        run: node scripts/ci/budget.mjs 53000 node --disable-warning=ExperimentalWarning --test --test-reporter=tap --test-concurrency=1 --test-name-pattern='Windows standalone|Windows embedded' connectors/launcher/test/windows-platform.test.ts

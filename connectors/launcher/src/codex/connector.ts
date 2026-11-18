@@ -294,13 +294,25 @@ export function startCodexConnector(o: { kv?: KeyValue; clock: Clock; log: Log; 
     if (stopping) return stopping;
     stopped = true; timer?.cancel();
     stopping = (async () => {
+      console.log('RECOVERY_STOP_BEFORE=1');
       await chain;
+      console.log('RECOVERY_STOP_AFTER=1');
+      console.log('RECOVERY_STOP_BEFORE=2');
       await lostCleanup;
+      console.log('RECOVERY_STOP_AFTER=2');
       // Keep the singleton on normal shutdown while bounded offline reports run.
+      console.log('RECOVERY_STOP_BEFORE=3');
       await reporter.stop();
+      console.log('RECOVERY_STOP_AFTER=3');
+      console.log('RECOVERY_STOP_BEFORE=4');
       await Promise.allSettled([...entries.keys()].map(retire));
+      console.log('RECOVERY_STOP_AFTER=4');
+      console.log('RECOVERY_STOP_BEFORE=5');
       try { recovery?.close(); }
+      console.log('RECOVERY_STOP_AFTER=5');
+      console.log('RECOVERY_STOP_BEFORE=6');
       finally { recovery = undefined; await publisher?.close(); publisher = undefined; }
+      console.log('RECOVERY_STOP_AFTER=6');
     })().finally(() => { markStopped({ reason: stopReason }); });
     return stopping;
   }
