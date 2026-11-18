@@ -490,6 +490,7 @@ jobs:
     timeout-minutes: 5
     steps: &package-steps
       - uses: actions/setup-node@v6
+        if: runner.os != 'Windows'
         timeout-minutes: 1
         with:
           node-version: '24'
@@ -502,6 +503,10 @@ jobs:
       - name: Restore producer source for native package tests
         timeout-minutes: 1
         run: node dist/npm-source/restore-source.mjs restore dist/npm-source "${{ github.sha }}"
+      - name: Select verified native Node without npm or yarn discovery
+        if: runner.os == 'Windows'
+        timeout-minutes: 1
+        run: node scripts/ci/native-node.mjs
       - uses: actions/download-artifact@v5
         if: runner.os == 'Windows'
         timeout-minutes: 1
