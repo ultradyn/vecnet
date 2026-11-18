@@ -6,10 +6,25 @@ const shard=Number(process.env.CI_NODE_SHARD),count=Number(process.env.CI_NODE_S
 if(!Number.isInteger(shard)||!Number.isInteger(count)||count<1||shard<0||shard>=count)throw new Error('invalid Node shard');
 const source=`
 import real, * as api from 'ci:real-node-test';
+import {AsyncLocalStorage} from 'node:async_hooks';
+const callbackContext=new AsyncLocalStorage();
 let ordinal=0,selected=0;
 const wrap=fn=>(...args)=>{
+ // Imported registration inside a selected callback is not a new root. Keep
+ // t.test native, but reject this unsupported shape even after an await.
+ if(callbackContext.getStore()){
+  process.exitCode=1;
+  throw new Error('sharded file has unsupported imported nested registration; use context.test or review scheduling');
+ }
  const index=ordinal++;
- if(index%${count}===${shard}){selected++;return fn(...args);}
+ if(index%${count}===${shard}){
+  selected++;
+  const callback=args.at(-1);
+  if(typeof callback==='function')args[args.length-1]=function(...values){
+   return callbackContext.run(true,()=>Reflect.apply(callback,this,values));
+  };
+  return fn(...args);
+ }
  return Promise.resolve();
 };
 const decorate=fn=>{
