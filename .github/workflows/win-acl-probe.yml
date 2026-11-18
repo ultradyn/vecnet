@@ -57,3 +57,9 @@ jobs:
       - name: Real reader checkpoint pressure
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 go test -p 2 -count=1 -timeout=50s -json ./internal/hub -run '^TestBackfillRealReaderCheckpointPressure$'
+      - name: Independent Windows enabled repair case
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 go test -p 2 -count=1 -timeout=50s -json ./internal/cli -run '^TestLauncherWindowsRepairPendingDriftEnabled$'
+      - name: Independent Windows intent repair case
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 go test -p 2 -count=1 -timeout=50s -json ./internal/cli -run '^TestLauncherWindowsRepairPendingDriftIntent$'
