@@ -256,6 +256,8 @@ func init() {
 		}
 	case "git-timeout":
 		time.Sleep(5 * time.Second)
+	case "git-non-repository":
+		fmt.Fprintln(os.Stderr, "fatal: not a git repository")
 	case "git-failure":
 	case "never-run":
 		if err := os.WriteFile(spec.Marker, nil, 0600); err != nil {
