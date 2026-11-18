@@ -99,6 +99,23 @@ BUILD_INFO. No-argument `build.mjs` still performs the original sequential local
 build. Every native package gate verifies the same tarball checksum; publish
 retains matching master/tag guard, npm12 trusted publishing/OIDC/provenance.
 
+The four package artifact consumers check out `scripts/ci`, `scripts/npm`,
+`npm` and the complete `connectors` tree. The package tests compare shipped
+launcher source against the checkout; the installed runtime and its schemas
+and systemd template come from the tarball. The tests do not read docs or
+screenshots. Source producers retain full checkouts.
+
+The Linux build stages the already-pinned npm 12.0.1 package after packing
+vecnet. `npm-release` carries it as `npm-tool/npm.tgz` next to the exact
+vecnet tarball and `SHA256SUMS`, not inside either published payload. The
+nested archive avoids unpacking the npm tree on Linux and in acceptance.
+Windows consumers extract it with native tar, validate its manifest, execute
+its CLI to confirm the version, and set `npm_execpath` for the package test.
+The real npm installation of the checked vecnet tarball and generated `.cmd`
+shims are still tested. Linux package tests and OIDC publishing keep the
+global pin. R13 measured a 28s global npm pin on each Windows package runner;
+the replacement's net savings and any queue improvement need native evidence.
+
 The three Linux-hosted test-bundle producers explicitly request
 `CI_GO_COMPILE_JOBS=4`. One shared policy validates canonical integers1..6,
 caps explicit requests by `os.availableParallelism()`, and applies the same

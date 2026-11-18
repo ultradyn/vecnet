@@ -138,6 +138,9 @@ jobs:
       - name: Pack tested release
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 npm pack ./dist/npm --pack-destination ./dist
+      - name: Stage pinned npm for Windows package tests
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/npm-tool.mjs stage 12.0.1
       - name: Record release checksum
         timeout-minutes: 1
         working-directory: dist
@@ -151,6 +154,7 @@ jobs:
           path: |
             dist/*.tgz
             dist/SHA256SUMS
+            dist/npm-tool
           if-no-files-found: error
           retention-days: 30
 
@@ -449,11 +453,17 @@ jobs:
         timeout-minutes: 1
         with:
           persist-credentials: false
+          sparse-checkout: |
+            scripts/ci
+            scripts/npm
+            npm
+            connectors
       - uses: actions/setup-node@v6
         timeout-minutes: 1
         with:
           node-version: '24'
       - name: Pin npm to packaging version
+        if: runner.os == 'Linux'
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 npm install --global npm@12.0.1 --ignore-scripts --no-audit --no-fund
       - uses: actions/download-artifact@v5
@@ -465,6 +475,10 @@ jobs:
       - name: Verify identical packed artifact
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/npm/verify-artifact.mjs
+      - name: Verify and use staged npm on Windows
+        if: runner.os == 'Windows'
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/npm-tool.mjs use 12.0.1
       - name: Test same packed bytes on native platform
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node --test --test-concurrency=2 scripts/npm/package.test.mjs
