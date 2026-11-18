@@ -14,22 +14,28 @@ whole-root. Smaller packages also split when they have at least two roots and
 complete measured process elapsed >8s. Cheap, unknown-small, single-root and
 no-test packages remain whole. The8s split threshold and packet caps are scheduling policy,
 not a measured speedup or a claim that the native budget passes.
-`go-timings.json` records complete R9 PASS root maxima across all18 native Go
-logs (run44260174057 attempt1, source1c05da91), Windows maximum of x64/ARM. Complete
-package process elapsed maxima are retained separately; small whole packages
-use that observed process cost rather than summing potentially parallel roots.
-Unknown roots use the median complete PASS root cost for their package, or a
-positive0.1s fallback when entirely unobserved. Failed/unfinished packages and
-roots (including the empty app-server JSON assertion) are explicitly censored;
-completed roots in later-failed packages remain valid root observations. Native
-skips are not timings. Startup uses the median nonnegative completed package
-elapsed minus summed root durations. `go-profile.mjs` replays the source-bound
-archived logs without fetching credentials or selecting coverage. Invoke with
-`DIRECTORY OUTPUT SOURCE_SHA RUN_ID ATTEMPT`; job metadata must bind the complete
-native log set, and output retains SHA256 hashes of those exact logs. R9 supplies
-2557 Linux and2327 Windows complete PASS roots, with81 censored records;
-264 Windows and2 Linux discovered roots still lack PASS observations. These are placement
-hints, not post-change runtime forecasts or proof of the workflow budget.
+`go-timings.json` records complete PASS root maxima from all 14 native Go jobs
+in R12 (run 44271362850, attempt 1, source `6845842d`): Windows used four
+workers with `GOMAXPROCS=1` and independent fixture executable copies. Windows
+weights use the maximum observed PASS across x64 and ARM64. Complete package
+process elapsed maxima are retained separately for small whole packages.
+Unknown roots use the median complete PASS root cost for their package, or
+0.1s when entirely unobserved. Failed, skipped and unfinished observations are
+censored; a root that passed on x64 can still have a censored ARM64 record.
+Startup uses the median nonnegative package PASS elapsed minus summed root
+elapsed, excluding overlapping same-package processes because test2json does
+not identify which process emitted an event.
+
+Replay with `node scripts/ci/go-profile.mjs DIRECTORY OUTPUT SOURCE_SHA RUN_ID
+ATTEMPT`. The importer requires the exact Go lane names and unique job IDs of
+one complete geometry: historical 6+6+6 or current 2+6+6. Job metadata must
+match source/run/attempt and completion; the current archive also requires
+matching `run.json` and each indexed log's SHA256 and byte length. The output
+retains the raw log hashes. R12 supplies 2,557 Linux and 2,548 Windows observed
+PASS roots, with 89 censored records. Of 2,559 Linux and 2,592 Windows discovered
+roots, 2 Linux and 44 Windows roots have no PASS weight. The profile never
+selects coverage.
+
 Deterministic weighted
 placement balances whole roots, then forms package packets within a partition:
 at most8 roots and4 estimated root seconds, plus one observed startup hint.
@@ -49,20 +55,21 @@ entire group and all descendants; no per-child budget multiplication.
 Each platform's consumers wait only for its matching producer, not the
 slowest of all three compile jobs. YAML step/strategy anchors share identical
 commands, not coverage exceptions. There are33 executed jobs including acceptance
-(32 before it); `schedule.mjs` supplies the audit cardinality. Reducing Linux6 to2
-frees four runner slots while keeping Windows6+6. Source-bound R9 inventory
-(46/2559 Linux packages/roots;45/2591 Windows) gives packet worker-model maximum
-Linux group25.17s / lane88.94s with2 lanes;1 lane costs169.83s. Windows6 models
-44.005s maximum group /116.235s lane. These are PASS-cost placement models, not
-runtime guarantees:264 Windows roots use fallbacks and process startup is uncertain.
-An explicit20-slot replay with archived producer release dates, non-Go occupancy,
-maximum observed consumer setup/idle/post costs and35s accept models354s for
-Linux2 vs392s for Linux6: neither meets300s. Sparse consumer checkout retains all
-source/fixture directories documented by the frozen checkout scout; producers
-retain full discovery. Accept uses only scripts/ci, scripts/npm and npm. Non-tag
-assembly checkout is shallow; pushed version tags retain full ancestry. Sparse
-speedups are unmeasured and not subtracted from the model. Native completion
-under300s and every step under60s remain mandatory and unproven.
+(32 before it); `schedule.mjs` supplies the audit cardinality. R12 completed
+in 351s, with a 60s Linux Node artifact download and a failing ARM Go group.
+The critical path was ARM Go lane 4, then acceptance; Linux Go started up to
+49s after its producer and also finished late. Replaying the same R12 PASS
+costs, the refreshed weights reduce the modeled worst ARM execution lane
+from 161s to 142s versus stale placement. With archived producer times,
+consumer setup/post, observed queue delay and acceptance, the model still
+lands around 352s. Linux 4/6 and Windows 8 lanes did not support a sub-300s
+run in the queue model, and alternative packet caps offered little ARM gain.
+Job count, packet caps, isolation and all deadlines are unchanged. These
+models are not a native pass or evidence that the clipboard failure is fixed.
+Sparse checkout retains the documented consumer inputs; producers retain full
+discovery. Accept uses only scripts/ci, scripts/npm and npm. Non-tag assembly
+checkout is shallow; pushed version tags retain full ancestry. Actual native
+completion under 300s and every step under 60s remain mandatory and unproven.
 New roots/examples/fuzz seeds and small/no-test packages remain conserved.
 Disposable testhub/preference stores copy a closed fully migrated image into
 independent files, then regenerate identity material. FreshStore and the named

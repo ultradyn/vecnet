@@ -8,7 +8,11 @@ export function observeGo(log) {
   if(offset<0)continue;
   const e=JSON.parse(line.slice(offset));
   if(!e.Package)continue;
-  if(e.Action==='start')active.set(e.Package,{pending:new Set(),roots:new Map()});
+  if(e.Action==='start') {
+   const batch=active.get(e.Package);
+   if(batch){batch.count++;batch.overlapped=true;}
+   else active.set(e.Package,{count:1,overlapped:false,pending:new Set(),rootElapsed:0});
+  }
   const run=active.get(e.Package);
   if(!run)throw new Error(`Go event without package start: ${e.Package}`);
   if(e.Test?.includes('/'))continue;
@@ -19,7 +23,7 @@ export function observeGo(log) {
    if(e.Action==='pass') {
     if(!Number.isFinite(e.Elapsed)||e.Elapsed<0)throw new Error('invalid root elapsed');
     maximum(roots[e.Package]??={},e.Test,positive(e.Elapsed));
-    run.roots.set(e.Test,e.Elapsed);
+    run.rootElapsed+=e.Elapsed;
    } else censored.push({pkg:e.Package,test:e.Test,action:e.Action});
   } else {
    if(e.Action==='pass') {
@@ -27,16 +31,20 @@ export function observeGo(log) {
     maximum(packageElapsed,e.Package,positive(e.Elapsed));
     // Only package PASS contributes process elapsed. Root fallbacks are
     // derived below from complete root observations, not process/skip ratios.
-    const extra=e.Elapsed-[...run.roots.values()].reduce((a,b)=>a+b,0);
-    if(extra>=0)overhead.push(extra);
+    // test2json identifies the package, not the process. Do not guess which
+    // root timings belong to a package completion when its packets overlap.
+    const extra=e.Elapsed-run.rootElapsed;
+    if(!run.overlapped&&extra>=0)overhead.push(extra);
    } else censored.push({pkg:e.Package,action:e.Action});
-   for(const test of run.pending)censored.push({pkg:e.Package,test,action:'unfinished'});
-   active.delete(e.Package);
+   if(--run.count===0){
+    for(const test of run.pending)censored.push({pkg:e.Package,test,action:'unfinished'});
+    active.delete(e.Package);
+   }
   }
  }
  for(const [pkg,run] of active) {
   for(const test of run.pending)censored.push({pkg,test,action:'unfinished'});
-  censored.push({pkg,action:'unfinished'});
+  for(let i=0;i<run.count;i++)censored.push({pkg,action:'unfinished'});
  }
  return {roots,packageElapsed,censored,overhead};
 }
@@ -74,18 +82,41 @@ if(process.argv[1] && path.resolve(process.argv[1])===fileURLToPath(import.meta.
  const [directory,output,sha,runText,attemptText]=process.argv.slice(2);
  const run=Number(runText),attempt=Number(attemptText);
  if(!directory||!output||!/^[a-f0-9]{40}$/.test(sha??'')||!Number.isSafeInteger(run)||run<1||!Number.isSafeInteger(attempt)||attempt<1)throw new Error('expected log directory, output JSON, source SHA, run and attempt');
- const index=JSON.parse(await readFile(path.join(directory,'index.json'),'utf8'));
- const jobs=JSON.parse(await readFile(path.join(directory,'jobs.json'),'utf8')).jobs;
- const selected=index.filter(row=>row.name.startsWith('test-go-'));
- if(selected.length!==18 || new Set(selected.map(row=>row.name)).size!==18 || new Set(selected.map(row=>row.id)).size!==18 || selected.some(row=>!/^test-go-(linux|windows-x64|windows-arm) \([0-5]\)$/.test(row.name)) || jobs.filter(job=>job.name.startsWith('test-go-')).length!==18)throw new Error('expected all18 native Go logs');
- for(const row of selected) {
-  const job=jobs.find(job=>job.id===row.id);
-  if(!job||job.name!==row.name||job.head_sha!==sha||job.run_id!==run||job.run_attempt!==attempt||job.status!=='completed'||job.conclusion!==row.conclusion)throw new Error('source/run/job binding mismatch');
+ const readJSON=async name=>JSON.parse(await readFile(path.join(directory,name),'utf8'));
+ const index=await readJSON('index.json');
+ const {jobs,total_count}=await readJSON('jobs.json');
+ const goJobs=rows=>rows.filter(row=>row.name.startsWith('test-go-'));
+ const selected=goJobs(index),metadata=goJobs(jobs);
+ // Explicit archive geometries, independent of the current scheduler policy.
+ const names=linux=>['linux','windows-x64','windows-arm'].flatMap(platform=>
+  Array.from({length:platform==='linux'?linux:6},(_,lane)=>`test-go-${platform} (${lane})`));
+ const exact=(rows,expected)=>rows.length===expected.length&&
+  new Set(rows.map(row=>row.name)).size===expected.length&&
+  new Set(rows.map(row=>row.id)).size===expected.length&&
+  rows.every(row=>Number.isSafeInteger(row.id)&&row.id>0&&expected.includes(row.name));
+ const geometry=[2,6].map(names).find(expected=>exact(selected,expected)&&exact(metadata,expected));
+ if(!geometry||(total_count!==undefined&&total_count!==jobs.length))throw new Error('expected exact full geometry (14 or 18 native Go logs)');
+ const current=geometry.length===14;
+ // Historical 18-job indexes carry conclusions, but no run receipt or hashes.
+ // The current archive also binds the separate run receipt and raw log bytes.
+ if(current){
+  const receipt=await readJSON('run.json');
+  if(receipt.id!==run||receipt.head_sha!==sha||receipt.run_attempt!==attempt||receipt.status!=='completed')throw new Error('source/run binding mismatch');
  }
- const logs=await Promise.all(selected.map(async row=>({id:row.id,name:row.name,log:await readFile(path.join(directory,`${row.id}.log`),'utf8')})));
+ for(const row of selected) {
+  const job=metadata.find(job=>job.id===row.id);
+  if(!job||job.name!==row.name||job.head_sha!==sha||job.run_id!==run||job.run_attempt!==attempt||job.status!=='completed'||
+   !['success','failure'].includes(job.conclusion)||((!current||row.conclusion!==undefined)&&job.conclusion!==row.conclusion))throw new Error('source/run/job binding mismatch');
+ }
+ const logs=await Promise.all(selected.map(async row=>{
+  const data=await readFile(path.join(directory,`${row.id}.log`));
+  const sha256=createHash('sha256').update(data).digest('hex');
+  if((current||row.sha256!==undefined||row.bytes!==undefined)&&(row.bytes!==data.length||row.sha256!==sha256))throw new Error(`native Go log hash/length mismatch: ${row.name}`);
+  return {id:row.id,name:row.name,sha256,log:data.toString('utf8')};
+ }));
  const result=buildGoProfile(logs);
- result.source={sha,run,attempt,logs:logs.map(({id,name,log})=>({id,name,sha256:createHash('sha256').update(log).digest('hex')}))};
- result.evidence=`Archived native run${run} attempt${attempt} source${sha}, all18 native Go logs. Complete PASS root maxima (Windows maxx64/ARM); complete package slice elapsed maxima and median complete-root fallbacks. Failed/unfinished roots and package executions explicitly censored. Zero-rounded PASS costs floored0.01s. Startup median of nonnegative completed package elapsed minus summed roots. No postchange native measurements or predicted gains; discovery supplies coverage. Unobserved roots use positive package fallback or0.1s.`;
+ result.source={sha,run,attempt,logs:logs.map(({id,name,sha256})=>({id,name,sha256}))};
+ result.evidence=`Archived native run${run} attempt${attempt} source${sha}, all${geometry.length} native Go logs. Complete PASS root maxima (Windows maxx64/ARM); complete package slice elapsed maxima and median complete-root fallbacks. Failed/unfinished roots and package executions explicitly censored. Zero-rounded PASS costs floored0.01s. Startup median from nonnegative package PASS elapsed minus summed roots, excluding overlapping same-package processes. No postchange native measurements or predicted gains; discovery supplies coverage. Unobserved roots use positive package fallback or0.1s.`;
  await writeFile(output,JSON.stringify(result,null,2)+'\n');
- console.log(JSON.stringify({roots:Object.fromEntries(['linux','windows'].map(p=>[p,Object.values(result[p].roots).reduce((n,r)=>n+Object.keys(r).length,0)])),censored:result.censored},null,2));
+ console.log(JSON.stringify({roots:Object.fromEntries(['linux','windows'].map(p=>[p,Object.values(result[p].roots).reduce((n,r)=>n+Object.keys(r).length,0)])),censored:result.censored.length}));
 }
