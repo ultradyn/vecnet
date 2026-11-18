@@ -12,6 +12,7 @@ import { nativeTargets } from '../npm/platforms.mjs';
 import { partition } from './partition.mjs';
 import { stageSource } from './source-archive.mjs';
 import { buildWindowsOwner, readWindowsOwner, stageWindowsOwner } from './windows-owner.mjs';
+import {buildCLIFixture,readCLIFixture,stageCLIFixture} from './cli-fixture.mjs';
 const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
 const go=args=>execFileSync('go',args,{env:goCompileEnvironment(process.env),encoding:'utf8',maxBuffer:16*1024*1024});
 function packages(){return go(['list','-mod=readonly','-f','{{.ImportPath}}\t{{.Dir}}\t{{len .TestGoFiles}}\t{{len .XTestGoFiles}}','./...']).trim().split(/\r?\n/).map(line=>{const[pkg,dir,internal,external]=line.split('\t');return{pkg,dir,tests:Number(internal)+Number(external)>0};});}
@@ -56,6 +57,7 @@ export async function consumeBundle(directory,{sha,platform,root=process.cwd(),t
  if(new Set(targets.map(t=>t.pkg)).size!==targets.length)throw new Error('duplicate bundle package');
  const windows=platform.startsWith('win32-');
  const ownerBytes=windows?await readWindowsOwner(directory,receipt,platform):null;
+ const cliFixtureBytes=windows?await readCLIFixture(directory,receipt,platform):null;
  const suffix=windows?'.test.exe':'.test';
  const tool='test2json'+(windows?'.exe':'');
  const files=await readdir(directory);if(!files.includes(tool))throw new Error('missing native test2json');
@@ -95,7 +97,8 @@ export async function consumeBundle(directory,{sha,platform,root=process.cwd(),t
    return {pkg:row.pkg,names,directory:cwd,binary};
   });
   const owner=ownerBytes?await stageWindowsOwner(ownerBytes,temporary):undefined;
-  return {...(takeOwnership?{inventory,test2json,temporary}:{inventory,test2json}),...(owner?{owner}:{})};
+  const cliFixture=cliFixtureBytes?await stageCLIFixture(cliFixtureBytes,temporary):undefined;
+  return {...(takeOwnership?{inventory,test2json,temporary}:{inventory,test2json}),...(owner?{owner}:{}),...(cliFixture?{cliFixture}:{})};
  }catch(error){
   if(takeOwnership)await rm(temporary,{recursive:true,force:true});
   throw error;
@@ -109,7 +112,8 @@ async function finalize(platform){
  const tool='test2json'+(platform.startsWith('win32')?'.exe':'');go(['build','-p',jobs,'-trimpath','-ldflags','-s -w','-o',path.join(directory,tool),'cmd/test2json']);
  const revision=execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim();
  const helper=await buildWindowsOwner(directory,platform,goCompileEnvironment(process.env));
- await writeFile(path.join(directory,'bundle.json'),JSON.stringify({revision,platform,groups,toolHash:hash(await readFile(path.join(directory,tool))),...helper},null,2));
+ const cliHelper=await buildCLIFixture(directory,platform,goCompileEnvironment(process.env));
+ await writeFile(path.join(directory,'bundle.json'),JSON.stringify({revision,platform,groups,toolHash:hash(await readFile(path.join(directory,tool))),...helper,...cliHelper},null,2));
  await stageSource(process.cwd(),path.resolve('dist/go-tests'));
 }
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){

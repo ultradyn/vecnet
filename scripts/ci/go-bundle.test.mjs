@@ -7,12 +7,12 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { ownerFixture } from './windows-owner.test-fixture.mjs';
 import { consumeBundle } from './go-bundle.mjs';
-import { planGo } from './schedule.mjs';
+import { planGo, nativeGoLanes } from './schedule.mjs';
 const entry=fileURLToPath(new URL('./go-bundle.mjs',import.meta.url));
 test('real compiled bundle conserves platform packages and rejects wrong source/corruption',async t=>{
  const root=await mkdtemp(path.join(os.tmpdir(),'ci-bundle-'));t.after(()=>rm(root,{recursive:true,force:true}));
  await writeFile(path.join(root,'go.mod'),'module fixture\n\ngo 1.26\n');
- await writeFile(path.join(root,'one_test.go'),'package fixture\nimport ("testing";"os")\nfunc TestOne(t *testing.T){if _,err:=os.Stat("one_test.go"); err!=nil {t.Fatal(err)}}\nfunc TestNew(t *testing.T){if os.Getenv("CI_BUNDLE_FAIL")=="1" {t.Fatal("new root assertion")}}\n');
+ await writeFile(path.join(root,'one_test.go'),'package fixture\nimport ("testing";"os")\nfunc TestOne(t *testing.T){if _,err:=os.Stat("one_test.go"); err!=nil {t.Fatal(err)}; if want:=os.Getenv("CI_EXPECT_CLI_FIXTURE"); want!="" && os.Getenv("CI_CLI_FIXTURE_HELPER")!=want {t.Fatal("CLI fixture environment missing")}}\nfunc TestNew(t *testing.T){if os.Getenv("CI_BUNDLE_FAIL")=="1" {t.Fatal("new root assertion")}}\n');
  await mkdir(path.join(root,'internal/empty'),{recursive:true});await writeFile(path.join(root,'internal/empty/empty.go'),'package empty\n');
  execFileSync('git',['init','-q'],{cwd:root});execFileSync('git',['add','.'],{cwd:root});execFileSync('git',['-c','core.hooksPath=/dev/null','-c','commit.gpgsign=false','-c','user.name=CI','-c','user.email=ci@example.invalid','commit','-qm','fixture'],{cwd:root});
  const sha=execFileSync('git',['rev-parse','HEAD'],{cwd:root,encoding:'utf8'}).trim();
@@ -25,6 +25,7 @@ test('real compiled bundle conserves platform packages and rejects wrong source/
  assert.match(toolSymbols.stderr,/no symbol/);
 
  const result=await consumeBundle(directory,options);
+ if(process.platform!=='win32')assert.equal(result.cliFixture,undefined);
  assert.equal(result.inventory.length,2);assert.deepEqual(result.inventory.flatMap(p=>p.names).sort(),['TestNew','TestOne']);
  // Execute real copied binary via native test2json without any Go toolchain.
  const rowNative=result.inventory.find(p=>p.binary);
@@ -59,14 +60,23 @@ test('real compiled bundle conserves platform packages and rejects wrong source/
    row.file+='.exe';
   }
   Object.assign(winReceipt,await ownerFixture(winDirectory,winReceipt.platform));
+  winReceipt.ciCLIFixture=(await ownerFixture(winDirectory,winReceipt.platform,'ci-cli-fixture.exe')).ciWindowsOwner;
   await writeFile(path.join(winDirectory,'bundle.json'),JSON.stringify(winReceipt));
   const winOptions={...options,platform:'win32-x64',takeOwnership:true};
   for(const [name,pattern,alter] of [
+   ['missing CLI fixture metadata',/CLI fixture metadata/,async (dir,receipt)=>{delete receipt.ciCLIFixture;}],
+   ['CLI fixture metadata path',/CLI fixture metadata/,async (dir,receipt)=>{receipt.ciCLIFixture.file='../other.exe';}],
+   ['missing CLI fixture image',/ENOENT/,async dir=>rm(path.join(dir,'ci-cli-fixture.exe'))],
+   ['CLI fixture hash',/CLI fixture hash/,async dir=>writeFile(path.join(dir,'ci-cli-fixture.exe'),'corrupt')],
+   ['CLI fixture architecture',/CLI fixture PE architecture/,async (dir,receipt)=>{receipt.ciCLIFixture=(await ownerFixture(dir,'win32-arm64','ci-cli-fixture.exe')).ciWindowsOwner;}],
+   ['CLI fixture alias',/unsafe CLI fixture/,async dir=>link(path.join(dir,'ci-cli-fixture.exe'),path.join(dir,'cli-alias.exe'))],
+   ['CLI fixture symlink',/unsafe CLI fixture/,async dir=>{const f=path.join(dir,'ci-cli-fixture.exe');await rename(f,f+'-alias');await symlink(f+'-alias',f);}],
    ['missing metadata',/owner metadata/,async (dir,receipt)=>{delete receipt.ciWindowsOwner;}],
    ['metadata path',/owner metadata/,async (dir,receipt)=>{receipt.ciWindowsOwner.file='../other.exe';}],
    ['owner hash',/owner hash/,async dir=>writeFile(path.join(dir,'ci-windows-owner.exe'),'corrupt')],
    ['helper from wrong architecture',/PE architecture/,async (dir,receipt)=>Object.assign(receipt,await ownerFixture(dir,'win32-arm64'))],
    ['wrong source',/source\/platform/,async (dir,receipt)=>{receipt.revision='0'.repeat(40);}],
+   ['wrong platform',/source\/platform/,async (dir,receipt)=>{receipt.platform='win32-arm64';}],
   ])await t.test(`Windows bundle rejects ${name} before executing a test binary`,async()=>{
    const dir=await mkdtemp(path.join(root,'win-invalid-'));
    await cp(winDirectory,dir,{recursive:true});
@@ -76,6 +86,8 @@ test('real compiled bundle conserves platform packages and rejects wrong source/
    await assert.rejects(consumeBundle(dir,winOptions),pattern);
   });
   const win=await consumeBundle(winDirectory,winOptions);
+  assert.equal(path.dirname(win.cliFixture),win.temporary);
+  assert.deepEqual(await readFile(win.cliFixture),await readFile(path.join(winDirectory,'ci-cli-fixture.exe')));
   assert.equal(path.dirname(win.owner),win.temporary);
   assert.deepEqual(await readFile(win.owner),await readFile(path.join(winDirectory,'ci-windows-owner.exe')));
   assert.ok(win.inventory.find(p=>p.binary).binary.endsWith('.test.exe'),'Windows relocation must preserve test-executable identity');
@@ -174,4 +186,46 @@ test('real compiled bundle conserves platform packages and rejects wrong source/
  const stagedEvents=execFileSync(stagedTool,['-t','-p',executed.pkg,executed.binary,'-test.v=test2json','-test.run','^TestOne$'],
   {cwd:executed.directory,encoding:'utf8'}).trim().split('\n').map(JSON.parse);
  assert.deepEqual(stagedEvents.filter(e=>e.Action==='pass'&&e.Test).map(e=>e.Test),['TestOne']);
+
+ // On Linux no helper artifact is required. An explicit portable fixture
+ // still exercises the same suite-to-child environment handoff as Windows.
+ const helper=path.join(executed.temporary,'helper with spaces');
+ await writeFile(helper,'fixture');await writeFile(path.join(root,'.ci/cli-fixture'),helper);
+ const placement=planGo(consumed,{}, {lanes:nativeGoLanes(process.platform)}).findIndex(rows=>rows.some(row=>row.pkg===executed.pkg));
+ const child=spawnSync(process.execPath,[fileURLToPath(new URL('./suite.mjs',import.meta.url)),'go',String(placement%nativeGoLanes(process.platform)),String(Math.floor(placement/nativeGoLanes(process.platform)))],{cwd:root,env:{...env,CI_EXPECT_CLI_FIXTURE:helper},encoding:'utf8',timeout:45000});
+ assert.equal(child.status,0,child.stdout+'\n'+child.stderr);
+ assert.match(child.stdout,/"Action":"pass"/);
+});
+
+test('standalone CLI fixture preserves real process contracts',async t=>{
+ const dir=await mkdtemp(path.join(os.tmpdir(),'cli fixture '));t.after(()=>rm(dir,{recursive:true,force:true}));
+ const binary=path.join(dir,'helper'+(process.platform==='win32'?'.exe':''));
+ execFileSync('go',['build','-p=2','-trimpath','-ldflags=-s -w','-o',binary,'./scripts/ci/_cli-fixture'],{cwd:fileURLToPath(new URL('../../',import.meta.url)),stdio:'pipe',timeout:45000});
+ const run=(spec,args=[],input='')=>{
+  return (async()=>{await writeFile(binary+'.cli-fixture.json',JSON.stringify(spec),{mode:0o600});return spawnSync(binary,args,{input,encoding:'utf8',timeout:2000});})();
+ };
+ for(const exit of [0,2,128]){
+  const discovery=await run({Kind:'git-tracking',Exit:exit},['-C',dir,'rev-parse','--show-toplevel']);
+  assert.equal(discovery.status,0);assert.equal(discovery.stdout.trim(),dir.split(path.sep).join('/'));
+  assert.equal((await run({Kind:'git-tracking',Exit:exit},['-C',dir,'ls-files','--error-unmatch','--','.codex/hooks.json'])).status,exit);
+ }
+ const log=path.join(dir,'argv.json');
+ assert.equal((await run({Kind:'argv',Log:log},['literal two words','--flag'])).status,0);
+ assert.deepEqual(JSON.parse(await readFile(log,'utf8')),['literal two words','--flag']);
+ const alias=path.join(dir,'second'+(process.platform==='win32'?'.exe':''));await link(binary,alias);
+ const otherLog=path.join(dir,'other.json');await writeFile(alias+'.cli-fixture.json',JSON.stringify({Kind:'argv',Log:otherLog}));
+ assert.equal(spawnSync(alias,['second'],{timeout:2000}).status,0);
+ assert.deepEqual(JSON.parse(await readFile(otherLog,'utf8')),['second']);
+ const clipboard=path.join(dir,'clipboard'),calls=path.join(dir,'calls');
+ assert.equal((await run({Kind:'clipboard',Log:clipboard,Calls:calls},[],Buffer.from('\ufeffhello 🌏','utf16le'))).status,0);
+ assert.equal(await readFile(clipboard,'utf8'),'hello 🌏');assert.equal(await readFile(calls,'utf8'),'called\n');
+ const claudeLog=path.join(dir,'claude');assert.equal((await run({Kind:'claude',Log:claudeLog},['one','two words'])).status,0);
+ assert.match(await readFile(claudeLog,'utf8'),/argv=one two words/);
+ const marker=path.join(dir,'marker');assert.equal((await run({Kind:'never-run',Marker:marker,Exit:99})).status,99);assert.equal((await readFile(marker)).length,0);
+ const notRepo=await run({Kind:'git-non-repository',Exit:128});assert.equal(notRepo.status,128);assert.match(notRepo.stderr,/not a git repository/);
+ assert.equal((await run({Kind:'git-failure',Exit:2})).status,2);
+ const sleeping=await run({Kind:'git-timeout'});assert.equal(sleeping.error?.code,'ETIMEDOUT');
+ assert.notEqual((await run({Kind:'unknown'})).status,0);
+ await writeFile(binary+'.cli-fixture.json','broken');assert.notEqual(spawnSync(binary,[],{timeout:2000}).status,0);
+ await rm(binary+'.cli-fixture.json');assert.notEqual(spawnSync(binary,[],{timeout:2000}).status,0);
 });

@@ -1,22 +1,18 @@
 package cli
 
 import (
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"sync"
 	"testing"
-	"time"
-	"unicode/utf16"
 
 	"github.com/XertroV/vecnet/internal/platform"
+	"github.com/XertroV/vecnet/internal/testfixture/cliprogram"
 )
 
 // Secret fixtures must have real private permissions before bytes are written:
@@ -83,13 +79,7 @@ func cliFixtureRequireMode(t *testing.T, path string, want os.FileMode) {
 
 // Export only in the test build so cli and cli_test use the same installer,
 // dispatcher and per-process snapshot.
-type CLIFixtureProgramSpec struct {
-	Kind   string
-	Log    string
-	Calls  string
-	Marker string
-	Exit   int
-}
+type CLIFixtureProgramSpec = cliprogram.Spec
 
 type cliFixtureProgramSpec = CLIFixtureProgramSpec
 
@@ -152,9 +142,24 @@ func TestMain(m *testing.M) {
 }
 
 func makeCLIFixtureSnapshot() (string, error) {
-	exe, err := os.Executable()
-	if err != nil {
-		return "", err
+	exe, configured := os.LookupEnv("CI_CLI_FIXTURE_HELPER")
+	if !configured {
+		var err error
+		exe, err = os.Executable()
+		if err != nil {
+			return "", err
+		}
+	} else {
+		if !filepath.IsAbs(exe) {
+			return "", fmt.Errorf("CLI fixture helper must be absolute")
+		}
+		info, err := os.Lstat(exe)
+		if err != nil {
+			return "", err
+		}
+		if !info.Mode().IsRegular() {
+			return "", fmt.Errorf("CLI fixture helper must be a regular file")
+		}
 	}
 	src, err := os.Open(exe)
 	if err != nil {
@@ -180,6 +185,77 @@ func makeCLIFixtureSnapshot() (string, error) {
 	return path, errors.Join(err, dst.Close())
 }
 
+func TestCLIFixtureSnapshotConfiguredImage(t *testing.T) {
+	oldDir := cliFixtureSnapshotDir
+	t.Cleanup(func() { cliFixtureSnapshotDir = oldDir })
+	for _, source := range []string{"", "relative.exe", t.TempDir()} {
+		t.Run("invalid source "+source, func(t *testing.T) {
+			t.Setenv("CI_CLI_FIXTURE_HELPER", source)
+			if _, err := makeCLIFixtureSnapshot(); err == nil {
+				t.Fatal("invalid configured image accepted")
+			}
+		})
+	}
+	t.Run("unset retains local fallback", func(t *testing.T) {
+		t.Setenv("CI_CLI_FIXTURE_HELPER", "restore on cleanup")
+		if err := os.Unsetenv("CI_CLI_FIXTURE_HELPER"); err != nil {
+			t.Fatal(err)
+		}
+		path, err := makeCLIFixtureSnapshot()
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { os.RemoveAll(filepath.Dir(path)) })
+		exe, err := os.Executable()
+		if err != nil {
+			t.Fatal(err)
+		}
+		a, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := os.ReadFile(exe)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(a) != string(b) {
+			t.Fatal("unset helper did not copy current executable")
+		}
+	})
+	t.Run("missing configured image fails closed", func(t *testing.T) {
+		t.Setenv("CI_CLI_FIXTURE_HELPER", filepath.Join(t.TempDir(), "absent.exe"))
+		path, err := makeCLIFixtureSnapshot()
+		if path != "" {
+			t.Cleanup(func() { os.RemoveAll(filepath.Dir(path)) })
+		}
+		if err == nil {
+			t.Fatal("configured missing helper fell back to test executable")
+		}
+	})
+	t.Run("configured bytes copied independently", func(t *testing.T) {
+		source := filepath.Join(t.TempDir(), "helper.exe")
+		want := []byte("independent fixture executable image")
+		if err := cliFixtureWriteFile(source, want, 0700); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("CI_CLI_FIXTURE_HELPER", source)
+		path, err := makeCLIFixtureSnapshot()
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { os.RemoveAll(filepath.Dir(path)) })
+		got, err := os.ReadFile(path)
+		if err != nil || string(got) != string(want) {
+			t.Fatal("snapshot did not use configured image")
+		}
+		a, _ := os.Stat(source)
+		b, _ := os.Stat(path)
+		if os.SameFile(a, b) {
+			t.Fatal("snapshot aliases configured source")
+		}
+	})
+}
+
 func init() {
 	if runtime.GOOS != "windows" {
 		return
@@ -188,85 +264,14 @@ func init() {
 	if err != nil {
 		return
 	}
-	raw, err := os.ReadFile(exe + ".cli-fixture.json")
+	spec, err := cliprogram.ReadSpec(exe)
 	if os.IsNotExist(err) {
 		return
 	}
 	if err != nil {
 		panic(err)
 	}
-	var spec cliFixtureProgramSpec
-	if err := json.Unmarshal(raw, &spec); err != nil {
-		panic(err)
-	}
-	switch spec.Kind {
-	case "clipboard":
-		raw, err := io.ReadAll(os.Stdin)
-		if err != nil {
-			panic(err)
-		}
-		if len(raw) < 2 || raw[0] != 0xff || raw[1] != 0xfe || len(raw)%2 != 0 {
-			panic("Windows clipboard fixture requires BOM-prefixed UTF-16LE")
-		}
-		units := make([]uint16, (len(raw)-2)/2)
-		for i := range units {
-			units[i] = binary.LittleEndian.Uint16(raw[2+2*i:])
-		}
-		if err := os.WriteFile(spec.Log, []byte(string(utf16.Decode(units))), 0600); err != nil {
-			panic(err)
-		}
-		if spec.Calls != "" {
-			f, err := os.OpenFile(spec.Calls, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
-			if err != nil {
-				panic(err)
-			}
-			fmt.Fprintln(f, "called")
-			f.Close()
-		}
-	case "claude":
-		cwd, err := os.Getwd()
-		if err != nil {
-			panic(err)
-		}
-		cwd, err = filepath.EvalSymlinks(cwd)
-		if err != nil {
-			panic(err)
-		}
-		f, err := os.OpenFile(spec.Log, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
-		if err != nil {
-			panic(err)
-		}
-		fmt.Fprintf(f, "cwd=%s argv=%s\n", cwd, strings.Join(os.Args[1:], " "))
-		f.Close()
-	case "argv":
-		raw, err := json.Marshal(os.Args[1:])
-		if err != nil {
-			panic(err)
-		}
-		if err := os.WriteFile(spec.Log, raw, 0600); err != nil {
-			panic(err)
-		}
-	case "git-tracking":
-		if len(os.Args) > 3 && os.Args[3] == "rev-parse" {
-			fmt.Println(filepath.ToSlash(os.Args[2]))
-			os.Exit(0)
-		}
-		if len(os.Args) <= 3 || os.Args[3] != "ls-files" {
-			panic("unexpected git fixture arguments")
-		}
-	case "git-timeout":
-		time.Sleep(5 * time.Second)
-	case "git-non-repository":
-		fmt.Fprintln(os.Stderr, "fatal: not a git repository")
-	case "git-failure":
-	case "never-run":
-		if err := os.WriteFile(spec.Marker, nil, 0600); err != nil {
-			panic(err)
-		}
-	default:
-		panic("unknown CLI fixture program kind")
-	}
-	os.Exit(spec.Exit)
+	os.Exit(cliprogram.Run(spec))
 }
 
 func cliFixtureShell(t *testing.T) string {

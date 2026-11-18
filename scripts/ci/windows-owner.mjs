@@ -11,11 +11,11 @@ const root = fileURLToPath(new URL('../../', import.meta.url));
 const machine = {'win32-x64': 0x8664, 'win32-arm64': 0xaa64};
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 
-function checkMachine(bytes, platform) {
+export function checkWindowsMachine(bytes, platform, label = 'Windows owner') {
   const pe = bytes.length >= 64 ? bytes.readUInt32LE(0x3c) : 0;
   if (!Object.hasOwn(machine, platform) || pe < 64 || pe > bytes.length - 6 ||
       bytes.readUInt16LE(0) !== 0x5a4d || bytes.readUInt32LE(pe) !== 0x4550 ||
-      bytes.readUInt16LE(pe + 4) !== machine[platform]) throw new Error('Windows owner PE architecture mismatch');
+      bytes.readUInt16LE(pe + 4) !== machine[platform]) throw new Error(`${label} PE architecture mismatch`);
 }
 
 export async function buildWindowsOwner(directory, platform, env) {
@@ -24,7 +24,7 @@ export async function buildWindowsOwner(directory, platform, env) {
   execFileSync('go', ['build', '-mod=readonly', '-p', '2', '-trimpath', '-buildvcs=false', '-ldflags', '-s -w',
     '-o', file, './scripts/ci/_owned-windows'], {cwd: root, env: {...env, GOMAXPROCS: '2'}, stdio: 'inherit'});
   const bytes = await readFile(file);
-  checkMachine(bytes, platform);
+  checkWindowsMachine(bytes, platform);
   return {ciWindowsOwner: {file: windowsOwnerFile, sha256: hash(bytes)}};
 }
 
@@ -38,7 +38,7 @@ export async function readWindowsOwner(directory, info, platform) {
   if (!stat.isFile() || stat.nlink !== 1) throw new Error('unsafe Windows owner file');
   const bytes = await readFile(file);
   if (hash(bytes) !== metadata.sha256) throw new Error('Windows owner hash mismatch');
-  checkMachine(bytes, platform);
+  checkWindowsMachine(bytes, platform);
   return bytes;
 }
 

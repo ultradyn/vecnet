@@ -44,6 +44,7 @@ if (kind === 'prepare-go') {
     await mkdir('.ci',{recursive:true});
     for(let i=0;i<6;i++)await writeFile(`.ci/go-${i}.json`,JSON.stringify(bundle.inventory.filter((_,n)=>n%6===i).map(row=>({...row,temporary}))));
     await writeFile('.ci/test2json',bundle.test2json);
+    if(bundle.cliFixture)await writeFile('.ci/cli-fixture',bundle.cliFixture);
     if(bundle.owner)await exportWindowsOwner(bundle.owner);
   } catch(error) {
     if(temporary)await rm(temporary,{recursive:true,force:true});
@@ -95,6 +96,12 @@ if (kind === 'prepare-go') {
   const tasks=planGo(inventory,timings[process.platform==='win32'?'windows':'linux'],{lanes:goLanes})[group*goLanes+lane];
   const tool=(await readFile('.ci/test2json','utf8')).trim();
   if(!tool)throw new Error('missing native test2json');
+  let cliFixture;
+  const requireCLIFixture=process.platform==='win32'&&process.env.GITHUB_ACTIONS==='true';
+  try{cliFixture=(await readFile('.ci/cli-fixture','utf8')).trim();}
+  catch(error){if(requireCLIFixture||error.code!=='ENOENT')throw error;}
+  if(requireCLIFixture&&!cliFixture)throw new Error('missing native CLI fixture');
+  if(cliFixture&&(!path.isAbsolute(cliFixture)||/[\r\n]/.test(cliFixture)))throw new Error('invalid native CLI fixture path');
   await runGoGroup(tasks,async ({pkg,selected,split,binary,directory,cost,exclusive})=>{
     if(exclusive)console.log(`ci-exclusive-go pkg=${pkg} root=${selected[0]}`);
     const filter=split?['-test.run',`^(${selected.join('|')})$`]:[];
@@ -103,6 +110,7 @@ if (kind === 'prepare-go') {
       const privateRoot=await privateTemporary('vecnet-ci-go-process-');
       try {
         const env={...process.env};
+        if(cliFixture)env.CI_CLI_FIXTURE_HELPER=cliFixture;
         for(const [key,leaf] of Object.entries({HOME:'home',USERPROFILE:'home',APPDATA:'config',LOCALAPPDATA:'data',TMPDIR:'tmp',TMP:'tmp',TEMP:'tmp',XDG_CONFIG_HOME:'config',XDG_CACHE_HOME:'cache',XDG_DATA_HOME:'data',XDG_STATE_HOME:'state',XDG_RUNTIME_DIR:'run'})){
           env[key]=path.join(privateRoot,leaf);await mkdir(env[key],{recursive:true,mode:0o700});
         }
