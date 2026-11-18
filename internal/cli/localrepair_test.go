@@ -80,47 +80,53 @@ func TestLocalInspectionDoesNotObserveOrSchedulePendingSetup(t *testing.T) {
 }
 
 func TestLocalRepairReportsLauncherUpgradePending(t *testing.T) {
-	a, root, home := localRegistryFixture(t)
-	unit := filepath.Join(home, ".config/systemd/user/vecnet-launcher.service")
-	if err := cliFixtureMkdirAll(filepath.Dir(unit), 0700); err != nil {
-		t.Fatal(err)
-	}
-	before := []byte("[Service]\nExecStart=/private/old-launcher\n")
-	if runtime.GOOS == "windows" && strings.HasSuffix(unit, ".task.json") {
-		before = []byte(`{"schema":1,"managed_by":"unregistered fixture"}`)
-	}
-	if err := cliFixtureWriteFile(unit, before, 0600); err != nil {
-		t.Fatal(err)
-	}
-	started := 0
-	a.localRepairStart = func(*exec.Cmd) error { started++; return nil }
-	a.localStartup([]string{"peers"})
-	if started != 1 {
-		t.Fatalf("installed launcher was omitted from automatic maintenance: %d", started)
-	}
-	path := filepath.Join(root, "hooks.json")
-	if err := cliFixtureWriteFile(path, []byte(`{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"vecnet hook --profile p --event user-prompt","timeout":5}]}]}}`), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := a.registerLocalArtifact(path, "codex-hooks", "old", time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	var out bytes.Buffer
-	a.stdout = &out
-	a.json = true
-	if err := a.cmdLocalRepair(nil); err == nil || !strings.Contains(err.Error(), "launcher") {
-		t.Fatalf("launcher upgrade falsely completed: error=%v output=%s", err, out.String())
-	}
-	if !strings.Contains(out.String(), `"state":"pending"`) || !strings.Contains(out.String(), "installer") {
-		t.Fatalf("missing actionable launcher upgrade result: %s", out.String())
-	}
-	if got, err := os.ReadFile(unit); err != nil || !bytes.Equal(before, got) {
-		t.Fatalf("replaced launcher without verified migration: %s %v", got, err)
-	}
-	projects, err := a.localProjects()
-	if err != nil || len(projects) != 1 || projects[0].Status != "pending" || projects[0].AppliedVersion != "" {
-		t.Fatalf("launcher software incorrectly marked upgraded: %#v %v", projects, err)
-	}
+	// Test maintenance decisions with logical time so private filesystem I/O
+	// cannot consume the production 200ms foreground startup budget.
+	synctest.Test(t, func(t *testing.T) {
+		a, root, home := localRegistryFixture(t)
+		// The project is a plain directory; host Git is outside this fixture.
+		t.Setenv("PATH", t.TempDir())
+		unit := filepath.Join(home, ".config/systemd/user/vecnet-launcher.service")
+		if err := cliFixtureMkdirAll(filepath.Dir(unit), 0700); err != nil {
+			t.Fatal(err)
+		}
+		before := []byte("[Service]\nExecStart=/private/old-launcher\n")
+		if runtime.GOOS == "windows" && strings.HasSuffix(unit, ".task.json") {
+			before = []byte(`{"schema":1,"managed_by":"unregistered fixture"}`)
+		}
+		if err := cliFixtureWriteFile(unit, before, 0600); err != nil {
+			t.Fatal(err)
+		}
+		started := 0
+		a.localRepairStart = func(*exec.Cmd) error { started++; return nil }
+		a.localStartup([]string{"peers"})
+		if started != 1 {
+			t.Fatalf("installed launcher was omitted from automatic maintenance: %d", started)
+		}
+		path := filepath.Join(root, "hooks.json")
+		if err := cliFixtureWriteFile(path, []byte(`{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"vecnet hook --profile p --event user-prompt","timeout":5}]}]}}`), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := a.registerLocalArtifact(path, "codex-hooks", "old", time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		a.stdout = &out
+		a.json = true
+		if err := a.cmdLocalRepair(nil); err == nil || !strings.Contains(err.Error(), "launcher") {
+			t.Fatalf("launcher upgrade falsely completed: error=%v output=%s", err, out.String())
+		}
+		if !strings.Contains(out.String(), `"state":"pending"`) || !strings.Contains(out.String(), "installer") {
+			t.Fatalf("missing actionable launcher upgrade result: %s", out.String())
+		}
+		if got, err := os.ReadFile(unit); err != nil || !bytes.Equal(before, got) {
+			t.Fatalf("replaced launcher without verified migration: %s %v", got, err)
+		}
+		projects, err := a.localProjects()
+		if err != nil || len(projects) != 1 || projects[0].Status != "pending" || projects[0].AppliedVersion != "" {
+			t.Fatalf("launcher software incorrectly marked upgraded: %#v %v", projects, err)
+		}
+	})
 }
 
 // Windows pathname Stat may defer file identity lookup until SameFile. Stat an
