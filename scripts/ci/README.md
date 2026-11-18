@@ -262,10 +262,14 @@ SHA-256; restore rejects mismatches before native tar extraction. Git remains
 installed for tests which create their own repositories and worktrees. The
 source checkout's `.git` directory is not required by the native Go tests.
 
-Node groups 0 and 1 remain with the Node helper guards. On Linux and Windows
-ARM64, group 2 also runs there; only group 3 follows the four E2E groups.
-Windows x64 retains groups 2 and 3 in its E2E job, keeping its earlier Node
-completion milestone available for package admission. All groups,
+On Linux and Windows ARM64, Node groups 0, 1 and 2 run with the helper guards;
+only group 3 follows the four E2E groups. Windows x64 runs all four Node groups
+in its E2E job, so the helper guards can release the earlier Node completion
+milestone used for package admission. In R23 the two moved x64 steps took
+22s and 28s. Their relocation advances eligibility by about 50s in a fixed
+duration comparison; one freed runner cannot admit both package jobs at once.
+The longer E2E tail, healthy Go lane occupancy and acceptance still require
+native measurement. All groups,
 platforms, shards and assertions remain admitted once, without additional
 jobs. These changes enable overlap and remove repeated checkout work; actual
 native completion below 300 seconds and individual steps below 60 seconds
