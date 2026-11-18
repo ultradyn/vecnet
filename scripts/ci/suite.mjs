@@ -1,7 +1,7 @@
 // Only CI scheduling lives here; assertions and platform selection remain in
 // the original suites. Run this whole command under budget.mjs, not each child
 // separately: discovery/compilation and all packages share the step deadline.
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { mkdir, mkdtemp, realpath, chmod, readFile, writeFile, access } from 'node:fs/promises';
 import { globSync } from 'node:fs';
 import path from 'node:path';
@@ -9,6 +9,7 @@ import os from 'node:os';
 import { performance } from 'node:perf_hooks';
 import { consumeBundle } from './go-bundle.mjs';
 import { partition } from './partition.mjs';
+import { bounded, planGo, goLanes, goGroups } from './schedule.mjs';
 
 const [kind, laneText = '0', groupText = '0'] = process.argv.slice(2);
 const lane = Number(laneText), group = Number(groupText);
@@ -65,24 +66,22 @@ if (kind === 'prepare-go') {
   await writeFile(`.ci/go-${lane}.json`, JSON.stringify(inventory));
   console.log(`Go inventory: ${inventory.length} packages, ${inventory.reduce((n, p) => n + p.names.length, 0)} root tests/examples/fuzz targets`);
 } else if (kind === 'go') {
-  partition([], lane, 3); partition([], group, 8);
-  const inventory = (await Promise.all(Array.from({length:6},(_,i)=>readFile(`.ci/go-${i}.json`,'utf8')))).flatMap(JSON.parse).sort((a,b)=>a.pkg.localeCompare(b.pkg,'en'));
-  if(new Set(inventory.map(p=>p.pkg)).size!==inventory.length)throw new Error('duplicate package inventory');
-  let roots = 0, packages = 0;
-  for (const [ordinal, { pkg, names, binary, directory }] of inventory.entries()) {
-    // Large packages are split by complete root name, never by subtest. Small
-    // packages run unfiltered once, including packages with no test files.
-    const split = names.length >= 20;
-    const selected = split ? partition(names, group * 3 + lane, 24) : names;
-    if (split ? !selected.length : ordinal % 24 !== group * 3 + lane) continue;
-    const filter = split ? ['-test.run', `^(${selected.join('|')})$`] : [];
+  partition([], lane, goLanes); partition([], group, goGroups);
+  const inventory = (await Promise.all(Array.from({length:6},(_,i)=>readFile(`.ci/go-${i}.json`,'utf8')))).flatMap(JSON.parse);
+  const timings=JSON.parse(await readFile(new URL('./go-timings.json',import.meta.url),'utf8'));
+  const tasks=planGo(inventory,timings[process.platform==='win32'?'windows':'linux'])[group*goLanes+lane];
+  let tool;try{tool=(await readFile('.ci/test2json','utf8')).trim();}catch(error){if(error.code!=='ENOENT')throw error;}
+  await bounded(tasks,async ({pkg,selected,split,binary,directory,cost})=>{
+    const filter=split?['-test.run',`^(${selected.join('|')})$`]:[];
     const started=performance.now();
-    let tool;try{tool=(await readFile('.ci/test2json','utf8')).trim();}catch{}
-    if(binary)execFileSync(tool||'go',[...(tool?[]:['tool','test2json']),'-t','-p',pkg,binary,'-test.v=test2json','-test.count=1','-test.timeout=50s',...filter],{cwd:directory,stdio:'inherit'});
-    console.log(`ci-package pkg=${pkg} roots=${selected.length} elapsed_ms=${Math.round(performance.now()-started)}`);
-    packages++; roots += selected.length;
-  }
-  console.log(`Go lane=${lane}/3 group=${group}/8 packages=${packages} roots=${roots}`);
+    if(binary)await new Promise((resolve,reject)=>{
+      const child=spawn(tool||'go',[...(tool?[]:['tool','test2json']),'-t','-p',pkg,binary,'-test.v=test2json','-test.count=1','-test.timeout=50s',...filter],{cwd:directory,stdio:'inherit'});
+      child.once('error',reject);
+      child.once('close',(code,signal)=>code===0?resolve():reject(new Error(`${pkg} failed: exit=${code} signal=${signal}`)));
+    });
+    console.log(`ci-package pkg=${pkg} roots=${selected.length} elapsed_ms=${Math.round(performance.now()-started)} estimated_s=${cost.toFixed(3)}`);
+  });
+  console.log(`Go lane=${lane}/${goLanes} group=${group}/${goGroups} packages=${tasks.length} roots=${tasks.reduce((n,t)=>n+t.selected.length,0)}`);
 } else if (kind === 'node' || kind === 'e2e') {
   const patterns = kind === 'node' ? ['connectors/hub-client/test/*.test.ts', 'connectors/launcher/test/*.test.ts', 'connectors/launcher/test/backends/*.test.ts'] : ['connectors/launcher/test/e2e/*.test.ts'];
   const all = patterns.flatMap(pattern => globSync(pattern));

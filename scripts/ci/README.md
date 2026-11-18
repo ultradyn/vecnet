@@ -1,13 +1,31 @@
 # Release CI scheduling and acceptance
 
 The workflow preserves full native Linux x64 / Windows x64 / Windows ARM64
-Go, Node and E2E coverage. Three native Go lanes execute complete whole-root groups. Three independent
+Go, Node and E2E coverage. Twelve native Go lanes per platform execute two
+complete whole-root groups each (24 disjoint partitions). Three independent
 Linux producer jobs cross-compile platform-selected test packages once in six
 bounded groups, after cold-dependency stages; source/hash-bound bundles include
 native test2json. Consumers validate/copy to private physical temp, discover
 root names natively, then execute binaries with original package cwd—no native
 toolchain setup, relinking or repeated go test driver. Packages with20+roots
 are partitioned whole-root; smaller/no-test packages remain complete.
+`go-timings.json` records R4 measured slow roots and positive package-cost
+fallbacks, including the supplied native FULL hub probe. Deterministic weighted
+placement balances whole roots, then batches each package's roots within a
+partition. It is not a coverage allowlist: discovery alone supplies the inventory,
+and unknown/new roots always receive a positive cost. Each group runs at most
+two independent package binaries concurrently, retaining package cwd and exit
+status; a failure stops queued work and drains the other worker. Native
+copy/list discovery also has at most two workers. The enclosing budget owns the
+entire group and all descendants; no per-child budget multiplication.
+
+Each platform's twelve consumers wait only for its matching producer, not the
+slowest of all three compile jobs. YAML step/strategy anchors share identical
+commands, not extra platform exceptions. There are 55 executed jobs including
+acceptance (54 before it); `schedule.mjs` supplies the audit cardinality. More
+native runners trade serial runtime for hosted concurrency, artifact transfer
+and queue overhead. R4 timing replay is only a placement estimate, not native
+GREEN; actual queue/setup/Windows FULL tails must satisfy the same limits.
 New roots/examples/fuzz seeds and small/no-test packages remain conserved.
 No SQLite override: production and test default FULL remains unchanged.
 

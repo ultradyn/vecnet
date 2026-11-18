@@ -1,6 +1,9 @@
 // Cross-compile complete test packages on existing Linux target producers;
 // discover names and execute ONLY on the native consumer. No platform skips.
-import { execFileSync } from 'node:child_process';
+import { execFileSync, execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { bounded } from './schedule.mjs';
+const exec = promisify(execFile);
 import { createHash } from 'node:crypto';
 import { chmod, copyFile, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -31,20 +34,19 @@ export async function consumeBundle(directory,{sha,platform,root=process.cwd(),t
  const tool='test2json'+(platform.startsWith('win32')?'.exe':'');
  if(hash(await readFile(path.join(directory,tool)))!==receipt.toolHash)throw new Error('test2json hash mismatch');
  await mkdir(temporary,{recursive:true});await copyFile(path.join(directory,tool),path.join(temporary,tool));await chmod(path.join(temporary,tool),0o755);
- const inventory=[];
- for(const row of targets){
+ const inventory=await bounded(targets,async row=>{
   const cwd=path.resolve(root,row.directory);if(path.relative(root,cwd).startsWith('..'))throw new Error('unsafe package directory');
-  if(!row.file){inventory.push({pkg:row.pkg,names:[],directory:cwd,binary:null});continue;}
+  if(!row.file)return {pkg:row.pkg,names:[],directory:cwd,binary:null};
   if(!Number.isInteger(row.group)||row.group<0||row.group>=6||path.basename(row.file)!==row.file)throw new Error('unsafe binary path');
   const source=path.join(directory,String(row.group),row.file);
   const bytes=await readFile(source);if(hash(bytes)!==row.sha256)throw new Error('test binary hash mismatch');
   const suffix=platform.startsWith('win32')?'.test.exe':'.test';
   const binary=path.join(temporary,row.pkg.replace(/[^A-Za-z0-9_-]/g,'_')+suffix);await writeFile(binary,bytes,{mode:0o700});await chmod(binary,0o700);
-  const listing=execFileSync(binary,['-test.list','.'],{cwd,encoding:'utf8'});
+  const {stdout:listing}=await exec(binary,['-test.list','.'],{cwd,encoding:'utf8'});
   const names=listing.trim().split(/\r?\n/).filter(Boolean);
   if(names.some(name=>!/^(?:Test\w+|Example\w*|Fuzz\w+)$/.test(name)))throw new Error('bad native test list');
-  inventory.push({pkg:row.pkg,names,directory:cwd,binary});
- }
+  return {pkg:row.pkg,names,directory:cwd,binary};
+ });
  return {inventory,test2json:path.join(temporary,tool)};
 }
 async function finalize(platform){

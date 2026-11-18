@@ -154,26 +154,14 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-  test-compile:
+  test-compile-linux:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: linux-x64
-            goos: linux
-            goarch: amd64
-          - platform: win32-x64
-            goos: windows
-            goarch: amd64
-          - platform: win32-arm64
-            goos: windows
-            goarch: arm64
     env:
-      GOOS: ${{ matrix.goos }}
-      GOARCH: ${{ matrix.goarch }}
-    steps:
+      GOOS: linux
+      GOARCH: amd64
+      CI_GO_PLATFORM: linux-x64
+    steps: &compile-go-steps
       - name: Preserve LF bytes on Windows
         if: runner.os == 'Windows'
         timeout-minutes: 1
@@ -205,49 +193,68 @@ jobs:
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs prepare-go 3
       - name: Test compiled Go execution conservation
-        if: matrix.platform == 'linux-x64'
+        if: env.CI_GO_PLATFORM == 'linux-x64'
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node --test scripts/ci/suite.test.mjs scripts/ci/go-bundle.test.mjs
       - name: Compile complete native Go test bundle group 1 of 6
         timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/go-bundle.mjs compile ${{ matrix.platform }} 0
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/go-bundle.mjs compile ${{ env.CI_GO_PLATFORM }} 0
       - name: Compile complete native Go test bundle group 2 of 6
         timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/go-bundle.mjs compile ${{ matrix.platform }} 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/go-bundle.mjs compile ${{ env.CI_GO_PLATFORM }} 1
       - name: Compile complete native Go test bundle group 3 of 6
         timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/go-bundle.mjs compile ${{ matrix.platform }} 2
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/go-bundle.mjs compile ${{ env.CI_GO_PLATFORM }} 2
       - name: Compile complete native Go test bundle group 4 of 6
         timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/go-bundle.mjs compile ${{ matrix.platform }} 3
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/go-bundle.mjs compile ${{ env.CI_GO_PLATFORM }} 3
       - name: Compile complete native Go test bundle group 5 of 6
         timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/go-bundle.mjs compile ${{ matrix.platform }} 4
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/go-bundle.mjs compile ${{ env.CI_GO_PLATFORM }} 4
       - name: Compile complete native Go test bundle group 6 of 6
         timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/go-bundle.mjs compile ${{ matrix.platform }} 5
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/go-bundle.mjs compile ${{ env.CI_GO_PLATFORM }} 5
       - name: Finalize source-bound test bundle and native event tool
         timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/go-bundle.mjs finalize ${{ matrix.platform }}
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/go-bundle.mjs finalize ${{ env.CI_GO_PLATFORM }}
       - uses: actions/upload-artifact@v4
         timeout-minutes: 1
         with:
-          name: go-tests-${{ matrix.platform }}
+          name: go-tests-${{ env.CI_GO_PLATFORM }}
           compression-level: 1
           path: dist/go-tests
           if-no-files-found: error
           retention-days: 7
 
-  test-go:
-    needs: test-compile
-    strategy:
+  test-compile-windows-x64:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      GOOS: windows
+      GOARCH: amd64
+      CI_GO_PLATFORM: win32-x64
+    steps: *compile-go-steps
+
+  test-compile-windows-arm:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      GOOS: windows
+      GOARCH: arm64
+      CI_GO_PLATFORM: win32-arm64
+    steps: *compile-go-steps
+
+  # Each native platform waits only for its own source-bound bundle. Avoid
+  # imposing the slowest producer's tail on both already-ready Windows bundles.
+  test-go-linux:
+    needs: test-compile-linux
+    strategy: &native-go-strategy
       fail-fast: false
       matrix:
-        runner: [ubuntu-24.04, windows-2025, windows-11-arm]
-        lane: [0, 1, 2]
-    runs-on: ${{ matrix.runner }}
+        lane: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
-    steps:
+    steps: &native-go-steps
       - name: Preserve LF bytes on Windows
         if: runner.os == 'Windows'
         timeout-minutes: 1
@@ -268,30 +275,26 @@ jobs:
       - name: Validate and discover matching native Go test binaries
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs consume-go
-      - name: Complete Go roots group 1 of 8
+      - name: Complete Go roots group 1 of 2
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs go ${{ matrix.lane }} 0
-      - name: Complete Go roots group 2 of 8
+      - name: Complete Go roots group 2 of 2
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs go ${{ matrix.lane }} 1
-      - name: Complete Go roots group 3 of 8
-        timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs go ${{ matrix.lane }} 2
-      - name: Complete Go roots group 4 of 8
-        timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs go ${{ matrix.lane }} 3
-      - name: Complete Go roots group 5 of 8
-        timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs go ${{ matrix.lane }} 4
-      - name: Complete Go roots group 6 of 8
-        timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs go ${{ matrix.lane }} 5
-      - name: Complete Go roots group 7 of 8
-        timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs go ${{ matrix.lane }} 6
-      - name: Complete Go roots group 8 of 8
-        timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs go ${{ matrix.lane }} 7
+
+  test-go-windows-x64:
+    needs: test-compile-windows-x64
+    strategy: *native-go-strategy
+    runs-on: windows-2025
+    timeout-minutes: 5
+    steps: *native-go-steps
+
+  test-go-windows-arm:
+    needs: test-compile-windows-arm
+    strategy: *native-go-strategy
+    runs-on: windows-11-arm
+    timeout-minutes: 5
+    steps: *native-go-steps
 
   test-node:
     needs: target
@@ -327,7 +330,7 @@ jobs:
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/native.mjs
       - name: Test command ownership and acceptance policies
         timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node --test --test-concurrency=2 scripts/ci/budget.test.mjs scripts/ci/ownership.test.mjs scripts/ci/partition.test.mjs scripts/ci/audit.test.mjs scripts/ci/status.test.mjs scripts/npm/assemble.test.mjs
+        run: node scripts/ci/budget.mjs 53000 node --test --test-concurrency=2 scripts/ci/budget.test.mjs scripts/ci/ownership.test.mjs scripts/ci/partition.test.mjs scripts/ci/schedule.test.mjs scripts/ci/audit.test.mjs scripts/ci/status.test.mjs scripts/npm/assemble.test.mjs
       - name: Test release guards and cross-platform wrappers
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node --test --test-concurrency=2 scripts/npm/release.test.mjs scripts/npm/npm-command.test.mjs scripts/npm/wrapper.test.mjs scripts/npm/verify-artifact.test.mjs
@@ -433,7 +436,7 @@ jobs:
   accept:
     # Always run the audit: skipped/failed dependencies must not become green.
     if: always()
-    needs: [target, test-compile, build, test-go, test-node, test-e2e, test-artifact]
+    needs: [target, test-compile-linux, test-compile-windows-x64, test-compile-windows-arm, build, test-go-linux, test-go-windows-x64, test-go-windows-arm, test-node, test-e2e, test-artifact]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:

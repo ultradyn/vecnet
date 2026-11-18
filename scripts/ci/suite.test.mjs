@@ -17,7 +17,7 @@ test('real Go discovery and every scheduled command execute all roots exactly on
   // An executable example with stdout is included by Go's actual discovery.
   await writeFile(path.join(cwd, 'example_test.go'), 'package fixture\nimport "fmt"\nfunc Example() {fmt.Println("example")\n// Output: example\n}\n');
   await mkdir(path.join(cwd, 'small'));
-  await writeFile(path.join(cwd, 'small', 'one_test.go'), 'package small\nimport "testing"\nfunc TestSmall(t *testing.T) {}\n');
+  await writeFile(path.join(cwd, 'small', 'one_test.go'), 'package small\nimport ("testing";"os")\nfunc TestSmall(t *testing.T) {if os.Getenv("CI_SCHEDULE_FAIL")=="1" {t.Fatal("scheduled assertion fails")}}\n');
   await mkdir(path.join(cwd, 'empty'));
   await writeFile(path.join(cwd, 'empty', 'empty.go'), 'package empty\n');
   // Hosted Linux runners may omit all three temporary-directory variables.
@@ -40,9 +40,10 @@ test('real Go discovery and every scheduled command execute all roots exactly on
   const shim=path.join(cwd,'shim');await mkdir(shim);
   if(process.platform!=='win32')await writeFile(path.join(shim,'go'),'#!/bin/sh\nif [ "$1" = test ]; then echo repeated-compilation >&2; exit 99; fi\nexec '+JSON.stringify(execFileSync('which',['go'],{encoding:'utf8'}).trim())+' "$@"\n',{mode:0o755});
 
-  const passed = [];
-  for (let lane = 0; lane < 3; lane++) for (let group = 0; group < 8; group++) {
+  const passed = [], executions = [];
+  for (let lane = 0; lane < 12; lane++) for (let group = 0; group < 2; group++) {
     const output = execFileSync(process.execPath,[suite,'go',String(lane),String(group)],{cwd,encoding:'utf8',timeout:45000,env:{...process.env,PATH:shim+path.delimiter+process.env.PATH},maxBuffer:4*1024*1024});
+    executions.push(...output.split('\n').filter(line => line.startsWith('ci-package ')));
     for (const line of output.split('\n')) {
       if (!line.startsWith('{')) continue;
       const event = JSON.parse(line);
@@ -50,4 +51,17 @@ test('real Go discovery and every scheduled command execute all roots exactly on
     }
   }
   assert.deepEqual(passed.sort(), [...roots, 'FuzzSeed', 'Example', 'TestSmall'].sort());
+  assert.equal(executions.filter(line=>line.includes('pkg=ci-fixture/empty ')).length,1,'no-test package scheduled exactly once');
+  assert.equal(executions.filter(line=>line.includes('pkg=ci-fixture/small ')).length,1,'small package scheduled whole exactly once');
+  // A real assertion failure in the compiled Go binary must make the whole
+  // command RED; no compile/relink needed to exercise failure propagation.
+  const {planGo}=await import('./schedule.mjs');
+  const scheduled=planGo(inventory).findIndex(tasks=>tasks.some(p=>p.pkg==='ci-fixture/small'));
+  assert.throws(()=>execFileSync(process.execPath,[suite,'go',String(scheduled%12),String(Math.floor(scheduled/12))],{
+    cwd,env:{...env,CI_SCHEDULE_FAIL:'1'},encoding:'utf8',stdio:'pipe',timeout:45000,
+  }),error=>{
+    assert.match(error.stdout,/scheduled assertion fails/);
+    assert.match(error.stderr,/ci-fixture\/small failed/);
+    return true;
+  });
 });
