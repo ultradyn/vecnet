@@ -51,9 +51,10 @@ async function setup(t: TestContext, opts: {attach?: boolean; kind?: SessionStat
   const replies=()=>rows().filter(r=>r.kind==='send' && !(r.payload as SendRequest).job_status).map(r=>r.payload as SendRequest);
   const receipts=()=>rows().filter(r=>r.kind==='receipt').map(r=>r.payload as ReceiptBody);
   const statuses=()=>rows().map(r=>r.payload as SendRequest).filter(p=>p.job_status).map(p=>p.job_status!);
-  return {lane,ledger,job,deps,clock,log,handle,sends,calls,blobs,fetched,rows,replies,receipts,statuses,delivered:()=>delivered,activities:()=>activities,ended:()=>ended,
+  function publish(event:TurnEvent){if(event.type==='turn_finished')kind='idle';events.push({cursor:{value:String(++next)},event});wake?.();}
+  return {lane,ledger,job,deps,clock,log,handle,sends,calls,blobs,fetched,rows,replies,receipts,statuses,publish,delivered:()=>delivered,activities:()=>activities,ended:()=>ended,
     message:(text:string,priority:'wake'|'wake_idle'|'hold'='wake',sender='req')=>threadDelivery(job.threadId,sender,text,priority),
-    async emit(event:TurnEvent){if(event.type==='turn_finished')kind='idle';events.push({cursor:{value:String(++next)},event});wake?.();await tick();},
+    async emit(event:TurnEvent){publish(event);await tick();},
   };
 }
 
@@ -110,20 +111,42 @@ test('a direct upload reference is attached without a transfer URL or server pro
   assert.ok(attachmentReferenceErrors({...attachment, sha256_verified:true}).length > 0);
   assert.ok(attachmentReferenceErrors({...attachment, integrity:{algorithm:'sha256',value:'c'.repeat(64),verified:true}}).length > 0);
 });
-test('R2 long output is sent with a published attachmentReference and no server proof',async t=>{
+test('R2 long output is sent with a published attachmentReference and no server proof', { timeout: 10_000 }, async t=>{
+  let receivedCompletion!: () => void, releaseCompletion!: () => void;
+  const completionReceived = new Promise<void>(resolve => { receivedCompletion = resolve; });
+  const completionReleased = new Promise<void>(resolve => { releaseCompletion = resolve; });
+  t.after(releaseCompletion);
+  const s = await setup(t);
   const clock = fakeClock(Date.parse('2026-11-06T00:00:00.000Z'));
   const hub = await startFakeHub({ clock, signedURLs: true });
+  // setup registers the lane stop/join first; keep its HTTP dependencies alive until then.
   t.after(() => hub.close());
-  const client = createHubClient({ baseUrl: hub.url, credential: hub.bearer, clock });
-  const s = await setup(t);
+  const client = createHubClient({ baseUrl: hub.url, credential: hub.bearer, clock, async fetch(input, init) {
+    const response = await fetch(input, init);
+    if (input.toString().endsWith('/complete')) {
+      // Hold delivery of the real HTTP response until the test observes that
+      // receiving a backend turn is not the same as publishing its reply.
+      receivedCompletion();
+      await completionReleased;
+    }
+    return response;
+  } });
   let proof: BlobRef | undefined;
   s.deps.hub.putBlob = async (bytes, mediaType, signal) => {
     s.blobs.push({ bytes, mediaType });
     proof = await client.putBlob(bytes, mediaType, signal);
     return proof;
   };
+  const replyQueued = new Promise<void>(resolve => {
+    // The lane notifies activity after committing the turn and outbox reply.
+    s.deps.onActivity = () => resolve();
+  });
   const full = 'x'.repeat(100 * 1024);
-  await s.emit(finished('r2-long', full));
+  s.publish(finished('r2-long', full));
+  await completionReceived;
+  assert.equal(s.replies().length, 0);
+  releaseCompletion();
+  await replyQueued;
   const attachment = s.replies()[0].attachments?.[0];
   assert.equal(proof?.sha256_verified, true);
   assert.equal(proof?.integrity?.verified, true);
