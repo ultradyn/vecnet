@@ -44,10 +44,11 @@ or dropped. Spare workers can now execute multiple packets of the same package.
 Every process receives independent private physical HOME/USERPROFILE, APPDATA/LOCALAPPDATA,
 TMPDIR/TMP/TEMP and XDG config/cache/data/state/runtime directories, removed after it exits.
 Original cwd, binary filenames and native assertions/hooks/cleanup remain intact. It is not a coverage allowlist: discovery alone supplies the inventory,
-and unknown/new roots always receive a positive cost. Each group runs at most
-four independent package binaries concurrently on Windows and two on Linux,
-retaining package cwd and exit status. The bounded pool accepts an explicit
-positive integer capacity; its default remains two for Node and other callers.
+and unknown/new roots always receive a positive cost. Only the GitHub Actions
+native Go group opts into six ordinary packets on Windows or four on Linux,
+retaining package cwd and exit status. This is a bounded experiment on runners
+observed with four CPUs, not evidence that CPU or memory contention is absent.
+Local Go execution, Node and other default pool callers use two.
 A failure stops all queued work, drains every already-running worker and preserves
 the first rejection. Compilation and native copy/list discovery retain two workers. The enclosing budget owns the
 entire group and all descendants; no per-child budget multiplication.
@@ -138,8 +139,9 @@ effective value to both Go `-p` and the producer Go subprocess `GOMAXPROCS`.
 Unset requests preserve the existing two-job default and inherited environment.
 All cold dependency build stages, six bundle compile groups and event-tool
 finalization use this policy; malformed overrides fail before producer work.
-Other target/assembly builds, discovery and native execution remain unchanged:
-native Windows `GOMAXPROCS=1` per process, four Windows execution workers and two Linux workers (Linux `GOMAXPROCS=2`).
+Other target/assembly builds and discovery are unchanged. For native execution,
+`GOMAXPROCS` stays `1` per Windows process and `2` per Linux process; wider
+Release packet pools do not change the per-process setting.
 Parent's actual ubuntu-24.04 capacity probe run44264657616, heada573c13b,
 `capacity-probe/capacity.json` verified availableParallelism4, cpus4 and
 16464306176 bytes totalMemory. This is allocation evidence, not speedup or memory

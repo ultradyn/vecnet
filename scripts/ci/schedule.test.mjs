@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { planGo, bounded, runGoGroup, releaseJobCount, goLanes, nativeGoLanes, goGroups } from './schedule.mjs';
+import { planGo, bounded, runGoGroup, nativeGoWorkers, releaseJobCount, goLanes, nativeGoLanes, goGroups } from './schedule.mjs';
 const inventory = [
  {pkg:'heavy', names:Array.from({length:48},(_,i)=>`Test${i}`), binary:'heavy'},
  {pkg:'small', names:['Example','FuzzSeed'],binary:'small'},
@@ -116,21 +116,24 @@ test('explicit four workers reach four, never exceed four and preserve index res
  assert.deepEqual(initial,[0,1,2,3]);assert.equal(peak,4);assert.equal(active,0);
  assert.deepEqual(results,['0:0','1:1','2:2','3:3','4:4','5:5']);
 });
-test('four-worker failure stops every dequeue, drains all active workers and preserves first error',async()=>{
+for(const width of [4,6]) test(`${width}-worker failure stops dequeue, drains active workers and preserves the first error`,async()=>{
  const first=new Error('first observed failure'),later=new Error('later failure');
+ const items=Array.from({length:width+2},(_,id)=>id),admitted=items.slice(0,width);
  const starts=[],finished=[],release=[];let settled=false;
- const run=bounded([0,1,2,3,4,5],async n=>{
+ const run=bounded(items,async n=>{
   starts.push(n);await new Promise(resolve=>{release[n]=resolve;});finished.push(n);
   if(n===1)throw first;if(n===0)throw later;
- },4);
+ },width);
  const outcome=run.then(()=>{settled=true;return null;},error=>{settled=true;return error;});
  await turn();const initial=[...starts];
  release[1]();await turn();release[0]();await turn();
- const early=settled;release[2]?.();await turn();const beforeLast=settled;
- release[3]?.();const error=await outcome;
- assert.deepEqual(initial,[0,1,2,3]);assert.deepEqual(starts,[0,1,2,3]);
+ const early=settled;
+ for(let i=2;i<width-1;i++)release[i]?.();
+ await turn();const beforeLast=settled;
+ release[width-1]?.();const error=await outcome;
+ assert.deepEqual(initial,admitted);assert.deepEqual(starts,admitted);
  assert.equal(early,false);assert.equal(beforeLast,false);
- assert.deepEqual(finished.sort(),[0,1,2,3]);assert.equal(error,first);
+ assert.deepEqual(finished.sort(),admitted);assert.equal(error,first);
 });
 test('invalid explicit pool capacity rejects before starting any work',async()=>{
  for(const capacity of [0,-1,1.5,NaN,Infinity,'4',null]){
@@ -300,4 +303,20 @@ test('Windows admits the whole repair root and PowerShell root as separate seria
  assert.deepEqual(roots(linux),discovered);
  assert.ok(linux.flat().every(t=>!t.exclusive));
  assert.equal(linux.flat().filter(t=>t.pkg===pkg).length,1);
+});
+
+test('native Go worker policy admits six Windows and four Linux packets, with a two-worker fallback',async()=>{
+ const starts=[];
+ for(const platform of ['win32','linux','darwin']){
+  const items=Array.from({length:8},(_,id)=>({id}));
+  let admitted=0;const releases=[];
+  const running=runGoGroup(items,async ({id})=>{
+   admitted++;
+   await new Promise(resolve=>{releases[id]=resolve;});
+  },nativeGoWorkers(platform));
+  starts.push(admitted);
+  for(let i=0;i<items.length;i++){for(const release of releases)release?.();await turn();}
+  await running;
+ }
+ assert.deepEqual(starts,[6,4,2]);
 });
