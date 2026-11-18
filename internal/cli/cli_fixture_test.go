@@ -105,24 +105,24 @@ func cliFixtureProgram(t *testing.T, dir, name, script string, spec cliFixturePr
 		t.Fatal(err)
 	}
 	path := filepath.Join(dir, name)
-	if linkErr := os.Link(exe, path); linkErr != nil {
-		src, err := os.Open(exe)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer src.Close()
-		dst, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0700)
-		if err != nil {
-			t.Fatal(err)
-		}
-		_, err = io.Copy(dst, src)
-		closeErr := dst.Close()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if closeErr != nil {
-			t.Fatal(closeErr)
-		}
+	// Never hardlink the running binary: launcher repair requires it to
+	// remain single-link, including while other packet processes use fixtures.
+	src, err := os.Open(exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.Close()
+	dst, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0700)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = io.Copy(dst, src)
+	closeErr := dst.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closeErr != nil {
+		t.Fatal(closeErr)
 	}
 	raw, err := json.Marshal(spec)
 	if err != nil {
