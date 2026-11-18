@@ -1,0 +1,107 @@
+name: Disposable producer batching comparison
+on:
+  push:
+    branches: [ci80/r14-compile-probe]
+permissions:
+  contents: read
+jobs:
+  producer:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [baseline, consolidated]
+    env:
+      GOOS: windows
+      GOARCH: arm64
+      CGO_ENABLED: '0'
+      GOMAXPROCS: '2'
+      CI_GO_COMPILE_JOBS: '4'
+    steps:
+      - uses: actions/checkout@v5
+        timeout-minutes: 1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        timeout-minutes: 1
+        with:
+          node-version: '24'
+      - name: Download pinned Go
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/toolchain.mjs download
+      - name: Extract pinned Go
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/toolchain.mjs extract
+      - name: Identical cold dependencies 0
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs prepare-go 0
+      - name: Identical cold dependencies 1
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs prepare-go 1
+      - name: Identical cold dependencies 2
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs prepare-go 2
+      - name: Identical cold dependencies 3
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs prepare-go 3
+      - name: Consolidated compile, same receipts
+        if: matrix.mode == 'consolidated'
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/diagnostic-compile-all.mjs
+      - name: Baseline compile group 0
+        if: matrix.mode == 'baseline'
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/go-bundle.mjs compile win32-arm64 0
+      - name: Baseline compile group 1
+        if: matrix.mode == 'baseline'
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/go-bundle.mjs compile win32-arm64 1
+      - name: Baseline compile group 2
+        if: matrix.mode == 'baseline'
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/go-bundle.mjs compile win32-arm64 2
+      - name: Baseline compile group 3
+        if: matrix.mode == 'baseline'
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/go-bundle.mjs compile win32-arm64 3
+      - name: Baseline compile group 4
+        if: matrix.mode == 'baseline'
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/go-bundle.mjs compile win32-arm64 4
+      - name: Baseline compile group 5
+        if: matrix.mode == 'baseline'
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/go-bundle.mjs compile win32-arm64 5
+      - name: Finalize unchanged source-bound receipts
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/go-bundle.mjs finalize win32-arm64
+      - name: Summarize binary and source hashes
+        timeout-minutes: 1
+        run: |
+          mkdir -p evidence
+          cp dist/go-tests/win32-arm64/bundle.json evidence/bundle.json
+          node -e 'const os=require("node:os"); console.log(JSON.stringify({cpus:os.availableParallelism(),memory:os.totalmem()}))' > evidence/capacity.json
+      - uses: actions/upload-artifact@v4
+        timeout-minutes: 1
+        with:
+          name: batching-${{ matrix.mode }}
+          path: evidence
+          if-no-files-found: error
+  compare:
+    needs: producer
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@v5
+        timeout-minutes: 1
+        with:
+          pattern: batching-*
+          path: evidence
+      - name: Compare every binary and receipt
+        timeout-minutes: 1
+        run: |
+          python3 - <<'PYCODE'
+          import json,pathlib
+          p=pathlib.Path('evidence');a=json.loads((p/'batching-baseline/bundle.json').read_text());b=json.loads((p/'batching-consolidated/bundle.json').read_text());assert a==b,'different binary, source, inventory or tool hash';print('IDENTICAL',len(a['groups']),len([r for g in a['groups'] for r in g]),'receipt groups/packages')
+          PYCODE
