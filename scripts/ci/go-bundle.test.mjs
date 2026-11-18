@@ -13,7 +13,7 @@ test('real compiled bundle conserves platform packages and rejects wrong source/
  const root=await mkdtemp(path.join(os.tmpdir(),'ci-bundle-'));t.after(()=>rm(root,{recursive:true,force:true}));
  await writeFile(path.join(root,'go.mod'),'module fixture\n\ngo 1.26\n');
  await writeFile(path.join(root,'one_test.go'),'package fixture\nimport ("testing";"os")\nfunc TestOne(t *testing.T){if _,err:=os.Stat("one_test.go"); err!=nil {t.Fatal(err)}}\nfunc TestNew(t *testing.T){if os.Getenv("CI_BUNDLE_FAIL")=="1" {t.Fatal("new root assertion")}}\n');
- await mkdir(path.join(root,'empty'));await writeFile(path.join(root,'empty/empty.go'),'package empty\n');
+ await mkdir(path.join(root,'internal/empty'),{recursive:true});await writeFile(path.join(root,'internal/empty/empty.go'),'package empty\n');
  execFileSync('git',['init','-q'],{cwd:root});execFileSync('git',['add','.'],{cwd:root});execFileSync('git',['-c','core.hooksPath=/dev/null','-c','commit.gpgsign=false','-c','user.name=CI','-c','user.email=ci@example.invalid','commit','-qm','fixture'],{cwd:root});
  const sha=execFileSync('git',['rev-parse','HEAD'],{cwd:root,encoding:'utf8'}).trim();
  const platform=`${process.platform}-${process.arch}`;
