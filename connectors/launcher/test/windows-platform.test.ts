@@ -156,7 +156,10 @@ for (const kind of ['file ancestor', 'inaccessible read'] as const) {
         restore = () => aclCommand([dirname(probe), '/restore', acl, '/q']);
         verifyRestored = () => {
           aclCommand([probe, '/save', restored, '/t', '/q']);
-          assert.deepEqual(readFileSync(restored), readFileSync(acl), 'all owned ACLs must be restored exactly');
+          const before = readFileSync(acl), after = readFileSync(restored);
+          const descriptors = (bytes: Buffer) => bytes.toString('utf16le').split(/\r?\n/).filter(line => line.startsWith('D:')).map(line => line.replace(/S-1-\d+(?:-\d+)+/g, sid => 'S-MASKED'));
+          console.log('SAFE_ACL_COMPARE ' + JSON.stringify({ equal: before.equals(after), beforeBytes: before.length, afterBytes: after.length, before: descriptors(before), after: descriptors(after) }));
+          assert.deepEqual(after, before, 'all owned ACLs must be restored exactly');
         };
         // Native-private children have protected DACLs: deny the actual
         // read target explicitly before denying its container.
