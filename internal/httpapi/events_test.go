@@ -804,8 +804,10 @@ func TestStalledSSEWriterDoesNotBlockSend(t *testing.T) {
 
 			send := func(key, to string) {
 				t.Helper()
+				// The writer blocks explicitly on a Delivery frame; the queue is
+				// bounded by frame count. Keep bodies small to avoid unrelated
+				// database write volume in this backpressure test.
 				body := sendBody(key, to)
-				body["content"] = map[string]any{"text": strings.Repeat("x", 4000)}
 				j, err := json.Marshal(body)
 				if err != nil {
 					t.Fatal(err)
