@@ -1,5 +1,5 @@
 {
-  "evidence": "R6 run44250215246 sourcee22bf3e all3Node raw logs, top-level TAP title/duration attribution to discovered files; +0.5sstartup,5sunknown. ARM Paseo censored after50s with remaining cases:80s conservative scheduling estimate split4 registration shards, not measured completion. Discovery, never profile, supplies files.",
+  "evidence": "R6 run44250215246 sourcee22bf3e all3Node raw logs, top-level TAP title/duration attribution to discovered files; +0.5sstartup,5sunknown. ARM Paseo censored after50s with remaining cases:80s conservative scheduling estimate split4 registration shards, not measured completion. Discovery, never profile, supplies files. Windows-platform only: R13 run44277980493 sourcef72529e26f6301ca81fb5341ab03ea437d6748f1, both successful Windows Node jobs (134711588845, 134711588967), 20 complete TAP roots per job. Four registration shards; 19s each is a placement estimate rounded up from the largest ordinal-modulo-4 root sum (16.692s) plus 0.563s maximum whole-file residual and 1s extra startup, not measured shard completion.",
   "profiles": {
     "linux": {
       "connectors/hub-client/test/client.test.ts": {
@@ -213,7 +213,8 @@
         "seconds": 0.503
       },
       "connectors/launcher/test/windows-platform.test.ts": {
-        "seconds": 38.014
+        "seconds": 76,
+        "shards": 4
       },
       "connectors/hub-client/test/fake-hub.test.ts": {
         "seconds": 0.638
