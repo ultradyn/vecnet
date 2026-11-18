@@ -279,14 +279,14 @@ jobs:
       - name: Restore producer source and fixtures at the tested revision
         timeout-minutes: 1
         run: node dist/go-tests/restore-source.mjs restore dist/go-tests "${{ github.sha }}"
-      - name: Select verified native Node without npm or yarn discovery
-        if: runner.os == 'Windows'
-        timeout-minutes: 1
-        run: node scripts/ci/native-node.mjs
       - name: Verify and stage native Windows Go command owner
         if: runner.os == 'Windows'
         timeout-minutes: 1
         run: node scripts/ci/windows-owner.mjs use-go
+      - name: Select verified native Node without npm or yarn discovery
+        if: runner.os == 'Windows'
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/native-node.mjs
       - name: Validate and discover matching native Go test binaries
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs consume-go
@@ -503,10 +503,6 @@ jobs:
       - name: Restore producer source for native package tests
         timeout-minutes: 1
         run: node dist/npm-source/restore-source.mjs restore dist/npm-source "${{ github.sha }}"
-      - name: Select verified native Node without npm or yarn discovery
-        if: runner.os == 'Windows'
-        timeout-minutes: 1
-        run: node scripts/ci/native-node.mjs
       - uses: actions/download-artifact@v5
         if: runner.os == 'Windows'
         timeout-minutes: 1
@@ -517,6 +513,10 @@ jobs:
         if: runner.os == 'Windows'
         timeout-minutes: 1
         run: node scripts/ci/native.mjs --owner-only
+      - name: Select verified native Node without npm or yarn discovery
+        if: runner.os == 'Windows'
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/native-node.mjs
       - name: Pin npm to packaging version
         if: runner.os == 'Linux'
         timeout-minutes: 1
