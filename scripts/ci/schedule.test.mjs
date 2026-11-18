@@ -10,7 +10,7 @@ test('weighted whole-root schedule conserves discovered additions and indivisibl
  const input=structuredClone(inventory);input[0].names.push('TestNew');
  const profile={packages:{heavy:1},roots:{heavy:{Test0:30,Test1:25}}};
  const plan=planGo(input,profile);
- assert.equal(plan.length,32);
+ assert.equal(plan.length,24);
  const tasks=plan.flat();
  assert.deepEqual(tasks.filter(t=>t.pkg==='heavy').flatMap(t=>t.selected).sort(),input[0].names.sort());
  assert.equal(tasks.filter(t=>t.pkg==='small').length,1);
@@ -52,29 +52,16 @@ test('bounded failures stop queued work, drain active work and propagate failure
  assert.deepEqual(starts,[0,1]);assert.equal(drained,true);
 });
 test('acceptance cardinality includes every native lane and existing release gate',()=>{
- assert.equal(goLanes,8);
+ assert.equal(goLanes,6);
  assert.equal(goGroups,4);
- assert.equal(releaseJobCount(),37);
- assert.equal(nativeGoLanes('linux'),2);assert.equal(nativeGoLanes('win32'),8);
+ assert.equal(releaseJobCount(),33);
+ assert.equal(nativeGoLanes('linux'),2);assert.equal(nativeGoLanes('win32'),6);
  const input=[{pkg:'p',names:Array.from({length:401},(_,i)=>`Test${i}`)}];
  for(const platform of ['linux','win32']){
   const plan=planGo(input,{}, {lanes:nativeGoLanes(platform)});
   assert.equal(plan.length,nativeGoLanes(platform)*4);
   assert.deepEqual(plan.flat().flatMap(t=>t.selected).sort(),input[0].names.toSorted());
  }
-});
-test('workflow execution lanes and cold-cache generation match the scheduler',async()=>{
- const {readFile}=await import('node:fs/promises');
- const workflow=await readFile(new URL('../../.github/workflows/release.yml',import.meta.url),'utf8');
- const windows=workflow.match(/strategy: &windows-go-strategy[\s\S]*?lane: (\[[^\n]+\])/);
- assert.deepEqual(JSON.parse(windows[1]),Array.from({length:nativeGoLanes('win32')},(_,i)=>i));
- assert.match(workflow,/test-go-windows-arm:[\s\S]*?strategy: \*windows-go-strategy/);
- const linux=workflow.match(/test-go-linux:[\s\S]*?lane: (\[[^\n]+\])/);
- assert.deepEqual(JSON.parse(linux[1]),Array.from({length:nativeGoLanes('linux')},(_,i)=>i));
- // Two producer definitions, each with primary and both fallback prefixes.
- const keys=workflow.split('\n').filter(line=>line.includes('go-compile-v'));
- assert.equal(keys.length,6);
- assert.ok(keys.every(line=>line.includes('go-compile-v2-')));
 });
 test('scheduled partitions distribute all no-test packages, not just packages with roots',()=>{
  const empty=Array.from({length:46},(_,i)=>({pkg:`empty${i}`,names:[],binary:null}));

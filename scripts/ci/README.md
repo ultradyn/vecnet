@@ -1,8 +1,8 @@
 # Release CI scheduling and acceptance
 
 The workflow preserves full native Linux x64 / Windows x64 / Windows ARM64
-Go, Node and E2E coverage. Two Linux and eight Windows lanes per platform execute
-four complete whole-root groups each (8 Linux / 32 Windows partitions). Three independent
+Go, Node and E2E coverage. Two Linux and six Windows lanes per platform execute
+four complete whole-root groups each (8 Linux / 24 Windows partitions). Three independent
 Linux producer jobs cross-compile platform-selected test packages once in six
 bounded groups, after cold-dependency stages; source/hash-bound bundles include
 native test2json. Consumers validate/copy to private physical temp, discover
@@ -58,8 +58,8 @@ ATTEMPT [INVENTORY_JSON]`. Without inventory the importer emits root costs only,
 not whole-package elapsed. Inventory JSON binds `sha`, `run`, `attempt` and a
 `platforms` map (`linux`, `windows-x64`, `windows-arm` → package/root arrays).
 The importer requires the exact Go lane names and unique job IDs of
-one complete geometry: historical 6+6+6, prior 2+6+6 or current 2+8+8. Job metadata must
-match source/run/attempt and completion; both two-Linux-lane geometries require
+one complete geometry: historical 6+6+6 or current 2+6+6. Job metadata must
+match source/run/attempt and completion; the current archive also requires
 matching `run.json` and each indexed log's SHA256 and byte length. The output
 retains the raw log hashes. R12 supplies 2,557 Linux and 2,548 Windows observed
 PASS roots, with 89 censored records. Of 2,559 Linux and 2,592 Windows discovered
@@ -132,8 +132,8 @@ policy, not assuming the cold Release bin will pass or meet the budget.
 
 Each platform's consumers wait only for its matching producer, not the
 slowest of all three compile jobs. YAML step/strategy anchors share identical
-commands, not coverage exceptions. There are37 executed jobs including acceptance
-(36 before it); `schedule.mjs` supplies the audit cardinality. R12 completed
+commands, not coverage exceptions. There are33 executed jobs including acceptance
+(32 before it); `schedule.mjs` supplies the audit cardinality. R12 completed
 in 351s, with a 60s Linux Node artifact download and a failing ARM Go group.
 The critical path was ARM Go lane 4, then acceptance; Linux Go started up to
 49s after its producer and also finished late. Replaying the same R12 PASS
@@ -142,25 +142,13 @@ from 161s to 142s versus stale placement. With archived producer times,
 consumer setup/post, observed queue delay and acceptance, the model still
 lands around 352s. Linux 4/6 and Windows 8 lanes did not support a sub-300s
 run in the queue model, and alternative packet caps offered little ARM gain.
-That historical replay retained its job count, packet caps, isolation and deadlines. These
+Job count, packet caps, isolation and all deadlines are unchanged. These
 models are not a native pass or evidence that the clipboard failure is fixed.
 Source producers retain full discovery. Native Go, package and acceptance
 consumers restore source from their producer artifacts; Node/E2E retain sparse
 checkouts. Non-tag assembly checkout is shallow; pushed version tags retain
 full ancestry. Actual native
 completion under 300s and every step under 60s remain mandatory and unproven.
-Cold-master followup adds two execution lanes on each Windows architecture,
-with the same four groups, six ordinary packet workers, exclusive roots and
-six discovery/compile metadata partitions. A replay of the current profile and
-complete native inventory supports testing this placement; it does not establish
-native savings or cold compliance. More lanes can incur additional queue delay,
-and artifact/acceptance work can become the critical path. Cache generation v2
-changes primary and all fallback prefixes together so the first fresh event
-exercises empty producer caches; verify all seven restore misses and successful
-save steps in that run. Warm PR receipts do not establish master/tag cache state.
-The trusted default-branch completed-run auditor must carry the matching
-37-job policy when evaluating this geometry; the earlier 33-job policy rejects
-it. No cardinality or timing exception is implied during integration.
 New roots/examples/fuzz seeds and small/no-test packages remain conserved.
 Disposable testhub/preference stores copy a closed fully migrated image into
 independent files, then regenerate identity material. FreshStore and the named
