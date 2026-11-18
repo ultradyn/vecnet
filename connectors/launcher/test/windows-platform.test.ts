@@ -3,12 +3,15 @@ import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import childProcess from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
+import fs from 'node:fs';
+import type { PathLike } from 'node:fs';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, linkSync, existsSync, readFileSync, statSync, lstatSync, realpathSync, chmodSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { once } from 'node:events';
 import { createConnection } from 'node:net';
+import { openLedger } from '../src/ledger.ts';
 import { localPlatform, readPrivateFileSync } from '../src/private-files.ts';
 import { readCredential } from '../src/daemon.ts';
 import { CODEX_RELOAD_MS, codexBindingsPath, codexRecoveryPath, startCodexConnector } from '../src/codex/connector.ts';
@@ -259,6 +262,81 @@ test('Windows native private reads are bounded and fail closed without the helpe
   assert.throws(() => readPrivateFileSync(path, { env: { ...process.env, VECNET_BIN: join(dir, 'missing.exe') } }));
 });
 
+test('Windows recovery precreates a private database and preserves existing SQLite state on readmission', t => {
+  const dir = sandbox(t), env = { ...process.env, HOME: dir };
+  const recoveryPath = () => {
+    const descriptor = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    try {
+      // Exercise the Windows creation branch with the real private helper on
+      // Linux too; only native runs prove TokenUser ownership and DACLs.
+      Object.defineProperty(process, 'platform', { ...descriptor, value: 'win32' });
+      return codexRecoveryPath(env);
+    } finally { Object.defineProperty(process, 'platform', descriptor); }
+  };
+  const database = recoveryPath();
+  assert.equal(existsSync(database), true, 'private database must exist before SQLite opens it');
+  assert.equal(statSync(database).size, 0);
+  localPlatform('check-private', database, { env });
+  const clock = fakeClock(Date.now()), first = openLedger(database, clock);
+  try { first.kv('codex').set('restart-sentinel', 'retained recovery state'); }
+  finally { first.close(); }
+  const bytes = readFileSync(database), identity = statSync(database, { bigint: true });
+  assert.equal(recoveryPath(), database);
+  const admitted = statSync(database, { bigint: true });
+  assert.equal(admitted.ino, identity.ino); assert.equal(admitted.dev, identity.dev);
+  assert.deepEqual(readFileSync(database), bytes, 'readmission never replaces/truncates existing recovery');
+  localPlatform('check-private', database, { env });
+  const second = openLedger(database, clock);
+  try { assert.equal(second.kv('codex').get('restart-sentinel'), 'retained recovery state'); }
+  finally { second.close(); }
+  const restored = readFileSync(database), children = readdirSync(dirname(database));
+  makePublicReadable(database);
+  assert.throws(recoveryPath, 'public recovery database remains refused');
+  assert.deepEqual(readFileSync(database), restored);
+  makeOwnerPrivate(database);
+  const hardlink = join(dir, 'recovery-alias'); linkSync(database, hardlink);
+  assert.throws(recoveryPath, 'hard-linked recovery database remains refused');
+  rmSync(hardlink);
+  const parked = join(dir, 'parked-database'); fs.renameSync(database, parked);
+  symlinkSync(dirname(database), database); // Native directory junction needs no symlink privilege.
+  try {
+    assert.throws(recoveryPath, 'reparse/symlink recovery database remains refused');
+    assert.deepEqual(readFileSync(parked), restored);
+  } finally { rmSync(database); fs.renameSync(parked, database); }
+  const sidecar = database + '-wal'; writePrivate(sidecar, 'sidecar sentinel'); makePublicReadable(sidecar);
+  assert.throws(recoveryPath, 'public recovery sidecar remains refused');
+  assert.equal(readFileSync(sidecar, 'utf8'), 'sidecar sentinel'); rmSync(sidecar);
+  assert.deepEqual(readdirSync(dirname(database)), children, 'private creation leaves no seed files');
+  assert.equal(recoveryPath(), database);
+
+  // Interleave a real competing creator at the exclusive publication boundary.
+  // The losing initializer must validate, never replace, the winner's bytes.
+  rmSync(database);
+  const link = fs.linkSync;
+  const publication = t.mock.method(fs, 'linkSync', (source: PathLike, target: PathLike) => {
+    if (target === database) localPlatform('write-private', database, { env, input: 'concurrent recovery bytes' });
+    return link(source, target);
+  }); syncBuiltinESMExports();
+  try { assert.equal(recoveryPath(), database); }
+  finally { publication.mock.restore(); syncBuiltinESMExports(); }
+  assert.equal(readFileSync(database, 'utf8'), 'concurrent recovery bytes');
+  assert.equal(statSync(database).nlink, 1);
+  assert.deepEqual(readdirSync(dirname(database)), children, 'losing initializer removes only its private seed');
+
+  rmSync(database);
+  const unsafePublication = t.mock.method(fs, 'linkSync', (source: PathLike, target: PathLike) => {
+    if (target === database) {
+      localPlatform('write-private', database, { env, input: 'untrusted concurrent bytes' });
+      if (windows) makePublicReadable(database); else chmodSync(database, 0o644);
+    }
+    return link(source, target);
+  }); syncBuiltinESMExports();
+  try { assert.throws(recoveryPath, 'a concurrently created public database remains refused'); }
+  finally { unsafePublication.mock.restore(); syncBuiltinESMExports(); }
+  assert.equal(readFileSync(database, 'utf8'), 'untrusted concurrent bytes');
+  assert.deepEqual(readdirSync(dirname(database)), children);
+});
+
 test('Windows recovery selects explicit HOME, rejects public DACLs and junction descendants', { skip: !windows }, t => {
   const home = sandbox(t), env = { ...process.env, HOME: home, USERPROFILE: join(home, 'unselected') };
   const expected = join(home, '.local', 'state', 'vecnet', 'codex', 'bindings.json');
@@ -346,6 +424,12 @@ test('Windows live connector exposes fatal helper loss only after fencing, and a
   assert.equal(s.fake.subscribers(s.id).length, 0, 'fatal outcome waits for unsubscribe');
   await until(() => firstChildren.every(c => c.exitCode !== null || c.signalCode !== null), 'owned children exit after fenced transport close');
   assert.equal(reports.some(r => r.reason === 'stopped'), false, 'no offline report after singleton loss');
+  const database = join(dirname(s.path), 'delivery.sqlite');
+  localPlatform('check-private', database, { env: s.env });
+  const recoveryBytes = readFileSync(database), recoveryIdentity = statSync(database, { bigint: true });
+  assert.equal(codexRecoveryPath(s.env), database, 'closed recovery database admits the replacement');
+  assert.deepEqual(readFileSync(database), recoveryBytes, 'replacement admission preserves recovery bytes');
+  assert.equal(statSync(database, { bigint: true }).ino, recoveryIdentity.ino);
   const count = children.length; clock.advance(CODEX_RELOAD_MS * 2);
   assert.equal(children.length, count, 'old connector never self-revives without a singleton');
   const second = start(); onCleanup(t, () => second.stop());

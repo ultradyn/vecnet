@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, realpathSync } from 'node:fs';
+import { closeSync, constants, fstatSync, linkSync, lstatSync, mkdirSync, openSync, realpathSync, unlinkSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import type { Clock, Log } from '../../../hub-client/src/ports.ts';
 import type { KeyValue } from '../backend.ts';
@@ -56,14 +56,36 @@ export function codexRecoveryPath(env: NodeJS.ProcessEnv): string {
     const state = join(home, '.local', 'state', 'vecnet', 'codex');
     localPlatform('mkdir-private', state, { env });
     const database = join(state, 'delivery.sqlite');
+    let missing = false;
     for (const file of [database, database + '-wal', database + '-shm', database + '-journal']) {
       try {
         const st = lstatSync(file);
         if (!st.isFile() || st.isSymbolicLink() || st.nlink !== 1) throw unsafe();
         localPlatform('check-private', file, { env });
-      } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw unsafe(); }
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw unsafe();
+        if (file === database) missing = true;
+      }
     }
-    return database; // SQLite and sidecars inherit the protected directory DACL.
+    if (missing) {
+      // SQLite's default Windows creator may choose a different owner. Seed
+      // the inode through the native helper before SQLite can write any bytes.
+      // write-private replaces its target: publish a unique seed exclusively
+      // instead, so concurrent initializers cannot truncate an existing DB.
+      const seed = join(state, '.recovery-' + randomUUID());
+      try {
+        localPlatform('write-private', seed, { env, input: '' });
+        try { linkSync(seed, database); }
+        catch (e) { if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e; }
+      } catch { throw unsafe(); }
+      finally { try { unlinkSync(seed); } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw unsafe(); } }
+      try {
+        const st = lstatSync(database);
+        if (!st.isFile() || st.isSymbolicLink() || st.nlink !== 1) throw unsafe();
+        localPlatform('check-private', database, { env });
+      } catch { throw unsafe(); }
+    }
+    return database;
   }
   const checkDir = (path: string, privateDir: boolean) => {
     const st = lstatSync(path);
