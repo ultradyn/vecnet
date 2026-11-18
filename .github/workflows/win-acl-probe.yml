@@ -86,7 +86,19 @@ jobs:
         with:
           name: fixture-phase-${{ matrix.arch }}
           path: dist/fixture-probe
+      - name: Exact first four packet neighbors cold
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/diagnostic-fixture-run.mjs neighbors
+      - name: Same exact neighbors with two workers
+        if: always()
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/diagnostic-fixture-run.mjs neighbors2
+      - name: Exact first four packet neighbors warm
+        if: always()
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/diagnostic-fixture-run.mjs neighbors
       - name: Cold original PowerShell hook assertions
+        if: always()
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/diagnostic-fixture-run.mjs startup
       - name: Original legacy adoption assertions
