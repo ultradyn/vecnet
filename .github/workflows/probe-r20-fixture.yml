@@ -1,0 +1,204 @@
+name: R20 native CLI fixture comparison
+
+on:
+  push:
+    branches: [ci80/r20-cli-fixture-probe]
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  CGO_ENABLED: '0'
+  GOMAXPROCS: '1'
+
+jobs:
+  baseline:
+    if: &probe-ref github.repository == 'ultradyn/vecnet' && github.ref == 'refs/heads/ci80/r20-cli-fixture-probe'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 4
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2025, windows-11-arm]
+        include:
+          - os: windows-2025
+            platform: win32-x64
+            artifact: 14432165338
+          - os: windows-11-arm
+            platform: win32-arm64
+            artifact: 14431621105
+    env:
+      MODE: baseline
+      PLATFORM: ${{ matrix.platform }}
+      R18_ARTIFACT_ID: ${{ matrix.artifact }}
+    steps: &fixture-native-steps
+      - uses: actions/checkout@v5
+        timeout-minutes: 1
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/ci
+            scripts/npm
+      - uses: actions/setup-node@v6
+        timeout-minutes: 1
+        with:
+          node-version: '24.22.3'
+          package-manager-cache: false
+      - &fixture-deadline
+        name: Export original run-created deadline
+        timeout-minutes: 1
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/ci/probe-r20-transfer.mjs deadline
+      - name: Download exact R18 producer ZIP
+        timeout-minutes: 1
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $seconds = [Math]::Min(48, [Math]::Floor(([long]$env:CI_RUN_DEADLINE - [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) / 1000) - 3)
+          if ($seconds -lt 1) { throw 'Diagnostic overall budget exhausted before download' }
+          New-Item -ItemType Directory .r20-fixture | Out-Null
+          curl.exe --fail --silent --show-error --location --max-time $seconds --header "Authorization: Bearer $env:GH_TOKEN" --output .r20-fixture/bundle.zip "$env:GITHUB_API_URL/repos/$env:GITHUB_REPOSITORY/actions/artifacts/$env:R18_ARTIFACT_ID/zip"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Download and extract the matching candidate CLI ZIP
+        if: env.MODE == 'candidate'
+        timeout-minutes: 1
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/probe-r20-transfer.mjs candidate
+      - name: Verify ZIP and restore the actual R18 source
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/probe-r20-fixture.mjs unpack $env:PLATFORM
+      - name: Verify and record exact native inventory
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/probe-r20-fixture.mjs discover $env:PLATFORM
+      - name: Compare whole Enabled root
+        id: enabled
+        continue-on-error: true
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/probe-r20-fixture.mjs sample 6 enabled
+      - name: Compare whole Intent root
+        id: intent
+        continue-on-error: true
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/probe-r20-fixture.mjs sample 6 intent
+      - name: Compare whole task and publication drift root
+        id: drift
+        continue-on-error: true
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/probe-r20-fixture.mjs sample 6 drift
+      - name: Compare whole TaskController concurrent changes root
+        id: controller
+        continue-on-error: true
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/probe-r20-fixture.mjs sample 6 controller
+      - name: Preserve genuine cold install admission alone
+        id: cold
+        continue-on-error: true
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/probe-r20-fixture.mjs sample 6 cold
+      - name: Preserve all five unsafe executable rejection cases
+        id: unsafe
+        continue-on-error: true
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/probe-r20-fixture.mjs sample 6 unsafe
+      - name: Retain every diagnostic failure in the job conclusion
+        if: ${{ !cancelled() }}
+        timeout-minutes: 1
+        env:
+          RESULTS: ${{ format('{0} {1} {2} {3} {4} {5}', steps.enabled.outcome, steps.intent.outcome, steps.drift.outcome, steps.controller.outcome, steps.cold.outcome, steps.unsafe.outcome) }}
+        run: |
+          Write-Output "Whole windows (including neighbors): $env:RESULTS"
+          if ($env:RESULTS -ne 'success success success success success success') { exit 1 }
+
+  candidate-x64:
+    needs: compile-x64
+    if: *probe-ref
+    runs-on: windows-2025
+    timeout-minutes: 4
+    env:
+      MODE: candidate
+      PLATFORM: win32-x64
+      R18_ARTIFACT_ID: '14432165338'
+      CANDIDATE_ARTIFACT_ID: ${{ needs.compile-x64.outputs.artifact-id }}
+    steps: *fixture-native-steps
+
+  candidate-arm64:
+    needs: compile-arm64
+    if: *probe-ref
+    runs-on: windows-11-arm
+    timeout-minutes: 4
+    env:
+      MODE: candidate
+      PLATFORM: win32-arm64
+      R18_ARTIFACT_ID: '14431621105'
+      CANDIDATE_ARTIFACT_ID: ${{ needs.compile-arm64.outputs.artifact-id }}
+    steps: *fixture-native-steps
+
+  compile-x64:
+    if: *probe-ref
+    runs-on: ubuntu-24.04
+    timeout-minutes: 4
+    outputs: &fixture-compile-outputs
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    env:
+      GOMAXPROCS: '4'
+      GOOS: windows
+      GOARCH: amd64
+      CI_GO_PLATFORM: win32-x64
+      CI_GO_COMPILE_JOBS: '4'
+    steps: &fixture-compile-steps
+      - uses: actions/checkout@v5
+        timeout-minutes: 1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        timeout-minutes: 1
+        with:
+          node-version: '24.22.3'
+          package-manager-cache: false
+      - *fixture-deadline
+      - name: Download pinned Go
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/toolchain.mjs download
+      - name: Extract pinned Go
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/toolchain.mjs extract
+      - name: Download compiler dependencies
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs prepare-go 0
+      - name: Prepare standard library
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs prepare-go 1
+      - name: Prepare SQLite dependency
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs prepare-go 2
+      - name: Prepare CLI dependencies
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs prepare-go 3
+      - name: Compile and bind only the changed CLI test package
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/probe-r20-build.mjs
+      - uses: actions/upload-artifact@v4
+        id: upload
+        timeout-minutes: 1
+        with:
+          name: cli-fixture-${{ env.CI_GO_PLATFORM }}
+          path: dist/cli-fixture/${{ env.CI_GO_PLATFORM }}
+          if-no-files-found: error
+          retention-days: 7
+
+  compile-arm64:
+    if: *probe-ref
+    runs-on: ubuntu-24.04
+    timeout-minutes: 4
+    outputs: *fixture-compile-outputs
+    env:
+      GOMAXPROCS: '4'
+      GOOS: windows
+      GOARCH: arm64
+      CI_GO_PLATFORM: win32-arm64
+      CI_GO_COMPILE_JOBS: '4'
+    steps: *fixture-compile-steps
