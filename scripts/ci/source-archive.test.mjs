@@ -3,6 +3,7 @@ import {execFileSync} from 'node:child_process';
 import {mkdtemp, mkdir, readFile, writeFile, access, rm} from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import {fileURLToPath} from 'node:url';
 import test from 'node:test';
 import {stageSource, restoreSource} from './source-archive.mjs';
 
@@ -46,4 +47,34 @@ test('native source archive restores committed fixture bytes and sparse ancestor
   const fresh=path.join(temp,'corrupt-native'); await mkdir(fresh);
   await assert.rejects(restoreSource(bundle,sha,fresh),/hash/);
   await assert.rejects(access(path.join(fresh,'go.mod')));
+});
+
+test('package source includes the release manifest and runtime comparison inputs without native Go fixtures', async t => {
+  const temp=await mkdtemp(path.join(os.tmpdir(),'ci package source '));
+  t.after(()=>rm(temp,{recursive:true,force:true}));
+  const root=path.join(temp,'producer'), bundle=path.join(temp,'bundle'), destination=path.join(temp,'consumer');
+  await mkdir(root); await mkdir(destination);
+  const files={
+    'package.json':'{"type":"module"}', 'npm/package.json':'{"version":"0.2.5"}',
+    'connectors/launcher/src/main.ts':'export {};\n',
+    'scripts/ci/audit.mjs':'export {};\n', 'scripts/npm/package.test.mjs':'export {};\n',
+    'scripts/shared.mjs':'ancestor\n', 'internal/cli/fixture.txt':'go fixture\n',
+    'docs/protocol/schema.json':'{}\n',
+  };
+  for(const [name,bytes] of Object.entries(files)){
+    await mkdir(path.dirname(path.join(root,name)),{recursive:true});
+    await writeFile(path.join(root,name),bytes);
+  }
+  const git=args=>execFileSync('git',args,{cwd:root,encoding:'utf8'}).trim();
+  git(['init','-q']); git(['add','.']);
+  git(['-c','core.hooksPath=/dev/null','-c','commit.gpgsign=false','-c','user.name=CI','-c','user.email=ci@example.invalid','commit','-qm','fixture']);
+  const sha=git(['rev-parse','HEAD']);
+  // Exercise the producer CLI as used by the package workflow, including paths with spaces.
+  execFileSync(process.execPath,[fileURLToPath(new URL('./source-archive.mjs',import.meta.url)),'stage',bundle,'package'],{cwd:root});
+  await restoreSource(bundle,sha,destination);
+  for(const [name,bytes] of Object.entries(files).filter(([name])=>!name.startsWith('internal/')&&!name.startsWith('docs/'))){
+    assert.equal(await readFile(path.join(destination,name),'utf8'),bytes,name);
+  }
+  for(const name of ['.git','internal/cli/fixture.txt','docs/protocol/schema.json'])await assert.rejects(access(path.join(destination,name)));
+  await assert.rejects(stageSource(root,path.join(temp,'invalid'),'typo'),/scope/);
 });

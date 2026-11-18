@@ -6,10 +6,15 @@ import {copyFile, mkdir, readFile, writeFile} from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 
-const folders=['bench','cmd','internal','connectors','docs/protocol','scripts/ci','scripts/npm'];
+const scopes={
+  go:['bench','cmd','internal','connectors','docs/protocol','scripts/ci','scripts/npm'],
+  package:['connectors','scripts/ci','scripts/npm','npm'],
+};
 const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
 const git=(root,args)=>execFileSync('git',args,{cwd:root,encoding:'utf8',timeout:45000,maxBuffer:4*1024*1024});
-export async function stageSource(root,bundle){
+export async function stageSource(root,bundle,scope='go'){
+  const folders=scopes[scope];
+  if(!Array.isArray(folders))throw new Error('unknown source archive scope');
   root=path.resolve(root); bundle=path.resolve(bundle);
   const revision=git(root,['rev-parse','HEAD']).trim();
   const files=git(root,['ls-tree','-r','--name-only','-z',revision]).split('\0').filter(Boolean);
@@ -20,7 +25,7 @@ export async function stageSource(root,bundle){
   await mkdir(bundle,{recursive:true});
   const archive=path.join(bundle,'source.tar.gz');
   git(root,['archive','--format=tar.gz','--output='+archive,revision,'--',...selected]);
-  await writeFile(path.join(bundle,'source.json'),JSON.stringify({revision,sha256:hash(await readFile(archive))}));
+  await writeFile(path.join(bundle,'source.json'),JSON.stringify({revision,scope,sha256:hash(await readFile(archive))}));
   await copyFile(fileURLToPath(import.meta.url),path.join(bundle,'restore-source.mjs'));
 }
 export async function restoreSource(bundle,sha,root){
@@ -31,7 +36,8 @@ export async function restoreSource(bundle,sha,root){
   execFileSync('tar',['-xzf',archive,'-C',path.resolve(root)],{stdio:'inherit',timeout:45000});
 }
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){
-  const [command,bundle,sha]=process.argv.slice(2);
-  if(command==='restore')await restoreSource(bundle,sha,process.cwd());
-  else throw new Error('source archive restore command required');
+  const [command,bundle,argument]=process.argv.slice(2);
+  if(command==='restore')await restoreSource(bundle,argument,process.cwd());
+  else if(command==='stage')await stageSource(process.cwd(),bundle,argument);
+  else throw new Error('source archive stage/restore command required');
 }
