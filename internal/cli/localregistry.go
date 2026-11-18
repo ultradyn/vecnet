@@ -285,7 +285,7 @@ func (a *app) mutateLocalRegistry(create bool, fn func(*localRegistryDocument) e
 	ctx, cancel := context.WithTimeout(a.localRegistryContext(), 2*time.Second)
 	defer cancel()
 	if err := ctx.Err(); err != nil {
-		return err
+		return fmt.Errorf("local inventory update: %w", err)
 	}
 	dir, err := a.localRegistryDirectory(create)
 	if !create && errors.Is(err, os.ErrNotExist) {
@@ -297,6 +297,9 @@ func (a *app) mutateLocalRegistry(create bool, fn func(*localRegistryDocument) e
 	defer dir.Close()
 	unlock, err := localRegistryLock(ctx, dir)
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return fmt.Errorf("local inventory update: %w", err)
+		}
 		return err
 	}
 	defer unlock()
@@ -326,7 +329,7 @@ func (a *app) mutateLocalRegistry(create bool, fn func(*localRegistryDocument) e
 		return nil
 	}
 	if err := ctx.Err(); err != nil {
-		return err
+		return fmt.Errorf("local inventory update: %w", err)
 	}
 	return localRegistryAtomic(dir, "inventory.json", append(raw, '\n'))
 }
@@ -381,7 +384,7 @@ func (a *app) localProjectIdentity() (localProject, error) {
 			return p, err
 		}
 	} else if ctx.Err() != nil {
-		return p, ctx.Err()
+		return p, fmt.Errorf("local project Git discovery: %w", ctx.Err())
 	} // Non-Git directories also work without git installed.
 	return p, nil
 }
