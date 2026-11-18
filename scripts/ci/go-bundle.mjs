@@ -12,9 +12,6 @@ import { nativeTargets } from '../npm/platforms.mjs';
 import { partition } from './partition.mjs';
 import { stageSource } from './source-archive.mjs';
 const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
-// Listing validates real binaries but runs no test roots. Hosted discovery can
-// use four CPUs; local execution retains the existing two-process boundary.
-export const bundleDiscoveryJobs=(env,available)=>env.GITHUB_ACTIONS==='true'?Number(goCompileJobs('4',available)):2;
 const go=args=>execFileSync('go',args,{env:goCompileEnvironment(process.env),encoding:'utf8',maxBuffer:16*1024*1024});
 function packages(){return go(['list','-mod=readonly','-f','{{.ImportPath}}\t{{.Dir}}\t{{len .TestGoFiles}}\t{{len .XTestGoFiles}}','./...']).trim().split(/\r?\n/).map(line=>{const[pkg,dir,internal,external]=line.split('\t');return{pkg,dir,tests:Number(internal)+Number(external)>0};});}
 export async function compileGroup(platform,index){
@@ -51,7 +48,7 @@ export async function consumeBundle(directory,{sha,platform,root=process.cwd(),t
   const names=listing.trim().split(/\r?\n/).filter(Boolean);
   if(names.some(name=>!/^(?:Test\w+|Example\w*|Fuzz\w+)$/.test(name)))throw new Error('bad native test list');
   return {pkg:row.pkg,names,directory:cwd,binary};
- },bundleDiscoveryJobs(process.env));
+ });
  return {inventory,test2json:path.join(temporary,tool)};
 }
 async function finalize(platform){

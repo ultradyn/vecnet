@@ -1,7 +1,7 @@
-name: R18 native discovery comparison
+name: R19 native Node cache comparison
 on:
   push:
-    branches: [ci80/r18-discovery-probe]
+    branches: [ci80/r19-node-cache-probe]
   workflow_dispatch:
 permissions:
   contents: read
@@ -12,22 +12,27 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {runner: windows-2025, arch: x64, width: '2'}
-          - {runner: windows-2025, arch: x64, width: '4'}
-          - {runner: windows-11-arm, arch: arm64, width: '2'}
-          - {runner: windows-11-arm, arch: arm64, width: '4'}
+          - {runner: windows-2025, arch: x64, setup: 'action'}
+          - {runner: windows-2025, arch: x64, setup: 'cache'}
+          - {runner: windows-11-arm, arch: arm64, setup: 'action'}
+          - {runner: windows-11-arm, arch: arm64, setup: 'cache'}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 5
     env:
       GOMAXPROCS: '1'
-      WIDTH: ${{ matrix.width }}
-      BUNDLE_SHA: 401a8214e2484846854727bf0e8897cc46257362
+      WIDTH: '2'
+      BUNDLE_SHA: ea7f480ecd83a9ea7b1551bef096bc8c0dc643b3
     steps:
       - uses: actions/checkout@v5
         timeout-minutes: 1
         with:
           persist-credentials: false
+      - name: Select verified cached native Node without npm discovery
+        if: matrix.setup == 'cache'
+        timeout-minutes: 1
+        run: node scripts/ci/native-node.mjs
       - uses: actions/setup-node@v6
+        if: matrix.setup == 'action'
         timeout-minutes: 1
         with:
           node-version: '24'
@@ -36,14 +41,14 @@ jobs:
         with:
           name: go-tests-win32-${{ matrix.arch }}
           path: dist/go-tests
-          run-id: 44305065506
+          run-id: 44313480033
           github-token: ${{ github.token }}
-      - name: Compare cold native discovery at the selected width
+      - name: Validate the same native bundle on the selected runtime
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/probe-r18-discovery.mjs
       - uses: actions/upload-artifact@v4
         timeout-minutes: 1
         with:
-          name: discovery-${{ matrix.arch }}-${{ matrix.width }}
+          name: cache-${{ matrix.arch }}-${{ matrix.setup }}
           path: discovery-result.json
           if-no-files-found: error

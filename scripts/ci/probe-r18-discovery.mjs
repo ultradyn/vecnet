@@ -1,5 +1,5 @@
 // Disposable diagnostic only: never merge this workflow or script.
-import {consumeBundle,bundleDiscoveryJobs} from './go-bundle.mjs';
+import {consumeBundle} from './go-bundle.mjs';
 import {restoreSource} from './source-archive.mjs';
 import {mkdir,mkdtemp,readFile,rm,writeFile} from 'node:fs/promises';
 import {execFileSync} from 'node:child_process';
@@ -16,8 +16,8 @@ try {
  for(const [key,leaf] of Object.entries({HOME:'home',USERPROFILE:'home',APPDATA:'config',LOCALAPPDATA:'data',TMPDIR:'tmp',TMP:'tmp',TEMP:'tmp',XDG_CONFIG_HOME:'config',XDG_CACHE_HOME:'cache',XDG_DATA_HOME:'data',XDG_STATE_HOME:'state',XDG_RUNTIME_DIR:'run'})){
   process.env[key]=path.join(work,leaf);await mkdir(process.env[key],{recursive:true});
  }
- process.env.GITHUB_ACTIONS=width===4?'true':'false';
- assert.equal(bundleDiscoveryJobs(process.env),width);
+ process.env.GITHUB_ACTIONS='true';
+
  const start=performance.now();
  const result=await consumeBundle(path.resolve('dist/go-tests',`win32-${process.arch}`),{sha,platform:`win32-${process.arch}`,root,temporary:path.join(work,'native')});
  const elapsedMs=performance.now()-start;
