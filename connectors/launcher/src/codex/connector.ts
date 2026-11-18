@@ -10,8 +10,8 @@ import type { Binding, Engine } from './engine.ts';
 import { openCodexRpc } from './rpc.ts';
 import { bindingFingerprint, parseBinding, readBindings, threadKey } from './connector-authority.ts';
 import type { FileState } from './connector-authority.ts';
-import { openStatusPublisher } from './connector-status.ts';
-import type { StatusPublisher } from './connector-status.ts';
+import { createStatusPublisher, openStatusPublisher } from './connector-status.ts';
+import type { DeliveryLease, StatusPublisher } from './connector-status.ts';
 import { createRuntimeStatusReporter, runtimeStatusPost } from './runtime-status.ts';
 import type { RuntimeStatusPost } from './runtime-status.ts';
 import { userHome } from '../../../hub-client/src/platform.ts';
@@ -148,7 +148,7 @@ const fingerprint = (b: Binding) => b.origin + ':' + bindingFingerprint(b);
 
 /** One engine per authoritative canonical home/thread, one connector per file.
  * Launcher registrations supply lifecycle callbacks, never delivery authority. */
-export function startCodexConnector(o: { kv?: KeyValue; clock: Clock; log: Log; env: NodeJS.ProcessEnv; openRpc?: typeof openCodexRpc; postRuntimeStatus?: RuntimeStatusPost }): CodexConnector {
+export function startCodexConnector(o: { kv?: KeyValue; clock: Clock; log: Log; env: NodeJS.ProcessEnv; openRpc?: typeof openCodexRpc; postRuntimeStatus?: RuntimeStatusPost; lease?: DeliveryLease; leaseLost?: AbortSignal }): CodexConnector {
   const log = redactingLog(o.log), { clock } = o;
   const euid = process.geteuid?.() ?? -1;
   const recoveryEnv = { ...o.env };
@@ -190,30 +190,34 @@ export function startCodexConnector(o: { kv?: KeyValue; clock: Clock; log: Log; 
     else if (s.state === 'refused') log.warn('codex_bindings_refused', { reason: s.reason });
     else if (s.state === 'invalid') log.warn('codex_bindings_invalid', { reason: s.reason });
   }
+  function onLeaseLost() {
+    if (stopReason === 'status_lock_lost') return;
+    // Fence synchronously, including any offline reports already in flight.
+    stopReason = 'status_lock_lost';
+    log.warn('codex_status_lock_lost');
+    stopped = true; timer?.cancel();
+    reporter.fence();
+    lostCleanup = Promise.allSettled([...entries.keys()].map(retire));
+    void stopConnector().catch(() => { log.warn('codex_connector_cleanup_failed'); });
+  }
   async function reload() {
     const s = readBindings(path, euid, env);
     fileChanged(s);
     if (!publisher && path !== undefined) {
-      try { codexRecoveryPath(recoveryEnv); }
-      catch { log.warn('codex_recovery_refused'); return; }
-      publisher = await openStatusPublisher(path, euid, { env, onLost() {
-        // Loss of the singleton is fatal: fence synchronously, then notify the
-        // host only after cleanup. A running-but-dead service cannot be restarted
-        // by Task Scheduler/systemd; never silently return to the reload loop.
-        stopReason = 'status_lock_lost';
-        log.warn('codex_status_lock_lost');
-        stopped = true; timer?.cancel();
-        reporter.fence(); // Abort even an offline shutdown already in progress.
-        lostCleanup = Promise.allSettled([...entries.keys()].map(retire));
-        void stopConnector().catch(() => { log.warn('codex_connector_cleanup_failed'); });
-      } });
-      if (!publisher) {
-        if (!duplicateLogged) { duplicateLogged = true; log.warn('codex_connector_duplicate'); }
-        return;
+      if (o.lease) publisher = createStatusPublisher(path, o.lease, env);
+      else {
+        try { codexRecoveryPath(recoveryEnv); }
+        catch { log.warn('codex_recovery_refused'); return; }
+        publisher = await openStatusPublisher(path, euid, { env, onLost: onLeaseLost });
+        if (!publisher) {
+          if (!duplicateLogged) { duplicateLogged = true; log.warn('codex_connector_duplicate'); }
+          return;
+        }
+        duplicateLogged = false;
       }
-      duplicateLogged = false;
     }
-    if (!publisher || !publisher.valid() || stopped) return;
+    if (!publisher || stopped) return;
+    if (!publisher.valid()) { onLeaseLost(); return; }
     if (!recovery) {
       try { recovery = openRecovery(codexRecoveryPath(recoveryEnv), clock, o.kv); }
       catch { log.warn('codex_recovery_refused'); publisher.publish(clock.now(), []); return; }
@@ -258,7 +262,8 @@ export function startCodexConnector(o: { kv?: KeyValue; clock: Clock; log: Log; 
         e.over = isOver; e.expired = expired; e.engine.setOverLimit(isOver);
       }
     }
-    if (stopped || !publisher.valid()) return;
+    if (stopped) return;
+    if (!publisher.valid()) { onLeaseLost(); return; }
     publisher.publish(clock.now(), entries.values());
     reporter.sync(entries.values());
   }
@@ -267,19 +272,24 @@ export function startCodexConnector(o: { kv?: KeyValue; clock: Clock; log: Log; 
     timer = clock.timer(CODEX_RELOAD_MS, () => { timer = undefined; void serial(reload).then(schedule); });
   }
   void serial(reload).then(schedule);
+  o.leaseLost?.addEventListener('abort', onLeaseLost, { once: true });
+  if (o.leaseLost?.aborted) onLeaseLost();
 
   function stopConnector(): Promise<void> {
     if (stopping) return stopping;
     stopped = true; timer?.cancel();
     stopping = (async () => {
       await chain;
-      await lostCleanup;
       // Keep the singleton on normal shutdown while bounded offline reports run.
       await reporter.stop();
       await Promise.allSettled([...entries.keys()].map(retire));
+      await lostCleanup;
       try { recovery?.close(); }
       finally { recovery = undefined; await publisher?.close(); publisher = undefined; }
-    })().finally(() => { markStopped({ reason: stopReason }); });
+    })().finally(() => {
+      o.leaseLost?.removeEventListener('abort', onLeaseLost);
+      markStopped({ reason: stopReason });
+    });
     return stopping;
   }
 

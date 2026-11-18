@@ -12,12 +12,16 @@ export interface StatusPublisher {
   valid(): boolean;
   close(): Promise<void>;
 }
-interface HeldLock { valid(): boolean; close(): Promise<void> }
+export interface DeliveryLease { valid(): boolean; close(): Promise<void> }
+
+// Bind each real lease to the authority it locked, even if a pathname changes
+// between election and publisher construction.
+const leaseStatusPaths = new WeakMap<DeliveryLease, string>();
 
 /** The helper owns LockFileEx, NOT a stale PID/file sentinel. Stdin EOF (also
  * when Node crashes) releases the lock. Readiness is bounded and exact; an old
  * CLI or malformed output must never make a connector appear ready. */
-function windowsLock(path: string, env: Environment, onLost: () => void): Promise<HeldLock | undefined> {
+function windowsLock(path: string, env: Environment, onLost: () => void): Promise<DeliveryLease | undefined> {
   return new Promise(resolve => {
     let command;
     try { command = commandInvocation([envValue(env, 'VECNET_BIN') || 'vecnet', 'local-platform', 'lock', path], env); }
@@ -54,8 +58,8 @@ function windowsLock(path: string, env: Environment, onLost: () => void): Promis
 /** Unix retains flock on the inherited open file description between
  * heartbeats. Never unlink the lock inode. Windows uses a held native helper;
  * there is deliberately no insecure lock-file/PID fallback on either OS. */
-export async function openStatusPublisher(bindingsPath: string, euid: number, options: { env?: Environment; onLost?: () => void } = {}): Promise<StatusPublisher | undefined> {
-  let fd: number | undefined, lock: HeldLock | undefined;
+export async function openDeliveryLease(bindingsPath: string, euid: number, options: { env?: Environment; onLost?: () => void } = {}): Promise<DeliveryLease | undefined> {
+  let fd: number | undefined, lock: DeliveryLease | undefined;
   const env = options.env ?? process.env;
   try {
     if (process.platform === 'win32') localPlatform('mkdir-private', dirname(bindingsPath), { env });
@@ -74,44 +78,60 @@ export async function openStatusPublisher(bindingsPath: string, euid: number, op
       const result = spawnSync('flock', ['--exclusive', '--nonblock', '3'], { stdio: ['ignore', 'ignore', 'ignore', fd], timeout: 2000 });
       if (result.error || result.status !== 0) throw new Error('lock_unavailable');
       const held = fd;
-      lock = { valid: () => true, async close() { closeSync(held); } };
+      let closed = false;
+      lock = { valid: () => !closed, async close() { if (!closed) { closed = true; closeSync(held); } } };
     }
-    const held = lock;
-    let closed = false, owned: { dev: number; ino: number } | undefined;
-    return {
-      valid: () => !closed && held.valid(),
-      publish(now, entries) {
-        if (closed) return;
-        if (!held.valid()) throw new Error('status_lock_lost');
-        const bindings = [...entries].map(({ binding: b, engine }) => ({
-          config_path: b.configPath, profile: b.profile, as: b.as ?? '', codex_home: b.codexHome,
-          thread_id: b.threadId, generation: b.generation, state: engine.state(), liveness: engine.liveness(),
-        }));
-        const data = JSON.stringify({ version: 1, updated_at: new Date(now).toISOString(), bindings });
-        if (Buffer.byteLength(data) > 1_048_576) throw new Error('status_too_large');
-        if (process.platform === 'win32') localPlatform('write-private', path, { env, input: data + '\n' });
-        else {
-          const temp = path + '.' + randomUUID() + '.tmp';
-          try {
-            writeFileSync(temp, data + '\n', { mode: 0o600, flag: 'wx' });
-            renameSync(temp, path);
-          } finally { try { unlinkSync(temp); } catch {} }
-        }
-        owned = lstatSync(path);
-      },
-      async close() {
-        if (closed) return;
-        closed = true;
-        try {
-          const current = lstatSync(path);
-          // Once ownership is lost another publisher may have replaced it.
-          if (held.valid() && owned && current.dev === owned.dev && current.ino === owned.ino) unlinkSync(path);
-        } catch {} finally { await held.close(); }
-      },
-    };
+    leaseStatusPaths.set(lock, path);
+    return lock;
   } catch {
     if (lock) await lock.close();
     else if (fd !== undefined) closeSync(fd);
     return;
   }
+}
+
+/** Internal writer for an elected connector. Closing it never releases the lease. */
+export function createStatusPublisher(bindingsPath: string, lease: DeliveryLease, env: Environment): StatusPublisher {
+  const path = leaseStatusPaths.get(lease) ?? bindingsPath + '.status.json';
+  let closed = false, owned: { dev: number; ino: number } | undefined;
+  return {
+    valid: () => !closed && lease.valid(),
+    publish(now, entries) {
+      if (closed) return;
+      if (!lease.valid()) throw new Error('status_lock_lost');
+      const bindings = [...entries].map(({ binding: b, engine }) => ({
+        config_path: b.configPath, profile: b.profile, as: b.as ?? '', codex_home: b.codexHome,
+        thread_id: b.threadId, generation: b.generation, state: engine.state(), liveness: engine.liveness(),
+      }));
+      const data = JSON.stringify({ version: 1, updated_at: new Date(now).toISOString(), bindings });
+      if (Buffer.byteLength(data) > 1_048_576) throw new Error('status_too_large');
+      if (process.platform === 'win32') localPlatform('write-private', path, { env, input: data + '\n' });
+      else {
+        const temp = path + '.' + randomUUID() + '.tmp';
+        try {
+          writeFileSync(temp, data + '\n', { mode: 0o600, flag: 'wx' });
+          renameSync(temp, path);
+        } finally { try { unlinkSync(temp); } catch {} }
+      }
+      owned = lstatSync(path);
+    },
+    async close() {
+      if (closed) return;
+      closed = true;
+      if (!owned || !lease.valid()) return;
+      try {
+        const current = lstatSync(path);
+        if (current.dev === owned.dev && current.ino === owned.ino) unlinkSync(path);
+      } catch {}
+    },
+  };
+}
+
+/** Compatibility entry for callers that own both the writer and the lease. */
+export async function openStatusPublisher(bindingsPath: string, euid: number, options: { env?: Environment; onLost?: () => void } = {}): Promise<StatusPublisher | undefined> {
+  const lease = await openDeliveryLease(bindingsPath, euid, options);
+  if (!lease) return;
+  const publisher = createStatusPublisher(bindingsPath, lease, options.env ?? process.env);
+  let closing: Promise<void> | undefined;
+  return { ...publisher, close: () => closing ??= publisher.close().finally(() => lease.close()) };
 }

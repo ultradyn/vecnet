@@ -3,7 +3,9 @@ import { isAbsolute } from 'node:path';
 import { stderrLog, systemClock } from '../daemon.ts';
 import { userHome } from '../../../hub-client/src/platform.ts';
 import { localPlatform } from '../private-files.ts';
-import { codexBindingsPath, codexRecoveryPath, startCodexConnector } from './connector.ts';
+import { codexBindingsPath, codexRecoveryPath } from './connector.ts';
+import { startDeliveryHost } from '../delivery/host.ts';
+import type { DeliveryHost } from '../delivery/host.ts';
 
 class DeliveryError extends Error {}
 const unsafe = () => new DeliveryError('unsafe state path');
@@ -38,16 +40,16 @@ async function main(): Promise<void> {
   let stop!: () => void;
   const interrupted = new Promise<void>(resolve => { stop = resolve; });
   process.once('SIGTERM', stop); process.once('SIGINT', stop);
-  let connector: ReturnType<typeof startCodexConnector> | undefined;
+  let host: DeliveryHost | undefined;
   try {
-    connector = startCodexConnector({ env, clock: systemClock, log: stderrLog() });
-    await Promise.race([interrupted, connector.stopped]);
+    host = startDeliveryHost({ env, clock: systemClock, log: stderrLog() });
+    await Promise.race([interrupted, host.stopped]);
   } finally {
-    try { await connector?.stop(); }
+    try { await host?.stop(); }
     finally { process.removeListener('SIGTERM', stop); process.removeListener('SIGINT', stop); }
   }
   // Recheck after stop so a signal racing lock loss cannot report success.
-  if ((await connector.stopped).reason === 'status_lock_lost') throw new DeliveryError('status lock lost');
+  if ((await host.stopped).reason === 'status_lock_lost') throw new DeliveryError('status lock lost');
 }
 
 main().then(() => { process.exitCode = 0; }, error => {
