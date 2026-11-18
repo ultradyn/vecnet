@@ -9,6 +9,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createHubClient } from '../../../hub-client/src/client.ts';
 import { newUlid } from '../../../hub-client/src/ids.ts';
 import type { Clock } from '../../../hub-client/src/ports.ts';
 import type { Delivery, Message, SendRequest, VecnetEvent } from '../../../hub-client/src/wire.ts';
@@ -89,7 +90,7 @@ interface Env {
   inspect<T>(fn: (ledger: Ledger) => T): T;
 }
 
-async function setup(t: TestContext, o: { idle?: Record<string, string>; clockOffsetMs?: number; noStart?: boolean } = {}): Promise<Env> {
+async function setup(t: TestContext, o: { idle?: Record<string, string>; clockOffsetMs?: number; noStart?: boolean; hubFetch?: typeof fetch } = {}): Promise<Env> {
   const dir = mkdtempSync(join(tmpdir(), 'launcher-e2e-'));
   const peers: Requester[] = [];
   let daemon: Daemon | undefined;
@@ -136,11 +137,15 @@ async function setup(t: TestContext, o: { idle?: Record<string, string>; clockOf
     idle: { park_after: '2s', settle_opaque: '4s', settle_observable: '4s', check_every: '250ms', deadline_margin: '1s', ...o.idle },
   });
   const log = memoryLog();
+  // Lifecycle time jumps must not expire an in-flight real HTTP request.
+  // In particular, requester SSE can observe running before the outbox has
+  // consumed that POST's response. Keep transport timeouts on wall time.
+  const hubClient = createHubClient({ baseUrl: hub.url, credential: launcher.secret, fetch: o.hubFetch });
   const env: Env = {
     hub, dir, stateFile, repo, cfg, clock, log, launcher, requester, bystander, operator,
     get daemon() { return daemon!; },
     fake: () => fakeFor(stateFile),
-    async start(s = {}) { daemon = await startDaemon({ cfg, clock, log, env: { VECNET_CODEX_BINDINGS: join(dir, 'codex-bindings.json') }, beforeRecordRef: s.beforeRecordRef }); },
+    async start(s = {}) { daemon = await startDaemon({ cfg, clock, log, hub: hubClient, env: { VECNET_CODEX_BINDINGS: join(dir, 'codex-bindings.json') }, beforeRecordRef: s.beforeRecordRef }); },
     inspect(fn) {
       const ledger = openLedger(join(cfg.state_dir, 'ledger.sqlite'), clock);
       try { return fn(ledger); } finally { ledger.close(); }

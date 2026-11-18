@@ -1,6 +1,5 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import type { Clock } from '../../../hub-client/src/ports.ts';
 import { validateSchema } from '../../src/contract/metadata.ts';
 import { WAIT, PERMISSION_SCHEMA, until, setup, launch, status, running, delivered, waitReply, permissionRequest } from './harness.ts';
 
@@ -98,9 +97,35 @@ test('8. deadline: a launch that just passes the gate is settled at expires_at -
   // cannot be moved, so the daemon's clock starts behind real time by enough
   // to pass the gate with an expires_at 8 s away, then catches up.
   const lifeMs = 8000, behind = 30_000 + 600_000 + 2000 - lifeMs;
-  const env = await setup(t, { idle: { settle_opaque: '30s', settle_observable: '30s' }, clockOffsetMs: -behind });
-  const l = await running(env, { expiresInMs: lifeMs });
+  // SSE can deliver running before its POST response has been consumed by the
+  // outbox. Hold that real response across catch-up to exercise this ordering
+  // deterministically, rather than hoping the native scheduler triggers it.
+  let release!: () => void;
+  const responseGate = new Promise<void>(resolve => { release = resolve; });
+  t.after(() => release());
+  let runningSignal: AbortSignal | undefined;
+  const hubFetch: typeof fetch = async (input, init) => {
+    const response = await fetch(input, init);
+    if (typeof init?.body === 'string' && JSON.parse(init.body).job_status?.state === 'running') {
+      runningSignal = init.signal ?? undefined;
+      await responseGate;
+    }
+    return response;
+  };
+  const env = await setup(t, { idle: { settle_opaque: '30s', settle_observable: '30s' }, clockOffsetMs: -behind, hubFetch });
+  const l = await launch(env, { expiresInMs: lifeMs });
+  // The accepted POST, not requester delivery latency, is our readiness fence.
+  // Still require the real running delivery below, after releasing the response.
+  await until(() => runningSignal !== undefined, 'running POST response held open');
+  assert.ok(runningSignal);
+  assert.equal(env.fake().sessions()[0].settles, 0, 'not settled before the deadline');
   env.clock.shift(behind);
+  // shift schedules passed timers for the next event-loop turn.
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const aborted = runningSignal.aborted;
+  release();
+  assert.equal(aborted, false, 'lifecycle clock catch-up must not abort real HTTP');
+  await status(env, l.jobId, 'running');
   const done = await status(env, l.jobId, 'succeeded', lifeMs + 5000);
   const out = done.job_status!.output as { ended: string };
   assert.equal(out.ended, 'deadline');
