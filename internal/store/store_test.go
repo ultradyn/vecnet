@@ -436,17 +436,16 @@ func TestOpenSynchronousEnv(t *testing.T) {
 	}{{"", 2}, {"full", 2}, {"FULL", 2}, {"normal", 1}, {"Normal", 1}} {
 		t.Run("env="+tc.env, func(t *testing.T) {
 			t.Setenv("VECNET_SQLITE_SYNCHRONOUS", tc.env)
-			db, err := store.Open(filepath.Join(t.TempDir(), "hub.db"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer db.Close()
+			db := openMigratedFixture(t)
 			var got int
 			if err := db.QueryRow("PRAGMA synchronous").Scan(&got); err != nil {
 				t.Fatal(err)
 			}
 			if got != tc.want {
 				t.Fatalf("synchronous=%d, want %d", got, tc.want)
+			}
+			if tc.env == "" {
+				checkMigratedFixtureIsolation(t, db)
 			}
 		})
 	}
