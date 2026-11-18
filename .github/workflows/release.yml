@@ -339,6 +339,12 @@ jobs:
         timeout-minutes: 1
         with:
           persist-credentials: false
+          sparse-checkout: |
+            connectors
+            internal
+            scripts
+            docs/protocol
+            npm
       - uses: actions/setup-node@v6
         timeout-minutes: 1
         with:
@@ -394,6 +400,12 @@ jobs:
         timeout-minutes: 1
         with:
           persist-credentials: false
+          sparse-checkout: |
+            connectors
+            internal
+            scripts
+            docs/protocol
+            npm
       - uses: actions/setup-node@v6
         timeout-minutes: 1
         with:

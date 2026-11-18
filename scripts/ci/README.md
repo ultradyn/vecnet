@@ -165,3 +165,9 @@ The Windows execution environment uses one Go scheduler thread per packet
 while retaining four independent workers. Producer compilation, Node/E2E, Linux
 and all time/coverage/source gates are unchanged. Full native acceptance is
 required; these focused comparisons do not establish the overall300s budget.
+
+Node/E2E checkouts retain complete connectors, internal, scripts, docs/protocol
+and npm directories plus root files. Discovery still sees all connector test
+files, backend fixtures, embedded protocol schemas and cross-platform scripts;
+unrelated documentation screenshots are omitted from these consumers. Source
+producers retain full checkout, so Go discovery cannot lose new package roots.
