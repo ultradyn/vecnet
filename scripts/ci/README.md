@@ -264,7 +264,7 @@ are still required.
 The three Node platform jobs keep identical steps but expose completion
 milestones for package admission. Windows package gates wait for build, the
 ARM test producer and x64 Node completion; Linux package gates wait for build
-and all Node platforms. This makes every ARM Go lane eligible before package
+and all Node platforms. This makes every ARM Go lane eligible before Windows package
 gates claim runner slots, without adding jobs or test commands. Actual GitHub
 allocation, full native correctness and the strict overall budget remain
 required; the dependency graph does not guarantee a queue order.
