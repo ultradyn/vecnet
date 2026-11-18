@@ -200,7 +200,7 @@ jobs:
       - name: Test compiled Go execution conservation
         if: env.CI_GO_PLATFORM == 'linux-x64'
         timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node --test scripts/ci/suite.test.mjs scripts/ci/go-bundle.test.mjs
+        run: node scripts/ci/budget.mjs 53000 node --test scripts/ci/suite.test.mjs scripts/ci/go-bundle.test.mjs scripts/ci/source-archive.test.mjs
       - name: Compile complete native Go test bundle group 1 of 6
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/go-bundle.mjs compile ${{ env.CI_GO_PLATFORM }} 0
@@ -262,22 +262,6 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps: &native-go-steps
-      - name: Preserve LF bytes on Windows
-        if: runner.os == 'Windows'
-        timeout-minutes: 1
-        run: git config --global core.autocrlf false
-      - uses: actions/checkout@v5
-        timeout-minutes: 1
-        with:
-          persist-credentials: false
-          sparse-checkout: |
-            bench
-            cmd
-            internal
-            connectors
-            docs/protocol
-            scripts/ci
-            scripts/npm
       - uses: actions/setup-node@v6
         timeout-minutes: 1
         with:
@@ -287,6 +271,9 @@ jobs:
         with:
           name: go-tests-${{ runner.os == 'Windows' && 'win32' || 'linux' }}-${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
           path: dist/go-tests
+      - name: Restore producer source and fixtures at the tested revision
+        timeout-minutes: 1
+        run: node dist/go-tests/restore-source.mjs restore dist/go-tests "${{ github.sha }}"
       - name: Validate and discover matching native Go test binaries
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs consume-go
@@ -378,12 +365,6 @@ jobs:
       - name: node complete group 2 of 4
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs node 0 1
-      - name: node complete group 3 of 4
-        timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs node 0 2
-      - name: node complete group 4 of 4
-        timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs node 0 3
 
   test-e2e:
     needs: target
@@ -435,6 +416,13 @@ jobs:
       - name: e2e complete group 4 of 4
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs e2e 0 3
+
+      - name: node complete group 3 of 4
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs node 0 2
+      - name: node complete group 4 of 4
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs node 0 3
 
   test-artifact:
     needs: build

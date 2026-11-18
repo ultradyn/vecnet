@@ -10,6 +10,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { nativeTargets } from '../npm/platforms.mjs';
 import { partition } from './partition.mjs';
+import { stageSource } from './source-archive.mjs';
 const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
 const go=args=>execFileSync('go',args,{env:goCompileEnvironment(process.env),encoding:'utf8',maxBuffer:16*1024*1024});
 function packages(){return go(['list','-mod=readonly','-f','{{.ImportPath}}\t{{.Dir}}\t{{len .TestGoFiles}}\t{{len .XTestGoFiles}}','./...']).trim().split(/\r?\n/).map(line=>{const[pkg,dir,internal,external]=line.split('\t');return{pkg,dir,tests:Number(internal)+Number(external)>0};});}
@@ -58,6 +59,7 @@ async function finalize(platform){
  const tool='test2json'+(platform.startsWith('win32')?'.exe':'');go(['build','-p',jobs,'-trimpath','-ldflags','-s -w','-o',path.join(directory,tool),'cmd/test2json']);
  const revision=execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim();
  await writeFile(path.join(directory,'bundle.json'),JSON.stringify({revision,platform,groups,toolHash:hash(await readFile(path.join(directory,tool)))},null,2));
+ await stageSource(process.cwd(),path.resolve('dist/go-tests'));
 }
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){
  const [command,platform,index]=process.argv.slice(2);
