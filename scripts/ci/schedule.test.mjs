@@ -260,3 +260,44 @@ test('Windows admits the exact installed PowerShell hook root alone without matc
  assert.equal(packets.filter(t=>!t.exclusive).map(t=>t.selected.join()).join(),sibling);
  assert.ok(packets.every(t=>t.split&&t.binary==='cli'));
 });
+
+test('Windows admits the whole repair root and PowerShell root as separate serial packets',async()=>{
+ const pkg='github.com/XertroV/vecnet/internal/cli';
+ const repair='TestLauncherWindowsManagedRepairPreservesServiceIntent';
+ const hook='TestCodexHookWindowsInstalledCommandPreservesArgv';
+ const ordinary=repair+'Extended';
+ const inv=[{pkg,names:[hook,repair,ordinary],binary:'cli',directory:'original'},
+  ...['a','b','c'].map(pkg=>({pkg,names:[repair],binary:pkg}))];
+ // Fill three of the four groups so the two cheap CLI roots share the fourth.
+ // Both fit the ordinary packet caps, so accidental coalescing is observable.
+ const profile={packages:{a:4,b:4,c:4},roots:{[pkg]:{[repair]:2,[hook]:1}}};
+ const plan=planGo(inv,profile,{platform:'win32',lanes:1});
+ const roots=groups=>groups.flat().flatMap(t=>t.selected.map(name=>`${t.pkg}/${name}`)).sort();
+ const discovered=inv.flatMap(p=>p.names.map(name=>`${p.pkg}/${name}`)).sort();
+ assert.deepEqual(roots(plan),discovered);
+ assert.equal(plan.flat().filter(t=>t.exclusive).length,2);
+ const group=plan.find(tasks=>tasks.some(t=>t.pkg===pkg&&t.selected.includes(repair)));
+ const exclusive=group.filter(t=>t.exclusive);
+ assert.deepEqual(exclusive.map(t=>t.selected),[[repair],[hook]]);
+ assert.ok(exclusive.every(t=>t.split&&t.pkg===pkg&&t.binary==='cli'&&t.directory==='original'));
+
+ const starts=[],release=new Map();
+ const run=runGoGroup(group,async task=>{
+  const name=task.selected.join(',');
+  starts.push(name);
+  await new Promise(finish=>release.set(name,finish));
+ },4);
+ const initial=[...starts];
+ release.get(repair)?.();await turn();
+ const afterRepair=[...starts];
+ for(let i=0;i<group.length;i++){for(const finish of release.values())finish();await turn();}
+ await run;
+ assert.deepEqual(initial,[repair]);
+ assert.deepEqual(afterRepair,[repair,hook]);
+ assert.deepEqual(starts,[repair,hook,ordinary]);
+
+ const linux=planGo(inv,profile,{platform:'linux',lanes:2});
+ assert.deepEqual(roots(linux),discovered);
+ assert.ok(linux.flat().every(t=>!t.exclusive));
+ assert.equal(linux.flat().filter(t=>t.pkg===pkg).length,1);
+});

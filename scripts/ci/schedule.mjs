@@ -22,11 +22,13 @@ const cost = n => {
   if (!Number.isFinite(n) || n <= 0) throw new Error('invalid scheduling cost');
   return n;
 };
-// From native A/B: isolate the timing-sensitive SSE oracle and the cold
-// PowerShell hook launch. This only classifies discovered Windows roots.
+// Resource admission for discovered Windows roots, not coverage selection.
 const exclusiveGoRoots = new Map([
-  ['github.com/XertroV/vecnet/internal/httpapi','TestSlowSSEConsumerDoesNotBlockSend'],
-  ['github.com/XertroV/vecnet/internal/cli','TestCodexHookWindowsInstalledCommandPreservesArgv'],
+  ['github.com/XertroV/vecnet/internal/httpapi',['TestSlowSSEConsumerDoesNotBlockSend']],
+  ['github.com/XertroV/vecnet/internal/cli',[
+    'TestCodexHookWindowsInstalledCommandPreservesArgv',
+    'TestLauncherWindowsManagedRepairPreservesServiceIntent',
+  ]],
 ]);
 export function planGo(inventory, profile = {}, {lanes=goLanes,platform=process.platform} = {}) {
   if(!Number.isInteger(lanes)||lanes<1)throw new Error('invalid lane count');
@@ -42,7 +44,7 @@ export function planGo(inventory, profile = {}, {lanes=goLanes,platform=process.
     if (measured !== undefined) cost(measured);
     // ~70s remaining across four groups gives ~17.5s/group. An 8s threshold
     // leaves placement headroom; it is policy, not a measured runtime forecast.
-    const exclusive = name => platform==='win32' && exclusiveGoRoots.get(row.pkg)===name;
+    const exclusive = name => platform==='win32' && exclusiveGoRoots.get(row.pkg)?.includes(name);
     const split = row.names.some(exclusive) || row.names.length >= 20 || (row.names.length >= 2 && measured > 8);
     if (!split) {
       // Whole packages use process elapsed; summed roots overcount parallel tests.
