@@ -45,6 +45,8 @@ const exclusiveGoRoots = new Map([
     // These three real Node admissions overlapped and timed out on ARM64.
     'TestLauncherWindowsInstallPreviewAndExplicitIntent',
     'TestLauncherWindowsInstallRejectsUnsafeDACLAndHardlinks',
+    // R21: the first valid Node probe failed under the ordinary ARM64 pool.
+    'TestLauncherWindowsInstallRejectsUnsafeExecutableBeforeExecution',
     'TestLauncherWindowsRepairPendingDriftUnit',
     repairRoot,
   ]],

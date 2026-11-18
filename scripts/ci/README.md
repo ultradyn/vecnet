@@ -77,7 +77,11 @@ On Windows only, these discovered roots use exclusive singleton packets:
 `TestLauncherWindowsManagedRepairPreservesServiceIntent`, plus the three CLI
 roots that failed cold Node admission in R16: `TestLauncherWindowsInstallPreviewAndExplicitIntent`,
 `TestLauncherWindowsInstallRejectsUnsafeDACLAndHardlinks`, and
-`TestLauncherWindowsRepairPendingDriftUnit`. Each runs serially
+`TestLauncherWindowsRepairPendingDriftUnit`, and the exact R21 failure
+`TestLauncherWindowsInstallRejectsUnsafeExecutableBeforeExecution`. In the R21
+full run its first valid cold Node probe failed under the ARM64 ordinary pool;
+the same root passed in isolation in a separate diagnostic, after other tests.
+It still runs all five original independently cold cases. Each exclusive root runs serially
 before the ordinary packet pool in its assigned group, with the same process
 isolation, root filter and deadlines. The repair root still runs all four
 original cases together, alone in its existing group slot: R16 recorded a
@@ -86,7 +90,11 @@ Windows placement evaluates the serial prefix plus a six-worker packet
 makespan, with a soft 37s target and lane-total balancing. This is not a limit
 or a forecast. All-15 launcher-fixture caller serialization was rejected in
 replay because its stressed bins exceed the owner. Untested contention and
-native queue/acceptance remain open; Linux placement is unchanged.
+native queue/acceptance remain open; Linux placement is unchanged. The R21
+archive replay did not establish a critical-path benefit from refreshing the
+shared Windows timing profile or using separate architecture profiles, so the
+existing timing profile and packet caps remain. The added isolation is a
+functional admission candidate, not a CI budget fix.
 
 Diagnostic runs 44294556720, 44295400381 and 44297999615 exercised these
 roots under different loads with `GOMAXPROCS=2`, not Release Windows' `1`.

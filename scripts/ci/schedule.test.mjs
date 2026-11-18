@@ -370,3 +370,40 @@ test('Windows placement prices the serial prefix separately and leaves whole rep
  assert.ok(bins.filter(g=>g!==repairBin&&g!==daclBin).every(g=>g.length<=8));
  assert.equal(JSON.stringify(bins),JSON.stringify(planGo([...input].reverse(),profile,{platform:'win32',lanes:1})));
 });
+
+test('Windows serial prefix adds only the exact unsafe-executable CLI root and keeps ordinary admission',async()=>{
+ const pkg='github.com/XertroV/vecnet/internal/cli';
+ const unsafe='TestLauncherWindowsInstallRejectsUnsafeExecutableBeforeExecution';
+ const previous=[sseRoot,'TestCodexHookWindowsInstalledCommandPreservesArgv',
+  'TestLauncherWindowsInstallPreviewAndExplicitIntent','TestLauncherWindowsInstallRejectsUnsafeDACLAndHardlinks',
+  'TestLauncherWindowsRepairPendingDriftUnit','TestLauncherWindowsManagedRepairPreservesServiceIntent'];
+ const ordinary=[unsafe+'Extended','TestLauncherWindowsInstallRejectsUnsafeExecutable','Example','FuzzSeed'];
+ const inv=[{pkg,names:[unsafe,...previous.slice(1),...ordinary],binary:'cli',directory:'original'},
+  {pkg:ssePackage,names:[sseRoot]}, {pkg:'other',names:[unsafe]}, {pkg:'empty',names:[],binary:null}];
+ const keys=(pkg,names)=>(names.length?names:['']).map(name=>`${pkg}/${name}`);
+ const discovered=inv.flatMap(t=>keys(t.pkg,t.names)).sort();
+ const packets=planGo(inv,{}, {platform:'win32'}).flat();
+ assert.deepEqual(packets.flatMap(t=>keys(t.pkg,t.selected)).sort(),discovered);
+ assert.deepEqual(packets.filter(t=>t.exclusive).flatMap(t=>keys(t.pkg,t.selected)).sort(),
+  [...keys(ssePackage,[sseRoot]),...keys(pkg,[unsafe,...previous.slice(1)])].sort());
+ const isolated=packets.find(t=>t.exclusive&&t.selected.includes(unsafe));
+ assert.deepEqual(isolated.selected,[unsafe]);
+ assert.ok(isolated.split&&isolated.binary==='cli'&&isolated.directory==='original');
+ for(const platform of ['linux','darwin']){
+  const other=planGo(inv,{}, {platform}).flat();
+  assert.ok(other.every(t=>!t.exclusive));
+  assert.deepEqual(other.flatMap(t=>keys(t.pkg,t.selected)).sort(),discovered);
+ }
+ const neighbors=Array.from({length:7},(_,id)=>({id}));
+ const starts=[];let finishExclusive;
+ const run=runGoGroup([...neighbors,isolated],async task=>{
+  if(task===isolated){
+   starts.push(unsafe);
+   await new Promise(resolve=>{finishExclusive=resolve;});
+  }else starts.push(task.id);
+ },nativeGoWorkers('win32'));
+ const beforeRelease=[...starts];
+ finishExclusive();await run;
+ assert.deepEqual(beforeRelease,[unsafe]);
+ assert.deepEqual(starts,[unsafe,0,1,2,3,4,5,6]);
+});
