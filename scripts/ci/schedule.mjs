@@ -19,7 +19,9 @@ export function planGo(inventory, profile = {}) {
     const fallback = cost(profile.packages?.[row.pkg] ?? 0.1);
     const weight = name => cost(profile.roots?.[row.pkg]?.[name] ?? fallback);
     if (row.names.length < 20) {
-      work.push({row, selected:row.names, split:false, cost:Math.max(fallback,row.names.reduce((n,name)=>n+weight(name),0))});
+      const measured = profile.packageElapsed?.[row.pkg];
+      // Small packages run whole; summed root wall times overcount parallel tests.
+      work.push({row, selected:row.names, split:false, cost:measured === undefined ? Math.max(fallback,row.names.reduce((n,name)=>n+weight(name),0)) : cost(measured), measured:measured!==undefined});
     } else {
       for (const name of row.names) work.push({row, selected:[name], split:true, cost:weight(name)});
     }
@@ -36,10 +38,10 @@ export function planGo(inventory, profile = {}) {
     }
     const bin=bins[index], previous=bin.tasks.get(item.row.pkg);
     if(previous){previous.selected.push(...item.selected);previous.cost+=item.cost;}
-    else bin.tasks.set(item.row.pkg,{...item.row,selected:[...item.selected],split:item.split,cost:item.cost});
+    else bin.tasks.set(item.row.pkg,{...item.row,selected:[...item.selected],split:item.split,cost:item.cost,measured:item.measured});
     bin.load+=item.cost;
   }
-  return bins.map(bin=>[...bin.tasks.values()].map(task=>({...task,cost:task.cost+(profile.startup??0),selected:task.split?task.selected.sort(compare):task.selected})).sort((a,b)=>b.cost-a.cost || compare(a.pkg,b.pkg)));
+  return bins.map(bin=>[...bin.tasks.values()].map(task=>({...task,cost:task.cost+(task.measured?0:(profile.startup??0)),selected:task.split?task.selected.sort(compare):task.selected})).sort((a,b)=>b.cost-a.cost || compare(a.pkg,b.pkg)));
 }
 
 // Do not return on the first error with live children still running. Stop

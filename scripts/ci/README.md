@@ -9,11 +9,20 @@ native test2json. Consumers validate/copy to private physical temp, discover
 root names natively, then execute binaries with original package cwd—no native
 toolchain setup, relinking or repeated go test driver. Packages with20+roots
 are partitioned whole-root; smaller/no-test packages remain complete.
-`go-timings.json` records complete R6 PASS root maxima across all native Go
-logs, Windows maximum of x64/ARM, with positive prior package fallbacks for
-unobserved roots. Measured per-package process overhead is counted once after
-batching (Windows0.10s/Linux0.02s). Censored package failures are not root duration observations.
-These pre-fixture-correction costs are placement hints, not runtime forecasts. Deterministic weighted
+`go-timings.json` records complete R7 PASS root maxima across all18 native Go
+logs (run44254434973, source101f0727), Windows maximum of x64/ARM. Complete
+package process elapsed maxima are retained separately; small whole packages
+use that observed process cost rather than summing potentially parallel roots.
+Unknown roots use the median complete PASS root cost for their package, or a
+positive0.1s fallback when entirely unobserved. Failed/unfinished packages and
+roots (including sibling-owned localruntime failures) are explicitly censored;
+completed roots in later-failed packages remain valid root observations. Native
+skips are not timings. Startup uses the median nonnegative completed package
+elapsed minus summed root durations. `go-profile.mjs` replays the source-bound
+archived logs without fetching credentials or selecting coverage. New split
+Windows drift roots have no native root measurement yet. These are placement
+hints, not post-change runtime forecasts or proof of the workflow budget.
+Deterministic weighted
 placement balances whole roots, then batches each package's roots within a
 partition. It is not a coverage allowlist: discovery alone supplies the inventory,
 and unknown/new roots always receive a positive cost. Each group runs at most

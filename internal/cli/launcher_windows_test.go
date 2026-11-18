@@ -664,40 +664,61 @@ func TestLauncherWindowsTaskControllerRejectsConcurrentChanges(t *testing.T) {
 		t.Fatal("custom task refusal republished profile")
 	}
 }
-func TestLauncherWindowsRepairPendingIntentAndEnablementDrift(t *testing.T) {
-	for _, kind := range []string{"enabled", "active", "task", "intent", "metadata", "unit", "manifest"} {
-		t.Run(kind, func(t *testing.T) {
-			f, a, manager, project, art := launcherWindowsRepairFixture(t, false, false)
-			manager.failRegister = true
-			if _, err := a.repairLauncherArtifact(project, art); err == nil {
-				t.Fatal("did not leave pending repair")
-			}
-			manager.failRegister = false
-			manager.calls = nil
-			switch kind {
-			case "enabled":
-				manager.state.Enabled = true
-			case "active":
-				manager.state.Active = true
-			case "task":
-				manager.state.Definition.Executable = `C:\custom\node.exe`
-			default:
-				path := map[string]string{"intent": filepath.Join(filepath.Dir(art.Path), "repair-pending.json"), "metadata": art.Path, "unit": f.paths.Unit, "manifest": f.paths.Manifest}[kind]
-				if err := os.WriteFile(path, []byte("custom pending\n"), 0o600); err != nil {
-					t.Fatal(err)
-				}
-			}
-			unit, manifest, meta := launcherTestRead(t, f.paths.Unit), launcherTestRead(t, f.paths.Manifest), launcherTestRead(t, art.Path)
-			if _, err := a.repairLauncherArtifact(project, art); err == nil {
-				t.Fatal("pending drift accepted")
-			}
-			if !bytes.Equal(unit, launcherTestRead(t, f.paths.Unit)) || !bytes.Equal(manifest, launcherTestRead(t, f.paths.Manifest)) || !bytes.Equal(meta, launcherTestRead(t, art.Path)) {
-				t.Fatal("pending drift overwritten")
-			}
-			if strings.Contains(strings.Join(manager.calls, "\n"), "register ") || strings.Contains(strings.Join(manager.calls, "\n"), "restart ") {
-				t.Fatal("drift activated task")
-			}
-		})
+
+// Each drift case is an independent root so native whole-root scheduling can
+// place it without a seven-fixture indivisible straggler. Assertions stay shared.
+func TestLauncherWindowsRepairPendingDriftEnabled(t *testing.T) {
+	launcherWindowsRepairPendingDrift(t, "enabled")
+}
+func TestLauncherWindowsRepairPendingDriftActive(t *testing.T) {
+	launcherWindowsRepairPendingDrift(t, "active")
+}
+func TestLauncherWindowsRepairPendingDriftTask(t *testing.T) {
+	launcherWindowsRepairPendingDrift(t, "task")
+}
+func TestLauncherWindowsRepairPendingDriftIntent(t *testing.T) {
+	launcherWindowsRepairPendingDrift(t, "intent")
+}
+func TestLauncherWindowsRepairPendingDriftMetadata(t *testing.T) {
+	launcherWindowsRepairPendingDrift(t, "metadata")
+}
+func TestLauncherWindowsRepairPendingDriftUnit(t *testing.T) {
+	launcherWindowsRepairPendingDrift(t, "unit")
+}
+func TestLauncherWindowsRepairPendingDriftManifest(t *testing.T) {
+	launcherWindowsRepairPendingDrift(t, "manifest")
+}
+func launcherWindowsRepairPendingDrift(t *testing.T, kind string) {
+	t.Helper()
+	f, a, manager, project, art := launcherWindowsRepairFixture(t, false, false)
+	manager.failRegister = true
+	if _, err := a.repairLauncherArtifact(project, art); err == nil {
+		t.Fatal("did not leave pending repair")
+	}
+	manager.failRegister = false
+	manager.calls = nil
+	switch kind {
+	case "enabled":
+		manager.state.Enabled = true
+	case "active":
+		manager.state.Active = true
+	case "task":
+		manager.state.Definition.Executable = `C:\custom\node.exe`
+	default:
+		path := map[string]string{"intent": filepath.Join(filepath.Dir(art.Path), "repair-pending.json"), "metadata": art.Path, "unit": f.paths.Unit, "manifest": f.paths.Manifest}[kind]
+		if err := os.WriteFile(path, []byte("custom pending\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	unit, manifest, meta := launcherTestRead(t, f.paths.Unit), launcherTestRead(t, f.paths.Manifest), launcherTestRead(t, art.Path)
+	if _, err := a.repairLauncherArtifact(project, art); err == nil {
+		t.Fatal("pending drift accepted")
+	}
+	if !bytes.Equal(unit, launcherTestRead(t, f.paths.Unit)) || !bytes.Equal(manifest, launcherTestRead(t, f.paths.Manifest)) || !bytes.Equal(meta, launcherTestRead(t, art.Path)) {
+		t.Fatal("pending drift overwritten")
+	}
+	if strings.Contains(strings.Join(manager.calls, "\n"), "register ") || strings.Contains(strings.Join(manager.calls, "\n"), "restart ") {
+		t.Fatal("drift activated task")
 	}
 }
 func TestLauncherWindowsTaskHostRoundTripAndTamperRefusal(t *testing.T) {

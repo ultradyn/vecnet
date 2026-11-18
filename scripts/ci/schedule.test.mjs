@@ -65,3 +65,10 @@ test('package launch overhead is counted once after batching, including no-test 
  const plan=planGo([{pkg:'p',names:Array.from({length:48},(_,i)=>`Test${i}`)}],{packages:{p:1},startup:0.25});
  for(const task of plan.flat())assert.equal(task.cost,task.selected.length+0.25);
 });
+test('indivisible small packages use complete measured process cost, not serial sum of parallel roots',()=>{
+ const tasks=planGo([{pkg:'parallel',names:['TestA','TestB']}],{
+  packages:{parallel:5.1},roots:{parallel:{TestA:10,TestB:10}},packageElapsed:{parallel:10.2},startup:0.1,
+ }).flat();
+ assert.equal(tasks.length,1);
+ assert.equal(tasks[0].cost,10.2);
+});
