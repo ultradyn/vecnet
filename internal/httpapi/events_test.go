@@ -512,10 +512,19 @@ func TestSlowSSEConsumerDoesNotBlockSend(t *testing.T) {
 
 func slowSSEConsumerDoesNotBlockSend(t *testing.T, refs bool) {
 	waitStreams(t, 0)
-	env := testhub.StartWith(t, func(cfg *hub.Config) { cfg.DeliveryReferences = refs })
-	// A stuck stream is only dropped after SSEStall; at an hour, any send
-	// whose append waited on the stream would hang, and the per-send
-	// timeout below catches it. A send merely slowed by the stuck stream is
+	blocked := make(chan struct{})
+	env := testhub.StartWithServer(t, func(cfg *hub.Config) { cfg.DeliveryReferences = refs }, func(srv *http.Server) {
+		next := srv.Handler
+		srv.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/v1/events" {
+				w = &blockedSSESocket{ResponseWriter: w, blocked: blocked, done: r.Context().Done()}
+			}
+			next.ServeHTTP(w, r)
+		})
+	})
+	// Keep the SSE queue's stall timer from dropping the stream during
+	// measurements. Any send whose append waits on the stuck writer would
+	// hang, and the per-send timeout below catches it. A send merely slowed by the stuck stream is
 	// caught both by the aggregate send budget and by
 	// interleaving each send to b (stuck stream) with the same
 	// send to c (no stream) and comparing the totals: both halves see the
@@ -540,10 +549,6 @@ func slowSSEConsumerDoesNotBlockSend(t *testing.T, refs bool) {
 	b, bSec := env.NewPeer("session", "b")
 	c, _ := env.NewPeer("dot", "c")
 	env.SetLimits(a, 10000, 10000)
-
-	// Open a stream and never read from it.
-	s := openSSE(t, env, bSec, "", nil)
-	waitStreams(t, 1)
 
 	// Coordinator decision (2026-11-05): the stream-specific guarantee is the
 	// per-send deadlock watchdog plus the interleaved no-stream comparison
@@ -588,6 +593,18 @@ func slowSSEConsumerDoesNotBlockSend(t *testing.T, refs bool) {
 		}
 		return took
 	}
+	// An unread loopback socket can still buffer every measured Delivery.
+	// Connect over HTTP as before, but hold the writer on a real Delivery
+	// before timing either recipient, independent of OS socket buffering.
+	s := openSSE(t, env, bSec, "?after=head", nil)
+	waitStreams(t, 1)
+	send("seed", b, perSend)
+	select {
+	case <-blocked:
+	case <-time.After(perSend):
+		t.Fatal("SSE writer did not reach the seed Delivery")
+	}
+
 	var stuck, free time.Duration
 	for i := 0; i < n; i++ {
 		free += send(fmt.Sprintf("free-%d", i), c, perSend)
@@ -608,6 +625,26 @@ func slowSSEConsumerDoesNotBlockSend(t *testing.T, refs bool) {
 	s.cancel()
 	s.resp.Body.Close()
 	waitStreams(t, 0)
+}
+
+// blockedSSESocket lets the real server send headers and SSE preamble to the
+// client but models transport backpressure on its first Delivery. Keep
+// net/http's flush and deadline support for all unblocked writes.
+type blockedSSESocket struct {
+	http.ResponseWriter
+	blocked chan struct{}
+	done    <-chan struct{}
+}
+
+func (w *blockedSSESocket) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+func (w *blockedSSESocket) Write(p []byte) (int, error) {
+	if strings.Contains(string(p), "\nevent: delivery\n") {
+		close(w.blocked)
+		<-w.done
+		return 0, io.ErrClosedPipe
+	}
+	return w.ResponseWriter.Write(p)
 }
 
 // observeSlowSSESend samples only this test process before the request watchdog
@@ -673,11 +710,10 @@ func (w *stalledDeliveryWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// TestStalledSSEWriterDoesNotBlockSend complements the stuck-socket test
-// above deterministically: the real SSE handler's writer is proven blocked
-// mid-Delivery write (no dependence on TCP buffer sizes), then 200 sends
-// overflow the 64-frame queue. Same-owner and unrelated sends must still
-// commit while the log reader is backpressured by the full queue.
+// TestStalledSSEWriterDoesNotBlockSend drives the SSE handler directly and
+// sends an uninterrupted burst to its recipient. The writer is blocked
+// mid-Delivery write, then 200 sends overflow the 64-frame queue. Same-owner
+// and unrelated sends must still commit while the log reader is backpressured.
 func TestStalledSSEWriterDoesNotBlockSend(t *testing.T) {
 	for _, mode := range deliveryModes {
 		t.Run(mode.name, func(t *testing.T) {
