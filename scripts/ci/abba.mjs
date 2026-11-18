@@ -4,6 +4,13 @@ import {execFileSync} from 'node:child_process';
 import {performance} from 'node:perf_hooks';
 import path from 'node:path';
 const [mode,pkg,policy,trial]=process.argv.slice(2);
+if(mode==='cleanup'){
+ const probeRoot=process.env.CI80_ABBA_ROOT;
+ if(!probeRoot){console.log('ABBA_CLEANUP no initialized disposable root');process.exit(0);}
+ const probeOuter=path.dirname(probeRoot);
+ if(path.basename(probeRoot)!=='private'||!path.basename(probeOuter).startsWith('ci80-abba-'))throw new Error('unsafe cleanup root');
+ rmSync(probeOuter,{recursive:true,force:true});process.exit(0);
+}
 const roots={hub:'TestPreferencesConfigDurationsValidatedBeforeConversion|TestRetentionIndexedIntervalsPreserveHistoricalRules',cmdhub:'TestHubURLFlagOverridesEnvironment|TestBlobExpiryBootstrapProductionPreferences',cli:'TestReceivedNoticeCLI|TestLauncherWindowsInstallPreviewAndExplicitIntent'};
 const packages={hub:'internal/hub',cmdhub:'cmd/vecnet-hub',cli:'internal/cli'};
 if(!roots[pkg])throw new Error('unknown package');
@@ -21,8 +28,4 @@ if(mode==='compile'){
  }catch(error){result=error.status??1;}
  console.log('ABBA_RESULT '+JSON.stringify({mode,package:pkg,policy,trial,wallMs:Math.round(performance.now()-started),exit:result}));
  process.exitCode=result;
-}else if(mode==='cleanup'){
- const probeRoot=process.env.CI80_ABBA_ROOT;
- if(!probeRoot||!path.basename(probeRoot).startsWith('ci80-abba-'))throw new Error('unsafe cleanup root');
- rmSync(probeRoot,{recursive:true,force:true});
 }else throw new Error('unknown mode');
