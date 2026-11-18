@@ -94,17 +94,18 @@ if(process.argv[1] && path.resolve(process.argv[1])===fileURLToPath(import.meta.
  const goJobs=rows=>rows.filter(row=>row.name.startsWith('test-go-'));
  const selected=goJobs(index),metadata=goJobs(jobs);
  // Explicit archive geometries, independent of the current scheduler policy.
- const names=linux=>['linux','windows-x64','windows-arm'].flatMap(platform=>
-  Array.from({length:platform==='linux'?linux:6},(_,lane)=>`test-go-${platform} (${lane})`));
+ const names=(linux,windows)=>['linux','windows-x64','windows-arm'].flatMap(platform=>
+  Array.from({length:platform==='linux'?linux:windows},(_,lane)=>`test-go-${platform} (${lane})`));
  const exact=(rows,expected)=>rows.length===expected.length&&
   new Set(rows.map(row=>row.name)).size===expected.length&&
   new Set(rows.map(row=>row.id)).size===expected.length&&
   rows.every(row=>Number.isSafeInteger(row.id)&&row.id>0&&expected.includes(row.name));
- const geometry=[2,6].map(names).find(expected=>exact(selected,expected)&&exact(metadata,expected));
+ const geometry=[[6,6],[2,6],[2,8]].map(([linux,windows])=>({names:names(linux,windows),strict:linux===2}))
+  .find(({names})=>exact(selected,names)&&exact(metadata,names));
  if(!geometry||(total_count!==undefined&&total_count!==jobs.length))throw new Error('expected exact full geometry (14 or 18 native Go logs)');
- const current=geometry.length===14;
- // Historical 18-job indexes carry conclusions, but no run receipt or hashes.
- // The current archive also binds the separate run receipt and raw log bytes.
+ const current=geometry.strict;
+ // Only historical 6+6+6 indexes omit run receipts/hashes. Both 2+6+6
+ // and 2+8+8 bind the run and raw log bytes, irrespective of total count.
  if(current){
   const receipt=await readJSON('run.json');
   if(receipt.id!==run||receipt.head_sha!==sha||receipt.run_attempt!==attempt||receipt.status!=='completed')throw new Error('source/run binding mismatch');
@@ -129,7 +130,7 @@ if(process.argv[1] && path.resolve(process.argv[1])===fileURLToPath(import.meta.
  }
  const result=buildGoProfile(logs,inventories);
  result.source={sha,run,attempt,logs:logs.map(({id,name,sha256})=>({id,name,sha256}))};
- result.evidence=`Archived native run${run} attempt${attempt} source${sha}, all${geometry.length} native Go logs. Complete PASS root maxima (Windows maxx64/ARM); whole-package process elapsed maxima only with matching inventory and median complete-root fallbacks. Failed/unfinished roots and package executions explicitly censored. Zero-rounded PASS costs floored0.01s. Startup median from nonnegative package PASS elapsed minus summed roots, excluding overlapping same-package processes. No postchange native measurements or predicted gains; discovery supplies coverage. Unobserved roots use positive package fallback or0.1s.`;
+ result.evidence=`Archived native run${run} attempt${attempt} source${sha}, all${geometry.names.length} native Go logs. Complete PASS root maxima (Windows maxx64/ARM); whole-package process elapsed maxima only with matching inventory and median complete-root fallbacks. Failed/unfinished roots and package executions explicitly censored. Zero-rounded PASS costs floored0.01s. Startup median from nonnegative package PASS elapsed minus summed roots, excluding overlapping same-package processes. No postchange native measurements or predicted gains; discovery supplies coverage. Unobserved roots use positive package fallback or0.1s.`;
  await writeFile(output,JSON.stringify(result,null,2)+'\n');
  console.log(JSON.stringify({roots:Object.fromEntries(['linux','windows'].map(p=>[p,Object.values(result[p].roots).reduce((n,r)=>n+Object.keys(r).length,0)])),censored:result.censored.length}));
 }

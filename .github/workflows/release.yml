@@ -73,6 +73,8 @@ jobs:
         timeout-minutes: 1
         run: |
           printf 'GOCACHE=%s/ci-go-cache/build\nGOMODCACHE=%s/ci-go-cache/modules\n' "$RUNNER_TEMP" "$RUNNER_TEMP" >> "$GITHUB_ENV"
+      # v2 isolates the eight-lane cold-budget validation from populated v1 caches.
+      # All fallbacks share the generation so the first fresh run must miss.
       - name: Restore Go compilation and module caches
         id: go-cache
         uses: actions/cache/restore@v4
@@ -81,10 +83,10 @@ jobs:
           path: |
             ${{ runner.temp }}/ci-go-cache/build
             ${{ runner.temp }}/ci-go-cache/modules
-          key: go-compile-v1-${{ runner.os }}-${{ runner.arch }}-go1.27.4-${{ env.GOOS }}-${{ env.GOARCH }}-${{ env.CI_GO_CACHE_ROLE }}-${{ hashFiles('go.mod', 'go.sum') }}-${{ hashFiles('**/*.go') }}
+          key: go-compile-v2-${{ runner.os }}-${{ runner.arch }}-go1.27.4-${{ env.GOOS }}-${{ env.GOARCH }}-${{ env.CI_GO_CACHE_ROLE }}-${{ hashFiles('go.mod', 'go.sum') }}-${{ hashFiles('**/*.go') }}
           restore-keys: |
-            go-compile-v1-${{ runner.os }}-${{ runner.arch }}-go1.27.4-${{ env.GOOS }}-${{ env.GOARCH }}-${{ env.CI_GO_CACHE_ROLE }}-${{ hashFiles('go.mod', 'go.sum') }}-
-            go-compile-v1-${{ runner.os }}-${{ runner.arch }}-go1.27.4-${{ env.GOOS }}-${{ env.GOARCH }}-${{ env.CI_GO_CACHE_ROLE }}-
+            go-compile-v2-${{ runner.os }}-${{ runner.arch }}-go1.27.4-${{ env.GOOS }}-${{ env.GOARCH }}-${{ env.CI_GO_CACHE_ROLE }}-${{ hashFiles('go.mod', 'go.sum') }}-
+            go-compile-v2-${{ runner.os }}-${{ runner.arch }}-go1.27.4-${{ env.GOOS }}-${{ env.GOARCH }}-${{ env.CI_GO_CACHE_ROLE }}-
       - name: Cold dependency stage 1 of 4
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs prepare-go 0
@@ -243,6 +245,8 @@ jobs:
         timeout-minutes: 1
         run: |
           printf 'GOCACHE=%s/ci-go-cache/build\nGOMODCACHE=%s/ci-go-cache/modules\n' "$RUNNER_TEMP" "$RUNNER_TEMP" >> "$GITHUB_ENV"
+      # v2 isolates the eight-lane cold-budget validation from populated v1 caches.
+      # All fallbacks share the generation so the first fresh run must miss.
       - name: Restore Go compilation and module caches
         id: go-cache
         uses: actions/cache/restore@v4
@@ -251,10 +255,10 @@ jobs:
           path: |
             ${{ runner.temp }}/ci-go-cache/build
             ${{ runner.temp }}/ci-go-cache/modules
-          key: go-compile-v1-${{ runner.os }}-${{ runner.arch }}-go1.27.4-${{ env.GOOS }}-${{ env.GOARCH }}-${{ env.CI_GO_CACHE_ROLE }}-${{ hashFiles('go.mod', 'go.sum') }}-${{ hashFiles('**/*.go') }}
+          key: go-compile-v2-${{ runner.os }}-${{ runner.arch }}-go1.27.4-${{ env.GOOS }}-${{ env.GOARCH }}-${{ env.CI_GO_CACHE_ROLE }}-${{ hashFiles('go.mod', 'go.sum') }}-${{ hashFiles('**/*.go') }}
           restore-keys: |
-            go-compile-v1-${{ runner.os }}-${{ runner.arch }}-go1.27.4-${{ env.GOOS }}-${{ env.GOARCH }}-${{ env.CI_GO_CACHE_ROLE }}-${{ hashFiles('go.mod', 'go.sum') }}-
-            go-compile-v1-${{ runner.os }}-${{ runner.arch }}-go1.27.4-${{ env.GOOS }}-${{ env.GOARCH }}-${{ env.CI_GO_CACHE_ROLE }}-
+            go-compile-v2-${{ runner.os }}-${{ runner.arch }}-go1.27.4-${{ env.GOOS }}-${{ env.GOARCH }}-${{ env.CI_GO_CACHE_ROLE }}-${{ hashFiles('go.mod', 'go.sum') }}-
+            go-compile-v2-${{ runner.os }}-${{ runner.arch }}-go1.27.4-${{ env.GOOS }}-${{ env.GOARCH }}-${{ env.CI_GO_CACHE_ROLE }}-
       - name: Cold dependency stage 1 of 4
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs prepare-go 0
@@ -404,7 +408,7 @@ jobs:
     strategy: &windows-go-strategy
       fail-fast: false
       matrix:
-        lane: [0, 1, 2, 3, 4, 5]
+        lane: [0, 1, 2, 3, 4, 5, 6, 7]
     runs-on: windows-2025
     timeout-minutes: 5
     env:

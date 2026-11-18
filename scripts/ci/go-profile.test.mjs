@@ -75,7 +75,7 @@ test('overlapping packets keep root state and exclude ambiguous startup samples'
  assert.deepEqual(obs.overhead,[0.5]);
 });
 
-for(const linuxLanes of [6,2])test(`archive binding requires all ${linuxLanes+12} native Go logs`,async t=>{
+for(const [linuxLanes,windowsLanes] of [[6,6],[2,6],[2,8]])test(`archive binding requires exact ${linuxLanes}+${windowsLanes}+${windowsLanes} native Go logs`,async t=>{
  const {mkdtemp,writeFile,rm,readFile,rename}=await import('node:fs/promises');
  const {createHash}=await import('node:crypto');
  const {execFileSync}=await import('node:child_process');
@@ -83,8 +83,8 @@ for(const linuxLanes of [6,2])test(`archive binding requires all ${linuxLanes+12
  const {fileURLToPath}=await import('node:url');
  const dir=await mkdtemp(path.join(os.tmpdir(),'go-profile-'));t.after(()=>rm(dir,{recursive:true,force:true}));
  const index=[],jobs=[];
- const current=linuxLanes===2, count=linuxLanes+12, sha='a'.repeat(40);
- for(const platform of ['linux','windows-x64','windows-arm'])for(let lane=0;lane<(platform==='linux'?linuxLanes:6);lane++){
+ const current=linuxLanes===2, count=linuxLanes+2*windowsLanes, sha='a'.repeat(40);
+ for(const platform of ['linux','windows-x64','windows-arm'])for(let lane=0;lane<(platform==='linux'?linuxLanes:windowsLanes);lane++){
   const id=jobs.length+1,name=`test-go-${platform} (${lane})`;
   const log=[{Action:'start',Package:'p'},{Action:'run',Package:'p',Test:'TestObserved'},{Action:'pass',Package:'p',Test:'TestObserved',Elapsed:id},{Action:'pass',Package:'p',Elapsed:id+0.1}].map(event).join('\n');
   index.push(current?{id,name,bytes:Buffer.byteLength(log),sha256:createHash('sha256').update(log).digest('hex')}:{id,name,conclusion:'success'});
@@ -121,6 +121,9 @@ for(const linuxLanes of [6,2])test(`archive binding requires all ${linuxLanes+12
   const whole=JSON.parse(await readFile(out,'utf8'));
   assert.equal(whole.windows.packageElapsed.p,count+0.1);
   const runFile=path.join(dir,'run.json');
+  await rename(runFile,`${runFile}.missing`);assert.throws(run,/ENOENT/);await rename(`${runFile}.missing`,runFile);
+  const bound=index[0];index[0]={id:bound.id,name:bound.name,conclusion:'success'};
+  await save();assert.throws(run,/log hash\/length mismatch/);index[0]=bound;await save();
   await writeFile(runFile,JSON.stringify({...runMeta,run_attempt:1}));assert.throws(run,/binding mismatch/);
   await writeFile(runFile,JSON.stringify(runMeta));
   const log=await readFile(file,'utf8');

@@ -1,12 +1,12 @@
 import {availableParallelism} from 'node:os';
 // Scheduling policy only. Discovery, not timing observations, determines coverage.
-export const goLanes = 6;
+export const goLanes = 8;
 export const goGroups = 4;
 export const nativeGoLanes = platform => platform==='linux'?2:goLanes;
 // Only the hosted native Go execution step opts into the wider pool.
 export const nativeGoWorkers = platform => platform==='win32'?6:platform==='linux'?4:2;
 export const goPartitions = goLanes * goGroups;
-// target4 + compile3 + build1 + Go(2+6+6) + Node3 + E2E3 + artifact4 + accept1.
+// target4 + compile3 + build1 + Go(2+8+8) + Node3 + E2E3 + artifact4 + accept1.
 export const releaseJobCount = () => 4 + 3 + 1 + nativeGoLanes('linux') + 2 * goLanes + 3 + 3 + 4 + 1;
 // Explicit producer opt-in only; unrelated callers retain the two-job default.
 export function goCompileJobs(value, available=availableParallelism()) {
