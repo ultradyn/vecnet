@@ -326,11 +326,13 @@ export async function startFakeCodexAppServer(o: { dir: string; clock?: Clock; u
       timers.add(timer);
     },
     async close() {
+      console.log('RECOVERY_SERVER_CLOSE_BEFORE');
       if (stopped) return; stopped = true;
       for (const t of threads.values()) t.unload?.cancel();
       for (const timer of timers) timer.cancel();
       for (const p of peers.values()) p.socket.destroy();
       await new Promise<void>(resolve => server.close(() => resolve()));
+      console.log('RECOVERY_SERVER_CLOSE_AFTER');
     },
   };
 }

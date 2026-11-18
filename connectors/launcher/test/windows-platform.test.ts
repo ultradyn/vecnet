@@ -39,8 +39,10 @@ function onCleanup(t: CleanupContext, close: Cleanup): void {
     stack = []; cleanups.set(t, stack);
     t.after(async () => {
       const errors: unknown[] = [];
-      for (const cleanup of stack!.reverse()) {
-        try { await cleanup(); } catch (error) { errors.push(error); }
+      for (const [index, cleanup] of stack!.reverse().entries()) {
+        console.log('RECOVERY_CLEANUP_BEFORE=' + index);
+        try { await cleanup(); console.log('RECOVERY_CLEANUP_AFTER=' + index); }
+        catch (error) { console.log('RECOVERY_CLEANUP_ERROR=' + index); errors.push(error); }
       }
       if (errors.length) throw new AggregateError(errors, 'owned fixture cleanup failed');
     });
@@ -400,7 +402,8 @@ function mockLiveProcesses(t: TestContext, pipe: string) {
   const closed: Promise<void>[] = [];
   onCleanup(t, async () => {
     for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill();
-    await Promise.all(closed);
+    console.log('RECOVERY_CHILD_JOIN', JSON.stringify(children.map((child, index) => ({index, exitCode: child.exitCode, signalCode: child.signalCode}))));
+    await Promise.all(closed); console.log('RECOVERY_CHILD_JOIN_DONE');
   });
   const run = fixtureSpawn(childProcess.spawn, { pipe, onLock: (child: childProcess.ChildProcess) => helpers.push(child) });
   const mock = t.mock.method(childProcess, 'spawn', (...args: Parameters<typeof childProcess.spawn>) => {
@@ -452,8 +455,10 @@ test('Windows live connector exposes fatal helper loss only after fencing, and a
   probeStage = 10; console.log('RECOVERY_LIVE_STAGE=10');
   await first.stop(); assert.equal(readFileSync(s.path + '.status.json', 'utf8'), replacementStatus, 'old cleanup cannot delete successor readiness');
   probeStage = 11; console.log('RECOVERY_LIVE_STAGE=11');
-  await second.stop(); assert.deepEqual(await second.stopped, { reason: 'stopped' });
+  await second.stop(); console.log('RECOVERY_BODY_STOP_DONE');
+  assert.deepEqual(await second.stopped, { reason: 'stopped' }); console.log('RECOVERY_BODY_OUTCOME_DONE');
   assert.equal(existsSync(s.path + '.status.json'), false); assert.equal(reports.at(-1)?.reason, 'stopped');
+  console.log('RECOVERY_BODY_DONE');
 });
 
 test('Windows standalone live runner exits 1 on actual helper death and restarts ready, normal stop remains exit 0', { skip: !windows, timeout: 15000 }, async t => {
@@ -510,7 +515,8 @@ test('Windows embedded live helper loss stops the launcher nonzero, then a fresh
   await h.restart();
   await until(() => s.watches() === 2 && s.fake.subscribers(s.id).length === 1, 'fresh embedded live binding');
   h.clock.advance(CODEX_RELOAD_MS); await until(s.ready, 'fresh embedded readiness');
-  assert.equal(helpers.length, 2); await h.daemon.stop(); assert.equal(process.exitCode, previousExit);
+  assert.equal(helpers.length, 2); console.log('RECOVERY_EMBEDDED_STOP_BEFORE'); await h.daemon.stop(); console.log('RECOVERY_EMBEDDED_STOP_AFTER'); assert.equal(process.exitCode, previousExit);
+  console.log('RECOVERY_EMBEDDED_BODY_DONE');
 });
 
 for (const [name, open] of [['exact-root delivery', openDeliveryRpc], ['launcher backend', openBackendRpc]] as const) {
