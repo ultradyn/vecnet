@@ -11,11 +11,28 @@ function run(args, options = {}) {
   return spawnSync(process.execPath, [fileURLToPath(runner), ...args], { encoding: 'utf8', timeout: 10_000, ...options });
 }
 test('propagates failure and preserves literal argv without a shell', () => {
-  const args = ['space & pipe|', '%PATH%', '!x!', '"quoted"', 'trailing\\'];
+  const args = ['', 'space & pipe|', '%PATH%', '!x!', '"quoted"', 'trailing\\', 'space trailing\\', 'quote\\"in', '世界'];
   const result = run(['5000', process.execPath, '-e', 'console.log(JSON.stringify(process.argv.slice(1))); process.exitCode=7', ...args]);
   assert.equal(result.status, 7, result.stderr);
   assert.deepEqual(JSON.parse(result.stdout), args);
+  if (process.platform === 'win32' && process.env.CI_WINDOWS_OWNER) assert.match(result.stderr, /owner=windows-native/);
 });
+test('reports an unknown command without running a shell', () => {
+  const result = run(['5000', path.join(os.tmpdir(), 'ci-nonexistent-owner-child.exe')]);
+  assert.equal(result.status, 1, result.stderr);
+  if (process.platform === 'win32' && process.env.CI_WINDOWS_OWNER) assert.match(result.stderr, /owner=windows-native/);
+});
+
+test('a configured Windows owner that cannot start does not fall back', {skip: process.platform !== 'win32'}, async t => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'ci-owner-missing-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const result = run(['5000', process.execPath, '-e', 'console.log("CHILD EXECUTED")'], {
+    env: {...process.env, CI_WINDOWS_OWNER: path.join(dir, 'missing.exe')},
+  });
+  assert.equal(result.status, 1, result.stderr);
+  assert.doesNotMatch(result.stdout, /CHILD EXECUTED/);
+});
+
 test('deadline kills a stubborn grandchild as well as its launcher', async t => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'ci budget '));
   t.after(() => rm(dir, { recursive: true, force: true }));
@@ -26,6 +43,7 @@ test('deadline kills a stubborn grandchild as well as its launcher', async t => 
   const pid = Number(await readFile(pidFile, 'utf8'));
   t.after(() => { try { process.kill(pid, 'SIGKILL'); } catch {} });
   assert.equal(result.status, 124, result.stderr);
+  if (process.platform === 'win32' && process.env.CI_WINDOWS_OWNER) assert.match(result.stderr, /owner=windows-native/);
   let alive = true;
   for (let i = 0; i < 100; i++) {
     try { process.kill(pid, 0); } catch { alive = false; break; }

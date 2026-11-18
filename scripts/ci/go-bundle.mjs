@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { nativeTargets } from '../npm/platforms.mjs';
 import { partition } from './partition.mjs';
 import { stageSource } from './source-archive.mjs';
+import { buildWindowsOwner, readWindowsOwner, stageWindowsOwner } from './windows-owner.mjs';
 const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
 const go=args=>execFileSync('go',args,{env:goCompileEnvironment(process.env),encoding:'utf8',maxBuffer:16*1024*1024});
 function packages(){return go(['list','-mod=readonly','-f','{{.ImportPath}}\t{{.Dir}}\t{{len .TestGoFiles}}\t{{len .XTestGoFiles}}','./...']).trim().split(/\r?\n/).map(line=>{const[pkg,dir,internal,external]=line.split('\t');return{pkg,dir,tests:Number(internal)+Number(external)>0};});}
@@ -49,12 +50,14 @@ export async function consumeBundle(directory,{sha,platform,root=process.cwd(),t
  const manifest=path.join(directory,'bundle.json');
  if(takeOwnership)await requireUnaliasedFile(manifest);
  const receipt=JSON.parse(await readFile(manifest,'utf8'));
- if(receipt.revision!==sha||receipt.platform!==platform||(takeOwnership?!/^[a-f0-9]{40}$/.test(sha??''):!temporary))throw new Error('bundle source/platform mismatch');
+ if(receipt.revision!==sha||receipt.platform!==platform||!/^[a-f0-9]{40}$/.test(sha??'')||(!takeOwnership&&!temporary))throw new Error('bundle source/platform mismatch');
  if(!Array.isArray(receipt.groups)||receipt.groups.length!==6)throw new Error('incomplete bundle groups');
  const targets=receipt.groups.flat();
  if(new Set(targets.map(t=>t.pkg)).size!==targets.length)throw new Error('duplicate bundle package');
- const suffix=platform.startsWith('win32')?'.test.exe':'.test';
- const tool='test2json'+(platform.startsWith('win32')?'.exe':'');
+ const windows=platform.startsWith('win32-');
+ const ownerBytes=windows?await readWindowsOwner(directory,receipt,platform):null;
+ const suffix=windows?'.test.exe':'.test';
+ const tool='test2json'+(windows?'.exe':'');
  const files=await readdir(directory);if(!files.includes(tool))throw new Error('missing native test2json');
  const outputName=row=>row.pkg.replace(/[^A-Za-z0-9_-]/g,'_')+suffix;
  if(takeOwnership){
@@ -91,7 +94,8 @@ export async function consumeBundle(directory,{sha,platform,root=process.cwd(),t
    if(names.some(name=>!/^(?:Test\w+|Example\w*|Fuzz\w+)$/.test(name)))throw new Error('bad native test list');
    return {pkg:row.pkg,names,directory:cwd,binary};
   });
-  return takeOwnership?{inventory,test2json,temporary}:{inventory,test2json};
+  const owner=ownerBytes?await stageWindowsOwner(ownerBytes,temporary):undefined;
+  return {...(takeOwnership?{inventory,test2json,temporary}:{inventory,test2json}),...(owner?{owner}:{})};
  }catch(error){
   if(takeOwnership)await rm(temporary,{recursive:true,force:true});
   throw error;
@@ -104,7 +108,8 @@ async function finalize(platform){
  const expected=packages().map(p=>p.pkg).sort(),actual=groups.flat().map(p=>p.pkg).sort();if(JSON.stringify(expected)!==JSON.stringify(actual))throw new Error('incomplete bundle packages');
  const tool='test2json'+(platform.startsWith('win32')?'.exe':'');go(['build','-p',jobs,'-trimpath','-ldflags','-s -w','-o',path.join(directory,tool),'cmd/test2json']);
  const revision=execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim();
- await writeFile(path.join(directory,'bundle.json'),JSON.stringify({revision,platform,groups,toolHash:hash(await readFile(path.join(directory,tool)))},null,2));
+ const helper=await buildWindowsOwner(directory,platform,goCompileEnvironment(process.env));
+ await writeFile(path.join(directory,'bundle.json'),JSON.stringify({revision,platform,groups,toolHash:hash(await readFile(path.join(directory,tool))),...helper},null,2));
  await stageSource(process.cwd(),path.resolve('dist/go-tests'));
 }
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){

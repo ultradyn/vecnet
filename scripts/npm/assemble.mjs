@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
+import { readWindowsOwner, windowsOwnerFile } from '../ci/windows-owner.mjs';
 import { nativeTargets } from './platforms.mjs';
 export async function validateTargets(directory,{revision,version}) {
  const entries=(await readdir(directory)).sort();
@@ -13,8 +14,10 @@ export async function validateTargets(directory,{revision,version}) {
   if(go&&go!==info.go)throw new Error('mixed build toolchains');go=info.go;
   const expected=['vecnet'+target.suffix,'vecnet-hub'+target.suffix].sort();
   if(JSON.stringify(Object.keys(info.binaries).sort())!==JSON.stringify(expected))throw new Error('incomplete binaries');
-  if(JSON.stringify((await readdir(dir)).sort())!==JSON.stringify([...expected,'target.json'].sort()))throw new Error('unexpected target files');
+  const files=[...expected,'target.json',...(target.goos==='windows'?[windowsOwnerFile]:[])];
+  if(JSON.stringify((await readdir(dir)).sort())!==JSON.stringify(files.sort()))throw new Error('unexpected target files');
   for(const name of expected){const hash=createHash('sha256').update(await readFile(path.join(dir,name))).digest('hex');if(info.binaries[name]!==hash)throw new Error('target hash mismatch');}
+  if(target.goos==='windows')await readWindowsOwner(dir,info,target.platform);
   targets.push({...target,dir,info});
  }
  return {go,targets};

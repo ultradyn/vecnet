@@ -8,6 +8,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { performance } from 'node:perf_hooks';
 import { consumeBundle } from './go-bundle.mjs';
+import { exportWindowsOwner } from './windows-owner.mjs';
 import { partition } from './partition.mjs';
 import { bounded, runGoGroup, planGo, nativeGoLanes, nativeGoWorkers, goGroups, goCompileJobs, goCompileEnvironment } from './schedule.mjs';
 import {planNode} from './node-schedule.mjs';
@@ -43,6 +44,7 @@ if (kind === 'prepare-go') {
     await mkdir('.ci',{recursive:true});
     for(let i=0;i<6;i++)await writeFile(`.ci/go-${i}.json`,JSON.stringify(bundle.inventory.filter((_,n)=>n%6===i).map(row=>({...row,temporary}))));
     await writeFile('.ci/test2json',bundle.test2json);
+    if(bundle.owner)await exportWindowsOwner(bundle.owner);
   } catch(error) {
     if(temporary)await rm(temporary,{recursive:true,force:true});
     throw error;
