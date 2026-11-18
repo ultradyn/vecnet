@@ -41,15 +41,17 @@ Startup uses the median nonnegative package PASS elapsed minus summed root
 elapsed, excluding overlapping same-package processes because test2json does
 not identify which process emitted an event.
 
-The Windows placement profile refresh uses R16 run 44305065506 PASS values.
-When a root has no ARM64 PASS in that run, it also considers the latest
-same-architecture PASS from R14 (44292345778), or R12 if absent, retaining the
-larger cost. Whole-package costs require a successful non-overlapping process
-covering the exact discovered root set. If only filtered or ambiguous samples
-exist in R16, keep a verified R12 whole-package sample when available.
-Failures, skips and unfinished roots do not contribute PASS root timings.
-Linux keeps its R12
-profile. The file retains source/run/attempt and SHA256 log receipts.
+Windows root weights retain the prior refreshes, including R31's measured
+replacement of the interrupted-publication root after its directory-walk fix.
+The R38 refresh takes the maximum of each retained hint and complete PASS root
+times from R37 runs 44415327162 and 44416023762 at source `9645a20c` (x64/ARM64).
+It adds nine previously unweighted roots and raises 733 existing hints; no hint
+decreases. Failed, skipped and unfinished observations contribute no timing.
+Linux, package fallbacks, whole-package costs and startup hints remain unchanged.
+Whole-package costs require a successful non-overlapping process covering the
+exact discovered root set; these new imports supply root costs only.
+The file retains source/run/attempt, log SHA256 and metadata receipts. Placement
+estimates do not establish native throughput or waive the strict acceptance gates.
 
 Replay with `node scripts/ci/go-profile.mjs DIRECTORY OUTPUT SOURCE_SHA RUN_ID
 ATTEMPT [INVENTORY_JSON]`. Without inventory the importer emits root costs only,
@@ -83,6 +85,19 @@ A failure stops all queued work, drains every already-running worker and preserv
 the first rejection. Compilation and bundle discovery have separate
 capacity policies. The enclosing budget owns the
 entire group and all descendants; no per-child budget multiplication.
+
+Windows Go jobs prepare one genuine private, single-link Node image after native
+bundle discovery, before the packet pool. An explicit CLI test-binary utility
+copies the source, checks private ownership and independent source-matching
+bytes, and runs the original real `--version` preparation with its 12s context.
+Only success publishes a path. Read-only packet fixtures validate and borrow
+that job image; they never remove it or fall back after an invalid path. Real
+installation admission and its 5s version probe still run. Cold admission and
+mutation cases retain independent never-executed copies. An `always()` step
+removes only the fixed fixture child of the native bundle, ignoring the published
+path as a cleanup target. Both new Windows-only steps retain the 53s owner and
+one-minute step deadline. This deduplicates preparation; the cause of the R35 ARM
+and R36 x64 stalls and a native performance benefit remain unproven.
 
 On Windows only, these discovered roots use exclusive singleton packets:
 `TestSlowSSEConsumerDoesNotBlockSend`,
@@ -214,6 +229,41 @@ native-tar extraction are distinct bounded steps, avoiding ARM .NET ZIP
 extraction. Reproduce cold state with private empty GOCACHE/GOMODCACHE, never
 by deleting shared caches. Native cold/ARM timings still require actual CI.
 
+The four target producers and three Linux-hosted test-bundle producers use
+private `GOCACHE` and `GOMODCACHE` directories under `runner.temp/ci-go-cache`
+(`build` and `modules`). Explicit `actions/cache/restore@v4` runs after pinned
+Go extraction and before all four unchanged dependency stages. Keys separate
+schema `go-compile-v1`, Linux host OS/architecture, exact Go 1.27.4, target
+GOOS/GOARCH, target versus tests role, `go.mod`/`go.sum` hash and checked-out
+Go source hash. The first fallback retains the full dependency prefix for
+source edits; a second fallback drops only the dependency hash so updates reuse
+standard-library and other unchanged build objects. Go module download/build
+validates input versions and checksums, and Go checks actual changed inputs,
+including embedded files, before reuse. The source hash is deliberately coarse;
+it does not replace Go input validation. Neither fallback crosses compiler,
+host, target or role boundaries.
+
+Explicit `actions/cache/save@v4` runs only after successful artifact production
+and upload, and only without an exact hit; it saves the restored primary key
+and the same two paths. Restore and save each have a one-minute cancellation
+guard, with no automatic cache-save post step. Compilation/module entries are
+reused; passing test results and source-bound final artifacts are not used to
+replace any build, compile, discovery or native execution command. Native
+consumers, assembly, publication and source/artifact policies are unchanged.
+
+A source-key miss can save a new full cache for each of seven producers;
+immutable exact hits are not refreshed. These caches have no configured size
+cap or retention period: repository cache quota/eviction limits availability,
+and cold misses still pay all compilation plus cache compression/upload costs.
+The schema can be bumped to invalidate entries. Neither warm-cache speedup nor
+cold-cache compliance is established here; actual native runs must still pass
+strict overall <300s and every-step <60s acceptance, including cache steps.
+
+Caches created for a GitHub PR merge ref cannot be reused on master.
+A green or warm PR run therefore establishes neither master/tag cache state
+nor timing. Cache action failures, including stalled saves reaching the guard,
+remain hard CI failures with no acceptance bypass.
+
 `budget.mjs 53000 command [args...]` owns the complete command, not one child
 at a time. Linux uses a kernel child-subreaper: adopted descendants are killed
 and reaped on early success/failure, deadline or cancellation. Windows creates
@@ -234,8 +284,15 @@ Only an unset owner selects the PowerShell bootstrap; an invalid configured
 owner fails. This removes repeated PowerShell and C# compilation from those
 steps; exact native lifecycle and full-run timing still require validation.
 
-`accept` audits finished source-bound jobs/steps including setup/post/action
-and queue time, fails on any missing/failed/incomplete evidence, reserves8s
+`accept` selects verified cached native Node 24 after restoring its source. This
+uses the same identity-checking selector as Windows consumers instead of
+repeating package-manager discovery: the first merged-master run spent 11s
+in setup-node, versus 1s in the preceding PR run. Source restoration uses the
+hosted runner's existing Node for plain JavaScript, as on Windows. Tagged
+publication still pins npm 12.0.1 explicitly. Native timing remains required.
+
+The audit includes setup/post/action and queue time, fails on any
+missing/failed/incomplete evidence, reserves8s
 after non-tag preflight (R5 audit4s/posts0s; verification unmeasured) or35s for tags
 (two14s publication caps plus7s verification/cleanup), and exports an absolute overall deadline.
 All remaining commands cap themselves to that deadline with cleanup reserve;

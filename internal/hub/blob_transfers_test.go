@@ -98,6 +98,10 @@ func TestR2RepeatableDownloadAndStateBeforeLimit(t *testing.T) {
 	requireBlobCode(t, err, "blob_purged")
 }
 func TestR2ConcurrentMintLimit(t *testing.T) {
+	// Exercise mint accounting independently of power-loss durability: slow
+	// per-commit FULL syncs can exhaust SQLite's writer busy timeout. NORMAL
+	// keeps the real concurrent pool and transactions on this disposable DB.
+	t.Setenv("VECNET_SQLITE_SYNCHRONOUS", "normal")
 	f, g, c := downloadFixture(t)
 	var successes atomic.Int32
 	var issued, denied atomic.Int32
@@ -123,13 +127,14 @@ func TestR2ConcurrentMintLimit(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := 0; i < 50; i++ {
 		wg.Go(func() {
+			started := time.Now()
 			v, err := f.env.Hub.BlobDownload(context.Background(), &c, "", g.SHA256, g.BlobID)
 			if err == nil && v.URL != "" {
 				successes.Add(1)
 			} else {
 				var e *APIError
 				if !errors.As(err, &e) || e.Status != http.StatusTooManyRequests {
-					t.Error("unexpected concurrent refusal")
+					t.Errorf("unexpected concurrent refusal: error=%T %v api_error=%#v url_present=%t elapsed=%s pool=%+v", err, err, e, v.URL != "", time.Since(started), f.env.Hub.DB.Stats())
 				}
 			}
 		})

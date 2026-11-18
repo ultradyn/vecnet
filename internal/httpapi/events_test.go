@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/http/httptrace"
+	"os"
 	"runtime"
 	"strings"
 	"sync"
@@ -529,6 +530,59 @@ func slowSSEConsumerDoesNotBlockSend(t *testing.T, refs bool) {
 			next.ServeHTTP(w, r)
 		})
 	})
+	// Compare SSE backpressure, not which interleaved send pays for a WAL
+	// checkpoint. Keep this disposable fixture NORMAL and its real four-way
+	// pool; configure and retain every connection before measuring sends.
+	poolSize := env.Hub.DB.Stats().MaxOpenConnections
+	if poolSize != 4 {
+		t.Fatalf("SSE fixture pool = %d, want 4", poolSize)
+	}
+	env.Hub.DB.SetMaxIdleConns(poolSize)
+	func() {
+		var conns []*sql.Conn
+		defer func() {
+			for _, conn := range conns {
+				conn.Close()
+			}
+		}()
+		for i := 0; i < poolSize; i++ {
+			conn, err := env.Hub.DB.Conn(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			conns = append(conns, conn)
+			if _, err := conn.ExecContext(context.Background(), `PRAGMA wal_autocheckpoint=0`); err != nil {
+				t.Fatal(err)
+			}
+			var synchronous, auto int
+			if err := conn.QueryRowContext(context.Background(), `PRAGMA synchronous`).Scan(&synchronous); err != nil || synchronous != 1 {
+				t.Fatalf("connection %d: synchronous=%d, want NORMAL (1): %v", i, synchronous, err)
+			}
+			if err := conn.QueryRowContext(context.Background(), `PRAGMA wal_autocheckpoint`).Scan(&auto); err != nil || auto != 0 {
+				t.Fatalf("connection %d: wal_autocheckpoint=%d, want 0: %v", i, auto, err)
+			}
+		}
+	}()
+	var databasePath string
+	if err := env.Hub.DB.QueryRow(`SELECT file FROM pragma_database_list WHERE name='main'`).Scan(&databasePath); err != nil {
+		t.Fatal(err)
+	}
+	// Registered before openSSE's cleanup, so cancellation closes the client
+	// first. Join the handler before checking the finite burst's WAL bound
+	// and paying the deferred checkpoint cost, even on an assertion failure.
+	t.Cleanup(func() {
+		waitStreams(t, 0)
+		if info, err := os.Stat(databasePath + "-wal"); err != nil {
+			t.Errorf("deferred checkpoint WAL: %v", err)
+		} else if info.Size() > 128<<20 {
+			t.Errorf("finite SSE fixture WAL = %d bytes, want <= 128 MiB", info.Size())
+		}
+		var busy, frames, checkpointed int
+		if err := env.Hub.DB.QueryRow(`PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&busy, &frames, &checkpointed); err != nil || busy != 0 || frames != 0 || checkpointed != 0 {
+			t.Errorf("final checkpoint: busy=%d frames=%d checkpointed=%d: %v", busy, frames, checkpointed, err)
+		}
+	})
+
 	// Keep the SSE queue's stall timer from dropping the stream during
 	// measurements. Any send whose append waits on the stuck writer would
 	// hang, and the per-send timeout below catches it. A send merely slowed by the stuck stream is

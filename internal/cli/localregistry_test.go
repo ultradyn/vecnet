@@ -33,6 +33,9 @@ func localRegistryFixture(t *testing.T) (*app, string, string) {
 		t.Fatal(err)
 	}
 	cliFixtureChdir(t, root)
+	// Most callers model plain directories, not Git discovery. Keep ambient
+	// Git out of their real observation budgets; Git-specific tests opt in.
+	t.Setenv("PATH", t.TempDir())
 	// These fixtures model private registry/filesystem state. Native scheduler
 	// contract tests supply their own task manager; never inspect host tasks here.
 	return &app{ctx: context.Background(), localLauncherTasks: func(context.Context) ([]string, error) { return nil, nil }, getenv: func(k string) string {
@@ -46,6 +49,23 @@ func localRegistryInventory(home string) string {
 	return filepath.Join(home, ".local", "state", "vecnet", "projects", "inventory.json")
 }
 func localRegistryNow() time.Time { return time.Date(2026, 11, 15, 2, 0, 0, 0, time.UTC) }
+
+func TestLocalRegistryFixtureDoesNotRunAmbientGit(t *testing.T) {
+	tools := t.TempDir()
+	marker := filepath.Join(tools, "git-called")
+	cliFixtureProgram(t, tools, "git", "#!/bin/sh\n: > \"$VECNET_TEST_GIT_MARKER\"\n", cliFixtureProgramSpec{Kind: "never-run", Marker: marker})
+	t.Setenv("VECNET_TEST_GIT_MARKER", marker)
+	t.Setenv("PATH", tools)
+	t.Setenv("PATHEXT", ".EXE")
+	a, root, _ := localRegistryFixture(t)
+	p, err := a.observeLocalProject("v1", localRegistryNow())
+	if _, markerErr := os.Stat(marker); !os.IsNotExist(markerErr) {
+		t.Fatalf("plain-directory fixture executed ambient Git: %v", markerErr)
+	}
+	if err != nil || p.Root != root || p.Repository != "" || p.Worktree != "" {
+		t.Fatalf("plain-directory observation: %+v %v", p, err)
+	}
+}
 
 func TestLocalRegistryInspectionDoesNotCreateFiles(t *testing.T) {
 	a, _, home := localRegistryFixture(t)
@@ -113,7 +133,10 @@ func TestLocalRegistryObservationSeparatesAppliedState(t *testing.T) {
 	}
 }
 func TestLocalRegistryGitWorktreesAndSubdirectories(t *testing.T) {
+	searchPath := os.Getenv("PATH")
 	a, root, _ := localRegistryFixture(t)
+	// This test deliberately exercises real Git repository/worktree discovery.
+	t.Setenv("PATH", searchPath)
 	git := func(args ...string) string {
 		t.Helper()
 		c := exec.Command("git", args...)
