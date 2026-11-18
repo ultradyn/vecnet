@@ -139,9 +139,12 @@ var (
 
 func TestMain(m *testing.M) {
 	code := m.Run()
-	if cliFixtureSnapshotDir != "" {
-		if err := os.RemoveAll(cliFixtureSnapshotDir); err != nil {
-			fmt.Fprintf(os.Stderr, "remove CLI fixture snapshot directory: %v\n", err)
+	for _, dir := range []string{cliFixtureSnapshotDir, launcherFixtureNodeDir} {
+		if dir == "" {
+			continue
+		}
+		if err := os.RemoveAll(dir); err != nil {
+			fmt.Fprintf(os.Stderr, "remove CLI fixture image directory: %v\n", err)
 			code = 1
 		}
 	}

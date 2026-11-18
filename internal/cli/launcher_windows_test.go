@@ -67,16 +67,12 @@ func launcherUseFakeTasks(t *testing.T) *launcherFakeTasks {
 	t.Cleanup(func() { newLauncherTaskController = original })
 	return manager
 }
-func launcherWindowsFixture(t *testing.T) (launcherFixture, *app, *launcherFakeTasks, []string) {
+func launcherWindowsFixture(t *testing.T, nodeMode launcherFixtureNodeMode) (launcherFixture, *app, *launcherFakeTasks, []string) {
 	t.Helper()
 	manager := launcherUseFakeTasks(t)
 	f := newLauncherFixture(t, "launcher")
 	if code, _, errs := f.run(t, append(f.setup, "--write")...); code != 0 {
 		t.Fatal(errs)
-	}
-	node, err := exec.LookPath("node.exe")
-	if err != nil {
-		t.Fatal("native Windows Node is required for launcher install tests: ", err)
 	}
 	executable, err := os.Executable()
 	if err != nil {
@@ -103,29 +99,9 @@ func launcherWindowsFixture(t *testing.T) (launcherFixture, *app, *launcherFakeT
 	if closeErr != nil {
 		t.Fatal(closeErr)
 	}
-	// Stage a genuine Node image into this private fixture, so software/repair
-	// tests are independent of the machine's package-manager install ACLs.
-	nodeCopy := filepath.Join(f.env["HOME"], "private node", "node.exe")
-	if err = platform.MkdirAll(filepath.Dir(nodeCopy), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	input, err := os.Open(node)
+	nodeCopy, err := launcherFixtureNode(f.env["HOME"], nodeMode)
 	if err != nil {
-		t.Fatal(err)
-	}
-	output, err := platform.OpenFile(nodeCopy, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o700)
-	if err != nil {
-		input.Close()
-		t.Fatal(err)
-	}
-	_, err = io.Copy(output, input)
-	input.Close()
-	closeErr = output.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if closeErr != nil {
-		t.Fatal(closeErr)
+		t.Fatal("stage genuine Windows Node for launcher install tests: ", err)
 	}
 	args := []string{"install", "--source", launcherTestSource(t), "--node", nodeCopy, "--vecnet-bin", bin}
 	if code, _, errs := f.run(t, append(args, "--write")...); code != 0 {
@@ -136,7 +112,7 @@ func launcherWindowsFixture(t *testing.T) (launcherFixture, *app, *launcherFakeT
 }
 func launcherWindowsRepairFixture(t *testing.T, active, enabled bool) (launcherFixture, *app, *launcherFakeTasks, string, localArtifact) {
 	t.Helper()
-	f, a, manager, _ := launcherWindowsFixture(t)
+	f, a, manager, _ := launcherWindowsFixture(t, sharedLauncherNode)
 	path := filepath.Join(filepath.Dir(f.paths.Manifest), "managed.json")
 	var meta launcherManaged
 	if err := json.Unmarshal(launcherTestRead(t, path), &meta); err != nil {
@@ -241,7 +217,7 @@ func TestLauncherWindowsTaskDefinitionIsLiteralAndComplete(t *testing.T) {
 	}
 }
 func TestLauncherWindowsInstallPreviewAndExplicitIntent(t *testing.T) {
-	f, _, manager, args := launcherWindowsFixture(t)
+	f, _, manager, args := launcherWindowsFixture(t, sharedLauncherNode)
 	if manager.state.Active || manager.state.Enabled {
 		t.Fatal("implicit install enabled/started task")
 	}
@@ -429,7 +405,7 @@ func TestLauncherWindowsRepairRejectsTaskAndPublicationDrift(t *testing.T) {
 func TestLauncherWindowsInstallRejectsUnsafeDACLAndHardlinks(t *testing.T) {
 	for _, kind := range []string{"credential", "snapshot", "unit", "lock", "hardlink", "data-ancestor", "manifest-ancestor"} {
 		t.Run(kind, func(t *testing.T) {
-			f, _, manager, args := launcherWindowsFixture(t)
+			f, _, manager, args := launcherWindowsFixture(t, sharedLauncherNode)
 			var runtime launcherInstall
 			json.Unmarshal(launcherTestRead(t, f.paths.Manifest), &runtime)
 			path := map[string]string{"credential": f.paths.Credential, "snapshot": runtime.Entry, "unit": f.paths.Unit, "lock": f.paths.Manifest + ".lock", "hardlink": runtime.Entry, "data-ancestor": f.env["XDG_DATA_HOME"], "manifest-ancestor": f.env["XDG_CONFIG_HOME"]}[kind]
@@ -639,7 +615,7 @@ func TestLauncherWindowsLiveTaskScheduler(t *testing.T) {
 }
 
 func TestLauncherWindowsTaskControllerRejectsConcurrentChanges(t *testing.T) {
-	f, _, manager, args := launcherWindowsFixture(t)
+	f, _, manager, args := launcherWindowsFixture(t, sharedLauncherNode)
 	raw := launcherTestRead(t, f.paths.Unit)
 	prepare, err := (&app{ctx: context.Background(), getenv: func(k string) string { return f.env[k] }}).launcherWindowsPrepareInstall(f.paths, raw, false, false)
 	if err != nil {
@@ -806,7 +782,7 @@ func TestLauncherWindowsUnregisteredProfileDiscovery(t *testing.T) {
 func TestLauncherWindowsInstallRejectsUnsafeExecutableBeforeExecution(t *testing.T) {
 	for _, kind := range []string{"node-file", "node-parent", "cli-file", "cli-parent", "node-hardlink"} {
 		t.Run(kind, func(t *testing.T) {
-			f, _, manager, args := launcherWindowsFixture(t)
+			f, _, manager, args := launcherWindowsFixture(t, freshLauncherNode)
 			var installed launcherInstall
 			if err := launcherReadJSON(f.paths.Manifest, &installed); err != nil {
 				t.Fatal(err)
