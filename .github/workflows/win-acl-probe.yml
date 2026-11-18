@@ -1,48 +1,14 @@
-name: Disposable Windows inbox probe
+name: Disposable runner capacity probe
 on:
   push:
     branches: [ci80/r8-focused-probe]
 permissions:
   contents: read
-  actions: read
-concurrency:
-  group: ci80-r10-focused-probe
-  cancel-in-progress: true
-env:
-  GOMAXPROCS: '2'
 jobs:
-  focused:
-    timeout-minutes: 5
-    strategy:
-      fail-fast: false
-      matrix:
-        runner: [windows-2025, windows-11-arm]
-    runs-on: ${{ matrix.runner }}
+  capacity:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 1
     steps:
-      - name: Preserve LF
+      - name: Report actual allocated CPU and memory
         timeout-minutes: 1
-        run: git config --global core.autocrlf false
-      - uses: actions/checkout@v5
-        timeout-minutes: 1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@v6
-        timeout-minutes: 1
-        with:
-          node-version: '24'
-      - uses: actions/download-artifact@v5
-        timeout-minutes: 1
-        with:
-          name: go-tests-win32-${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
-          path: dist/go-tests
-          run-id: 44260174057
-          github-token: ${{ github.token }}
-      - name: Verify exact R9 source bundle and discover real native roots
-        timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/diagnostic-inbox.mjs prepare
-      - name: Unchanged inbox assertion in isolation
-        timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/diagnostic-inbox.mjs 1
-      - name: Unchanged inbox assertion under four-process load
-        timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/diagnostic-inbox.mjs 4
+        run: node -e "const os=require('node:os'); console.log(JSON.stringify({availableParallelism:os.availableParallelism(),cpus:os.cpus().length,totalMemoryBytes:os.totalmem(),platform:process.platform,arch:process.arch,node:process.version}));"
