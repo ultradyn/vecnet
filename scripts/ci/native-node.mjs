@@ -2,11 +2,14 @@
 import { execFileSync } from 'node:child_process';
 import { appendFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
 
 const identityProbe = 'JSON.stringify({version:process.version,arch:process.arch,platform:process.platform})';
 
 export async function selectNativeNode({ cache, arch, platform = process.platform, githubPath } = {}) {
+  // Share the existing strict step budget across cache lookup and all probes.
+  const deadline = performance.now() + 53_000;
   if (!cache || !githubPath || !['x64', 'arm64'].includes(arch) || !['linux', 'win32'].includes(platform)) {
     throw new Error('native Node cache context required: RUNNER_TOOL_CACHE, RUNNER_ARCH (X64/ARM64), GITHUB_PATH, and Linux or Windows');
   }
@@ -31,10 +34,12 @@ export async function selectNativeNode({ cache, arch, platform = process.platfor
     const slot = path.join(root, name, arch);
     const bin = platform === 'win32' ? slot : path.join(slot, 'bin');
     const executable = path.join(bin, platform === 'win32' ? 'node.exe' : 'node');
+    const remaining = Math.floor(deadline - performance.now());
+    if (remaining <= 0) throw new Error('native Node selection budget exhausted');
     let output;
     try {
       output = execFileSync(executable, ['-p', identityProbe], {
-        encoding: 'utf8', timeout: 10_000, killSignal: 'SIGKILL', windowsHide: true,
+        encoding: 'utf8', timeout: remaining, killSignal: 'SIGKILL', windowsHide: true,
       });
     } catch (error) {
       // Hosted images can have a newer version for a different architecture only.

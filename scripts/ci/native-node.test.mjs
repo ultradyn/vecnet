@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import childProcess, { spawnSync } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { syncBuiltinESMExports } from 'node:module';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { selectNativeNode } from './native-node.mjs';
@@ -35,6 +36,44 @@ async function executableFixture(cache, slot, identity, platform = 'linux') {
 function cli(env) {
   return spawnSync(process.execPath, [entry], { env, encoding: 'utf8', timeout: 15_000 });
 }
+
+function scaleProbeTimeout(t) {
+  // Scale the timeout 100-fold while keeping the real spawn/wait/kill lifecycle.
+  const execFileSync = childProcess.execFileSync;
+  t.mock.method(childProcess, 'execFileSync', (file, args, options) => execFileSync(file, args, {
+    ...options, timeout: Math.max(1, Math.floor(options.timeout / 100)),
+  }));
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+}
+
+test('a cold identity probe can use the selection budget beyond the old startup cutoff', linuxOnly, async t => {
+  const context = await fixture(t);
+  const { bin, executable } = await executableFixture(context.cache, '24.10.2/x64',
+    { version: 'v24.10.2', arch: 'x64', platform: 'linux' });
+  const script = await readFile(executable, 'utf8');
+  await writeFile(executable, script.replace('#!/bin/sh\n', '#!/bin/sh\nsleep 0.25\n'));
+  scaleProbeTimeout(t);
+  assert.equal(await selectNativeNode({ ...context, arch: 'x64', platform: 'linux' }), executable);
+  assert.equal(await readFile(context.githubPath, 'utf8'), `${originalPath}${bin}\n`);
+});
+
+test('an exhausted identity probe is killed without publishing PATH or falling back', linuxOnly, async t => {
+  const context = await fixture(t);
+  await executableFixture(context.cache, '24.9.0/x64', { version: 'v24.9.0', arch: 'x64', platform: 'linux' });
+  const { executable } = await executableFixture(context.cache, '24.10.2/x64',
+    { version: 'v24.10.2', arch: 'x64', platform: 'linux' });
+  await writeFile(executable, '#!/bin/sh\ntrap "" TERM\nwhile :; do :; done\n');
+  scaleProbeTimeout(t);
+  let failure;
+  await assert.rejects(selectNativeNode({ ...context, arch: 'x64', platform: 'linux' }), error => {
+    failure = error;
+    return error.code === 'ETIMEDOUT' && error.signal === 'SIGKILL';
+  });
+  assert.ok(failure.pid > 0);
+  assert.throws(() => process.kill(failure.pid, 0), { code: 'ESRCH' });
+  assert.equal(await readFile(context.githubPath, 'utf8'), originalPath);
+});
 
 test('CLI publishes highest available canonical Node 24 without invoking npm or yarn', linuxOnly, async t => {
   const { root, cache, githubPath } = await fixture(t);
