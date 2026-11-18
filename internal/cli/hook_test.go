@@ -87,7 +87,7 @@ func runHookFormatting(t *testing.T, env map[string]string, args ...string) (str
 	if err != nil || help || len(rest) == 0 || rest[0] != "hook" {
 		t.Fatalf("formatting hook args: %v, help=%v, rest=%v", err, help, rest)
 	}
-	a.hookRun(rest[1:], hookNow, func() {}, func(data []byte) error {
+	a.hookRun(rest[1:], hookNow, hookAfterPoll, func(data []byte) error {
 		_, err := out.Write(data)
 		return err
 	}, 0)
