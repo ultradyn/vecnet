@@ -92,16 +92,48 @@ function assertPrivateDiagnostic(invoke: () => void, sentinel: string, terminalE
   }
 }
 
+function isReadDenial(code: unknown, nativeWindows: boolean): boolean {
+  // Node's bundled libuv maps Windows ERROR_ACCESS_DENIED to UV_EPERM:
+  // https://github.com/nodejs/node/blob/v24.22.2/deps/uv/src/win/error.c#L158-L159
+  return code === 'EACCES' || (nativeWindows && code === 'EPERM');
+}
+
+test('read refusal classification admits only platform access-denial codes', () => {
+  for (const [code, nativeWindows, expected] of [
+    ['EACCES', false, true], ['EACCES', true, true],
+    ['EPERM', true, true], ['EPERM', false, false],
+    ['ENOENT', true, false], ['ENOTDIR', true, false], ['EIO', true, false],
+    ['EBUSY', true, false], ['UNKNOWN', true, false], ['NO_ERROR', true, false],
+    [undefined, true, false], [null, true, false], [0, true, false],
+    ['EACCES private-input-SENTINEL', true, false],
+  ] as const) assert.equal(isReadDenial(code, nativeWindows), expected, `denial classification case ${String(code)}`);
+});
+
 for (const kind of ['file ancestor', 'inaccessible read'] as const) {
   test(`private fixture parent probes redact real ${kind} refusals`, t => {
     const dir = sandbox(t), sentinel = 'F1-parent-path-SENTINEL', parent = join(dir, sentinel), probe = join(parent, 'child');
     const bytes = 'unchanged parent fixture bytes';
     let restore = () => {};
     let verifyRestored = () => {};
+    // Drain all checks even on setup/control/redaction failure. LIFO restores
+    // ACLs first, verifies every saved ACL next, then checks data before rm.
+    onCleanup(t, () => {
+      if (kind === 'file ancestor') assert.equal(readFileSync(parent, 'utf8'), bytes);
+      else {
+        assert.deepEqual(readdirSync(parent), ['child']); assert.deepEqual(readdirSync(probe), ['keep']);
+        assert.equal(readFileSync(join(probe, 'keep'), 'utf8'), bytes);
+        if (windows) localPlatform('check-private', probe, { directory: true });
+      }
+    });
+    onCleanup(t, () => verifyRestored());
+    onCleanup(t, () => restore());
     if (kind === 'file ancestor') writeFileSync(parent, bytes);
     else {
       makePrivateDirectory(probe); writePrivate(join(probe, 'keep'), bytes);
       if (windows) {
+        localPlatform('check-private', probe, { directory: true });
+        localPlatform('check-private', join(probe, 'keep'));
+        assert.equal(readFileSync(join(probe, 'keep'), 'utf8'), bytes);
         const identity = childProcess.spawnSync('whoami.exe', ['/user', '/fo', 'csv', '/nh'], { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
         const sid = identity.stdout?.match(/S-1-\d+(?:-\d+)+/)?.[0];
         assert.ok(identity.status === 0 && sid, 'fixture token identity lookup failed');
@@ -118,41 +150,40 @@ for (const kind of ['file ancestor', 'inaccessible read'] as const) {
           aclCommand([probe, '/save', restored, '/t', '/q']);
           assert.deepEqual(readFileSync(restored), readFileSync(acl), 'all owned ACLs must be restored exactly');
         };
-        try {
-          // Native-private children have protected DACLs: deny the actual
-          // read target explicitly before denying its container.
-          aclCommand([join(probe, 'keep'), '/deny', `*${sid}:(F)`, '/q']);
-          aclCommand([probe, '/deny', `*${sid}:(F)`, '/q']);
-        }
-        catch (error) { restore(); throw error; }
+        // Native-private children have protected DACLs: deny the actual
+        // read target explicitly before denying its container.
+        aclCommand([join(probe, 'keep'), '/deny', `*${sid}:(F)`, '/q']);
+        aclCommand([probe, '/deny', `*${sid}:(F)`, '/q']);
       } else {
         const mode = statSync(parent).mode & 0o777;
         chmodSync(parent, 0o000); restore = () => chmodSync(parent, mode);
       }
     }
-    try {
-      const errno = kind === 'file ancestor' ? windows ? 'ENOENT' : 'ENOTDIR' : 'EACCES';
-      const control = kind === 'inaccessible read' && windows ? () => readFileSync(join(probe, 'keep')) : () => lstatSync(probe);
-      assert.throws(control, (error: unknown) => (error as NodeJS.ErrnoException).code === errno,
+    const errno = kind === 'file ancestor' ? windows ? 'ENOENT' : 'ENOTDIR' : 'EACCES';
+    if (kind === 'inaccessible read') {
+      // Only a real failed read (not metadata lookup) is a native control.
+      let code: unknown = 'NO_ERROR';
+      try { if (windows) readFileSync(join(probe, 'keep')); else lstatSync(probe); }
+      catch (error) { code = (error as NodeJS.ErrnoException | undefined)?.code; }
+      // Never pass the raw error to assert: its path/message may be private.
+      const diagnostic = ['NO_ERROR', 'EACCES', 'EPERM', 'ENOENT', 'ENOTDIR', 'EIO', 'EBUSY', 'EBADF', 'EISDIR']
+        .find(known => known === code) ?? 'UNKNOWN';
+      if (windows) t.diagnostic(`native denied-read control code=${diagnostic}`);
+      assert.ok(isReadDenial(code, windows), `the control must reach a real access-denied read (code=${diagnostic})`);
+      if (windows) assert.equal(lstatSync(probe).isDirectory(), true, 'metadata lookup is not a denied file read');
+    } else {
+      assert.throws(() => lstatSync(probe), (error: unknown) => (error as NodeJS.ErrnoException).code === errno,
         'the control must reach the platform actual filesystem refusal');
-      if (kind === 'inaccessible read' && windows) assert.equal(lstatSync(probe).isDirectory(), true, 'metadata lookup is not a denied file read');
-      const descriptor = Object.getOwnPropertyDescriptor(process, 'platform')!;
-      try {
-        // Linux reaches real terminal lstat errors. Native Windows instead
-        // reaches the real helper's non-directory/inaccessible-parent open.
-        Object.defineProperty(process, 'platform', { ...descriptor, value: 'win32' });
-        for (const invoke of [() => writePrivate(join(probe, 'authority'), 'private-input-SENTINEL'), () => makePrivateDirectory(join(probe, 'directory'))]) {
-          assertPrivateDiagnostic(invoke, sentinel, windows ? undefined : errno);
-        }
-      } finally { Object.defineProperty(process, 'platform', descriptor); }
-    } finally { restore(); }
-    verifyRestored();
-    if (kind === 'file ancestor') assert.equal(readFileSync(parent, 'utf8'), bytes);
-    else {
-      assert.deepEqual(readdirSync(parent), ['child']); assert.deepEqual(readdirSync(probe), ['keep']);
-      assert.equal(readFileSync(join(probe, 'keep'), 'utf8'), bytes);
-      if (windows) localPlatform('check-private', probe, { directory: true });
     }
+    const descriptor = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    try {
+      // Linux reaches real terminal lstat errors. Native Windows instead
+      // reaches the real helper's non-directory/inaccessible-parent open.
+      Object.defineProperty(process, 'platform', { ...descriptor, value: 'win32' });
+      for (const invoke of [() => writePrivate(join(probe, 'authority'), 'private-input-SENTINEL'), () => makePrivateDirectory(join(probe, 'directory'))]) {
+        assertPrivateDiagnostic(invoke, sentinel, windows ? undefined : errno);
+      }
+    } finally { Object.defineProperty(process, 'platform', descriptor); }
   });
 }
 
