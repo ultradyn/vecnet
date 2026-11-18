@@ -10,7 +10,42 @@ import (
 	"testing"
 
 	"github.com/XertroV/vecnet/internal/platform"
+	"golang.org/x/sys/windows"
 )
+
+func launcherWindowsClosedHandleError(err error) bool {
+	// Windows File.Stat queries the native handle and may wrap ERROR_INVALID_HANDLE
+	// after Close instead of reporting os.ErrClosed.
+	return errors.Is(err, os.ErrClosed) || errors.Is(err, windows.ERROR_INVALID_HANDLE)
+}
+
+func TestLauncherWindowsDirectoryWalkPinClosureAssertion(t *testing.T) {
+	base, err := platform.MkdirTemp(t.TempDir(), "walk-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pin, err := platform.OpenDir(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pin.Close()
+	if _, err := pin.Stat(); err != nil {
+		t.Fatal(err)
+	} else if launcherWindowsClosedHandleError(err) {
+		t.Fatal("live pin accepted as closed")
+	}
+	if err := pin.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pin.Stat(); !launcherWindowsClosedHandleError(err) {
+		t.Fatalf("closed pin rejected: %v", err)
+	}
+	for _, err := range []error{os.ErrInvalid, os.ErrNotExist, windows.ERROR_ACCESS_DENIED} {
+		if launcherWindowsClosedHandleError(&os.PathError{Op: "stat", Path: base, Err: err}) {
+			t.Fatalf("unrelated error accepted as closed: %v", err)
+		}
+	}
+}
 
 func TestLauncherWindowsDirectoryWalkLinear(t *testing.T) {
 	base, err := platform.MkdirTemp(t.TempDir(), "walk-")
@@ -50,7 +85,7 @@ func TestLauncherWindowsDirectoryWalkLinear(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, pin := range pins {
-		if _, err := pin.Stat(); !errors.Is(err, os.ErrClosed) {
+		if _, err := pin.Stat(); !launcherWindowsClosedHandleError(err) {
 			t.Fatalf("pin retained after Close: %s: %v", pin.Name(), err)
 		}
 	}
@@ -98,7 +133,7 @@ func TestLauncherWindowsDirectoryWalkRejectsUnsafeChild(t *testing.T) {
 				t.Fatal("refusal did not exercise the directory walk")
 			}
 			for _, pin := range opened {
-				if _, err := pin.Stat(); !errors.Is(err, os.ErrClosed) {
+				if _, err := pin.Stat(); !launcherWindowsClosedHandleError(err) {
 					t.Fatalf("pin leaked after refusal: %s: %v", pin.Name(), err)
 				}
 			}
