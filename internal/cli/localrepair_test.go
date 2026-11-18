@@ -13,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -525,45 +526,66 @@ func TestLocalRepairConcurrentAdoptionRemainsPending(t *testing.T) {
 }
 
 func TestLocalStartupObservesWithoutInstallingAndAdoptsLegacyHooks(t *testing.T) {
-	a, root, _ := localRegistryFixture(t)
-	// This is a plain-directory project. Do not spend its bounded startup
-	// budget launching the host Git just to report that it is not a repo.
-	t.Setenv("PATH", t.TempDir())
-	var started int
-	a.localRepairStart = func(*exec.Cmd) error { started++; return nil }
-	a.localStartup([]string{"peers"})
-	projects, err := a.localProjects()
-	if err != nil || len(projects) != 1 {
-		t.Fatalf("%#v %v", projects, err)
-	}
-	if p := projects[0]; p.ObservedVersion != localSoftwareVersion() || p.AppliedVersion != "" || len(p.Artifacts) != 0 {
-		t.Fatalf("observation changed installation state: %#v", p)
-	}
-	if started != 0 {
-		t.Fatal("inventory-only observation installed integration")
-	}
-	path := filepath.Join(root, ".codex/hooks.json")
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatal("observation installed hooks")
-	}
-	if err := cliFixtureMkdirAll(filepath.Dir(path), 0700); err != nil {
-		t.Fatal(err)
-	}
-	raw := []byte(`{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"vecnet hook --profile old --event user-prompt","timeout":5}]}]}}`)
-	if err := cliFixtureWriteFile(path, raw, 0600); err != nil {
-		t.Fatal(err)
-	}
-	a.localStartup([]string{"peers"})
-	if started != 1 {
-		t.Fatalf("recognized stale integration did not schedule repair: %d", started)
-	}
-	projects, err = a.localProjects()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(projects[0].Artifacts) != 1 || projects[0].Artifacts[0].Version != "legacy" {
-		t.Fatalf("%#v", projects)
-	}
+	// Use logical time for observation/adoption assertions so cold private
+	// filesystem I/O cannot consume the production 200ms startup budget.
+	// synctest advances time only when the bubble is durably blocked.
+	synctest.Test(t, func(t *testing.T) {
+		a, root, _ := localRegistryFixture(t)
+		// This is a plain-directory project. Do not spend its bounded startup
+		// budget launching the host Git just to report that it is not a repo.
+		t.Setenv("PATH", t.TempDir())
+		var started int
+		a.localRepairStart = func(*exec.Cmd) error { started++; return nil }
+		a.localStartup([]string{"peers"})
+		projects, err := a.localProjects()
+		if err != nil || len(projects) != 1 {
+			t.Fatalf("%#v %v", projects, err)
+		}
+		if p := projects[0]; p.ObservedVersion != localSoftwareVersion() || p.AppliedVersion != "" || len(p.Artifacts) != 0 {
+			t.Fatalf("observation changed installation state: %#v", p)
+		}
+		if started != 0 {
+			t.Fatal("inventory-only observation installed integration")
+		}
+		path := filepath.Join(root, ".codex/hooks.json")
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatal("observation installed hooks")
+		}
+		if err := cliFixtureMkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		raw := []byte(`{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"vecnet hook --profile old --event user-prompt","timeout":5}]}]}}`)
+		if err := cliFixtureWriteFile(path, raw, 0600); err != nil {
+			t.Fatal(err)
+		}
+		a.localStartup([]string{"peers"})
+		if started != 1 {
+			t.Fatalf("recognized stale integration did not schedule repair: %d", started)
+		}
+		projects, err = a.localProjects()
+		if err != nil || len(projects) != 1 {
+			t.Fatalf("%#v %v", projects, err)
+		}
+		if len(projects[0].Artifacts) != 1 || projects[0].Artifacts[0].Version != "legacy" || projects[0].Artifacts[0].Path != path || projects[0].Artifacts[0].Kind != "codex-hooks" {
+			t.Fatalf("%#v", projects)
+		}
+		if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, raw) {
+			t.Fatalf("adoption changed hooks before repair: %q %v", got, err)
+		}
+		if err := a.repairLocalProjects(); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := os.ReadFile(path); err != nil || bytes.Contains(got, []byte("--profile old")) || !hasOwnedCodexHooks(got, localBinary()) {
+			t.Fatalf("legacy hooks were not repaired: %q %v", got, err)
+		}
+		projects, err = a.localProjects()
+		if err != nil || len(projects) != 1 {
+			t.Fatalf("%#v %v", projects, err)
+		}
+		if p := projects[0]; p.Status != "ready" || p.AppliedVersion != localSoftwareVersion() || len(p.Artifacts) != 1 || p.Artifacts[0].Version != localSoftwareVersion() {
+			t.Fatalf("repair did not publish applied integration: %#v", p)
+		}
+	})
 }
 
 func TestManagedHookRepairRejectsConcurrentUserEdit(t *testing.T) {
