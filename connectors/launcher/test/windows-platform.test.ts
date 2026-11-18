@@ -1,7 +1,7 @@
 import test from 'node:test';
 import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import childProcess from 'node:child_process';
+import childProcess, { spawn as builtinSpawn } from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 import fs from 'node:fs';
 import type { PathLike } from 'node:fs';
@@ -412,7 +412,9 @@ function mockLiveProcesses(t: TestContext, pipe: string) {
   return { helpers, children };
 }
 
-test('control proxy exit releases stranded stdout before the exact child close join', async t => {
+for (const refused of [false, true]) {
+test(refused ? 'control proxy synchronous admission refusal restores mocks, ESM bindings and streams' :
+  'control proxy exit releases stranded stdout before the exact child close join', async t => {
   const dir = sandbox(t), control = join(dir, 'app-server-control');
   makePrivateDirectory(control);
   const node = privateExecutable(dir, process.execPath, 'node.exe');
@@ -433,23 +435,46 @@ test('control proxy exit releases stranded stdout before the exact child close j
   // Reproduce Windows' observed tunnel destruction without stdout closure;
   // Linux Duplex.from otherwise forwards destruction and hides this leak.
   const tunnel = new PassThrough();
+  const originalFrom = Duplex.from;
   const from = t.mock.method(Duplex, 'from', () => tunnel);
-  const connecting = connectControlProxy(dir, { ...process.env, VECNET_CODEX_BIN: node });
-  const rejected = assert.rejects(connecting, /WebSocket/);
-  try {
-    stdin.destroy(); stderr.destroy();
-    assert.equal(stdout.destroyed, false); assert.equal(joined, false);
-    child.emit('exit', 0, null);
-    assert.equal(stdout.destroyed, true, 'exited control proxy must release its stranded stdout pipe');
-    assert.equal(joined, false, 'process exit is not the exact child close event');
-    await closed; await rejected;
-    assert.equal(stdout.closed, true); assert.equal(joined, true);
-  } finally {
-    stdin.destroy(); stdout.destroy(); stderr.destroy();
-    from.mock.restore(); mock.mock.restore(); syncBuiltinESMExports();
-    await rejected;
+  const exercise = async () => {
+    let rejected: Promise<void> | undefined;
+    try {
+      const connecting = connectControlProxy(dir, { ...process.env, VECNET_CODEX_BIN: refused ? join(dir, 'missing.exe') : node });
+      rejected = assert.rejects(connecting, /WebSocket/);
+      stdin.destroy(); stderr.destroy();
+      assert.equal(stdout.destroyed, false); assert.equal(joined, false);
+      child.emit('exit', 0, null);
+      assert.equal(stdout.destroyed, true, 'exited control proxy must release its stranded stdout pipe');
+      assert.equal(joined, false, 'process exit is not the exact child close event');
+      await closed; await rejected;
+      assert.equal(stdout.closed, true); assert.equal(joined, true);
+    } finally {
+      stdin.destroy(); stdout.destroy(); stderr.destroy(); tunnel.destroy();
+      from.mock.restore(); mock.mock.restore(); syncBuiltinESMExports();
+      await rejected;
+    }
+  };
+  if (!refused) await exercise();
+  else {
+    try {
+      await assert.rejects(exercise(), /codex_native_binary_unavailable/);
+      assert.equal(childProcess.spawn, spawn, 'synchronous refusal restores spawn property');
+      assert.equal(builtinSpawn, spawn, 'synchronous refusal resynchronizes builtin ESM spawn');
+      assert.equal(Duplex.from, originalFrom, 'synchronous refusal restores Duplex.from');
+      for (const stream of [stdin, stdout, stderr, tunnel]) {
+        assert.equal(stream.destroyed, true, 'synchronous refusal destroys prepared stream');
+      }
+      await closed;
+      for (const stream of [stdin, stdout, stderr, tunnel]) assert.equal(stream.closed, true);
+    } finally {
+      // Backstop the regression itself so a RED cannot pollute later tests.
+      stdin.destroy(); stdout.destroy(); stderr.destroy(); tunnel.destroy();
+      from.mock.restore(); mock.mock.restore(); syncBuiltinESMExports();
+    }
   }
 });
+}
 
 test('control proxy carries real WebSocket bytes and joins child close after transport shutdown', async t => {
   const dir = sandbox(t), fake = await startFakeCodexAppServer({ dir: join(dir, 'proxy') });
