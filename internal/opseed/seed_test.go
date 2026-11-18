@@ -3,6 +3,8 @@ package opseed_test
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -14,12 +16,58 @@ import (
 
 func seed(t *testing.T, scale bool) (*testhub.Env, opseed.Scenario) {
 	t.Helper()
+	return seedOptions(t, opseed.Options{Scale: scale})
+}
+
+func seedOptions(t *testing.T, options opseed.Options) (*testhub.Env, opseed.Scenario) {
+	t.Helper()
 	e := testhub.Start(t)
+	if options.Scale || options.Many {
+		// These serial, disposable NORMAL fixtures exercise real transactions,
+		// not checkpoint cadence. Avoid repeatedly flushing the same growing
+		// database while other CI packets are also writing. Checkpoint once
+		// before returning to the assertions, then restore the original pool.
+		poolSize := e.Hub.DB.Stats().MaxOpenConnections
+		e.Hub.DB.SetMaxOpenConns(1)
+		defer e.Hub.DB.SetMaxOpenConns(poolSize)
+		if count(t, e, "PRAGMA synchronous") != 1 || count(t, e, "PRAGMA wal_autocheckpoint") != 1000 {
+			t.Fatal("large seed requires the disposable NORMAL fixture with default checkpoints")
+		}
+		if _, err := e.Hub.DB.Exec("PRAGMA wal_autocheckpoint=0"); err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			// With no intervening checkpoint this file grows monotonically;
+			// its final size bounds the entire fixture's deferred WAL growth.
+			walPath := filepath.Join(e.Hub.Cfg.DataDir, "hub.db-wal")
+			const maxWALBytes = 128 << 20
+			if info, err := os.Stat(walPath); err != nil {
+				t.Error(err)
+			} else {
+				t.Logf("seed WAL before checkpoint: %d bytes (limit %d)", info.Size(), maxWALBytes)
+				if info.Size() > maxWALBytes {
+					t.Errorf("seed WAL exceeded %d bytes", maxWALBytes)
+				}
+			}
+			if _, err := e.Hub.DB.Exec("PRAGMA wal_autocheckpoint=1000"); err != nil {
+				t.Error(err)
+			}
+			var busy, pages, checkpointed int
+			if err := e.Hub.DB.QueryRow("PRAGMA wal_checkpoint(TRUNCATE)").Scan(&busy, &pages, &checkpointed); err != nil || busy != 0 || pages != checkpointed {
+				t.Errorf("seed checkpoint: busy=%d pages=%d checkpointed=%d: %v", busy, pages, checkpointed, err)
+			}
+			if info, err := os.Stat(walPath); err != nil {
+				t.Error(err)
+			} else if info.Size() != 0 {
+				t.Errorf("seed checkpoint left %d WAL bytes", info.Size())
+			}
+		}()
+	}
 	c, err := e.Hub.Auth.Resolve(context.Background(), e.OperatorSecret)
 	if err != nil {
 		t.Fatal(err)
 	}
-	s, err := opseed.Seed(context.Background(), e.Hub, c, opseed.Options{Scale: scale})
+	s, err := opseed.Seed(context.Background(), e.Hub, c, options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,15 +285,7 @@ func TestSeedRetryBlocksFollowingDelivery(t *testing.T) {
 }
 
 func TestSeedMany(t *testing.T) {
-	e := testhub.Start(t)
-	c, err := e.Hub.Auth.Resolve(context.Background(), e.OperatorSecret)
-	if err != nil {
-		t.Fatal(err)
-	}
-	s, err := opseed.Seed(context.Background(), e.Hub, c, opseed.Options{Many: true})
-	if err != nil {
-		t.Fatal(err)
-	}
+	e, s := seedOptions(t, opseed.Options{Many: true})
 	if len(s.Peers) < 60 || len(s.Threads) < 300 {
 		t.Fatalf("many fixture: %d peers, %d threads", len(s.Peers), len(s.Threads))
 	}
