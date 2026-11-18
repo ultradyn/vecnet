@@ -12,8 +12,11 @@ test('weighted dynamic files and case shards conserve new files without duplicat
  const profile={a:{seconds:80,shards:4},b:{seconds:30},c:{seconds:20}};
  const plan=planNode(files,profile);
  assert.equal(plan.length,4);
- assert.equal(plan.flat().filter(x=>x.file==='new').length,1);
- assert.deepEqual(plan.flat().filter(x=>x.file==='a').map(x=>x.shard).sort(),[0,1,2,3]);
+ const identities=plan.flat().map(({file,shard,shards})=>[file,shard,shards]);
+ assert.deepEqual(identities.sort(),[
+  ['a',0,4],['a',1,4],['a',2,4],['a',3,4],
+  ['b',0,1],['c',0,1],['new',0,1],
+ ].sort(),'complete file/shard/shards multiset');
  for(const tasks of plan)assert.equal(new Set(tasks.map(x=>x.file)).size,tasks.length);
  assert.deepEqual(planNode([...files].reverse(),profile),plan);
  assert.throws(()=>planNode(['a','a'],profile),/duplicate/);
@@ -23,21 +26,46 @@ test('weighted dynamic files and case shards conserve new files without duplicat
 test('actual Node registration shards execute dynamic roots, nested assertions and hooks exactly once, and propagate failure',async t=>{
  const cwd=await mkdtemp(path.join(os.tmpdir(),'node conserved '));t.after(()=>rm(cwd,{recursive:true,force:true}));
  const file=path.join(cwd,'cases.test.mjs');
- await writeFile(file,`import test, {it as named, before, after} from 'node:test';
+ await writeFile(file,`import test, {it as named, before, after, beforeEach} from 'node:test';
  import assert from 'node:assert/strict';
- before(()=>console.log('HOOK'));after(()=>console.log('AFTER'));
- for(let i=0;i<13;i++)(i%2?test:named)('dynamic '+i,async t=>{console.log('ROOT '+i);await t.test('nested',()=>{assert.notEqual(process.env.CI_FAIL_ROOT,String(i));});});
+ const record=(kind,id)=>console.log('EVENT '+JSON.stringify([kind,id]));
+ before(()=>record('global-before','worker'));after(()=>record('global-after','worker'));
+ beforeEach(async context=>{
+  await Promise.resolve();
+  record('before-each',context.name);
+  context.after(async()=>{await Promise.resolve();record('hook-cleanup',context.name);});
+ });
+ for(let i=0;i<13;i++)(i%2?test:named)('dynamic '+i,async context=>{
+  record('root',i);
+  context.after(()=>record('root-cleanup',i));
+  await context.test('nested '+i,async nested=>{
+   nested.after(()=>record('nested-cleanup',i));
+   assert.notEqual(process.env.CI_FAIL_ROOT,String(i));
+   record('nested-assertion',i);
+  });
+ });
  test.skip('original skip',()=>{throw Error('original skip ran')});
  `);
- const roots=[];
+ const events=[];
  const env={...process.env};delete env.NODE_TEST_CONTEXT;
  const preload=fileURLToPath(new URL('./node-shard-register.mjs',import.meta.url));
  for(let shard=0;shard<4;shard++){
   const output=execFileSync(process.execPath,['--import',preload,'--test','--test-reporter=tap',file],{env:{...env,CI_NODE_SHARD:String(shard),CI_NODE_SHARDS:'4'},encoding:'utf8'});
-  roots.push(...[...output.matchAll(/# ROOT (\d+)/g)].map(x=>Number(x[1])));
-  assert.match(output,/# HOOK/);assert.match(output,/# AFTER/);
+  const workerEvents=[...output.matchAll(/# EVENT (.+)/g)].map(m=>JSON.parse(m[1]));
+  for(const kind of ['global-before','global-after']){
+   assert.deepEqual(workerEvents.filter(([name])=>name===kind),[[kind,'worker']],`${kind} once per worker`);
+  }
+  events.push(...workerEvents.filter(([kind])=>!kind.startsWith('global-')));
  }
- assert.deepEqual(roots.sort((a,b)=>a-b),Array.from({length:13},(_,i)=>i));
+ const expected=[];
+ for(let i=0;i<13;i++){
+  for(const kind of ['root','nested-assertion','root-cleanup','nested-cleanup'])expected.push([kind,i]);
+  for(const name of ['dynamic '+i,'nested '+i]){
+   expected.push(['before-each',name],['hook-cleanup',name]);
+  }
+ }
+ const identities=rows=>rows.map(row=>JSON.stringify(row)).sort();
+ assert.deepEqual(identities(events),identities(expected),'every root, nested assertion and context cleanup exactly once');
  assert.throws(()=>execFileSync(process.execPath,['--import',preload,'--test',file],{env:{...env,CI_NODE_SHARD:'1',CI_NODE_SHARDS:'4',CI_FAIL_ROOT:'5'},encoding:'utf8',stdio:'pipe'}),e=>{assert.match(e.stdout,/not ok/);return true;});
  await writeFile(file,`import {describe,it} from 'node:test';describe('new suite',()=>it('must not disappear',()=>{}));`);
  assert.throws(()=>execFileSync(process.execPath,['--import',preload,'--test',file],{env:{...env,CI_NODE_SHARD:'0',CI_NODE_SHARDS:'4'},encoding:'utf8',stdio:'pipe'}),e=>{assert.match(e.stdout,/added a suite/);return true;});
