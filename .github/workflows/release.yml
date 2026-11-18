@@ -20,9 +20,11 @@ env:
   GOMAXPROCS: '2'
 
 jobs:
+  # Packing is independent of all suites. Every native consumer tests these
+  # exact checksum-bound bytes; only publishing waits for every test job.
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 4
     outputs:
       version: ${{ steps.package.outputs.version }}
       tag: ${{ steps.package.outputs.tag }}
@@ -30,48 +32,44 @@ jobs:
       tarball: ${{ steps.package.outputs.tarball }}
     steps:
       - uses: actions/checkout@v5
+        timeout-minutes: 1
         with:
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@v6
+        timeout-minutes: 1
         with:
           node-version: '24'
       - name: Resolve package version
         id: package
-        run: node scripts/npm/release.mjs info
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/npm/release.mjs info
       - name: Verify tag matches a version on master
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-        run: node scripts/npm/release.mjs check-tag "$GITHUB_REF_NAME"
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/npm/release.mjs check-tag "$GITHUB_REF_NAME"
       - uses: actions/setup-go@v6
+        timeout-minutes: 1
         with:
           go-version: '1.27.4'
           cache-dependency-path: go.sum
       - name: Pin npm for repeatable packaging and OIDC support
-        run: npm install --global npm@12.0.1 --ignore-scripts --no-audit --no-fund
-      - name: Test release guards and cross-platform wrappers
-        run: node --test --test-concurrency=2 scripts/npm/release.test.mjs scripts/npm/npm-command.test.mjs scripts/npm/wrapper.test.mjs scripts/npm/verify-artifact.test.mjs
-      - name: Test Go packages
-        run: go test -mod=readonly -p 2 -timeout=20m ./...
-      - name: Build native binaries for connector tests
-        run: go build -mod=readonly -p 2 -o bin/ ./cmd/vecnet ./cmd/vecnet-hub
-      - name: Test Node connectors
-        env:
-          VECNET_BIN: ${{ github.workspace }}/bin/vecnet
-        run: node --disable-warning=ExperimentalWarning --test --test-concurrency=2 "connectors/hub-client/test/*.test.ts" "connectors/launcher/test/*.test.ts" "connectors/launcher/test/backends/*.test.ts"
-      - name: Test Node connectors against a real hub
-        run: node --disable-warning=ExperimentalWarning --test --test-concurrency=1 "connectors/launcher/test/e2e/*.test.ts"
-      - name: Build and pack Linux and Windows on x64 and ARM64
-        run: |
-          node scripts/npm/build.mjs
-          npm pack ./dist/npm --pack-destination ./dist
-      - name: Test the packed package on x64
-        run: node --test --test-concurrency=2 scripts/npm/package.test.mjs
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 npm install --global npm@12.0.1 --ignore-scripts --no-audit --no-fund
+      - name: Build Linux and Windows x64 and ARM64 artifacts
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/npm/build.mjs
+      - name: Pack release
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 npm pack ./dist/npm --pack-destination ./dist
       - name: Record release checksum
         working-directory: dist
+        timeout-minutes: 1
         env:
           TARBALL: ${{ steps.package.outputs.tarball }}
         run: sha256sum "$TARBALL" > SHA256SUMS
       - uses: actions/upload-artifact@v4
+        timeout-minutes: 1
         with:
           name: npm-release
           path: |
@@ -80,120 +78,243 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-  test-arm64:
-    needs: build
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 10
+  test-go:
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [0, 1]
+        runner: [ubuntu-24.04, windows-2025, windows-11-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 4
     steps:
+      - name: Preserve LF asset bytes on Windows
+        if: runner.os == 'Windows'
+        timeout-minutes: 1
+        run: git config --global core.autocrlf false
       - uses: actions/checkout@v5
+        timeout-minutes: 1
         with:
           persist-credentials: false
       - uses: actions/setup-node@v6
+        timeout-minutes: 1
         with:
           node-version: '24'
-      - uses: actions/download-artifact@v5
+          architecture: ${{ contains(matrix.runner, 'arm') && 'arm64' || 'x64' }}
+      - uses: actions/setup-go@v6
+        timeout-minutes: 1
         with:
-          name: npm-release
-          path: dist
-      - name: Verify the artifact checksum
-        run: node scripts/npm/verify-artifact.mjs
-      - name: Test the same packed package on native ARM64
-        run: node --test --test-concurrency=2 scripts/npm/package.test.mjs
+          go-version: '1.27.4'
+          cache-dependency-path: go.sum
+      - name: Discover complete native Go inventory
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs discover-go
+      - name: Go group 1 of 8 (complete roots, examples and fuzz seeds)
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs go ${{ matrix.lane }} 0
+      - name: Go group 2 of 8 (complete roots, examples and fuzz seeds)
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs go ${{ matrix.lane }} 1
+      - name: Go group 3 of 8 (complete roots, examples and fuzz seeds)
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs go ${{ matrix.lane }} 2
+      - name: Go group 4 of 8 (complete roots, examples and fuzz seeds)
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs go ${{ matrix.lane }} 3
+      - name: Go group 5 of 8 (complete roots, examples and fuzz seeds)
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs go ${{ matrix.lane }} 4
+      - name: Go group 6 of 8 (complete roots, examples and fuzz seeds)
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs go ${{ matrix.lane }} 5
+      - name: Go group 7 of 8 (complete roots, examples and fuzz seeds)
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs go ${{ matrix.lane }} 6
+      - name: Go group 8 of 8 (complete roots, examples and fuzz seeds)
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs go ${{ matrix.lane }} 7
 
-  test-windows:
+  test-node:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, windows-2025, windows-11-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 4
+    env:
+      VECNET_BIN: ${{ github.workspace }}/bin/vecnet${{ startsWith(matrix.runner, 'windows') && '.exe' || '' }}
+    steps:
+      - name: Preserve LF asset bytes on Windows
+        if: runner.os == 'Windows'
+        timeout-minutes: 1
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v5
+        timeout-minutes: 1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        timeout-minutes: 1
+        with:
+          node-version: '24'
+          architecture: ${{ contains(matrix.runner, 'arm') && 'arm64' || 'x64' }}
+      - uses: actions/setup-go@v6
+        timeout-minutes: 1
+        with:
+          go-version: '1.27.4'
+          cache-dependency-path: go.sum
+      - name: Build fresh native binaries
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 go build -mod=readonly -p 2 -o bin/ ./cmd/vecnet ./cmd/vecnet-hub
+      - name: Test CI scheduling and deadlines
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node --test --test-concurrency=2 "scripts/ci/*.test.mjs"
+      - name: Test release guards and cross-platform wrappers
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node --test --test-concurrency=2 scripts/npm/release.test.mjs scripts/npm/npm-command.test.mjs scripts/npm/wrapper.test.mjs scripts/npm/verify-artifact.test.mjs
+      - name: Test read-only Windows artifact evidence helper
+        if: runner.os == 'Windows'
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 pwsh -NoProfile -File scripts/windows/Get-ArtifactEvidence.Tests.ps1
+      - name: node group 1 of 4
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs node 0 0
+      - name: node group 2 of 4
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs node 0 1
+      - name: node group 3 of 4
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs node 0 2
+      - name: node group 4 of 4
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs node 0 3
+
+  test-e2e:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, windows-2025, windows-11-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 4
+    env:
+      VECNET_BIN: ${{ github.workspace }}/bin/vecnet${{ startsWith(matrix.runner, 'windows') && '.exe' || '' }}
+    steps:
+      - name: Preserve LF asset bytes on Windows
+        if: runner.os == 'Windows'
+        timeout-minutes: 1
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v5
+        timeout-minutes: 1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        timeout-minutes: 1
+        with:
+          node-version: '24'
+          architecture: ${{ contains(matrix.runner, 'arm') && 'arm64' || 'x64' }}
+      - uses: actions/setup-go@v6
+        timeout-minutes: 1
+        with:
+          go-version: '1.27.4'
+          cache-dependency-path: go.sum
+      - name: Build fresh native binaries
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 go build -mod=readonly -p 2 -o bin/ ./cmd/vecnet ./cmd/vecnet-hub
+      - name: e2e group 1 of 4
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs e2e 0 0
+      - name: e2e group 2 of 4
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs e2e 0 1
+      - name: e2e group 3 of 4
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs e2e 0 2
+      - name: e2e group 4 of 4
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs e2e 0 3
+
+  test-artifact:
     needs: build
     strategy:
       fail-fast: false
       matrix:
         include:
+          - runner: ubuntu-24.04
+            arch: x64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
           - runner: windows-2025
             arch: x64
           - runner: windows-11-arm
             arch: arm64
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 75
+    timeout-minutes: 2
     steps:
-      - name: Preserve LF asset bytes for packed-source verification
-        shell: pwsh
+      - name: Preserve LF asset bytes on Windows
+        if: runner.os == 'Windows'
+        timeout-minutes: 1
         run: git config --global core.autocrlf false
       - uses: actions/checkout@v5
+        timeout-minutes: 1
         with:
           persist-credentials: false
       - uses: actions/setup-node@v6
+        timeout-minutes: 1
         with:
           node-version: '24'
-          architecture: ${{ matrix.arch }}
-      - uses: actions/setup-go@v6
-        with:
-          go-version: '1.27.4'
-          cache-dependency-path: go.sum
+          architecture: ${{ contains(matrix.runner, 'arm') && 'arm64' || 'x64' }}
       - name: Pin npm to the packaging version
-        run: npm install --global npm@12.0.1 --ignore-scripts --no-audit --no-fund
-      - name: Test release guards and cross-platform wrappers
-        run: node --test --test-concurrency=2 scripts/npm/release.test.mjs scripts/npm/npm-command.test.mjs scripts/npm/wrapper.test.mjs scripts/npm/verify-artifact.test.mjs
-      - name: Test read-only Windows artifact evidence helper
-        run: .\scripts\windows\Get-ArtifactEvidence.Tests.ps1
-      - name: Build native binaries for connector tests
-        run: go build -mod=readonly -p 2 -o bin/ ./cmd/vecnet ./cmd/vecnet-hub
-      - name: Test Node connectors on Windows
-        env:
-          VECNET_BIN: ${{ github.workspace }}/bin/vecnet.exe
-        run: node --disable-warning=ExperimentalWarning --test --test-concurrency=2 "connectors/hub-client/test/*.test.ts" "connectors/launcher/test/*.test.ts" "connectors/launcher/test/backends/*.test.ts"
-      - name: Test the full Go suite on Windows
-        run: go test -mod=readonly -p 2 -timeout=40m -json ./...
-      - name: Test Node connectors against a real hub on Windows
-        env:
-          VECNET_BIN: ${{ github.workspace }}/bin/vecnet.exe
-        run: node --disable-warning=ExperimentalWarning --test --test-concurrency=1 "connectors/launcher/test/e2e/*.test.ts"
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 npm install --global npm@12.0.1 --ignore-scripts --no-audit --no-fund
       - uses: actions/download-artifact@v5
+        timeout-minutes: 1
         with:
           name: npm-release
           path: dist
-      - name: Verify the identical packed artifact checksum
-        run: node scripts/npm/verify-artifact.mjs
-      - name: Test the same packed package on native Windows
-        run: node --test --test-concurrency=2 scripts/npm/package.test.mjs
+      - name: Verify identical packed artifact checksum
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/npm/verify-artifact.mjs
+      - name: Test the same package on the native platform
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node --test --test-concurrency=2 scripts/npm/package.test.mjs
 
   publish:
-    needs: [build, test-arm64, test-windows]
+    needs: [build, test-go, test-node, test-e2e, test-artifact]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 4
     permissions:
       contents: write
       id-token: write
     steps:
-      - uses: actions/checkout@v5
+      - timeout-minutes: 1
+        uses: actions/checkout@v5
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v6
+      - timeout-minutes: 1
+        uses: actions/setup-node@v6
         with:
           node-version: '24'
-      - name: Set up npm trusted publishing
-        run: npm install --global npm@12.0.1 --ignore-scripts --no-audit --no-fund
-      - uses: actions/download-artifact@v5
+      - timeout-minutes: 1
+        name: Set up npm trusted publishing
+        run: node scripts/ci/budget.mjs 53000 npm install --global npm@12.0.1 --ignore-scripts --no-audit --no-fund
+      - timeout-minutes: 1
+        uses: actions/download-artifact@v5
         with:
           name: npm-release
           path: dist
-      - name: Verify the tested artifact checksum
-        run: node scripts/npm/verify-artifact.mjs
-      - name: Publish the tested tarball through OIDC
+      - timeout-minutes: 1
+        name: Verify the tested artifact checksum
+        run: node scripts/ci/budget.mjs 53000 node scripts/npm/verify-artifact.mjs
+      - timeout-minutes: 1
+        name: Publish the tested tarball through OIDC
         env:
           # npm provenance requires a public source repository.
           NPM_CONFIG_PROVENANCE: ${{ github.event.repository.private == false }}
-        run: node scripts/npm/release.mjs publish
-      - name: Create or finish the GitHub Release
+        run: node scripts/ci/budget.mjs 53000 node scripts/npm/release.mjs publish
+      - timeout-minutes: 1
+        name: Create or finish the GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.build.outputs.tag }}
           TARBALL: ${{ needs.build.outputs.tarball }}
           NPM_TAG: ${{ needs.build.outputs.npm-tag }}
-        run: |
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" "dist/$TARBALL" dist/SHA256SUMS --clobber
-          else
-            flags=()
-            if [ "$NPM_TAG" = next ]; then flags+=(--prerelease); fi
-            gh release create "$TAG" "dist/$TARBALL" dist/SHA256SUMS \
-              --verify-tag --title "$TAG" --generate-notes "${flags[@]}"
-          fi
+        run: node scripts/ci/budget.mjs 53000 bash scripts/ci/github-release.sh
