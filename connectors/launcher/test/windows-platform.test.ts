@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { once } from 'node:events';
+import { createConnection } from 'node:net';
 import { localPlatform, readPrivateFileSync } from '../src/private-files.ts';
 import { readCredential } from '../src/daemon.ts';
 import { CODEX_RELOAD_MS, codexBindingsPath, codexRecoveryPath, startCodexConnector } from '../src/codex/connector.ts';
@@ -24,32 +25,105 @@ import { harness, until } from './daemon-harness.ts';
 import { fixtureSpawn } from './fixtures/connector-process.mjs';
 
 const windows = process.platform === 'win32';
-function sandbox(t: { after(fn: () => void): void }) {
+type Cleanup = () => void | Promise<void>;
+type CleanupContext = Pick<TestContext, 'after'>;
+const cleanups = new WeakMap<CleanupContext, Cleanup[]>();
+/** Node after hooks are FIFO. Stop owners and join children before closing
+ * their servers or deleting private paths, including failed setup/assertions. */
+function onCleanup(t: CleanupContext, close: Cleanup): void {
+  let stack = cleanups.get(t);
+  if (!stack) {
+    stack = []; cleanups.set(t, stack);
+    t.after(async () => {
+      const errors: unknown[] = [];
+      for (const cleanup of stack!.reverse()) {
+        try { await cleanup(); } catch (error) { errors.push(error); }
+      }
+      if (errors.length) throw new AggregateError(errors, 'owned fixture cleanup failed');
+    });
+  }
+  stack.push(close);
+}
+function sandbox(t: CleanupContext) {
   const root = mkdtempSync(join(tmpdir(), 'vecnet-native-')), dir = join(root, 'private');
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  onCleanup(t, () => rmSync(root, { recursive: true, force: true }));
   makePrivateDirectory(dir); return realpathSync.native(dir);
 }
 
-for (const kind of ['ENOTDIR', 'EACCES'] as const) {
-  test(`private fixture parent probes redact real ${kind} errors`, t => {
+/** Populate an empty native-created inode rather than copying a public owner
+ * or exceeding the helper's unchanged 1 MiB stdin cap with executable bytes. */
+function privateExecutable(dir: string, source: string, name: string): string {
+  const executable = join(dir, name);
+  assert.throws(() => lstatSync(executable), { code: 'ENOENT' });
+  writePrivate(executable, '');
+  localPlatform('check-private', executable);
+  const seed = statSync(executable, { bigint: true }), bytes = readFileSync(source);
+  assert.equal(seed.size, 0n);
+  writeFileSync(executable, bytes, { flag: 'r+' });
+  if (!windows) chmodSync(executable, 0o700);
+  const populated = statSync(executable, { bigint: true });
+  assert.equal(populated.dev, seed.dev); assert.equal(populated.ino, seed.ino);
+  assert.equal(populated.size, BigInt(bytes.length)); assert.deepEqual(readFileSync(executable), bytes);
+  localPlatform('check-private', executable); localPlatform('check-safe', executable);
+  return executable;
+}
+
+function assertPrivateDiagnostic(invoke: () => void, sentinel: string, terminalErrno?: string): void {
+  let failure: unknown;
+  try { invoke(); } catch (error) { failure = error; }
+  assert.ok(failure instanceof Error, 'unsafe parent must refuse fixture creation');
+  const own = Object.fromEntries(Object.getOwnPropertyNames(failure).map(key => [key, Reflect.get(failure, key)]));
+  const serialized = JSON.stringify(own, (_key, value) => value instanceof Error
+    ? Object.fromEntries(Object.getOwnPropertyNames(value).map(key => [key, Reflect.get(value, key)])) : value);
+  assert.equal(serialized.includes(sentinel), false, 'serialized own/nonenumerable diagnostics must omit the parent path');
+  assert.equal(serialized.includes('private-input-SENTINEL'), false);
+  assert.equal('path' in failure, false); assert.equal('cause' in failure, false);
+  assert.deepEqual(Object.getOwnPropertyNames(failure).sort(), ['message', 'stack']);
+  if (terminalErrno) assert.deepEqual(JSON.parse(failure.message), { operation: 'lstat', errno: terminalErrno });
+  else {
+    const prefix = 'native private fixture failed: ';
+    assert.ok(failure.message.startsWith(prefix));
+    const metadata = JSON.parse(failure.message.slice(prefix.length));
+    assert.deepEqual(Object.keys(metadata).sort(), ['absoluteBinary', 'batch', 'command', 'configuredBinary', 'errno', 'inputBytes', 'outputBytes', 'signal', 'status']);
+    assert.equal(metadata.command, 'check-safe'); assert.equal(metadata.status, 1);
+    assert.equal(metadata.signal, null); assert.equal(metadata.errno, null);
+    assert.equal(metadata.inputBytes, 0); assert.equal(metadata.outputBytes, 0);
+    assert.equal(metadata.configuredBinary, true); assert.equal(metadata.absoluteBinary, true); assert.equal(metadata.batch, false);
+  }
+}
+
+for (const kind of ['file ancestor', 'inaccessible read'] as const) {
+  test(`private fixture parent probes redact real ${kind} refusals`, t => {
     const dir = sandbox(t), sentinel = 'F1-parent-path-SENTINEL', parent = join(dir, sentinel), probe = join(parent, 'child');
     const bytes = 'unchanged parent fixture bytes';
     let restore = () => {};
-    if (kind === 'ENOTDIR') writeFileSync(parent, bytes);
+    let verifyRestored = () => {};
+    if (kind === 'file ancestor') writeFileSync(parent, bytes);
     else {
       makePrivateDirectory(probe); writePrivate(join(probe, 'keep'), bytes);
       if (windows) {
         const identity = childProcess.spawnSync('whoami.exe', ['/user', '/fo', 'csv', '/nh'], { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
         const sid = identity.stdout?.match(/S-1-\d+(?:-\d+)+/)?.[0];
         assert.ok(identity.status === 0 && sid, 'fixture token identity lookup failed');
-        const acl = join(dir, 'saved-acl');
+        const acl = join(dir, 'saved-acl'), restored = join(dir, 'restored-acl');
         const aclCommand = (args: string[]) => {
           const result = childProcess.spawnSync('icacls.exe', args, { windowsHide: true, stdio: 'ignore' });
           assert.equal(result.status, 0, 'fixture ACL operation failed');
         };
-        aclCommand([probe, '/save', acl, '/q']);
+        // Save every owned descendant before explicit deny ACEs. Node
+        // lstat can query metadata despite deny; assert a real denied read.
+        aclCommand([probe, '/save', acl, '/t', '/q']);
         restore = () => aclCommand([dirname(probe), '/restore', acl, '/q']);
-        try { aclCommand([probe, '/deny', `*${sid}:(F)`, '/q']); }
+        verifyRestored = () => {
+          aclCommand([probe, '/save', restored, '/t', '/q']);
+          assert.deepEqual(readFileSync(restored), readFileSync(acl), 'all owned ACLs must be restored exactly');
+        };
+        try {
+          // Native-private children have protected DACLs: deny the actual
+          // read target explicitly before denying its container.
+          aclCommand([join(probe, 'keep'), '/deny', `*${sid}:(F)`, '/q']);
+          aclCommand([probe, '/deny', `*${sid}:(F)`, '/q']);
+        }
         catch (error) { restore(); throw error; }
       } else {
         const mode = statSync(parent).mode & 0o777;
@@ -57,29 +131,23 @@ for (const kind of ['ENOTDIR', 'EACCES'] as const) {
       }
     }
     try {
-      assert.throws(() => lstatSync(probe), (error: unknown) => (error as NodeJS.ErrnoException).code === kind,
-        'the control must reach a real filesystem refusal');
+      const errno = kind === 'file ancestor' ? windows ? 'ENOENT' : 'ENOTDIR' : 'EACCES';
+      const control = kind === 'inaccessible read' && windows ? () => readFileSync(join(probe, 'keep')) : () => lstatSync(probe);
+      assert.throws(control, (error: unknown) => (error as NodeJS.ErrnoException).code === errno,
+        'the control must reach the platform actual filesystem refusal');
+      if (kind === 'inaccessible read' && windows) assert.equal(lstatSync(probe).isDirectory(), true, 'metadata lookup is not a denied file read');
       const descriptor = Object.getOwnPropertyDescriptor(process, 'platform')!;
       try {
-        // Linux exercises the Windows fixture branch only up to its real
-        // failing lstat. No native helper result or ACL success is mocked.
+        // Linux reaches real terminal lstat errors. Native Windows instead
+        // reaches the real helper's non-directory/inaccessible-parent open.
         Object.defineProperty(process, 'platform', { ...descriptor, value: 'win32' });
         for (const invoke of [() => writePrivate(join(probe, 'authority'), 'private-input-SENTINEL'), () => makePrivateDirectory(join(probe, 'directory'))]) {
-          let failure: unknown;
-          try { invoke(); } catch (error) { failure = error; }
-          assert.ok(failure instanceof Error, 'unsafe parent must refuse fixture creation');
-          const own = Object.fromEntries(Object.getOwnPropertyNames(failure).map(key => [key, Reflect.get(failure, key)]));
-          const serialized = JSON.stringify(own, (_key, value) => value instanceof Error
-            ? Object.fromEntries(Object.getOwnPropertyNames(value).map(key => [key, Reflect.get(value, key)])) : value);
-          assert.equal(serialized.includes(sentinel), false, 'serialized own/nonenumerable diagnostics must omit the parent path');
-          assert.equal(serialized.includes('private-input-SENTINEL'), false);
-          assert.equal('path' in failure, false); assert.equal('cause' in failure, false);
-          assert.deepEqual(JSON.parse(failure.message), { operation: 'lstat', errno: kind });
-          assert.deepEqual(Object.getOwnPropertyNames(failure).sort(), ['message', 'stack']);
+          assertPrivateDiagnostic(invoke, sentinel, windows ? undefined : errno);
         }
       } finally { Object.defineProperty(process, 'platform', descriptor); }
     } finally { restore(); }
-    if (kind === 'ENOTDIR') assert.equal(readFileSync(parent, 'utf8'), bytes);
+    verifyRestored();
+    if (kind === 'file ancestor') assert.equal(readFileSync(parent, 'utf8'), bytes);
     else {
       assert.deepEqual(readdirSync(parent), ['child']); assert.deepEqual(readdirSync(probe), ['keep']);
       assert.equal(readFileSync(join(probe, 'keep'), 'utf8'), bytes);
@@ -87,6 +155,41 @@ for (const kind of ['ENOTDIR', 'EACCES'] as const) {
     }
   });
 }
+
+test('private executable fixture preserves bytes and identity through native validation', t => {
+  const dir = sandbox(t), executable = privateExecutable(dir, process.execPath, windows ? 'owned-node.exe' : 'owned-node');
+  const result = childProcess.spawnSync(executable, ['--version'], { encoding: 'utf8', windowsHide: true });
+  assert.equal(result.status, 0); assert.equal(result.stdout.trim(), process.version);
+  assert.throws(() => privateExecutable(dir, process.execPath, windows ? 'owned-node.exe' : 'owned-node'),
+    'an existing executable must never be overwritten');
+});
+
+test('owned fixture cleanup reverses acquisition and still drains after a failure', async () => {
+  const after: (() => void | Promise<void>)[] = [], order: string[] = [];
+  const context: CleanupContext = { after: close => { after.push(() => close(undefined as unknown as TestContext)); } };
+  const dir = sandbox(context);
+  onCleanup(context, () => { order.push('root'); });
+  try {
+    const fake = await startFakeCodexAppServer({ dir: join(dir, 'fake') });
+    onCleanup(context, async () => { order.push('server'); await fake.close(); });
+    const child = childProcess.spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+    const closed = new Promise<void>(resolve => child.once('close', () => resolve()));
+    onCleanup(context, async () => {
+      order.push('process');
+      if (child.exitCode === null && child.signalCode === null) child.kill();
+      await closed; throw new Error('controlled cleanup failure');
+    });
+    await once(child, 'spawn');
+    const socket = createConnection(windows ? fake.socketPath : realpathSync(fake.socketPath));
+    onCleanup(context, () => { order.push('connector'); socket.destroy(); });
+    await once(socket, 'connect');
+    assert.equal(after.length, 1);
+  } finally {
+    await assert.rejects(async () => after[0](), AggregateError);
+  }
+  assert.deepEqual(order, ['connector', 'process', 'server', 'root']);
+  assert.equal(existsSync(dirname(dir)), false, 'owned root is deleted only after socket/server and child close');
+});
 
 test('Windows DACL reads enforce private ownership for credentials and bindings; no chmod bypass', { skip: !windows }, async t => {
   const dir = sandbox(t), credential = join(dir, 'credential'), bindings = join(dir, 'bindings.json');
@@ -132,10 +235,10 @@ test('Windows publisher observes native helper loss and cannot publish or delete
     if ((args[1] as string[]).includes('lock')) helper = child;
     return child;
   }); syncBuiltinESMExports();
-  t.after(() => { mock.mock.restore(); syncBuiltinESMExports(); });
+  onCleanup(t, () => { mock.mock.restore(); syncBuiltinESMExports(); });
   let lost = 0;
-  const publisher = await openStatusPublisher(path, -1, { onLost() { lost++; } }); assert.ok(publisher); assert.ok(helper);
-  t.after(() => publisher.close()); publisher.publish(0, []);
+  const publisher = await openStatusPublisher(path, -1, { onLost() { lost++; } });
+  onCleanup(t, async () => { await publisher?.close(); }); assert.ok(publisher); assert.ok(helper); publisher.publish(0, []);
   const died = once(helper, 'close'); helper.kill(); await died;
   assert.equal(lost, 1); assert.equal(publisher.valid(), false); assert.throws(() => publisher.publish(1, []));
   const next = await openStatusPublisher(path, -1); assert.ok(next);
@@ -145,9 +248,12 @@ test('Windows publisher observes native helper loss and cannot publish or delete
 
 /** Live exact-root fixtures; native DACL checks and the held lock stay real. */
 async function liveBinding(t: TestContext) {
-  const home = sandbox(t), env = { ...process.env, HOME: home, VECNET_CODEX_BIN: process.execPath };
+  const home = sandbox(t);
+  const node = privateExecutable(home, process.execPath, 'node.exe');
+  const cli = privateExecutable(home, process.env.VECNET_BIN!, 'vecnet.exe');
+  const env = { ...process.env, HOME: home, VECNET_BIN: cli, VECNET_CODEX_BIN: node };
   const fake = await startFakeCodexAppServer({ dir: join(home, 'fake') });
-  t.after(() => fake.close());
+  onCleanup(t, () => fake.close());
   const codexHome = join(home, 'codex'), control = join(codexHome, 'app-server-control');
   makePrivateDirectory(control); writePrivate(join(control, 'app-server-control.sock'), 'fixture only');
   const path = codexBindingsPath(env)!, config = join(home, 'config.json'), trace = join(home, 'trace'), claims = join(home, 'claims');
@@ -164,16 +270,22 @@ async function liveBinding(t: TestContext) {
   const status = () => { try { return JSON.parse(readFileSync(path + '.status.json', 'utf8')); } catch { return undefined; } };
   const ready = () => status()?.bindings?.some((b: any) => b.thread_id === id && b.generation === owner.generation && b.state === 'ready' && b.liveness.live === true) === true;
   const watches = () => readFileSync(trace, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line)).filter(r => r.watchRevision === 0).length;
-  return { home, env, fake, path, id, status, ready, watches };
+  return { home, env, node, fake, path, id, status, ready, watches };
 }
 
 function mockLiveProcesses(t: TestContext, pipe: string) {
   const helpers: childProcess.ChildProcess[] = [], children: childProcess.ChildProcess[] = [];
+  const closed: Promise<void>[] = [];
+  onCleanup(t, async () => {
+    for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill();
+    await Promise.all(closed);
+  });
   const run = fixtureSpawn(childProcess.spawn, { pipe, onLock: (child: childProcess.ChildProcess) => helpers.push(child) });
   const mock = t.mock.method(childProcess, 'spawn', (...args: Parameters<typeof childProcess.spawn>) => {
-    const child = run(...args); children.push(child); return child;
+    const child = run(...args); children.push(child);
+    closed.push(new Promise(resolve => child.once('close', () => resolve()))); return child;
   }); syncBuiltinESMExports();
-  t.after(() => { mock.mock.restore(); syncBuiltinESMExports(); });
+  onCleanup(t, () => { mock.mock.restore(); syncBuiltinESMExports(); });
   return { helpers, children };
 }
 
@@ -181,7 +293,7 @@ test('Windows live connector exposes fatal helper loss only after fencing, and a
   const s = await liveBinding(t), { helpers, children } = mockLiveProcesses(t, s.fake.socketPath);
   const clock = fakeClock(Date.now()), log = memoryLog(), reports: { reason?: string }[] = [];
   const start = () => startCodexConnector({ env: s.env, log, clock, postRuntimeStatus: async (_b, snapshot) => { reports.push(snapshot); return true; } });
-  const first = start(); t.after(() => first.stop());
+  const first = start(); onCleanup(t, () => first.stop());
   await until(() => s.watches() === 1 && s.fake.subscribers(s.id).length === 1, 'live bound watch and subscription');
   clock.advance(CODEX_RELOAD_MS); await until(s.ready, 'ready live binding before helper death');
   const oldSubscriber = s.fake.subscribers(s.id)[0], firstChildren = [...children]; assert.equal(helpers.length, 1);
@@ -192,7 +304,7 @@ test('Windows live connector exposes fatal helper loss only after fencing, and a
   assert.equal(reports.some(r => r.reason === 'stopped'), false, 'no offline report after singleton loss');
   const count = children.length; clock.advance(CODEX_RELOAD_MS * 2);
   assert.equal(children.length, count, 'old connector never self-revives without a singleton');
-  const second = start(); t.after(() => second.stop());
+  const second = start(); onCleanup(t, () => second.stop());
   await until(() => s.watches() === 2 && s.fake.subscribers(s.id).length === 1, 'replacement live binding');
   assert.notEqual(s.fake.subscribers(s.id)[0], oldSubscriber); assert.equal(helpers.length, 2);
   clock.advance(CODEX_RELOAD_MS); await until(s.ready, 'replacement readiness');
@@ -205,13 +317,19 @@ test('Windows live connector exposes fatal helper loss only after fencing, and a
 test('Windows standalone live runner exits 1 on actual helper death and restarts ready, normal stop remains exit 0', { skip: !windows, timeout: 15000 }, async t => {
   const s = await liveBinding(t), pidFile = join(s.home, 'helper.pid');
   const children: childProcess.ChildProcess[] = [];
-  t.after(() => { for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill(); });
+  const closed: Promise<unknown>[] = [];
+  onCleanup(t, async () => {
+    for (const child of children) if (child.exitCode === null && child.signalCode === null) {
+      if (child.connected) child.send('stop'); else child.kill();
+    }
+    await Promise.all(closed);
+  });
   function launch() {
-    const child = childProcess.spawn(process.execPath, ['--disable-warning=ExperimentalWarning', fileURLToPath(new URL('./fixtures/connector-process.mjs', import.meta.url))],
+    const child = childProcess.spawn(s.node, ['--disable-warning=ExperimentalWarning', fileURLToPath(new URL('./fixtures/connector-process.mjs', import.meta.url))],
       { env: { ...s.env, FAKE_CODEX_PROXY_PIPE: s.fake.socketPath, FAKE_LOCK_PID_FILE: pidFile }, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
     children.push(child);
     let stderr = ''; child.stderr!.on('data', part => { stderr += part; });
-    const closed = once(child, 'close'); return { child, closed, stderr: () => stderr };
+    const done = once(child, 'close'); closed.push(done); return { child, closed: done, stderr: () => stderr };
   }
   const first = launch();
   await until(() => s.ready() && s.watches() === 1 || first.child.exitCode !== null, 'standalone live readiness');
@@ -231,8 +349,15 @@ test('Windows standalone live runner exits 1 on actual helper death and restarts
 
 test('Windows embedded live helper loss stops the launcher nonzero, then a fresh launcher becomes ready', { skip: !windows, timeout: 15000 }, async t => {
   const s = await liveBinding(t), { helpers } = mockLiveProcesses(t, s.fake.socketPath);
-  const previousExit = process.exitCode; t.after(() => { process.exitCode = previousExit; });
-  const h = await harness(t, { env: s.env });
+  const previousExit = process.exitCode; onCleanup(t, () => { process.exitCode = previousExit; });
+  const daemonCleanup: (() => void | Promise<void>)[] = [];
+  onCleanup(t, async () => {
+    // The harness owns its stop-before-delete callback, then its fake hub.
+    const errors: unknown[] = [];
+    for (const close of daemonCleanup) { try { await close(); } catch (error) { errors.push(error); } }
+    if (errors.length) throw new AggregateError(errors, 'daemon fixture cleanup failed');
+  });
+  const h = await harness({ after: close => { daemonCleanup.push(() => close(t)); } }, { env: s.env });
   await until(() => s.watches() === 1 && s.fake.subscribers(s.id).length === 1, 'embedded live binding');
   h.clock.advance(CODEX_RELOAD_MS); await until(s.ready, 'embedded readiness');
   helpers[0].kill(); await h.daemon.stopped; // no signal and no explicit stop
@@ -248,11 +373,16 @@ test('Windows embedded live helper loss stops the launcher nonzero, then a fresh
 
 for (const [name, open] of [['exact-root delivery', openDeliveryRpc], ['launcher backend', openBackendRpc]] as const) {
   test(`Windows ${name} uses proxy-only binary RFC6455 tunnel to the existing server`, { skip: !windows, timeout: 10000 }, async t => {
-    const dir = sandbox(t), fake = await startFakeCodexAppServer({ dir: join(dir, 'fake') }); t.after(() => fake.close());
+    const dir = sandbox(t), fake = await startFakeCodexAppServer({ dir: join(dir, 'fake') }); onCleanup(t, () => fake.close());
     fake.setThread({ id: 'exact-root', status: { type: 'active', activeFlags: [] } });
+    const node = privateExecutable(dir, process.execPath, 'node.exe');
     const home = join(dir, 'home'), control = join(home, 'app-server-control'); makePrivateDirectory(control);
     writePrivate(join(control, 'app-server-control.sock'), 'fixture only');
-    const spawn = childProcess.spawn, calls: string[][] = [];
+    const spawn = childProcess.spawn, calls: string[][] = [], children: childProcess.ChildProcess[] = [], closed: Promise<void>[] = [];
+    onCleanup(t, async () => {
+      for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill();
+      await Promise.all(closed);
+    });
     const mock = t.mock.method(childProcess, 'spawn', (...args: Parameters<typeof spawn>) => {
       const argv = args[1] as string[];
       if (argv[0] === 'app-server') {
@@ -263,14 +393,15 @@ for (const [name, open] of [['exact-root delivery', openDeliveryRpc], ['launcher
         assert.equal(options.env?.CODEX_THREAD_ID, undefined);
         assert.equal(options.env?.OPENAI_API_KEY, undefined);
         assert.equal(options.env?.VECNET_TOKEN, undefined);
-        return spawn(process.execPath, [fileURLToPath(new URL('./fixtures/fake-codex-proxy.mjs', import.meta.url))],
+        const child = spawn(node, [fileURLToPath(new URL('./fixtures/fake-codex-proxy.mjs', import.meta.url))],
           { ...options, env: { ...options.env, FAKE_CODEX_PROXY_PIPE: fake.socketPath } });
+        children.push(child); closed.push(new Promise(resolve => child.once('close', () => resolve()))); return child;
       }
       return Reflect.apply(spawn, childProcess, args);
     }); syncBuiltinESMExports();
-    t.after(() => { mock.mock.restore(); syncBuiltinESMExports(); });
-    const rpc = await open({ codexHome: home, euid: -1, log: memoryLog(), timeoutMs: 1000, env: { ...process.env, VECNET_CODEX_BIN: process.execPath } });
-    t.after(() => rpc.close());
+    onCleanup(t, () => { mock.mock.restore(); syncBuiltinESMExports(); });
+    const rpc = await open({ codexHome: home, euid: -1, log: memoryLog(), timeoutMs: 1000, env: { ...process.env, VECNET_CODEX_BIN: node } });
+    onCleanup(t, () => rpc.close());
     assert.equal(rpc.version, '0.166.0');
     const result = await rpc.call<{ thread: { id: string } }>('thread/read', { threadId: 'exact-root', includeTurns: false }, 1000);
     assert.equal(result.thread.id, 'exact-root'); assert.deepEqual(fake.paths, ['/']); assert.equal(calls.length, 1);
@@ -286,17 +417,7 @@ test('Windows custom CODEX_HOME finds the native install under USERPROFILE witho
   const binDir = join(user, '.codex', 'packages', 'app-server-daemon', 'releases', `0.169.0-${architecture}-pc-windows-msvc`, 'bin');
   makePrivateDirectory(binDir);
   const executable = join(binDir, 'codex.exe');
-  assert.throws(() => lstatSync(executable), { code: 'ENOENT' });
-  writePrivate(executable, '');
-  localPlatform('check-private', executable);
-  const seed = statSync(executable, { bigint: true }), bytes = readFileSync(process.execPath);
-  assert.equal(seed.size, 0n);
-  // Retain the native TokenUser owner and DACL while populating the real Node.
-  writeFileSync(executable, bytes, { flag: 'r+' });
-  const populated = statSync(executable, { bigint: true });
-  assert.equal(populated.dev, seed.dev); assert.equal(populated.ino, seed.ino);
-  assert.equal(populated.size, BigInt(bytes.length)); assert.deepEqual(readFileSync(executable), bytes);
-  localPlatform('check-private', executable);
+  privateExecutable(binDir, process.execPath, 'codex.exe');
   assert.equal(nativeCodexBinary(custom, { HOME: selected, USERPROFILE: user, PATH: '', SystemRoot: process.env.SystemRoot,
     VECNET_BIN: process.env.VECNET_BIN }), executable);
 });
@@ -308,7 +429,7 @@ test('Windows held helper receives only the CLI environment allowlist, not sessi
     if ((args[1] as string[]).includes('lock')) observed = (args[2] as childProcess.SpawnOptions).env;
     return Reflect.apply(spawn, childProcess, args);
   }); syncBuiltinESMExports();
-  t.after(() => { mock.mock.restore(); syncBuiltinESMExports(); });
+  onCleanup(t, () => { mock.mock.restore(); syncBuiltinESMExports(); });
   const publisher = await openStatusPublisher(path, -1, { env: { ...process.env, VECNET_TOKEN: 'private', OPENAI_API_KEY: 'private',
     CODEX_HOME: '/unselected', CODEX_SESSION_ID: 'private', ARBITRARY: 'private' } });
   assert.ok(publisher);

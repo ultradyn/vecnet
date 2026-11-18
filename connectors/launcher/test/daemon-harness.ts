@@ -101,7 +101,7 @@ export interface Harness {
   restart(opts?: { backends?: Map<string, Backend>; beforeRecordRef?: (jobId: string) => void; acceptCursorGap?: boolean; me?: () => Promise<unknown> }): Promise<void>;
 }
 
-export async function harness(t: TestContext, opts: { cfg?: Record<string, unknown>; peers?: DirectoryEntry[]; backend?: FakeBackend;
+export async function harness(t: Pick<TestContext, 'after'>, opts: { cfg?: Record<string, unknown>; peers?: DirectoryEntry[]; backend?: FakeBackend;
   beforeRecordRef?: (jobId: string) => void; env?: NodeJS.ProcessEnv } = {}): Promise<Harness> {
   const root = mkdtempSync(join(tmpdir(), 'launcher-daemon-')), dir = join(root, 'private');
   let daemon: Awaited<ReturnType<typeof startDaemon>> | undefined;
