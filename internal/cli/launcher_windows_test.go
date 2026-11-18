@@ -90,7 +90,7 @@ func launcherWindowsFixture(t *testing.T, nodeMode launcherFixtureNodeMode) (lau
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = io.Copy(file, source)
+	_, err = copyFixtureImage(file, source)
 	source.Close()
 	closeErr := file.Close()
 	if err != nil {
