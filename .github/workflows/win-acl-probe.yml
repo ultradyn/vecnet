@@ -1,0 +1,124 @@
+name: Disposable native Node fixture comparison
+on:
+  push:
+    branches: [ci80/r15-fixture-probe]
+permissions:
+  contents: read
+jobs:
+  compile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+        variant: [base, candidate]
+    env:
+      GOOS: windows
+      GOARCH: ${{ matrix.arch }}
+      CGO_ENABLED: '0'
+      GOMAXPROCS: '2'
+      CI_GO_COMPILE_JOBS: '4'
+      CI_FIXTURE_SOURCE: ${{ matrix.variant == 'base' && '90d3b1a5149e1054dc0f42cbebb534c5aef2a945' || '364f6873033dbaed4d57d1efc6c543a2d682345d' }}
+    steps:
+      - uses: actions/checkout@v5
+        timeout-minutes: 1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v5
+        timeout-minutes: 1
+        with:
+          ref: ${{ env.CI_FIXTURE_SOURCE }}
+          path: specimen
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        timeout-minutes: 1
+        with:
+          node-version: '24'
+      - name: Download pinned Go
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/toolchain.mjs download
+      - name: Extract pinned Go
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/toolchain.mjs extract
+      - name: Cold dependencies 0
+        timeout-minutes: 1
+        working-directory: specimen
+        run: node ../scripts/ci/budget.mjs 53000 node ../scripts/ci/suite.mjs prepare-go 0
+      - name: Cold dependencies 1
+        timeout-minutes: 1
+        working-directory: specimen
+        run: node ../scripts/ci/budget.mjs 53000 node ../scripts/ci/suite.mjs prepare-go 1
+      - name: Cold dependencies 2
+        timeout-minutes: 1
+        working-directory: specimen
+        run: node ../scripts/ci/budget.mjs 53000 node ../scripts/ci/suite.mjs prepare-go 2
+      - name: Cold dependencies 3
+        timeout-minutes: 1
+        working-directory: specimen
+        run: node ../scripts/ci/budget.mjs 53000 node ../scripts/ci/suite.mjs prepare-go 3
+      - name: Compile source-bound original CLI and store assertions
+        timeout-minutes: 1
+        working-directory: specimen
+        run: node ../scripts/ci/budget.mjs 53000 node ../scripts/ci/diagnostic-fixture-build.mjs
+      - uses: actions/upload-artifact@v4
+        timeout-minutes: 1
+        with:
+          name: fixture-${{ matrix.variant }}-${{ matrix.arch }}
+          path: specimen/dist/fixture-probe
+          if-no-files-found: error
+  native:
+    needs: compile
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 4
+    env:
+      CI_FIXTURE_SOURCE: ${{ matrix.variant == 'base' && '90d3b1a5149e1054dc0f42cbebb534c5aef2a945' || '364f6873033dbaed4d57d1efc6c543a2d682345d' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+        variant: [base, candidate]
+        include:
+          - arch: amd64
+            runner: windows-2025
+          - arch: arm64
+            runner: windows-11-arm
+    steps:
+      - uses: actions/checkout@v5
+        timeout-minutes: 1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v5
+        timeout-minutes: 1
+        with:
+          ref: ${{ env.CI_FIXTURE_SOURCE }}
+          path: specimen
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        timeout-minutes: 1
+        with:
+          node-version: '24'
+      - uses: actions/download-artifact@v5
+        timeout-minutes: 1
+        with:
+          name: fixture-${{ matrix.variant }}-${{ matrix.arch }}
+          path: specimen/dist/fixture-probe
+      - name: Original whole intent matrix with three busy neighbors
+        timeout-minutes: 1
+        working-directory: specimen
+        run: node ../scripts/ci/budget.mjs 53000 node ../scripts/ci/diagnostic-fixture-run.mjs loaded
+      - name: Original whole DACL and hardlink matrix
+        if: always()
+        timeout-minutes: 1
+        working-directory: specimen
+        run: node ../scripts/ci/budget.mjs 53000 node ../scripts/ci/diagnostic-fixture-run.mjs dacl
+      - name: Original whole executable refusal matrix
+        if: always()
+        timeout-minutes: 1
+        working-directory: specimen
+        run: node ../scripts/ci/budget.mjs 53000 node ../scripts/ci/diagnostic-fixture-run.mjs executables
+      - name: Original binary trust and candidate Node isolation contracts
+        if: always()
+        timeout-minutes: 1
+        working-directory: specimen
+        run: node ../scripts/ci/budget.mjs 53000 node ../scripts/ci/diagnostic-fixture-run.mjs contract
