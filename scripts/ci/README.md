@@ -234,8 +234,15 @@ Only an unset owner selects the PowerShell bootstrap; an invalid configured
 owner fails. This removes repeated PowerShell and C# compilation from those
 steps; exact native lifecycle and full-run timing still require validation.
 
-`accept` audits finished source-bound jobs/steps including setup/post/action
-and queue time, fails on any missing/failed/incomplete evidence, reserves8s
+`accept` selects verified cached native Node 24 after restoring its source. This
+uses the same identity-checking selector as Windows consumers instead of
+repeating package-manager discovery: the first merged-master run spent 11s
+in setup-node, versus 1s in the preceding PR run. Source restoration uses the
+hosted runner's existing Node for plain JavaScript, as on Windows. Tagged
+publication still pins npm 12.0.1 explicitly. Native timing remains required.
+
+The audit includes setup/post/action and queue time, fails on any
+missing/failed/incomplete evidence, reserves8s
 after non-tag preflight (R5 audit4s/posts0s; verification unmeasured) or35s for tags
 (two14s publication caps plus7s verification/cleanup), and exports an absolute overall deadline.
 All remaining commands cap themselves to that deadline with cleanup reserve;

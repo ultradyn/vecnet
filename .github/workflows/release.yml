@@ -576,10 +576,6 @@ jobs:
       contents: write
       id-token: write
     steps:
-      - uses: actions/setup-node@v6
-        timeout-minutes: 1
-        with:
-          node-version: '24'
       - uses: actions/download-artifact@v5
         timeout-minutes: 1
         with:
@@ -589,6 +585,9 @@ jobs:
       - name: Restore producer source for acceptance and publication
         timeout-minutes: 1
         run: node dist/npm-source/restore-source.mjs restore dist/npm-source "${{ github.sha }}"
+      - name: Select verified native Node without npm or yarn discovery
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/native-node.mjs
       - name: Pin OIDC npm before acceptance
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         timeout-minutes: 1
