@@ -244,6 +244,11 @@ The schema can be bumped to invalidate entries. Neither warm-cache speedup nor
 cold-cache compliance is established here; actual native runs must still pass
 strict overall <300s and every-step <60s acceptance, including cache steps.
 
+Caches created for a GitHub PR merge ref cannot be reused on master.
+A green or warm PR run therefore establishes neither master/tag cache state
+nor timing. Cache action failures, including stalled saves reaching the guard,
+remain hard CI failures with no acceptance bypass.
+
 `budget.mjs 53000 command [args...]` owns the complete command, not one child
 at a time. Linux uses a kernel child-subreaper: adopted descendants are killed
 and reaped on early success/failure, deadline or cancellation. Windows creates
