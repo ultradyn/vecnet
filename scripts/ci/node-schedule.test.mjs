@@ -98,6 +98,38 @@ test('imported nested test/it registration fails closed across shards, including
  }
 });
 
+test('imported registration from exported async hooks fails closed across four shards',async t=>{
+ const cwd=await mkdtemp(path.join(os.tmpdir(),'node imported hook '));t.after(()=>rm(cwd,{recursive:true,force:true}));
+ const file=path.join(cwd,'cases.test.mjs');
+ const env={...process.env};delete env.NODE_TEST_CONTEXT;
+ const preload=fileURLToPath(new URL('./node-shard-register.mjs',import.meta.url));
+ for(const [hook,registration] of [['beforeEach','test'],['before','it'],['afterEach','it'],['after','test']]){
+  await t.test(hook+' with imported '+registration,async()=>{
+   await writeFile(file,`import test, {it,${hook}} from 'node:test';
+   import assert from 'node:assert/strict';
+   ${hook}(async function(context){
+    await Promise.resolve();
+    console.log('IMPORTED_HOOK');
+    await ${registration}('hook child',()=>assert.fail('hook child assertion must fail'));
+   },{timeout:1000});
+   test('parent',()=>{});`);
+   const results=Array.from({length:4},(_,shard)=>spawnSync(process.execPath,
+    ['--import',preload,'--test','--test-reporter=tap',file],
+    {env:{...env,CI_NODE_SHARD:String(shard),CI_NODE_SHARDS:'4'},encoding:'utf8'}));
+   for(const [shard,result] of results.entries()){
+    assert.ifError(result.error);assert.equal(result.signal,null);
+    if(shard===0)assert.match(result.stdout,/# IMPORTED_HOOK/,'selected parent invokes its hook');
+    if(result.stdout.includes('# IMPORTED_HOOK')){
+     assert.equal(result.status,1,'imported registration in a hook must never silently lose its assertion');
+     assert.match(result.stdout+result.stderr,/unsupported imported nested registration/);
+     assert.match(result.stdout,/not ok/);
+    }else assert.equal(result.status,0,result.stdout+result.stderr);
+    assert.match(result.stdout,new RegExp('ci-node-shard registered=1 selected='+(shard===0?1:0)+' shard='+shard+'/4'),'hooks and rejected children must not consume root ordinals');
+   }
+  });
+ }
+});
+
 test('suite dynamically discovers every file and executes all shard roots exactly once',async t=>{
  const cwd=await mkdtemp(path.join(os.tmpdir(),'node suite conservation '));t.after(()=>rm(cwd,{recursive:true,force:true}));
  const {mkdir}=await import('node:fs/promises');

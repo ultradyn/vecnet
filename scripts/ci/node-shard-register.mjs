@@ -14,7 +14,10 @@ const wrap=fn=>(...args)=>{
  // t.test native, but reject this unsupported shape even after an await.
  if(callbackContext.getStore()){
   process.exitCode=1;
-  throw new Error('sharded file has unsupported imported nested registration; use context.test or review scheduling');
+  const message='sharded file has unsupported imported nested registration; use context.test or review scheduling';
+  // Node can suppress a global hook error when the shard has no selected roots.
+  console.error(message);
+  throw new Error(message);
  }
  const index=ordinal++;
  if(index%${count}===${shard}){
@@ -38,7 +41,17 @@ const test=decorate(real);
 const describe=()=>{throw new Error('sharded file added a suite; review scheduling before execution');};
 const it=decorate(api.it);
 export default test;export {test,it,describe};
-export const {before,after,beforeEach,afterEach,mock,run,snapshot}=api;
+// Hooks do not take shard ordinals. Their callback is first, before optional
+// options; enter the same context only when Node invokes that callback.
+const hook=fn=>function(...args){
+ const callback=args[0];
+ if(typeof callback==='function')args[0]=function(...values){
+  return callbackContext.run(true,()=>Reflect.apply(callback,this,values));
+ };
+ return Reflect.apply(fn,this,args);
+};
+export const before=hook(api.before),after=hook(api.after),beforeEach=hook(api.beforeEach),afterEach=hook(api.afterEach);
+export const {mock,run,snapshot}=api;
 process.on('exit',()=>{console.log('ci-node-shard registered='+ordinal+' selected='+selected+' shard=${shard}/${count}');if(!ordinal)process.exitCode=1;});
 `;
 // The --import preload also runs in the test runner parent. Only wrap
