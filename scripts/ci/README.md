@@ -7,8 +7,14 @@ Linux producer jobs cross-compile platform-selected test packages once in six
 bounded groups, after cold-dependency stages; source/hash-bound bundles include
 native test2json. Consumers validate/copy to private physical temp, discover
 root names natively, then execute binaries with original package cwd—no native
-toolchain setup, relinking or repeated go test driver. Packages with20+roots
-are partitioned whole-root; smaller/no-test packages remain complete.
+toolchain setup, relinking or repeated go test driver. Test binaries and native
+test2json use normal Go linker stripping (`-s -w`), without changing production
+binaries or weakening source/hash receipts. Packages with20+roots are partitioned
+whole-root. Smaller packages also split when they have at least two roots and
+complete measured process elapsed >8s. Cheap, unknown-small, single-root and
+no-test packages remain whole. The 8s threshold leaves placement headroom within
+roughly70s remaining across four groups (~17.5s/group); it is scheduling policy,
+not a measured speedup or a claim that the native budget passes.
 `go-timings.json` records complete R7 PASS root maxima across all18 native Go
 logs (run44254434973, source101f0727), Windows maximum of x64/ARM. Complete
 package process elapsed maxima are retained separately; small whole packages
@@ -26,9 +32,11 @@ Deterministic weighted
 placement balances whole roots, then batches each package's roots within a
 partition. It is not a coverage allowlist: discovery alone supplies the inventory,
 and unknown/new roots always receive a positive cost. Each group runs at most
-two independent package binaries concurrently, retaining package cwd and exit
-status; a failure stops queued work and drains the other worker. Native
-copy/list discovery also has at most two workers. The enclosing budget owns the
+four independent package binaries concurrently on Windows and two on Linux,
+retaining package cwd and exit status. The bounded pool accepts an explicit
+positive integer capacity; its default remains two for Node and other callers.
+A failure stops all queued work, drains every already-running worker and preserves
+the first rejection. Compilation and native copy/list discovery retain two workers. The enclosing budget owns the
 entire group and all descendants; no per-child budget multiplication.
 
 Each platform's six consumers wait only for its matching producer, not the
