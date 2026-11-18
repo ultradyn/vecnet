@@ -1,4 +1,4 @@
-name: Disposable runner capacity probe
+name: Disposable Windows capacity probe
 on:
   push:
     branches: [ci80/r8-focused-probe]
@@ -6,9 +6,19 @@ permissions:
   contents: read
 jobs:
   capacity:
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [windows-2025, windows-11-arm]
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 1
     steps:
-      - name: Report actual allocated CPU and memory
+      - name: Report actual CPU memory and scan state
         timeout-minutes: 1
-        run: node -e "const os=require('node:os'); console.log(JSON.stringify({availableParallelism:os.availableParallelism(),cpus:os.cpus().length,totalMemoryBytes:os.totalmem(),platform:process.platform,arch:process.arch,node:process.version}));"
+        run: |
+          node -e "const os=require('node:os'); console.log(JSON.stringify({availableParallelism:os.availableParallelism(),cpus:os.cpus().length,totalMemoryBytes:os.totalmem(),platform:process.platform,arch:process.arch}));"
+          if (Get-Command Get-MpComputerStatus -ErrorAction SilentlyContinue) {
+            Get-MpComputerStatus | Select-Object AMRunningMode, AntivirusEnabled, RealTimeProtectionEnabled, BehaviorMonitorEnabled, IoavProtectionEnabled | ConvertTo-Json -Compress
+          } else {
+            Write-Output 'Microsoft Defender cmdlet unavailable'
+          }
