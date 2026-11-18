@@ -40,7 +40,12 @@ var (
 		version, err := launcherNodeOutput(ctx, node)
 		elapsed := time.Since(start)
 		if err != nil || ctx.Err() != nil || !launcherNodeVersion(string(version)) {
-			return "", fmt.Errorf("prepare private Node --version after %s: command=%v context=%v output=%.80q", elapsed, err, ctx.Err(), version)
+			var exitErr *exec.ExitError
+			var stderr []byte
+			if errors.As(err, &exitErr) {
+				stderr = exitErr.Stderr[:min(len(exitErr.Stderr), 1024)]
+			}
+			return "", fmt.Errorf("prepare private Node --version after %s: command=%v context=%v output=%.80q stderr=%q", elapsed, err, ctx.Err(), version, stderr)
 		}
 		fmt.Fprintf(os.Stderr, "launcher Node fixture: prepared private image in %s, version=%.80q\n", elapsed, version)
 		return node, nil
