@@ -13,7 +13,7 @@ for(const name of ['cli.test.exe','store.test.exe','test2json.exe']){await copyF
 const isolated=async task=>{
  const {pkg,filter}=typeof task==='string'?{pkg:'cli',filter:task}:task;
  const temporary=await mkdtemp(path.join(await realpath(os.tmpdir()),'vecnet-r14-probe-'));
- const env={...process.env,GOMAXPROCS:'2'};
+ const env={...process.env,GOMAXPROCS:'1'};
  for(const [key,leaf] of Object.entries({HOME:'home',USERPROFILE:'home',APPDATA:'config',LOCALAPPDATA:'data',TMPDIR:'tmp',TMP:'tmp',TEMP:'tmp',XDG_CONFIG_HOME:'config',XDG_CACHE_HOME:'cache',XDG_DATA_HOME:'data',XDG_STATE_HOME:'state',XDG_RUNTIME_DIR:'run'})){
   env[key]=path.join(temporary,leaf);await mkdir(env[key],{recursive:true,mode:0o700});
  }

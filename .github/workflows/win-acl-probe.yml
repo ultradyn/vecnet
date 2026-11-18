@@ -1,7 +1,7 @@
-name: Disposable native Node fixture comparison
+name: Disposable isolated repair comparison
 on:
   push:
-    branches: [ci80/r15-fixture-probe]
+    branches: [ci80/r16-isolated-fixture-probe]
 permissions:
   contents: read
 jobs:
@@ -103,10 +103,10 @@ jobs:
         with:
           name: fixture-${{ matrix.variant }}-${{ matrix.arch }}
           path: specimen/dist/fixture-probe
-      - name: Original whole intent matrix with three busy neighbors
+      - name: Original whole intent matrix alone matching Release CPU
         timeout-minutes: 1
         working-directory: specimen
-        run: node ../scripts/ci/budget.mjs 53000 node ../scripts/ci/diagnostic-fixture-run.mjs loaded
+        run: node ../scripts/ci/budget.mjs 53000 node ../scripts/ci/diagnostic-fixture-run.mjs intent
       - name: Original whole DACL and hardlink matrix
         if: always()
         timeout-minutes: 1
