@@ -9,7 +9,7 @@ import os from 'node:os';
 import { performance } from 'node:perf_hooks';
 import { consumeBundle } from './go-bundle.mjs';
 import { partition } from './partition.mjs';
-import { bounded, planGo, nativeGoLanes, goGroups } from './schedule.mjs';
+import { bounded, planGo, nativeGoLanes, goGroups, goCompileJobs } from './schedule.mjs';
 import {planNode} from './node-schedule.mjs';
 import {fileURLToPath} from 'node:url';
 
@@ -22,11 +22,12 @@ async function privateTemporary(prefix) {
   return directory;
 }
 if (kind === 'prepare-go') {
+  const jobs=goCompileJobs(process.env.CI_GO_COMPILE_JOBS);
   const stages = [
     ['mod', 'download'],
-    ['build','-mod=readonly','-p','2','-trimpath','std'],
-    ['build','-mod=readonly','-p','2','-trimpath','modernc.org/sqlite'],
-    ['build','-mod=readonly','-p','2','-trimpath','charm.land/bubbletea/v2','github.com/santhosh-tekuri/jsonschema/v6','github.com/modelcontextprotocol/go-sdk/mcp'],
+    ['build','-mod=readonly','-p',jobs,'-trimpath','std'],
+    ['build','-mod=readonly','-p',jobs,'-trimpath','modernc.org/sqlite'],
+    ['build','-mod=readonly','-p',jobs,'-trimpath','charm.land/bubbletea/v2','github.com/santhosh-tekuri/jsonschema/v6','github.com/modelcontextprotocol/go-sdk/mcp'],
   ];
   if (!stages[lane]) throw new Error('invalid prepare stage');
   process.stdout.write(go(stages[lane]));

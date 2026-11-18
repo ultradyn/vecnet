@@ -2,7 +2,7 @@
 // discover names and execute ONLY on the native consumer. No platform skips.
 import { execFileSync, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { bounded } from './schedule.mjs';
+import { bounded, goCompileJobs } from './schedule.mjs';
 const exec = promisify(execFile);
 import { createHash } from 'node:crypto';
 import { chmod, copyFile, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
@@ -14,12 +14,13 @@ const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
 const go=args=>execFileSync('go',args,{encoding:'utf8',maxBuffer:16*1024*1024});
 function packages(){return go(['list','-mod=readonly','-f','{{.ImportPath}}\t{{.Dir}}\t{{len .TestGoFiles}}\t{{len .XTestGoFiles}}','./...']).trim().split(/\r?\n/).map(line=>{const[pkg,dir,internal,external]=line.split('\t');return{pkg,dir,tests:Number(internal)+Number(external)>0};});}
 export async function compileGroup(platform,index){
+ const jobs=goCompileJobs(process.env.CI_GO_COMPILE_JOBS);
  const target=nativeTargets.find(t=>t.platform===platform);if(!target)throw new Error('unknown bundle target');
  const host=go(['env','GOOS','GOARCH']).trim().split(/\r?\n/);if(host[0]!==target.goos||host[1]!==target.goarch)throw new Error('bundle target environment mismatch');
  const all=packages(),chosen=partition(all.map(p=>p.pkg),index,6),out=path.resolve('dist/go-tests',platform,String(index));await mkdir(out,{recursive:true});
  const names=chosen.map(pkg=>path.basename(pkg));
  if(new Set(names).size!==names.length)throw new Error('test package basename collision');
- if(chosen.length)go(['test','-mod=readonly','-p','2','-trimpath','-ldflags','-s -w','-c','-o',out+path.sep,...chosen]);
+ if(chosen.length)go(['test','-mod=readonly','-p',jobs,'-trimpath','-ldflags','-s -w','-c','-o',out+path.sep,...chosen]);
  const rows=[];
  for(const pkg of chosen){const meta=all.find(p=>p.pkg===pkg),file=path.basename(pkg)+'.test'+target.suffix;rows.push({pkg,directory:path.relative(process.cwd(),meta.dir).split(path.sep).join('/'),file:meta.tests?file:null,sha256:meta.tests?hash(await readFile(path.join(out,file))):null});}
  await writeFile(path.join(out,'packages.json'),JSON.stringify(rows));
@@ -50,10 +51,11 @@ export async function consumeBundle(directory,{sha,platform,root=process.cwd(),t
  return {inventory,test2json:path.join(temporary,tool)};
 }
 async function finalize(platform){
+ const jobs=goCompileJobs(process.env.CI_GO_COMPILE_JOBS);
  const directory=path.resolve('dist/go-tests',platform);const groups=[];
  for(let index=0;index<6;index++)groups.push(JSON.parse(await readFile(path.join(directory,String(index),'packages.json'),'utf8')).map(row=>({...row,group:index})));
  const expected=packages().map(p=>p.pkg).sort(),actual=groups.flat().map(p=>p.pkg).sort();if(JSON.stringify(expected)!==JSON.stringify(actual))throw new Error('incomplete bundle packages');
- const tool='test2json'+(platform.startsWith('win32')?'.exe':'');go(['build','-p','2','-trimpath','-ldflags','-s -w','-o',path.join(directory,tool),'cmd/test2json']);
+ const tool='test2json'+(platform.startsWith('win32')?'.exe':'');go(['build','-p',jobs,'-trimpath','-ldflags','-s -w','-o',path.join(directory,tool),'cmd/test2json']);
  const revision=execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim();
  await writeFile(path.join(directory,'bundle.json'),JSON.stringify({revision,platform,groups,toolHash:hash(await readFile(path.join(directory,tool)))},null,2));
 }

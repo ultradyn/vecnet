@@ -5,6 +5,12 @@ export const nativeGoLanes = platform => platform==='linux'?2:goLanes;
 export const goPartitions = goLanes * goGroups;
 // target4 + compile3 + build1 + Go(2+6+6) + Node3 + E2E3 + artifact4 + accept1.
 export const releaseJobCount = () => 4 + 3 + 1 + nativeGoLanes('linux') + 2 * goLanes + 3 + 3 + 4 + 1;
+// Explicit producer opt-in only; unrelated callers retain the two-job default.
+export function goCompileJobs(value) {
+  if(value===undefined)return '2';
+  if(typeof value!=='string'||!/^[1-6]$/.test(value))throw new Error('CI_GO_COMPILE_JOBS must be an integer from 1 to 6');
+  return value;
+}
 const compare = (a, b) => a < b ? -1 : a > b ? 1 : 0;
 const cost = n => {
   if (!Number.isFinite(n) || n <= 0) throw new Error('invalid scheduling cost');

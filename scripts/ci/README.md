@@ -92,6 +92,18 @@ BUILD_INFO. No-argument `build.mjs` still performs the original sequential local
 build. Every native package gate verifies the same tarball checksum; publish
 retains matching master/tag guard, npm12 trusted publishing/OIDC/provenance.
 
+The three Linux-hosted test-bundle producers explicitly set `CI_GO_COMPILE_JOBS=4`
+and `GOMAXPROCS=4` for their four allocated cores. One shared capacity policy
+accepts canonical integers1..6, defaults to2 when unset, and rejects malformed
+or out-of-range input before producer work. All cold dependency build stages,
+all six bundle compile groups and native test2json finalization use that value
+for Go's `-p`. This is a producer-only opt-in: target/assembly builds, local/BB
+callers and discovery keep their existing two-job defaults. Native consumers
+retain `GOMAXPROCS=2`, four Windows execution workers and two Linux workers.
+The extra producer CPU is an unmeasured throughput hypothesis, not a native
+speedup or proof of the300s/60s budgets. BB verification remains at two jobs;
+parent measures four-core cold-build time and memory in the full native matrix.
+
 Cold dependency stages: module download, standard library, SQLite, remaining
 large UI/schema/MCP dependencies. All compilation uses matching `-trimpath`
 flags. The pinned official Go1.27.4 archive is checksum verified; download and
