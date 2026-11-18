@@ -512,6 +512,9 @@ func TestLocalRepairConcurrentAdoptionRemainsPending(t *testing.T) {
 
 func TestLocalStartupObservesWithoutInstallingAndAdoptsLegacyHooks(t *testing.T) {
 	a, root, _ := localRegistryFixture(t)
+	// This is a plain-directory project. Do not spend its bounded startup
+	// budget launching the host Git just to report that it is not a repo.
+	t.Setenv("PATH", t.TempDir())
 	var started int
 	a.localRepairStart = func(*exec.Cmd) error { started++; return nil }
 	a.localStartup([]string{"peers"})
