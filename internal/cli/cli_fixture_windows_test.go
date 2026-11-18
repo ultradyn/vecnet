@@ -60,7 +60,14 @@ func cliFixtureSymlink(t *testing.T, target, link string) error {
 	if statErr == nil && info.IsDir() {
 		// A directory junction exercises canonicalization and reparse-point refusal
 		// without requiring Developer Mode or SeCreateSymbolicLinkPrivilege.
-		cmd := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", "New-Item -ItemType Junction -Path $env:VECNET_FIXTURE_LINK -Target $env:VECNET_FIXTURE_TARGET -ErrorAction Stop | Out-Null")
+		// Plain-directory fixtures deliberately exclude ambient tools from PATH.
+		// Keep the native junction fallback available through the system binary.
+		systemDir, err := windows.GetSystemDirectory()
+		if err != nil {
+			t.Fatal(err)
+		}
+		powershell := filepath.Join(systemDir, "WindowsPowerShell", "v1.0", "powershell.exe")
+		cmd := exec.Command(powershell, "-NoProfile", "-NonInteractive", "-Command", "New-Item -ItemType Junction -Path $env:VECNET_FIXTURE_LINK -Target $env:VECNET_FIXTURE_TARGET -ErrorAction Stop | Out-Null")
 		cmd.Env = append(os.Environ(), "VECNET_FIXTURE_LINK="+link, "VECNET_FIXTURE_TARGET="+resolved)
 		out, createErr := cmd.CombinedOutput()
 		if createErr != nil {

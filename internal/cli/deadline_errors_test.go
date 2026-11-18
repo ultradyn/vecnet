@@ -38,11 +38,14 @@ func TestLocalRegistryContextErrorLabels(t *testing.T) {
 	for _, cause := range []error{context.Canceled, context.DeadlineExceeded} {
 		for _, operation := range []string{"git-discovery", "inventory-update"} {
 			t.Run(operation+"/"+cause.Error(), func(t *testing.T) {
+				searchPath := os.Getenv("PATH")
 				a, _, home := localRegistryFixture(t)
 				a.ctx = deadlineErrorsContext(t, cause)
 				var err error
 				label := "local inventory update"
 				if operation == "git-discovery" {
+					// Keep the executable discoverable when testing Git context errors.
+					t.Setenv("PATH", searchPath)
 					label = "local project Git discovery"
 					_, err = a.localProjectIdentity()
 				} else {
