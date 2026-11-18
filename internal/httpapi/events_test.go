@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httptrace"
@@ -512,12 +513,17 @@ func TestSlowSSEConsumerDoesNotBlockSend(t *testing.T) {
 
 func slowSSEConsumerDoesNotBlockSend(t *testing.T, refs bool) {
 	waitStreams(t, 0)
-	blocked := make(chan struct{})
+	blocked, draining := make(chan struct{}), make(chan struct{})
+	sink, unread := net.Pipe()
+	defer sink.Close()
+	defer unread.Close()
 	env := testhub.StartWithServer(t, func(cfg *hub.Config) { cfg.DeliveryReferences = refs }, func(srv *http.Server) {
 		next := srv.Handler
 		srv.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/v1/events" {
-				w = &blockedSSESocket{ResponseWriter: w, blocked: blocked, done: r.Context().Done()}
+				stop := context.AfterFunc(r.Context(), func() { unread.Close() })
+				defer stop()
+				w = &blockedSSESocket{ResponseWriter: w, sink: sink, blocked: blocked, draining: draining}
 			}
 			next.ServeHTTP(w, r)
 		})
@@ -614,6 +620,11 @@ func slowSSEConsumerDoesNotBlockSend(t *testing.T, refs bool) {
 	if stuck > aggregate {
 		t.Fatalf("%d sends to a stuck SSE consumer took %v, want <= %v total", n, stuck, aggregate)
 	}
+	select {
+	case <-draining:
+		t.Fatal("SSE stream began teardown before the client canceled")
+	default:
+	}
 	if got := httpapi.ActiveStreams(); got != 1 {
 		t.Fatalf("active streams = %d after the sends, want the stuck stream still open", got)
 	}
@@ -627,22 +638,41 @@ func slowSSEConsumerDoesNotBlockSend(t *testing.T, refs bool) {
 	waitStreams(t, 0)
 }
 
-// blockedSSESocket lets the real server send headers and SSE preamble to the
-// client but models transport backpressure on its first Delivery. Keep
-// net/http's flush and deadline support for all unblocked writes.
+// blockedSSESocket passes headers and preamble through to the real client,
+// then routes the Delivery write to an unread, deadline-aware net.Pipe.
 type blockedSSESocket struct {
 	http.ResponseWriter
-	blocked chan struct{}
-	done    <-chan struct{}
+	sink     net.Conn
+	blocked  chan struct{}
+	draining chan struct{}
+
+	mu       sync.Mutex
+	deadline time.Time
 }
 
 func (w *blockedSSESocket) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
+func (w *blockedSSESocket) SetWriteDeadline(deadline time.Time) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	// Ordinary frame deadlines advance. A shortened deadline signals
+	// teardown even while the handler is still counted as active.
+	if !deadline.IsZero() && deadline.Before(w.deadline) {
+		select {
+		case <-w.draining:
+		default:
+			close(w.draining)
+		}
+	}
+	w.deadline = deadline
+	_ = w.sink.SetWriteDeadline(deadline)
+	return http.NewResponseController(w.ResponseWriter).SetWriteDeadline(deadline)
+}
+
 func (w *blockedSSESocket) Write(p []byte) (int, error) {
 	if strings.Contains(string(p), "\nevent: delivery\n") {
 		close(w.blocked)
-		<-w.done
-		return 0, io.ErrClosedPipe
+		return w.sink.Write(p)
 	}
 	return w.ResponseWriter.Write(p)
 }
