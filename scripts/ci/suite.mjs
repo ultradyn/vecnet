@@ -100,7 +100,7 @@ if (kind === 'prepare-go') {
     console.log(`node group=${group}/4 tasks=${tasks.length} discoveredFiles=${all.length}`);
     await bounded(tasks,async task=>{
       const started=performance.now();
-      const preload=task.shards>1?['--import',fileURLToPath(new URL('./node-shard-register.mjs',import.meta.url))]:[];
+      const preload=task.shards>1?['--import',new URL('./node-shard-register.mjs',import.meta.url).href]:[];
       await new Promise((resolve,reject)=>{
         const child=spawn(process.execPath,[...preload,'--disable-warning=ExperimentalWarning','--test','--test-reporter=tap',task.file],{
           stdio:'inherit',env:{...process.env,CI_NODE_SHARD:String(task.shard),CI_NODE_SHARDS:String(task.shards)},
