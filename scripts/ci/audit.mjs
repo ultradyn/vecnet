@@ -48,7 +48,7 @@ if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.ur
  // Preflight excludes only its own live job, located by its exact Actions name.
  const current=mode==='preflight'?jobs.find(j=>j.name==='accept'&&j.status==='in_progress'):undefined;
  if(mode==='preflight'&&!current)throw new Error('missing current acceptance job');
- const result=audit(run,jobs,{sha,preflight:mode==='preflight',reserve:45,currentJob:current?.id,expectedJobs:mode==='preflight'?24:25});
+ const result=audit(run,jobs,{sha,preflight:mode==='preflight',reserve:45,currentJob:current?.id,expectedJobs:mode==='preflight'?27:28});
  console.log(JSON.stringify(result,null,2));await writeFile('budget-audit.json',JSON.stringify(result,null,2));
  if(!result.pass)process.exitCode=1;
  else if(mode==='preflight'&&process.env.GITHUB_ENV)await appendFile(process.env.GITHUB_ENV,`CI_RUN_DEADLINE=${Date.parse(run.created_at)+299000}\n`);

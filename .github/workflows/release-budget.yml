@@ -6,6 +6,7 @@ on:
 permissions:
   contents: read
   actions: read
+  statuses: write
 jobs:
   audit:
     runs-on: ubuntu-24.04
@@ -20,4 +21,4 @@ jobs:
         timeout-minutes: 1
         env:
           GH_TOKEN: ${{ github.token }}
-        run: node scripts/ci/audit.mjs ${{ github.event.workflow_run.id }} ${{ github.event.workflow_run.head_sha }} completed
+        run: node scripts/ci/status.mjs

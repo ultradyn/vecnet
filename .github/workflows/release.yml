@@ -154,14 +154,25 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-  test-go:
+  test-compile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-24.04, windows-2025, windows-11-arm]
-        lane: [0, 1, 2]
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 5
+        include:
+          - platform: linux-x64
+            goos: linux
+            goarch: amd64
+          - platform: win32-x64
+            goos: windows
+            goarch: amd64
+          - platform: win32-arm64
+            goos: windows
+            goarch: arm64
+    env:
+      GOOS: ${{ matrix.goos }}
+      GOARCH: ${{ matrix.goarch }}
     steps:
       - name: Preserve LF bytes on Windows
         if: runner.os == 'Windows'
@@ -193,28 +204,70 @@ jobs:
       - name: Cold dependency stage 4 of 4
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs prepare-go 3
-      - name: Discover package partition 1 of 6
+      - name: Test compiled Go execution conservation
+        if: matrix.platform == 'linux-x64'
         timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs discover-go 0
-      - name: Discover package partition 2 of 6
+        run: node scripts/ci/budget.mjs 53000 node --test scripts/ci/suite.test.mjs scripts/ci/go-bundle.test.mjs
+      - name: Compile complete native Go test bundle group 1 of 6
         timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs discover-go 1
-      - name: Discover package partition 3 of 6
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/go-bundle.mjs compile ${{ matrix.platform }} 0
+      - name: Compile complete native Go test bundle group 2 of 6
         timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs discover-go 2
-      - name: Discover package partition 4 of 6
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/go-bundle.mjs compile ${{ matrix.platform }} 1
+      - name: Compile complete native Go test bundle group 3 of 6
         timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs discover-go 3
-      - name: Discover package partition 5 of 6
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/go-bundle.mjs compile ${{ matrix.platform }} 2
+      - name: Compile complete native Go test bundle group 4 of 6
         timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs discover-go 4
-      - name: Discover package partition 6 of 6
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/go-bundle.mjs compile ${{ matrix.platform }} 3
+      - name: Compile complete native Go test bundle group 5 of 6
         timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs discover-go 5
-      - name: Test actual Go execution conservation
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/go-bundle.mjs compile ${{ matrix.platform }} 4
+      - name: Compile complete native Go test bundle group 6 of 6
         timeout-minutes: 1
-        if: matrix.lane == 0
-        run: node scripts/ci/budget.mjs 53000 node --test scripts/ci/suite.test.mjs
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/go-bundle.mjs compile ${{ matrix.platform }} 5
+      - name: Finalize source-bound test bundle and native event tool
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/go-bundle.mjs finalize ${{ matrix.platform }}
+      - uses: actions/upload-artifact@v4
+        timeout-minutes: 1
+        with:
+          name: go-tests-${{ matrix.platform }}
+          compression-level: 1
+          path: dist/go-tests
+          if-no-files-found: error
+          retention-days: 7
+
+  test-go:
+    needs: test-compile
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, windows-2025, windows-11-arm]
+        lane: [0, 1, 2]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 5
+    steps:
+      - name: Preserve LF bytes on Windows
+        if: runner.os == 'Windows'
+        timeout-minutes: 1
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v5
+        timeout-minutes: 1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        timeout-minutes: 1
+        with:
+          node-version: '24'
+      - uses: actions/download-artifact@v5
+        timeout-minutes: 1
+        with:
+          name: go-tests-${{ runner.os == 'Windows' && 'win32' || 'linux' }}-${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
+          path: dist/go-tests
+      - name: Validate and discover matching native Go test binaries
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs consume-go
       - name: Complete Go roots group 1 of 8
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs go ${{ matrix.lane }} 0
@@ -274,7 +327,7 @@ jobs:
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/native.mjs
       - name: Test command ownership and acceptance policies
         timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node --test --test-concurrency=2 scripts/ci/budget.test.mjs scripts/ci/ownership.test.mjs scripts/ci/partition.test.mjs scripts/ci/audit.test.mjs scripts/npm/assemble.test.mjs
+        run: node scripts/ci/budget.mjs 53000 node --test --test-concurrency=2 scripts/ci/budget.test.mjs scripts/ci/ownership.test.mjs scripts/ci/partition.test.mjs scripts/ci/audit.test.mjs scripts/ci/status.test.mjs scripts/npm/assemble.test.mjs
       - name: Test release guards and cross-platform wrappers
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node --test --test-concurrency=2 scripts/npm/release.test.mjs scripts/npm/npm-command.test.mjs scripts/npm/wrapper.test.mjs scripts/npm/verify-artifact.test.mjs
@@ -380,7 +433,7 @@ jobs:
   accept:
     # Always run the audit: skipped/failed dependencies must not become green.
     if: always()
-    needs: [target, build, test-go, test-node, test-e2e, test-artifact]
+    needs: [target, test-compile, build, test-go, test-node, test-e2e, test-artifact]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:

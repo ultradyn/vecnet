@@ -1,8 +1,13 @@
 # Release CI scheduling and acceptance
 
 The workflow preserves full native Linux x64 / Windows x64 / Windows ARM64
-Go, Node and E2E coverage. Three Go lanes execute complete whole-root groups;
-six disjoint package discoveries follow four bounded cold-dependency stages.
+Go, Node and E2E coverage. Three native Go lanes execute complete whole-root groups. Three independent
+Linux producer jobs cross-compile platform-selected test packages once in six
+bounded groups, after cold-dependency stages; source/hash-bound bundles include
+native test2json. Consumers validate/copy to private physical temp, discover
+root names natively, then execute binaries with original package cwd—no native
+toolchain setup, relinking or repeated go test driver. Packages with20+roots
+are partitioned whole-root; smaller/no-test packages remain complete.
 New roots/examples/fuzz seeds and small/no-test packages remain conserved.
 No SQLite override: production and test default FULL remains unchanged.
 
@@ -38,9 +43,14 @@ All remaining commands cap themselves to that deadline with cleanup reserve;
 publish/release commands additionally have14s caps. No retries mask failures.
 The completed-run `Release budget acceptance` workflow checks the entire run
 including acceptance/publication/post steps under the same strict <300s and
-<60s policy. Configure it as required release/branch acceptance; an ordinary
+<60s policy. It publishes the explicit commit status **Release budget acceptance** on the
+triggering tested SHA (not default-branch HEAD), pending then success/failure,
+linked to exact source run/attempt; API/source/audit errors fail closed. Require
+that exact status context for release/branch acceptance; an ordinary
 Release green badge alone is insufficient. Its policy runs from the trusted
-default branch, not arbitrary privileged PR checkout code.
+default branch, not arbitrary privileged PR checkout code; only statuses:write
+is added for binding. Until this listener is on master, parent external audit
+remains mandatory.
 
 Five-minute job ceilings are cancellation guards, not a longer allowed overall
 budget. Native evidence and final acceptance audit must be green before release

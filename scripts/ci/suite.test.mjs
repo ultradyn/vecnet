@@ -24,9 +24,17 @@ test('real Go discovery and every scheduled command execute all roots exactly on
   for(let i=0;i<6;i++)invoke(['discover-go',String(i)]);
   const inventory=(await Promise.all(Array.from({length:6},(_,i)=>readFile(path.join(cwd,'.ci',`go-${i}.json`),'utf8')))).flatMap(JSON.parse);
   assert.equal(inventory.length, 3);
+  const compiled=inventory.filter(p=>p.names.length);
+  assert.equal(compiled.length,2);
+  for(const p of compiled)assert.ok(p.binary && p.directory,'discovery retains original cwd and reusable test binary');
+  // A PATH shim rejects go test during execution: compilation belongs solely
+  // to discovery. Real binaries must still execute every case exactly once.
+  const shim=path.join(cwd,'shim');await mkdir(shim);
+  if(process.platform!=='win32')await writeFile(path.join(shim,'go'),'#!/bin/sh\nif [ "$1" = test ]; then echo repeated-compilation >&2; exit 99; fi\nexec '+JSON.stringify(execFileSync('which',['go'],{encoding:'utf8'}).trim())+' "$@"\n',{mode:0o755});
+
   const passed = [];
   for (let lane = 0; lane < 3; lane++) for (let group = 0; group < 8; group++) {
-    const output = invoke(['go', String(lane), String(group)]);
+    const output = execFileSync(process.execPath,[suite,'go',String(lane),String(group)],{cwd,encoding:'utf8',timeout:45000,env:{...process.env,PATH:shim+path.delimiter+process.env.PATH},maxBuffer:4*1024*1024});
     for (const line of output.split('\n')) {
       if (!line.startsWith('{')) continue;
       const event = JSON.parse(line);
