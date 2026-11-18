@@ -2,14 +2,14 @@
 // the original suites. Run this whole command under budget.mjs, not each child
 // separately: discovery/compilation and all packages share the step deadline.
 import { execFileSync, spawn } from 'node:child_process';
-import { mkdir, mkdtemp, realpath, chmod, readFile, writeFile, access } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, chmod, readFile, writeFile, access, rm } from 'node:fs/promises';
 import { globSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { performance } from 'node:perf_hooks';
 import { consumeBundle } from './go-bundle.mjs';
 import { partition } from './partition.mjs';
-import { bounded, planGo, goLanes, goGroups } from './schedule.mjs';
+import { bounded, planGo, nativeGoLanes, goGroups } from './schedule.mjs';
 import {planNode} from './node-schedule.mjs';
 import {fileURLToPath} from 'node:url';
 
@@ -68,19 +68,29 @@ if (kind === 'prepare-go') {
   await writeFile(`.ci/go-${lane}.json`, JSON.stringify(inventory));
   console.log(`Go inventory: ${inventory.length} packages, ${inventory.reduce((n, p) => n + p.names.length, 0)} root tests/examples/fuzz targets`);
 } else if (kind === 'go') {
+  const goLanes=nativeGoLanes(process.platform);
   partition([], lane, goLanes); partition([], group, goGroups);
   const inventory = (await Promise.all(Array.from({length:6},(_,i)=>readFile(`.ci/go-${i}.json`,'utf8')))).flatMap(JSON.parse);
   const timings=JSON.parse(await readFile(new URL('./go-timings.json',import.meta.url),'utf8'));
-  const tasks=planGo(inventory,timings[process.platform==='win32'?'windows':'linux'])[group*goLanes+lane];
+  const tasks=planGo(inventory,timings[process.platform==='win32'?'windows':'linux'],{lanes:goLanes})[group*goLanes+lane];
   let tool;try{tool=(await readFile('.ci/test2json','utf8')).trim();}catch(error){if(error.code!=='ENOENT')throw error;}
   await bounded(tasks,async ({pkg,selected,split,binary,directory,cost})=>{
     const filter=split?['-test.run',`^(${selected.join('|')})$`]:[];
     const started=performance.now();
-    if(binary)await new Promise((resolve,reject)=>{
-      const child=spawn(tool||'go',[...(tool?[]:['tool','test2json']),'-t','-p',pkg,binary,'-test.v=test2json','-test.count=1','-test.timeout=50s',...filter],{cwd:directory,stdio:'inherit'});
-      child.once('error',reject);
-      child.once('close',(code,signal)=>code===0?resolve():reject(new Error(`${pkg} failed: exit=${code} signal=${signal}`)));
-    });
+    if(binary){
+      const privateRoot=await privateTemporary('vecnet-ci-go-process-');
+      try {
+        const env={...process.env};
+        for(const [key,leaf] of Object.entries({HOME:'home',USERPROFILE:'home',APPDATA:'config',LOCALAPPDATA:'data',TMPDIR:'tmp',TMP:'tmp',TEMP:'tmp',XDG_CONFIG_HOME:'config',XDG_CACHE_HOME:'cache',XDG_DATA_HOME:'data',XDG_STATE_HOME:'state',XDG_RUNTIME_DIR:'run'})){
+          env[key]=path.join(privateRoot,leaf);await mkdir(env[key],{recursive:true,mode:0o700});
+        }
+        await new Promise((resolve,reject)=>{
+          const child=spawn(tool||'go',[...(tool?[]:['tool','test2json']),'-t','-p',pkg,binary,'-test.v=test2json','-test.count=1','-test.timeout=50s',...filter],{cwd:directory,stdio:'inherit',env});
+          child.once('error',reject);
+          child.once('close',(code,signal)=>code===0?resolve():reject(new Error(`${pkg} failed: exit=${code} signal=${signal}`)));
+        });
+      } finally { await rm(privateRoot,{recursive:true,force:true}); }
+    }
     console.log(`ci-package pkg=${pkg} roots=${selected.length} elapsed_ms=${Math.round(performance.now()-started)} estimated_s=${cost.toFixed(3)}`);
   },process.platform==='win32'?4:2);
   console.log(`Go lane=${lane}/${goLanes} group=${group}/${goGroups} packages=${tasks.length} roots=${tasks.reduce((n,t)=>n+t.selected.length,0)}`);

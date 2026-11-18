@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { planGo, bounded, releaseJobCount, goLanes, goGroups } from './schedule.mjs';
+import { planGo, bounded, releaseJobCount, goLanes, nativeGoLanes, goGroups } from './schedule.mjs';
 const inventory = [
  {pkg:'heavy', names:Array.from({length:48},(_,i)=>`Test${i}`), binary:'heavy'},
  {pkg:'small', names:['Example','FuzzSeed'],binary:'small'},
@@ -19,7 +19,7 @@ test('weighted whole-root schedule conserves discovered additions and indivisibl
  const stragglers=plan.map(tasks=>tasks.flatMap(t=>t.selected));
  assert.notEqual(stragglers.findIndex(s=>s.includes('Test0')),stragglers.findIndex(s=>s.includes('Test1')));
  assert.deepEqual(planGo([...input].reverse(),profile),plan);
- for(const tasks of plan)assert.equal(new Set(tasks.map(t=>t.pkg)).size,tasks.length,'never concurrent executions of same package');
+ // Split packages may now occupy independent execution packets in one group.
 });
 test('rejects duplicate packages/roots and malformed inventories or measured costs',()=>{
  assert.throws(()=>planGo([...inventory,inventory[0]]),/duplicate/);
@@ -54,7 +54,14 @@ test('bounded failures stop queued work, drain active work and propagate failure
 test('acceptance cardinality includes every native lane and existing release gate',()=>{
  assert.equal(goLanes,6);
  assert.equal(goGroups,4);
- assert.equal(releaseJobCount(),37);
+ assert.equal(releaseJobCount(),33);
+ assert.equal(nativeGoLanes('linux'),2);assert.equal(nativeGoLanes('win32'),6);
+ const input=[{pkg:'p',names:Array.from({length:401},(_,i)=>`Test${i}`)}];
+ for(const platform of ['linux','win32']){
+  const plan=planGo(input,{}, {lanes:nativeGoLanes(platform)});
+  assert.equal(plan.length,nativeGoLanes(platform)*4);
+  assert.deepEqual(plan.flat().flatMap(t=>t.selected).sort(),input[0].names.toSorted());
+ }
 });
 test('scheduled partitions distribute all no-test packages, not just packages with roots',()=>{
  const empty=Array.from({length:46},(_,i)=>({pkg:`empty${i}`,names:[],binary:null}));
@@ -138,4 +145,20 @@ test('falsey first rejection still stops dequeue and survives later errors',asyn
   starts.push(n);await turn();if(n===0)throw null;drained=true;throw new Error('later');
  }).then(()=>({ok:true}),error=>({error}));
  assert.deepEqual(starts,[0,1]);assert.equal(drained,true);assert.deepEqual(outcome,{error:null});
+});
+
+test('large split packages form bounded packets, preserving every root including unknown additions',()=>{
+ const names=Array.from({length:1200},(_,n)=>`TestRoot${n}`);
+ const input=[{pkg:'large',names:[...names,'Example','FuzzSeed','TestNew'],binary:'native',directory:'original'}];
+ const profile={packages:{large:0.3},roots:{large:{TestRoot0:9}},startup:0.2};
+ const plan=planGo(input,profile),tasks=plan.flat();
+ assert.deepEqual(tasks.flatMap(t=>t.selected).sort(),input[0].names.toSorted());
+ assert.ok(plan.some(group=>group.filter(t=>t.pkg==='large').length>1),'pool can run multiple packets of same package');
+ for(const task of tasks){
+  assert.ok(task.selected.length<=8);
+  assert.ok(task.cost<=4.2+1e-9 || task.selected.length===1,'only indivisible expensive roots exceed packet cost');
+  assert.equal(task.directory,'original');assert.equal(task.binary,'native');
+ }
+ const placements=p=>p.map(group=>group.map(({selected,cost})=>({selected,cost})));
+ assert.deepEqual(placements(planGo([{...input[0],names:[...input[0].names].reverse()}],profile)),placements(plan));
 });

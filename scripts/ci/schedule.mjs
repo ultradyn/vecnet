@@ -1,15 +1,17 @@
 // Scheduling policy only. Discovery, not timing observations, determines coverage.
 export const goLanes = 6;
 export const goGroups = 4;
+export const nativeGoLanes = platform => platform==='linux'?2:goLanes;
 export const goPartitions = goLanes * goGroups;
-// target4 + compile3 + build1 + Go18 + Node3 + E2E3 + artifact4 + accept1.
-export const releaseJobCount = () => 4 + 3 + 1 + 3 * goLanes + 3 + 3 + 4 + 1;
+// target4 + compile3 + build1 + Go(2+6+6) + Node3 + E2E3 + artifact4 + accept1.
+export const releaseJobCount = () => 4 + 3 + 1 + nativeGoLanes('linux') + 2 * goLanes + 3 + 3 + 4 + 1;
 const compare = (a, b) => a < b ? -1 : a > b ? 1 : 0;
 const cost = n => {
   if (!Number.isFinite(n) || n <= 0) throw new Error('invalid scheduling cost');
   return n;
 };
-export function planGo(inventory, profile = {}) {
+export function planGo(inventory, profile = {}, {lanes=goLanes} = {}) {
+  if(!Number.isInteger(lanes)||lanes<1)throw new Error('invalid lane count');
   const seen = new Set(), work = [];
   for (const row of inventory) {
     if (!row.pkg || seen.has(row.pkg)) throw new Error('duplicate/invalid package inventory');
@@ -31,21 +33,29 @@ export function planGo(inventory, profile = {}) {
     }
   }
   work.sort((a,b)=>b.cost-a.cost || compare(a.row.pkg,b.row.pkg) || compare(a.selected[0]??'',b.selected[0]??''));
-  const bins = Array.from({length:goPartitions},()=>({load:0, tasks:new Map()}));
+  const bins = Array.from({length:lanes*goGroups},()=>({load:0, tasks:[]}));
   for (const item of work) {
-    // Partition n belongs to lane n%goLanes, group floor(n/goLanes). Balance lane
+    // Partition n belongs to lane n%lanes, group floor(n/lanes). Balance lane
     // totals as a tie breaker so early stragglers do not share a native runner.
-    const laneLoad = lane => Array.from({length:goGroups},(_,group)=>bins[group*goLanes+lane].load).reduce((a,b)=>a+b,0);
+    const laneLoad = lane => Array.from({length:goGroups},(_,group)=>bins[group*lanes+lane].load).reduce((a,b)=>a+b,0);
     let index = 0;
     for (let i=1;i<bins.length;i++) {
-      if (bins[i].load < bins[index].load || (bins[i].load===bins[index].load && laneLoad(i%goLanes)<laneLoad(index%goLanes))) index=i;
+      if (bins[i].load < bins[index].load || (bins[i].load===bins[index].load && laneLoad(i%lanes)<laneLoad(index%lanes))) index=i;
     }
-    const bin=bins[index], previous=bin.tasks.get(item.row.pkg);
-    if(previous){previous.selected.push(...item.selected);previous.cost+=item.cost;}
-    else bin.tasks.set(item.row.pkg,{...item.row,selected:[...item.selected],split:item.split,cost:item.cost,measured:item.measured});
+    const bin=bins[index];
+    // Do not coalesce an unbounded package batch: spare workers must be able
+    // to execute multiple packets. Limits are placement hints, not timeouts;
+    // one indivisible root may exceed the cost cap. Discovery remains authority.
+    const previous=item.split && bin.tasks.findLast(task=>task.pkg===item.row.pkg && task.split && task.selected.length+item.selected.length<=8 && task.rootCost+item.cost<=4);
+    if(previous){previous.selected.push(...item.selected);previous.rootCost+=item.cost;previous.cost+=item.cost;}
+    else {
+      const startup=item.measured?0:(profile.startup===undefined?0:cost(profile.startup));
+      bin.tasks.push({...item.row,selected:[...item.selected],split:item.split,rootCost:item.cost,cost:item.cost+startup});
+      bin.load+=startup;
+    }
     bin.load+=item.cost;
   }
-  return bins.map(bin=>[...bin.tasks.values()].map(task=>({...task,cost:task.cost+(task.measured?0:(profile.startup??0)),selected:task.split?task.selected.sort(compare):task.selected})).sort((a,b)=>b.cost-a.cost || compare(a.pkg,b.pkg)));
+  return bins.map(bin=>bin.tasks.map(({rootCost,...task})=>({...task,selected:task.split?task.selected.sort(compare):task.selected})).sort((a,b)=>b.cost-a.cost || compare(a.pkg,b.pkg) || compare(a.selected[0]??'',b.selected[0]??'')));
 }
 
 // Do not return on the first error with live children still running. Stop

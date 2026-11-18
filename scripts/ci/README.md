@@ -1,8 +1,8 @@
 # Release CI scheduling and acceptance
 
 The workflow preserves full native Linux x64 / Windows x64 / Windows ARM64
-Go, Node and E2E coverage. Six native Go lanes per platform execute four
-complete whole-root groups each (24 disjoint partitions). Three independent
+Go, Node and E2E coverage. Two Linux and six Windows lanes per platform execute
+four complete whole-root groups each (8 Linux / 24 Windows partitions). Three independent
 Linux producer jobs cross-compile platform-selected test packages once in six
 bounded groups, after cold-dependency stages; source/hash-bound bundles include
 native test2json. Consumers validate/copy to private physical temp, discover
@@ -12,25 +12,32 @@ test2json use normal Go linker stripping (`-s -w`), without changing production
 binaries or weakening source/hash receipts. Packages with20+roots are partitioned
 whole-root. Smaller packages also split when they have at least two roots and
 complete measured process elapsed >8s. Cheap, unknown-small, single-root and
-no-test packages remain whole. The 8s threshold leaves placement headroom within
-roughly70s remaining across four groups (~17.5s/group); it is scheduling policy,
+no-test packages remain whole. The8s split threshold and packet caps are scheduling policy,
 not a measured speedup or a claim that the native budget passes.
-`go-timings.json` records complete R7 PASS root maxima across all18 native Go
-logs (run44254434973, source101f0727), Windows maximum of x64/ARM. Complete
+`go-timings.json` records complete R9 PASS root maxima across all18 native Go
+logs (run44260174057 attempt1, source1c05da91), Windows maximum of x64/ARM. Complete
 package process elapsed maxima are retained separately; small whole packages
 use that observed process cost rather than summing potentially parallel roots.
 Unknown roots use the median complete PASS root cost for their package, or a
 positive0.1s fallback when entirely unobserved. Failed/unfinished packages and
-roots (including sibling-owned localruntime failures) are explicitly censored;
+roots (including the empty app-server JSON assertion) are explicitly censored;
 completed roots in later-failed packages remain valid root observations. Native
 skips are not timings. Startup uses the median nonnegative completed package
 elapsed minus summed root durations. `go-profile.mjs` replays the source-bound
-archived logs without fetching credentials or selecting coverage. New split
-Windows drift roots have no native root measurement yet. These are placement
+archived logs without fetching credentials or selecting coverage. Invoke with
+`DIRECTORY OUTPUT SOURCE_SHA RUN_ID ATTEMPT`; job metadata must bind the complete
+native log set, and output retains SHA256 hashes of those exact logs. R9 supplies
+2557 Linux and2327 Windows complete PASS roots, with81 censored records;
+264 Windows and2 Linux discovered roots still lack PASS observations. These are placement
 hints, not post-change runtime forecasts or proof of the workflow budget.
 Deterministic weighted
-placement balances whole roots, then batches each package's roots within a
-partition. It is not a coverage allowlist: discovery alone supplies the inventory,
+placement balances whole roots, then forms package packets within a partition:
+at most8 roots and4 estimated root seconds, plus one observed startup hint.
+An indivisible expensive root may exceed that placement cap; it is never split
+or dropped. Spare workers can now execute multiple packets of the same package.
+Every process receives independent private physical HOME/USERPROFILE, APPDATA/LOCALAPPDATA,
+TMPDIR/TMP/TEMP and XDG config/cache/data/state/runtime directories, removed after it exits.
+Original cwd, binary filenames and native assertions/hooks/cleanup remain intact. It is not a coverage allowlist: discovery alone supplies the inventory,
 and unknown/new roots always receive a positive cost. Each group runs at most
 four independent package binaries concurrently on Windows and two on Linux,
 retaining package cwd and exit status. The bounded pool accepts an explicit
@@ -39,13 +46,23 @@ A failure stops all queued work, drains every already-running worker and preserv
 the first rejection. Compilation and native copy/list discovery retain two workers. The enclosing budget owns the
 entire group and all descendants; no per-child budget multiplication.
 
-Each platform's six consumers wait only for its matching producer, not the
+Each platform's consumers wait only for its matching producer, not the
 slowest of all three compile jobs. YAML step/strategy anchors share identical
-commands, not extra platform exceptions. There are 37 executed jobs including
-acceptance (36 before it); `schedule.mjs` supplies the audit cardinality. Eighteen Go
-consumers replace36: R5 public FREE concurrency queued Linux starts until249s
-and ARM until280s. Fewer consumers cut artifact/setup work and queue waves,
-while retaining all24partitions. Actual native timings still must satisfy all limits.
+commands, not coverage exceptions. There are33 executed jobs including acceptance
+(32 before it); `schedule.mjs` supplies the audit cardinality. Reducing Linux6 to2
+frees four runner slots while keeping Windows6+6. Source-bound R9 inventory
+(46/2559 Linux packages/roots;45/2591 Windows) gives packet worker-model maximum
+Linux group25.17s / lane88.94s with2 lanes;1 lane costs169.83s. Windows6 models
+44.005s maximum group /116.235s lane. These are PASS-cost placement models, not
+runtime guarantees:264 Windows roots use fallbacks and process startup is uncertain.
+An explicit20-slot replay with archived producer release dates, non-Go occupancy,
+maximum observed consumer setup/idle/post costs and35s accept models354s for
+Linux2 vs392s for Linux6: neither meets300s. Sparse consumer checkout retains all
+source/fixture directories documented by the frozen checkout scout; producers
+retain full discovery. Accept uses only scripts/ci, scripts/npm and npm. Non-tag
+assembly checkout is shallow; pushed version tags retain full ancestry. Sparse
+speedups are unmeasured and not subtracted from the model. Native completion
+under300s and every step under60s remain mandatory and unproven.
 New roots/examples/fuzz seeds and small/no-test packages remain conserved.
 Disposable testhub/preference stores copy a closed fully migrated image into
 independent files, then regenerate identity material. FreshStore and the named

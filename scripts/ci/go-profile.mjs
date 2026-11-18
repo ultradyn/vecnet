@@ -64,25 +64,28 @@ export function buildGoProfile(logs) {
  return {...result,censored};
 }
 
-// Usage: node scripts/ci/go-profile.mjs <native-log-directory> <output-json>
+// Usage: node scripts/ci/go-profile.mjs <native-log-directory> <output-json> <source-sha> <run-id> <attempt>
 // Run only on archived, source-bound complete logs; never fetch/authenticate here.
+import {createHash} from 'node:crypto';
 import {readFile, writeFile} from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 if(process.argv[1] && path.resolve(process.argv[1])===fileURLToPath(import.meta.url)) {
- const [directory,output]=process.argv.slice(2);
- if(!directory||!output)throw new Error('expected log directory and output JSON');
+ const [directory,output,sha,runText,attemptText]=process.argv.slice(2);
+ const run=Number(runText),attempt=Number(attemptText);
+ if(!directory||!output||!/^[a-f0-9]{40}$/.test(sha??'')||!Number.isSafeInteger(run)||run<1||!Number.isSafeInteger(attempt)||attempt<1)throw new Error('expected log directory, output JSON, source SHA, run and attempt');
  const index=JSON.parse(await readFile(path.join(directory,'index.json'),'utf8'));
  const jobs=JSON.parse(await readFile(path.join(directory,'jobs.json'),'utf8')).jobs;
  const selected=index.filter(row=>row.name.startsWith('test-go-'));
- const sha='101f072702819a4066ed5b037c42191ef1c79d37',run=44254434973;
- if(selected.length!==18 || new Set(selected.map(row=>row.name)).size!==18)throw new Error('expected all18 native Go logs');
+ if(selected.length!==18 || new Set(selected.map(row=>row.name)).size!==18 || new Set(selected.map(row=>row.id)).size!==18 || selected.some(row=>!/^test-go-(linux|windows-x64|windows-arm) \([0-5]\)$/.test(row.name)) || jobs.filter(job=>job.name.startsWith('test-go-')).length!==18)throw new Error('expected all18 native Go logs');
  for(const row of selected) {
   const job=jobs.find(job=>job.id===row.id);
-  if(!job||job.name!==row.name||job.head_sha!==sha||job.run_id!==run||job.status!=='completed'||job.conclusion!==row.conclusion)throw new Error('source/run/job binding mismatch');
+  if(!job||job.name!==row.name||job.head_sha!==sha||job.run_id!==run||job.run_attempt!==attempt||job.status!=='completed'||job.conclusion!==row.conclusion)throw new Error('source/run/job binding mismatch');
  }
- const result=buildGoProfile(await Promise.all(selected.map(async row=>({name:row.name,log:await readFile(path.join(directory,`${row.id}.log`),'utf8')}))));
- result.evidence=`R7 run${run} source${sha}, all18 native Go logs. Complete PASS root maxima (Windows maxx64/ARM); complete package slice elapsed maxima and median complete-root fallbacks. Failed/unfinished roots and package executions explicitly censored. Zero-rounded PASS costs floored0.01s. Startup median of nonnegative completed package elapsed minus summed roots. No postchange native measurements or predicted gains; discovery supplies coverage. Unobserved roots use positive package fallback or0.1s.`;
+ const logs=await Promise.all(selected.map(async row=>({id:row.id,name:row.name,log:await readFile(path.join(directory,`${row.id}.log`),'utf8')})));
+ const result=buildGoProfile(logs);
+ result.source={sha,run,attempt,logs:logs.map(({id,name,log})=>({id,name,sha256:createHash('sha256').update(log).digest('hex')}))};
+ result.evidence=`Archived native run${run} attempt${attempt} source${sha}, all18 native Go logs. Complete PASS root maxima (Windows maxx64/ARM); complete package slice elapsed maxima and median complete-root fallbacks. Failed/unfinished roots and package executions explicitly censored. Zero-rounded PASS costs floored0.01s. Startup median of nonnegative completed package elapsed minus summed roots. No postchange native measurements or predicted gains; discovery supplies coverage. Unobserved roots use positive package fallback or0.1s.`;
  await writeFile(output,JSON.stringify(result,null,2)+'\n');
  console.log(JSON.stringify({roots:Object.fromEntries(['linux','windows'].map(p=>[p,Object.values(result[p].roots).reduce((n,r)=>n+Object.keys(r).length,0)])),censored:result.censored},null,2));
 }

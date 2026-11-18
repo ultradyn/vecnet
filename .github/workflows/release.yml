@@ -101,7 +101,7 @@ jobs:
         timeout-minutes: 1
         with:
           persist-credentials: false
-          fetch-depth: 0
+          fetch-depth: ${{ startsWith(github.ref, 'refs/tags/v') && '0' || '1' }}
       - uses: actions/setup-node@v6
         timeout-minutes: 1
         with:
@@ -248,10 +248,10 @@ jobs:
   # imposing the slowest producer's tail on both already-ready Windows bundles.
   test-go-linux:
     needs: test-compile-linux
-    strategy: &native-go-strategy
+    strategy:
       fail-fast: false
       matrix:
-        lane: [0, 1, 2, 3, 4, 5]
+        lane: [0, 1]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps: &native-go-steps
@@ -263,6 +263,14 @@ jobs:
         timeout-minutes: 1
         with:
           persist-credentials: false
+          sparse-checkout: |
+            bench
+            cmd
+            internal
+            connectors
+            docs/protocol
+            scripts/ci
+            scripts/npm
       - uses: actions/setup-node@v6
         timeout-minutes: 1
         with:
@@ -290,14 +298,17 @@ jobs:
 
   test-go-windows-x64:
     needs: test-compile-windows-x64
-    strategy: *native-go-strategy
+    strategy: &windows-go-strategy
+      fail-fast: false
+      matrix:
+        lane: [0, 1, 2, 3, 4, 5]
     runs-on: windows-2025
     timeout-minutes: 5
     steps: *native-go-steps
 
   test-go-windows-arm:
     needs: test-compile-windows-arm
-    strategy: *native-go-strategy
+    strategy: *windows-go-strategy
     runs-on: windows-11-arm
     timeout-minutes: 5
     steps: *native-go-steps
@@ -458,6 +469,10 @@ jobs:
         timeout-minutes: 1
         with:
           persist-credentials: false
+          sparse-checkout: |
+            scripts/ci
+            scripts/npm
+            npm
       - uses: actions/setup-node@v6
         timeout-minutes: 1
         with:
