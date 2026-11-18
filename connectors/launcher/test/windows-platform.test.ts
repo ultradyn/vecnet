@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { once } from 'node:events';
+import { Duplex, PassThrough } from 'node:stream';
 import { createConnection } from 'node:net';
 import { openLedger } from '../src/ledger.ts';
 import { localPlatform, readPrivateFileSync } from '../src/private-files.ts';
@@ -18,7 +19,7 @@ import { CODEX_RELOAD_MS, codexBindingsPath, codexRecoveryPath, startCodexConnec
 import { readBindings } from '../src/codex/connector-authority.ts';
 import { openStatusPublisher } from '../src/codex/connector-status.ts';
 import { openCodexRpc as openDeliveryRpc } from '../src/codex/rpc.ts';
-import { nativeCodexBinary } from '../src/backends/codex-app-server/control-proxy.ts';
+import { connectControlProxy, nativeCodexBinary } from '../src/backends/codex-app-server/control-proxy.ts';
 import { openCodexRpc as openBackendRpc } from '../src/backends/codex-app-server/rpc.ts';
 import { startFakeCodexAppServer } from './fake-codex-appserver.ts';
 import { makeOwnerPrivate, makePrivateDirectory, makePublicReadable, symlinkSync, writePrivate } from './fixtures/platform.ts';
@@ -410,6 +411,72 @@ function mockLiveProcesses(t: TestContext, pipe: string) {
   onCleanup(t, () => { mock.mock.restore(); syncBuiltinESMExports(); });
   return { helpers, children };
 }
+
+test('control proxy exit releases stranded stdout before the exact child close join', async t => {
+  const dir = sandbox(t), control = join(dir, 'app-server-control');
+  makePrivateDirectory(control);
+  const node = privateExecutable(dir, process.execPath, 'node.exe');
+  // Model the native observation: the process exited but stdout never ends.
+  // Private path/binary admission and the production transport stay real.
+  const child = new childProcess.ChildProcess();
+  const stdout = new PassThrough(), stderr = new PassThrough(), stdin = new PassThrough();
+  Object.assign(child, { stdout, stderr, stdin, stdio: [stdin, stdout, stderr] });
+  const spawn = childProcess.spawn;
+  const mock = t.mock.method(childProcess, 'spawn', (...args: Parameters<typeof spawn>) => {
+    if ((args[1] as string[])[0] === 'app-server') return child;
+    return Reflect.apply(spawn, childProcess, args);
+  }); syncBuiltinESMExports();
+  let joined = false;
+  const closed = new Promise<void>(resolve => child.once('close', () => { joined = true; resolve(); }));
+  // Preserve pipe-close-before-child-close in this controlled process boundary.
+  stdout.once('close', () => child.emit('close', 0, null));
+  // Reproduce Windows' observed tunnel destruction without stdout closure;
+  // Linux Duplex.from otherwise forwards destruction and hides this leak.
+  const tunnel = new PassThrough();
+  const from = t.mock.method(Duplex, 'from', () => tunnel);
+  const connecting = connectControlProxy(dir, { ...process.env, VECNET_CODEX_BIN: node });
+  const rejected = assert.rejects(connecting, /WebSocket/);
+  try {
+    stdin.destroy(); stderr.destroy();
+    assert.equal(stdout.destroyed, false); assert.equal(joined, false);
+    child.emit('exit', 0, null);
+    assert.equal(stdout.destroyed, true, 'exited control proxy must release its stranded stdout pipe');
+    assert.equal(joined, false, 'process exit is not the exact child close event');
+    await closed; await rejected;
+    assert.equal(stdout.closed, true); assert.equal(joined, true);
+  } finally {
+    stdin.destroy(); stdout.destroy(); stderr.destroy();
+    from.mock.restore(); mock.mock.restore(); syncBuiltinESMExports();
+    await rejected;
+  }
+});
+
+test('control proxy carries real WebSocket bytes and joins child close after transport shutdown', async t => {
+  const dir = sandbox(t), fake = await startFakeCodexAppServer({ dir: join(dir, 'proxy') });
+  onCleanup(t, () => fake.close());
+  makePrivateDirectory(join(dir, 'app-server-control'));
+  const node = privateExecutable(dir, process.execPath, 'node.exe');
+  const spawn = childProcess.spawn;
+  const run = fixtureSpawn(spawn, { pipe: windows ? fake.socketPath : realpathSync(fake.socketPath) });
+  let child: childProcess.ChildProcess | undefined, closed: Promise<unknown> | undefined;
+  const mock = t.mock.method(childProcess, 'spawn', (...args: Parameters<typeof spawn>) => {
+    const result = run(...args);
+    if ((args[1] as string[])[0] === 'app-server') { child = result; closed = once(result, 'close'); }
+    return result;
+  }); syncBuiltinESMExports();
+  onCleanup(t, async () => {
+    mock.mock.restore(); syncBuiltinESMExports();
+    if (child?.exitCode === null && child.signalCode === null) child.kill();
+    await closed;
+  });
+  const ws = await connectControlProxy(dir, { ...process.env, VECNET_CODEX_BIN: node });
+  onCleanup(t, () => ws.close());
+  const response = new Promise<string>(resolve => ws.onMessage(resolve));
+  ws.send(JSON.stringify({ id: 1, method: 'initialize', params: { capabilities: {} } }));
+  assert.equal(JSON.parse(await response).id, 1, 'proxy must preserve real framed response bytes');
+  ws.close(); await closed;
+  assert.equal(child!.stdout!.closed, true, 'exact child close follows stdout release');
+});
 
 test('Windows live connector exposes fatal helper loss only after fencing, and a replacement regains readiness', { skip: !windows, timeout: 15000 }, async t => {
   const s = await liveBinding(t), { helpers, children } = mockLiveProcesses(t, s.fake.socketPath);
