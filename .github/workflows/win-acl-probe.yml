@@ -39,9 +39,7 @@ jobs:
           github-token: ${{ github.token }}
       - name: Verify exact R9 source bundle and discover real native roots
         timeout-minutes: 1
-        env:
-          GITHUB_SHA: 528f8b508b2b4fe42aa1ecc44f858fb9b2ed6e1b
-        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs consume-go
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/diagnostic-inbox.mjs prepare
       - name: Unchanged inbox assertion in isolation
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/diagnostic-inbox.mjs 1
