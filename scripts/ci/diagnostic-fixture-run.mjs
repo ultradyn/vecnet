@@ -26,7 +26,7 @@ const isolated=async task=>{
  }finally{console.log(JSON.stringify({filter,elapsed_ms:Date.now()-started}));await rm(temporary,{recursive:true,force:true});}
 };
 const sse={pkg:'httpapi',filter:'^TestSlowSSEConsumerDoesNotBlockSend$'};
-const modes={sse:[sse],loaded:[sse,{pkg:'cli',filter:'^TestCodexHookWindowsInstalledCommandPreservesArgv$'},{pkg:'cli',filter:'^TestStateConcurrentWriters$'},{pkg:'cli',filter:'^TestRouteStatsRelocationRefusals$'}]};
+const modes={startup:[{pkg:'cli',filter:'^TestCodexHookWindowsInstalledCommandPreservesArgv$'}],sse:[sse],loaded:[sse,{pkg:'cli',filter:'^TestCodexHookWindowsInstalledCommandPreservesArgv$'},{pkg:'cli',filter:'^TestStateConcurrentWriters$'},{pkg:'cli',filter:'^TestRouteStatsRelocationRefusals$'}]};
 const selected=modes[process.argv[2]];if(!selected)throw new Error('unknown diagnostic mode');
 const result=[];
 if(process.argv[2]==='neighbors2'){

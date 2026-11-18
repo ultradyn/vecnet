@@ -86,6 +86,9 @@ jobs:
         with:
           name: fixture-phase-${{ matrix.arch }}
           path: dist/fixture-probe
+      - name: Original cold PowerShell assertions alone
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/diagnostic-fixture-run.mjs startup
       - name: Original assertions sse
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/diagnostic-fixture-run.mjs sse
