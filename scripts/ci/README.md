@@ -92,17 +92,27 @@ BUILD_INFO. No-argument `build.mjs` still performs the original sequential local
 build. Every native package gate verifies the same tarball checksum; publish
 retains matching master/tag guard, npm12 trusted publishing/OIDC/provenance.
 
-The three Linux-hosted test-bundle producers explicitly set `CI_GO_COMPILE_JOBS=4`
-and `GOMAXPROCS=4` for their four allocated cores. One shared capacity policy
-accepts canonical integers1..6, defaults to2 when unset, and rejects malformed
-or out-of-range input before producer work. All cold dependency build stages,
-all six bundle compile groups and native test2json finalization use that value
-for Go's `-p`. This is a producer-only opt-in: target/assembly builds, local/BB
-callers and discovery keep their existing two-job defaults. Native consumers
-retain `GOMAXPROCS=2`, four Windows execution workers and two Linux workers.
-The extra producer CPU is an unmeasured throughput hypothesis, not a native
-speedup or proof of the300s/60s budgets. BB verification remains at two jobs;
-parent measures four-core cold-build time and memory in the full native matrix.
+The three Linux-hosted test-bundle producers explicitly request
+`CI_GO_COMPILE_JOBS=4`. One shared policy validates canonical integers1..6,
+caps explicit requests by `os.availableParallelism()`, and applies the same
+effective value to both Go `-p` and the producer Go subprocess `GOMAXPROCS`.
+Unset requests preserve the existing two-job default and inherited environment.
+All cold dependency build stages, six bundle compile groups and event-tool
+finalization use this policy; malformed overrides fail before producer work.
+Other target/assembly builds, discovery and native execution remain unchanged:
+native `GOMAXPROCS=2`, four Windows execution workers and two Linux workers.
+Parent's actual ubuntu-24.04 capacity probe run44264657616, heada573c13b,
+`capacity-probe/capacity.json` verified availableParallelism4, cpus4 and
+16464306176 bytes totalMemory. This is allocation evidence, not speedup or memory
+acceptance. The runtime cap also handles future lower-CPU allocations. BB checks
+retain two jobs; full native time/memory and300s/60s acceptance remain parent-owned.
+
+Discovery's real compiled helper prepares one reusable native test2json before
+packet execution. Go1.27 can compile tool commands into GOCACHE on demand;
+invoking `go tool test2json` after each packet changes HOME/XDG would rebuild the
+tool repeatedly in private caches. Bundle consumers already use the hash-bound
+native event tool; discovery now likewise avoids invoking the Go driver during
+private packet execution, without changing assertions or root selection.
 
 Cold dependency stages: module download, standard library, SQLite, remaining
 large UI/schema/MCP dependencies. All compilation uses matching `-trimpath`

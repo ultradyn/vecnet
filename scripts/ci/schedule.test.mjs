@@ -167,7 +167,7 @@ test('compile capacity defaults to two, permits explicit bounded jobs and reject
  const {goCompileJobs}=await import('./schedule.mjs');
  assert.equal(typeof goCompileJobs,'function','shared compile capacity policy exists');
  assert.equal(goCompileJobs(undefined),'2');
- for(const value of ['1','2','3','4','5','6'])assert.equal(goCompileJobs(value),value);
+ for(const value of ['1','2','3','4','5','6'])assert.equal(goCompileJobs(value,6),value);
  for(const value of ['', '0','7','-1','2.5','04',' 4','4 ','NaN','Infinity',null,4]){
   assert.throws(()=>goCompileJobs(value),/CI_GO_COMPILE_JOBS/);
  }
@@ -187,4 +187,16 @@ test('invalid compile override fails closed at each producer entry point before 
   assert.match(child.stderr,/CI_GO_COMPILE_JOBS must be an integer from 1 to 6/);
   assert.doesNotMatch(child.stderr,/spawnSync go|ENOENT/);
  }
+});
+
+test('explicit compile jobs cap to available CPUs and use the same Go runtime environment',async()=>{
+ const {goCompileJobs,goCompileEnvironment}=await import('./schedule.mjs');
+ assert.equal(goCompileJobs('4',2),'2');assert.equal(goCompileJobs('4',4),'4');
+ assert.equal(goCompileJobs(undefined,1),'2','unset compatibility default remains two');
+ assert.equal(typeof goCompileEnvironment,'function');
+ const env={GOMAXPROCS:'4',CI_GO_COMPILE_JOBS:'4',KEEP:'original'};
+ assert.deepEqual(goCompileEnvironment(env,2),{...env,GOMAXPROCS:'2'});
+ assert.deepEqual(goCompileEnvironment(env,4),env);
+ assert.deepEqual(goCompileEnvironment({GOMAXPROCS:'2'},4),{GOMAXPROCS:'2'});
+ for(const available of [0,-1,1.5,NaN,Infinity,'2'])assert.throws(()=>goCompileJobs('4',available),/available parallelism/);
 });

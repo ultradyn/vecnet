@@ -162,7 +162,6 @@ jobs:
       GOARCH: amd64
       CI_GO_PLATFORM: linux-x64
       CI_GO_COMPILE_JOBS: '4'
-      GOMAXPROCS: '4'
     steps: &compile-go-steps
       - name: Preserve LF bytes on Windows
         if: runner.os == 'Windows'
@@ -236,7 +235,6 @@ jobs:
       GOARCH: amd64
       CI_GO_PLATFORM: win32-x64
       CI_GO_COMPILE_JOBS: '4'
-      GOMAXPROCS: '4'
     steps: *compile-go-steps
 
   test-compile-windows-arm:
@@ -247,7 +245,6 @@ jobs:
       GOARCH: arm64
       CI_GO_PLATFORM: win32-arm64
       CI_GO_COMPILE_JOBS: '4'
-      GOMAXPROCS: '4'
     steps: *compile-go-steps
 
   # Each native platform waits only for its own source-bound bundle. Avoid

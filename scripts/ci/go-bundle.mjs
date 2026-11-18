@@ -2,7 +2,7 @@
 // discover names and execute ONLY on the native consumer. No platform skips.
 import { execFileSync, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { bounded, goCompileJobs } from './schedule.mjs';
+import { bounded, goCompileJobs, goCompileEnvironment } from './schedule.mjs';
 const exec = promisify(execFile);
 import { createHash } from 'node:crypto';
 import { chmod, copyFile, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { nativeTargets } from '../npm/platforms.mjs';
 import { partition } from './partition.mjs';
 const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
-const go=args=>execFileSync('go',args,{encoding:'utf8',maxBuffer:16*1024*1024});
+const go=args=>execFileSync('go',args,{env:goCompileEnvironment(process.env),encoding:'utf8',maxBuffer:16*1024*1024});
 function packages(){return go(['list','-mod=readonly','-f','{{.ImportPath}}\t{{.Dir}}\t{{len .TestGoFiles}}\t{{len .XTestGoFiles}}','./...']).trim().split(/\r?\n/).map(line=>{const[pkg,dir,internal,external]=line.split('\t');return{pkg,dir,tests:Number(internal)+Number(external)>0};});}
 export async function compileGroup(platform,index){
  const jobs=goCompileJobs(process.env.CI_GO_COMPILE_JOBS);

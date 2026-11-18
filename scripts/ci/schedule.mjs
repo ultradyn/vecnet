@@ -1,3 +1,4 @@
+import {availableParallelism} from 'node:os';
 // Scheduling policy only. Discovery, not timing observations, determines coverage.
 export const goLanes = 6;
 export const goGroups = 4;
@@ -6,10 +7,15 @@ export const goPartitions = goLanes * goGroups;
 // target4 + compile3 + build1 + Go(2+6+6) + Node3 + E2E3 + artifact4 + accept1.
 export const releaseJobCount = () => 4 + 3 + 1 + nativeGoLanes('linux') + 2 * goLanes + 3 + 3 + 4 + 1;
 // Explicit producer opt-in only; unrelated callers retain the two-job default.
-export function goCompileJobs(value) {
+export function goCompileJobs(value, available=availableParallelism()) {
   if(value===undefined)return '2';
   if(typeof value!=='string'||!/^[1-6]$/.test(value))throw new Error('CI_GO_COMPILE_JOBS must be an integer from 1 to 6');
-  return value;
+  if(!Number.isInteger(available)||available<1)throw new Error('invalid available parallelism');
+  return String(Math.min(Number(value),available));
+}
+export function goCompileEnvironment(env, available=availableParallelism()) {
+  const jobs=goCompileJobs(env.CI_GO_COMPILE_JOBS,available);
+  return env.CI_GO_COMPILE_JOBS===undefined?env:{...env,GOMAXPROCS:jobs};
 }
 const compare = (a, b) => a < b ? -1 : a > b ? 1 : 0;
 const cost = n => {
