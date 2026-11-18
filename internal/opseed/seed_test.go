@@ -28,8 +28,13 @@ func seedOptions(t *testing.T, options opseed.Options) (*testhub.Env, opseed.Sce
 		// database while other CI packets are also writing. Checkpoint once
 		// before returning to the assertions, then restore the original pool.
 		poolSize := e.Hub.DB.Stats().MaxOpenConnections
+		const fixtureIdleConnections = 2 // Explicitly own database/sql's default fixture policy.
+		e.Hub.DB.SetMaxIdleConns(fixtureIdleConnections)
 		e.Hub.DB.SetMaxOpenConns(1)
-		defer e.Hub.DB.SetMaxOpenConns(poolSize)
+		defer func() {
+			e.Hub.DB.SetMaxOpenConns(poolSize)
+			e.Hub.DB.SetMaxIdleConns(fixtureIdleConnections)
+		}()
 		if count(t, e, "PRAGMA synchronous") != 1 || count(t, e, "PRAGMA wal_autocheckpoint") != 1000 {
 			t.Fatal("large seed requires the disposable NORMAL fixture with default checkpoints")
 		}
