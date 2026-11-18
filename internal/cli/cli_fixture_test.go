@@ -176,7 +176,7 @@ func makeCLIFixtureSnapshot() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	_, err = io.Copy(dst, src)
+	_, err = copyFixtureImage(dst, src)
 	return path, errors.Join(err, dst.Close())
 }
 
