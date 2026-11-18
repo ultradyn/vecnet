@@ -339,6 +339,8 @@ test('Windows live connector exposes fatal helper loss only after fencing, and a
   console.log('LIVE_PROBE connector stage=1 after');
   const clock = fakeClock(Date.now()), log = memoryLog(), reports: { reason?: string }[] = [];
   const start = () => startCodexConnector({ env: s.env, log, clock, postRuntimeStatus: async (_b, snapshot) => { reports.push(snapshot); return true; } });
+  const liveWarnIDs = ['codex_recovery_refused', 'codex_connector_failed', 'codex_connector_duplicate', 'codex_bindings_refused', 'codex_bindings_invalid', 'codex_connector_disabled', 'codex_engine_operation_failed', 'codex_binding_auth_unverified', 'codex_watch_unreachable'];
+  const warnings = () => Object.fromEntries(liveWarnIDs.map(id => [id, log.entries.filter(e => e.msg === id).length]));
   const first = start(); onCleanup(t, () => first.stop());
   console.log('LIVE_PROBE connector stage=2 before');
   await until(() => s.watches() === 1 && s.fake.subscribers(s.id).length === 1, 'live bound watch and subscription');
@@ -358,8 +360,18 @@ test('Windows live connector exposes fatal helper loss only after fencing, and a
   assert.equal(reports.some(r => r.reason === 'stopped'), false, 'no offline report after singleton loss');
   const count = children.length; clock.advance(CODEX_RELOAD_MS * 2);
   assert.equal(children.length, count, 'old connector never self-revives without a singleton');
+  console.log('LIVE_WARN_BEFORE_SECOND '+JSON.stringify(warnings()));
+  for (const [index, suffix] of ['', '-wal', '-shm', '-journal'].entries()) {
+    const candidate = join(dirname(s.path), 'delivery.sqlite' + suffix);
+    let exists = false, regular = false, singleLink = false, privateAccepted = false, metadataCode = 'NONE';
+    try { const st = lstatSync(candidate); exists = true; regular = st.isFile() && !st.isSymbolicLink(); singleLink = st.nlink === 1; }
+    catch (error) { metadataCode = ['ENOENT', 'EACCES', 'EPERM'].find(code => code === (error as NodeJS.ErrnoException)?.code) ?? 'OTHER'; }
+    if (exists) { try { localPlatform('check-private', candidate, { env: s.env }); privateAccepted = true; } catch {} }
+    console.log('LIVE_RECOVERY '+JSON.stringify({ index, exists, regular, singleLink, privateAccepted, metadataCode }));
+  }
   const second = start(); onCleanup(t, () => second.stop());
-  const replacementProbe = setInterval(() => console.log('LIVE_REPLACEMENT '+JSON.stringify({ watches:s.watches(), subscribers:s.fake.subscribers(s.id).length, ready:s.ready(), helpers:helpers.length, states:children.map(child=>({exit:child.exitCode,signal:child.signalCode})) })), 1000);
+  void second.stopped.then(outcome => console.log('LIVE_SECOND_STOP '+JSON.stringify({ reason: outcome.reason === 'stopped' ? 'stopped' : 'status_lock_lost' })));
+  const replacementProbe = setInterval(() => console.log('LIVE_REPLACEMENT '+JSON.stringify({ watches:s.watches(), subscribers:s.fake.subscribers(s.id).length, ready:s.ready(), helpers:helpers.length, states:children.map(child=>({exit:child.exitCode,signal:child.signalCode})), warnings:warnings() })), 1000);
   replacementProbe.unref(); onCleanup(t, () => clearInterval(replacementProbe));
   console.log('LIVE_PROBE connector stage=6 before');
   await until(() => s.watches() === 2 && s.fake.subscribers(s.id).length === 1, 'replacement live binding');
