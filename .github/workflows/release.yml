@@ -54,6 +54,7 @@ jobs:
           sparse-checkout: |
             cmd
             internal
+            connectors
             scripts/ci
             scripts/npm
             npm

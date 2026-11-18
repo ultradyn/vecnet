@@ -260,12 +260,12 @@ Node/E2E checkouts retain complete connectors, internal, scripts, docs/protocol
 and npm directories plus root files. Discovery still sees all connector test
 files, backend fixtures, embedded protocol schemas and cross-platform scripts;
 unrelated documentation screenshots are omitted from these consumers. Target
-producers retain cmd, internal, scripts/ci, scripts/npm and npm; package assembly
-also retains connectors for runtime assets. Test producers retain bench, cmd,
+producers retain cmd, internal, connectors, scripts/ci, scripts/npm and npm,
+including the Go package that embeds connector assets. Test producers retain bench, cmd,
 internal, connectors, docs/protocol, scripts/ci and scripts/npm. Every Go package
 and embedded asset remains present, and the source archive still selects from
 the complete committed Git tree. Root files and cone ancestors are retained.
-At R26 these producer checkouts contain 18–27 MB of the 155 MB tree; full
+At R26 these producer checkouts contain 20–27 MB of the 155 MB tree; full
 checkout included 86 MB of documentation and 42 MB of scratch files. This
 reduces transferred input, without establishing a native runtime guarantee.
 
