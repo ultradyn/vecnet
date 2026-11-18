@@ -614,3 +614,31 @@ func TestWindowsRuntimePinsInstalledNode(t *testing.T) {
 		t.Fatal(e)
 	}
 }
+
+// A delete-capable handle models the interval in pending.json replacement or
+// removal during commit. Private reads deliberately do not share delete access;
+// preflight must therefore be outside this interval, not retried within it.
+func TestWindowsPendingReadConflictsWithCommitHandle(t *testing.T) {
+	o, _ := windowsFixture(t)
+	ensureWindowsTest(t, o)
+	m, e := readManifest(o.Home, manifestName)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = writeManifest(o.Home, pendingName, m); e != nil {
+		t.Fatal(e)
+	}
+	path := filepath.Join(root(o.Home), pendingName)
+	name, e := windows.UTF16PtrFromString(path)
+	if e != nil {
+		t.Fatal(e)
+	}
+	h, e := windows.CreateFile(name, windows.DELETE, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer windows.CloseHandle(h)
+	if _, e = optionalManifest(o.Home, pendingName); !errors.Is(e, windows.ERROR_SHARING_VIOLATION) {
+		t.Fatalf("pending read during commit window: %v", e)
+	}
+}

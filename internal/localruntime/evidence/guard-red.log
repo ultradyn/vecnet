@@ -1,0 +1,9 @@
+bash '/home/xertrov/.codex/worktrees/d90c/vecnet'/scripts/bb/run.sh "$@"
+bb: host=x-boss lane=ci80-concurrent jobs=2 sync+bootstrap=1.3s; running: bash -c set -eu; umask 022; unset ACP_TEST_ROOT; private=$(mktemp -d /tmp/ci80-concurrent.XXXXXXXX); chmod 0700 "$private"; private=$(cd "$private" && pwd -P); export TMPDIR="$private/tmp" HOME="$private/home" XDG_CONFIG_HOME="$private/home/.config" XDG_CACHE_HOME="$private/home/.cache" XDG_DATA_HOME="$private/home/.local/share" XDG_STATE_HOME="$private/home/.local/state" XDG_RUNTIME_DIR="$private/run"; mkdir -m 0700 -p "$TMPDIR" "$HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME" "$XDG_RUNTIME_DIR"; trap 'rm -rf -- "$private"' EXIT; CGO_ENABLED=0 go test -p 2 -count=1 -run "^TestWindowsOperationGuard" ./internal/localruntime
+--- FAIL: TestWindowsOperationGuardExcludesPreflightAndCancelsWaiter (0.00s)
+    operation_guard_test.go:23: contending preflight entered: <nil>
+FAIL
+FAIL	github.com/XertroV/vecnet/internal/localruntime	0.002s
+FAIL
+bb: exit=1 sync=1.3s run=1.3s total=2.5s
+error: Recipe `bb` failed on line 144 with exit code 1
