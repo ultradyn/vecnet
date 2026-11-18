@@ -5,9 +5,16 @@ import path from 'node:path';
 import os from 'node:os';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { consumeBundle } from './go-bundle.mjs';
+import * as bundle from './go-bundle.mjs';
+const {consumeBundle}=bundle;
 import { planGo } from './schedule.mjs';
 const entry=fileURLToPath(new URL('./go-bundle.mjs',import.meta.url));
+test('bundle discovery uses four capacity-capped hosted workers and two locally',()=>{
+ assert.equal(typeof bundle.bundleDiscoveryJobs,'function');
+ for(const value of [undefined,'false','1'])assert.equal(bundle.bundleDiscoveryJobs({GITHUB_ACTIONS:value},8),2);
+ for(const available of [1,2,3,4,8])assert.equal(bundle.bundleDiscoveryJobs({GITHUB_ACTIONS:'true'},available),Math.min(4,available));
+ assert.throws(()=>bundle.bundleDiscoveryJobs({GITHUB_ACTIONS:'true'},0),/parallelism/);
+});
 test('real compiled bundle conserves platform packages and rejects wrong source/corruption',async t=>{
  const root=await mkdtemp(path.join(os.tmpdir(),'ci-bundle-'));t.after(()=>rm(root,{recursive:true,force:true}));
  await writeFile(path.join(root,'go.mod'),'module fixture\n\ngo 1.26\n');
