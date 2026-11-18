@@ -65,16 +65,21 @@ export async function stageTargetOwner(bytes) {
   }
 }
 
+export async function stageGoOwner({root = process.cwd(), sha, platform}) {
+  if (!Object.hasOwn(machine, platform)) throw new Error('expected native Windows Go owner platform');
+  const directory = path.resolve(root, 'dist/go-tests', platform);
+  const info = JSON.parse(await readFile(path.join(directory, 'bundle.json'), 'utf8'));
+  if (!/^[a-f0-9]{40}$/.test(sha || '') || info.revision !== sha) throw new Error('Windows Go owner source mismatch');
+  await stageTargetOwner(await readWindowsOwner(directory, info, platform));
+}
+
 // Stage before the first budgeted Go command, so bundle discovery also avoids
 // PowerShell startup. This step only validates and writes files; it spawns none.
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   if (process.platform !== 'win32' || process.argv.length !== 3 || process.argv[2] !== 'use-go') {
     throw new Error('usage: windows-owner.mjs use-go (Windows only)');
   }
-  const directory = path.resolve('dist/go-tests');
-  const info = JSON.parse(await readFile(path.join(directory, 'bundle.json'), 'utf8'));
   const sha = process.env.GITHUB_SHA;
-  if (!/^[a-f0-9]{40}$/.test(sha || '') || info.revision !== sha) throw new Error('Windows Go owner source mismatch');
-  await stageTargetOwner(await readWindowsOwner(directory, info, `win32-${process.arch}`));
+  await stageGoOwner({sha, platform: `win32-${process.arch}`});
   console.log(`Staged native Windows Go command owner for ${sha}`);
 }
