@@ -112,7 +112,7 @@ test('8. deadline: a launch that just passes the gate is settled at expires_at -
     }
     return response;
   };
-  const env = await setup(t, { idle: { settle_opaque: '30s', settle_observable: '30s' }, clockOffsetMs: -behind, hubFetch });
+  const env = await setup(t, { idle: { settle_opaque: '30s', settle_observable: '30s' }, clockOffsetMs: -behind, wallTimeTransport: { fetch: hubFetch } });
   const l = await launch(env, { expiresInMs: lifeMs });
   // The accepted POST, not requester delivery latency, is our readiness fence.
   // Still require the real running delivery below, after releasing the response.
@@ -133,4 +133,22 @@ test('8. deadline: a launch that just passes the gate is settled at expires_at -
   assert.ok(Date.parse(done.created_at) < expires, 'posted before the launch expired');
   assert.ok(Date.parse(done.created_at) >= expires - 1000 - 750, 'not settled long before expires_at - 1 s');
   assert.equal(env.fake().sessions()[0].settles, 1);
+});
+
+test('ordinary setup and restart keep real HTTP deadlines on the daemon clock', async t => {
+  const env = await setup(t, { noStart: true });
+  const timer = env.clock.timer.bind(env.clock);
+  let requestDeadlines = 0;
+  t.mock.method(env.clock, 'timer', (ms: number, fn: () => void) => {
+    if (ms === 30_000) requestDeadlines++;
+    return timer(ms, fn);
+  });
+  for (let start = 0; start < 2; start++) {
+    await env.start();
+    // Exclude the separate startup identity timeout: exercise real job traffic.
+    requestDeadlines = 0;
+    await running(env);
+    assert.ok(requestDeadlines > 0, 'real job HTTP deadlines use the daemon clock');
+    await env.daemon.stop();
+  }
 });

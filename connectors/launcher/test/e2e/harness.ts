@@ -90,7 +90,7 @@ interface Env {
   inspect<T>(fn: (ledger: Ledger) => T): T;
 }
 
-async function setup(t: TestContext, o: { idle?: Record<string, string>; clockOffsetMs?: number; noStart?: boolean; hubFetch?: typeof fetch } = {}): Promise<Env> {
+async function setup(t: TestContext, o: { idle?: Record<string, string>; clockOffsetMs?: number; noStart?: boolean; wallTimeTransport?: { fetch?: typeof fetch } } = {}): Promise<Env> {
   const dir = mkdtempSync(join(tmpdir(), 'launcher-e2e-'));
   const peers: Requester[] = [];
   let daemon: Daemon | undefined;
@@ -137,15 +137,16 @@ async function setup(t: TestContext, o: { idle?: Record<string, string>; clockOf
     idle: { park_after: '2s', settle_opaque: '4s', settle_observable: '4s', check_every: '250ms', deadline_margin: '1s', ...o.idle },
   });
   const log = memoryLog();
-  // Lifecycle time jumps must not expire an in-flight real HTTP request.
-  // In particular, requester SSE can observe running before the outbox has
-  // consumed that POST's response. Keep transport timeouts on wall time.
-  const hubClient = createHubClient({ baseUrl: hub.url, credential: launcher.secret, fetch: o.hubFetch });
+  // Only scenarios explicitly moving lifecycle time past real HTTP deadlines
+  // opt in. Ordinary setups/restarts retain the daemon's default client path.
+  const hubClient = o.wallTimeTransport
+    ? createHubClient({ baseUrl: hub.url, credential: launcher.secret, fetch: o.wallTimeTransport.fetch })
+    : undefined;
   const env: Env = {
     hub, dir, stateFile, repo, cfg, clock, log, launcher, requester, bystander, operator,
     get daemon() { return daemon!; },
     fake: () => fakeFor(stateFile),
-    async start(s = {}) { daemon = await startDaemon({ cfg, clock, log, hub: hubClient, env: { VECNET_CODEX_BINDINGS: join(dir, 'codex-bindings.json') }, beforeRecordRef: s.beforeRecordRef }); },
+    async start(s = {}) { daemon = await startDaemon({ cfg, clock, log, ...(hubClient ? { hub: hubClient } : {}), env: { VECNET_CODEX_BINDINGS: join(dir, 'codex-bindings.json') }, beforeRecordRef: s.beforeRecordRef }); },
     inspect(fn) {
       const ledger = openLedger(join(cfg.state_dir, 'ledger.sqlite'), clock);
       try { return fn(ledger); } finally { ledger.close(); }
