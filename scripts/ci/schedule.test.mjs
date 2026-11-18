@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { planGo, bounded, releaseJobCount, goLanes, nativeGoLanes, goGroups } from './schedule.mjs';
+import { planGo, bounded, runGoGroup, releaseJobCount, goLanes, nativeGoLanes, goGroups } from './schedule.mjs';
 const inventory = [
  {pkg:'heavy', names:Array.from({length:48},(_,i)=>`Test${i}`), binary:'heavy'},
  {pkg:'small', names:['Example','FuzzSeed'],binary:'small'},
@@ -199,4 +199,64 @@ test('explicit compile jobs cap to available CPUs and use the same Go runtime en
  assert.deepEqual(goCompileEnvironment(env,4),env);
  assert.deepEqual(goCompileEnvironment({GOMAXPROCS:'2'},4),{GOMAXPROCS:'2'});
  for(const available of [0,-1,1.5,NaN,Infinity,'2'])assert.throws(()=>goCompileJobs('4',available),/available parallelism/);
+});
+
+const ssePackage='github.com/XertroV/vecnet/internal/httpapi';
+const sseRoot='TestSlowSSEConsumerDoesNotBlockSend';
+
+test('Windows makes the discovered SSE root a singleton even in a small, cheap package',()=>{
+ const inv=[{pkg:ssePackage,names:[sseRoot,'TestNew','Example','FuzzSeed'],binary:'api',directory:'original'},
+  {pkg:'other',names:[sseRoot],binary:'other'}];
+ const windows=planGo(inv,{}, {platform:'win32'}).flat();
+ assert.equal(windows.filter(t=>t.exclusive).length,1);
+ const isolated=windows.find(t=>t.exclusive);
+ assert.equal(isolated.pkg,ssePackage);
+ assert.deepEqual(isolated.selected,[sseRoot]);
+ assert.equal(isolated.split,true,'a singleton must retain its native root filter');
+ assert.equal(isolated.binary,'api');assert.equal(isolated.directory,'original');
+ assert.deepEqual(windows.filter(t=>t.pkg===ssePackage).flatMap(t=>t.selected).sort(),inv[0].names.toSorted());
+ assert.ok(windows.filter(t=>t.pkg===ssePackage).every(t=>t.split),'no unfiltered repeat of the SSE root');
+ const absent=planGo([{...inv[0],names:['TestNew']}],{}, {platform:'win32'}).flat();
+ assert.equal(absent.flatMap(t=>t.selected).join(','),'TestNew');
+ assert.ok(absent.every(t=>!t.exclusive));
+ const linux=planGo(inv,{}, {platform:'linux',lanes:2}).flat();
+ assert.ok(linux.every(t=>!t.exclusive));
+ assert.equal(linux.filter(t=>t.pkg===ssePackage).length,1);
+});
+
+test('Windows Go group finishes its exclusive packet before using all four ordinary workers',async()=>{
+ const packets=Array.from({length:6},(_,id)=>({id,...(id===1?{exclusive:true}:{})}));
+ const starts=[],release=[];
+ const run=runGoGroup(packets,async ({id})=>{
+  starts.push(id);await new Promise(resolve=>{release[id]=resolve;});
+ },4);
+ const initial=[...starts];
+ release[1]?.();await turn();
+ const afterExclusive=[...starts];
+ for(let i=0;i<6;i++){for(const finish of release)finish?.();await turn();}
+ await run;
+ assert.deepEqual(initial,[1]);
+ assert.deepEqual(afterExclusive,[1,0,2,3,4]);
+ assert.deepEqual(starts,[1,0,2,3,4,5]);
+});
+
+test('an exclusive Go packet failure prevents every ordinary launch and propagates unchanged',async()=>{
+ const failure=new Error('native SSE assertion');
+ const starts=[];
+ await assert.rejects(runGoGroup([{id:0},{id:1,exclusive:true},{id:2}],async ({id})=>{
+  starts.push(id);
+  if(id===1)throw failure;
+ },4),e=>e===failure);
+ assert.deepEqual(starts,[1]);
+});
+
+test('Windows admits the exact installed PowerShell hook root alone without matching other hook tests',()=>{
+ const pkg='github.com/XertroV/vecnet/internal/cli';
+ const root='TestCodexHookWindowsInstalledCommandPreservesArgv';
+ const sibling=root+'Extended';
+ const inv=[{pkg,names:[sibling,root],binary:'cli'}];
+ const packets=planGo(inv,{roots:{[pkg]:{[root]:25}}},{platform:'win32'}).flat();
+ assert.equal(packets.filter(t=>t.exclusive).map(t=>t.selected.join()).join(),root);
+ assert.equal(packets.filter(t=>!t.exclusive).map(t=>t.selected.join()).join(),sibling);
+ assert.ok(packets.every(t=>t.split&&t.binary==='cli'));
 });

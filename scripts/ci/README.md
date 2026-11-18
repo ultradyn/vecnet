@@ -52,6 +52,16 @@ A failure stops all queued work, drains every already-running worker and preserv
 the first rejection. Compilation and native copy/list discovery retain two workers. The enclosing budget owns the
 entire group and all descendants; no per-child budget multiplication.
 
+On Windows only, the discovered `TestSlowSSEConsumerDoesNotBlockSend` and
+`TestCodexHookWindowsInstalledCommandPreservesArgv` roots use exclusive
+singleton packets. They run before the ordinary packet pool in their assigned
+group, with the same process isolation, root filter, timeouts and assertions.
+The existing R14 Windows bins already put both roots in singleton packets;
+this policy changes their admission, not their placement. Native diagnostic
+runs 44294556720 and 44295400381 reproduced SSE failures under packet load
+and passed both original roots in isolation on both architectures. Those were
+focused diagnostics, not a native Release budget pass.
+
 Each platform's consumers wait only for its matching producer, not the
 slowest of all three compile jobs. YAML step/strategy anchors share identical
 commands, not coverage exceptions. There are33 executed jobs including acceptance

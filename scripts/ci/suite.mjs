@@ -9,7 +9,7 @@ import os from 'node:os';
 import { performance } from 'node:perf_hooks';
 import { consumeBundle } from './go-bundle.mjs';
 import { partition } from './partition.mjs';
-import { bounded, planGo, nativeGoLanes, goGroups, goCompileJobs, goCompileEnvironment } from './schedule.mjs';
+import { bounded, runGoGroup, planGo, nativeGoLanes, goGroups, goCompileJobs, goCompileEnvironment } from './schedule.mjs';
 import {planNode} from './node-schedule.mjs';
 import {fileURLToPath} from 'node:url';
 
@@ -83,7 +83,8 @@ if (kind === 'prepare-go') {
   const tasks=planGo(inventory,timings[process.platform==='win32'?'windows':'linux'],{lanes:goLanes})[group*goLanes+lane];
   const tool=(await readFile('.ci/test2json','utf8')).trim();
   if(!tool)throw new Error('missing native test2json');
-  await bounded(tasks,async ({pkg,selected,split,binary,directory,cost})=>{
+  await runGoGroup(tasks,async ({pkg,selected,split,binary,directory,cost,exclusive})=>{
+    if(exclusive)console.log(`ci-exclusive-go pkg=${pkg} root=${selected[0]}`);
     const filter=split?['-test.run',`^(${selected.join('|')})$`]:[];
     const started=performance.now();
     if(binary){

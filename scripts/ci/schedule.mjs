@@ -22,7 +22,13 @@ const cost = n => {
   if (!Number.isFinite(n) || n <= 0) throw new Error('invalid scheduling cost');
   return n;
 };
-export function planGo(inventory, profile = {}, {lanes=goLanes} = {}) {
+// From native A/B: isolate the timing-sensitive SSE oracle and the cold
+// PowerShell hook launch. This only classifies discovered Windows roots.
+const exclusiveGoRoots = new Map([
+  ['github.com/XertroV/vecnet/internal/httpapi','TestSlowSSEConsumerDoesNotBlockSend'],
+  ['github.com/XertroV/vecnet/internal/cli','TestCodexHookWindowsInstalledCommandPreservesArgv'],
+]);
+export function planGo(inventory, profile = {}, {lanes=goLanes,platform=process.platform} = {}) {
   if(!Number.isInteger(lanes)||lanes<1)throw new Error('invalid lane count');
   const seen = new Set(), work = [];
   for (const row of inventory) {
@@ -36,12 +42,13 @@ export function planGo(inventory, profile = {}, {lanes=goLanes} = {}) {
     if (measured !== undefined) cost(measured);
     // ~70s remaining across four groups gives ~17.5s/group. An 8s threshold
     // leaves placement headroom; it is policy, not a measured runtime forecast.
-    const split = row.names.length >= 20 || (row.names.length >= 2 && measured > 8);
+    const exclusive = name => platform==='win32' && exclusiveGoRoots.get(row.pkg)===name;
+    const split = row.names.some(exclusive) || row.names.length >= 20 || (row.names.length >= 2 && measured > 8);
     if (!split) {
       // Whole packages use process elapsed; summed roots overcount parallel tests.
       work.push({row, selected:row.names, split:false, cost:measured === undefined ? Math.max(fallback,row.names.reduce((n,name)=>n+weight(name),0)) : cost(measured), measured:measured!==undefined});
     } else {
-      for (const name of row.names) work.push({row, selected:[name], split:true, cost:weight(name)});
+      for (const name of row.names) work.push({row, selected:[name], split:true, exclusive:exclusive(name), cost:weight(name)});
     }
   }
   work.sort((a,b)=>b.cost-a.cost || compare(a.row.pkg,b.row.pkg) || compare(a.selected[0]??'',b.selected[0]??''));
@@ -58,11 +65,11 @@ export function planGo(inventory, profile = {}, {lanes=goLanes} = {}) {
     // Do not coalesce an unbounded package batch: spare workers must be able
     // to execute multiple packets. Limits are placement hints, not timeouts;
     // one indivisible root may exceed the cost cap. Discovery remains authority.
-    const previous=item.split && bin.tasks.findLast(task=>task.pkg===item.row.pkg && task.split && task.selected.length+item.selected.length<=8 && task.rootCost+item.cost<=4);
+    const previous=item.split && !item.exclusive && bin.tasks.findLast(task=>task.pkg===item.row.pkg && task.split && !task.exclusive && task.selected.length+item.selected.length<=8 && task.rootCost+item.cost<=4);
     if(previous){previous.selected.push(...item.selected);previous.rootCost+=item.cost;previous.cost+=item.cost;}
     else {
       const startup=item.measured?0:(profile.startup===undefined?0:cost(profile.startup));
-      bin.tasks.push({...item.row,selected:[...item.selected],split:item.split,rootCost:item.cost,cost:item.cost+startup});
+      bin.tasks.push({...item.row,selected:[...item.selected],split:item.split,...(item.exclusive?{exclusive:true}:{}),rootCost:item.cost,cost:item.cost+startup});
       bin.load+=startup;
     }
     bin.load+=item.cost;
@@ -84,4 +91,11 @@ export async function bounded(items, worker, concurrency = 2) {
   await Promise.all(Array.from({length:Math.min(concurrency,items.length)},()=>run()));
   if(failed)throw failure;
   return results;
+}
+
+// A serial prefix owns the runner before any ordinary packet is admitted.
+// Both phases remain inside the same step owner and native test timeouts.
+export async function runGoGroup(tasks, worker, concurrency) {
+  for (const task of tasks) if (task.exclusive) await worker(task);
+  await bounded(tasks.filter(task=>!task.exclusive),worker,concurrency);
 }
