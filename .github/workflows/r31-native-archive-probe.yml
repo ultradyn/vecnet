@@ -1,0 +1,59 @@
+name: R31 native archive probe
+on:
+  push:
+    branches: [ci80/r31-native-archive-probe]
+permissions:
+  contents: read
+jobs:
+  encode:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v5
+        timeout-minutes: 1
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts/ci
+      - name: Create bounded codec fixture
+        timeout-minutes: 1
+        run: |
+          mkdir -p dist/go-tests/nested dist/go-test-archive
+          truncate -s 134217728 dist/go-tests/nested/window.bin
+          node -e "require('node:fs').writeFileSync('dist/go-tests/nested/source receipt.json', JSON.stringify({source:'3faf30ee8d40946deeca17d9c735921d503581b9',fixture:true}))"
+          sha256sum .github/workflows/release.yml
+      - name: Encode with exact candidate codec
+        timeout-minutes: 1
+        run: |
+          node scripts/ci/budget.mjs 53000 tar -I 'zstd -9 --long=27 -T2' -cf dist/go-test-archive/go-tests.tar.zst -C dist/go-tests .
+          zstd -lv dist/go-test-archive/go-tests.tar.zst
+      - uses: actions/upload-artifact@v4
+        timeout-minutes: 1
+        with:
+          name: native-codec
+          path: dist/go-test-archive/go-tests.tar.zst
+          compression-level: 0
+          if-no-files-found: error
+  decode:
+    needs: encode
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [windows-2025, windows-11-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 2
+    steps:
+      - uses: actions/download-artifact@v5
+        timeout-minutes: 1
+        with:
+          name: native-codec
+          path: dist/go-test-archive
+      - name: Expand with exact candidate native command
+        timeout-minutes: 1
+        run: |
+          tar --version
+          node -e "require('node:fs').mkdirSync('dist/go-tests', {recursive:true})"
+          tar -xf dist/go-test-archive/go-tests.tar.zst -C dist/go-tests
+      - name: Verify complete fixture and paths
+        timeout-minutes: 1
+        run: |
+          node -e "const fs=require('node:fs'),crypto=require('node:crypto'),assert=require('node:assert/strict');const bytes=fs.readFileSync('dist/go-tests/nested/window.bin');assert.equal(bytes.length,134217728);assert.equal(crypto.createHash('sha256').update(bytes).digest('hex'),crypto.createHash('sha256').update(Buffer.alloc(134217728)).digest('hex'));assert.deepEqual(JSON.parse(fs.readFileSync('dist/go-tests/nested/source receipt.json','utf8')),{source:'3faf30ee8d40946deeca17d9c735921d503581b9',fixture:true});assert.deepEqual(fs.readdirSync('dist/go-tests/nested').sort(),['source receipt.json','window.bin']);console.log('native codec complete: 128MiB window, exact content, nested/spaced paths')"
