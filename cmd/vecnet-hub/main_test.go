@@ -27,6 +27,91 @@ import (
 	"github.com/XertroV/vecnet/internal/testhub"
 )
 
+// bootHub prepares disposable operation-test schemas before the readiness
+// budget. Startup/migration contract tests use bootHubFromDisk or run directly.
+// Existing stores (including their identity, state and WAL) are never replaced.
+func bootHub(t *testing.T, args []string, getenv func(string) string) *bootedHub {
+	t.Helper()
+	// Operation callers must explicitly select their private data directory.
+	// Accept both flag spellings and = forms, with flags winning over the env.
+	dir := getenv("VECNET_DATA_DIR")
+	for i := 0; i < len(args); i++ {
+		arg := strings.TrimPrefix(args[i], "-")
+		arg = strings.TrimPrefix(arg, "-")
+		if arg == "data-dir" && i+1 < len(args) {
+			i++
+			dir = args[i]
+		} else if value, ok := strings.CutPrefix(arg, "data-dir="); ok {
+			dir = value
+		}
+	}
+	if dir == "" {
+		t.Fatal("bootHub requires an explicit private data directory")
+	}
+	prepareHubSchema(t, dir)
+	return bootHubFromDisk(t, args, getenv)
+}
+
+func prepareHubSchema(t *testing.T, dir string) {
+	t.Helper()
+	path := filepath.Join(dir, "hub.db")
+	if _, err := os.Lstat(path); err == nil {
+		return
+	} else if !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := testhub.FreshStore(t, path).Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Catch fixture path-selection mistakes and accidental identity sharing or
+// replacement by observing real serving hubs, including a stopped-hub restart.
+func TestBootHubOperationStoreIsolation(t *testing.T) {
+	seen := map[string]bool{}
+	for _, form := range []string{"env", "--data-dir", "-data-dir="} {
+		t.Run(form, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "hub")
+			unused := filepath.Join(t.TempDir(), "unopened")
+			envDir := unused
+			args := []string{"--listen", "127.0.0.1:0"}
+			switch form {
+			case "env":
+				envDir = dir
+			case "--data-dir":
+				args = append(args, form, dir)
+			default:
+				args = append(args, form+dir)
+			}
+			getenv := func(key string) string {
+				if key == "VECNET_DATA_DIR" {
+					return envDir
+				}
+				return ""
+			}
+			h := bootHub(t, args, getenv)
+			first := servedIdentity(t, h.base).Pubkey
+			if seen[first] {
+				t.Fatal("independent stores shared an identity")
+			}
+			seen[first] = true
+			if err := h.stop(); err != nil {
+				t.Fatal(err)
+			}
+			h = bootHub(t, args, getenv)
+			if got := servedIdentity(t, h.base).Pubkey; got != first {
+				t.Fatal("restart replaced the existing identity")
+			}
+			if _, err := os.Stat(unused); !os.IsNotExist(err) {
+				t.Fatalf("unused environment directory was touched: %v", err)
+			}
+		})
+	}
+}
+
 func TestBackfillLimitsRejectBeforeOpeningStore(t *testing.T) {
 	for _, flags := range [][]string{{"--storage-backfill-rows=-1"}, {"--storage-backfill-bytes=-1"}, {"--storage-backfill-target=-1ms"}, {"--storage-backfill-bytes=9223372036854775807"}} {
 		dir := filepath.Join(t.TempDir(), "unopened")
@@ -239,11 +324,6 @@ func TestRelocatedRefusesOwnURL(t *testing.T) {
 	}
 	t.Run("environment", func(t *testing.T) {
 		dir := t.TempDir()
-		// This case checks relocation, not fresh migrations. Prepare a private
-		// migrated store before starting the listening budget.
-		if err := testhub.FreshStore(t, filepath.Join(dir, "hub.db")).Close(); err != nil {
-			t.Fatal(err)
-		}
 		env := func(k string) string {
 			if k == "VECNET_RELOCATED_TO" {
 				return "https://next.example"
@@ -308,11 +388,6 @@ func servedIdentity(t *testing.T, base string) envelope.HubIdentity {
 
 func TestIdentityShowAndRotate(t *testing.T) {
 	dir := t.TempDir()
-	// Exercise identity commands against a current-schema store. Migrations
-	// are covered separately and do not belong in bootHub's listening budget.
-	if err := testhub.FreshStore(t, filepath.Join(dir, "hub.db")).Close(); err != nil {
-		t.Fatal(err)
-	}
 	args := []string{"--listen", "127.0.0.1:0", "--data-dir", dir}
 	boot := bootHub(t, args, noEnv)
 	old := servedIdentity(t, boot.base)
@@ -600,11 +675,6 @@ func TestMCPAllowedOriginsFlagAndEnv(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
-			// Origin policy needs a running server, not a first-install migration.
-			// Prepare a private store and close it before run reopens it normally.
-			if err := testhub.FreshStore(t, filepath.Join(dir, "hub.db")).Close(); err != nil {
-				t.Fatal(err)
-			}
 			args := append([]string{"--listen", "127.0.0.1:0", "--data-dir", dir}, tc.flags...)
 			h := bootHub(t, args, func(key string) string {
 				if key == "VECNET_MCP_ALLOWED_ORIGINS" {
@@ -769,11 +839,8 @@ func TestEventsRefreshIntervalFlagAndEnv(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
-			// Only prebuild the schema; runInit still creates the operator and
-			// bootHub reopens through the normal production startup path.
-			if err := testhub.FreshStore(t, filepath.Join(dir, "hub.db")).Close(); err != nil {
-				t.Fatal(err)
-			}
+			// runInit still creates the operator through production startup.
+			prepareHubSchema(t, dir)
 			var out bytes.Buffer
 			if err := runInit(dir, "Max", &out); err != nil {
 				t.Fatal(err)
