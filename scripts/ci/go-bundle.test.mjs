@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { cp, link, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { cp, link, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import test from 'node:test';
@@ -119,8 +119,15 @@ test('real compiled bundle conserves platform packages and rejects wrong source/
  }
 
  const original=await stat(nativeBinary,{bigint:true});
- // The real CI entry point must also work without runner-specific TMP vars.
- const env={...process.env,GITHUB_SHA:sha};delete env.TMPDIR;delete env.TEMP;delete env.TMP;
+ const env={...process.env,GITHUB_SHA:sha};
+ const copyTemp=path.join(root,'system-temp');
+ if(process.platform==='linux'){
+  // Linux staging must also work without runner-specific TMP vars.
+  delete env.TMPDIR;delete env.TEMP;delete env.TMP;
+ }else{
+  await mkdir(copyTemp);
+  Object.assign(env,{TMPDIR:copyTemp,TEMP:copyTemp,TMP:copyTemp});
+ }
  execFileSync(process.execPath,[fileURLToPath(new URL('./suite.mjs',import.meta.url)),'consume-go'],{cwd:root,env});
  const consumed=(await Promise.all(Array.from({length:6},(_,i)=>readFile(path.join(root,'.ci',`go-${i}.json`),'utf8')))).flatMap(JSON.parse);
  assert.deepEqual(consumed.flatMap(p=>p.names).sort(),['TestNew','TestOne']);
@@ -129,10 +136,18 @@ test('real compiled bundle conserves platform packages and rejects wrong source/
  assert.equal(executed.directory,root);
  assert.equal(executed.binary.endsWith(process.platform==='win32'?'.test.exe':'.test'),true);
  if(process.platform!=='win32')assert.equal((await stat(executed.temporary)).mode&0o777,0o700);
- await assert.rejects(stat(nativeBinary),{code:'ENOENT'});
  const staged=await stat(executed.binary,{bigint:true});
- assert.deepEqual([staged.dev,staged.ino],[original.dev,original.ino],
-  'the CI consumer must stage the existing executable, not write a copy');
+ if(process.platform==='linux'){
+  await assert.rejects(stat(nativeBinary),{code:'ENOENT'});
+  assert.deepEqual([staged.dev,staged.ino],[original.dev,original.ino],
+   'the Linux consumer must stage the existing executable, not write a copy');
+ }else{
+  assert.equal(path.dirname(executed.binary),executed.temporary);
+  assert.equal(path.dirname(executed.temporary),await realpath(copyTemp),
+   'the copied executable must live under system temp, not the artifact workspace');
+  assert.notDeepEqual([staged.dev,staged.ino],[original.dev,original.ino]);
+  assert.deepEqual(await readFile(nativeBinary),binaryBytes,'copying must preserve the artifact executable');
+ }
  const stagedTool=await readFile(path.join(root,'.ci/test2json'),'utf8');
  const stagedEvents=execFileSync(stagedTool,['-t','-p',executed.pkg,executed.binary,'-test.v=test2json','-test.run','^TestOne$'],
   {cwd:executed.directory,encoding:'utf8'}).trim().split('\n').map(JSON.parse);

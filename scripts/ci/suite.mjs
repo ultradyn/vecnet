@@ -32,15 +32,19 @@ if (kind === 'prepare-go') {
   if (!stages[lane]) throw new Error('invalid prepare stage');
   process.stdout.write(go(stages[lane],goCompileEnvironment(process.env)));
 } else if (kind === 'consume-go') {
-  const platform=`${process.platform}-${process.arch}`;
-  const bundle=await consumeBundle(path.resolve('dist/go-tests',platform),{sha:process.env.GITHUB_SHA,platform,takeOwnership:true});
-  const {temporary}=bundle;
+  const platform=`${process.platform}-${process.arch}`,takeOwnership=process.platform==='linux';
+  // Windows launcher tests validate the executable's ancestor ACLs. Use
+  // private system temp, not the artifact workspace's ancestor chain.
+  let temporary=takeOwnership?undefined:await privateTemporary('vecnet-ci-go-native-');
+  let bundle;
   try {
+    bundle=await consumeBundle(path.resolve('dist/go-tests',platform),{sha:process.env.GITHUB_SHA,platform,takeOwnership,temporary});
+    temporary??=bundle.temporary;
     await mkdir('.ci',{recursive:true});
     for(let i=0;i<6;i++)await writeFile(`.ci/go-${i}.json`,JSON.stringify(bundle.inventory.filter((_,n)=>n%6===i).map(row=>({...row,temporary}))));
     await writeFile('.ci/test2json',bundle.test2json);
   } catch(error) {
-    await rm(temporary,{recursive:true,force:true});
+    if(temporary)await rm(temporary,{recursive:true,force:true});
     throw error;
   }
   console.log(`Go native bundle: ${bundle.inventory.length} packages, ${bundle.inventory.reduce((n,p)=>n+p.names.length,0)} roots`);
