@@ -36,16 +36,8 @@ function onCleanup(t: CleanupContext, close: Cleanup): void {
     stack = []; cleanups.set(t, stack);
     t.after(async () => {
       const errors: unknown[] = [];
-      let cleanupStage = 0;
       for (const cleanup of stack!.reverse()) {
-        cleanupStage++;
-        try { await cleanup(); } catch (error) {
-          const message = error instanceof Error ? error.message : "";
-          const code = ["EACCES", "EPERM", "ENOENT", "ENOTDIR"].find(code => (error as NodeJS.ErrnoException)?.code === code) ?? "OTHER";
-          const reason = ["fixture ACL operation failed", "all owned ACLs must be restored exactly", "secret file must be a regular file readable only by its owner"].find(known => message.startsWith(known)) ?? "other-assertion";
-          console.log(`SAFE_CLEANUP_PROBE stage=${cleanupStage} code=${code} reason=${reason}`);
-          errors.push(error);
-        }
+        try { await cleanup(); } catch (error) { errors.push(error); }
       }
       if (errors.length) throw new AggregateError(errors, 'owned fixture cleanup failed');
     });
@@ -130,7 +122,10 @@ for (const kind of ['file ancestor', 'inaccessible read'] as const) {
       else {
         assert.deepEqual(readdirSync(parent), ['child']); assert.deepEqual(readdirSync(probe), ['keep']);
         assert.equal(readFileSync(join(probe, 'keep'), 'utf8'), bytes);
-        if (windows) localPlatform('check-private', probe, { directory: true });
+        if (windows) {
+          localPlatform('check-private', probe, { directory: true });
+          localPlatform('check-private', join(probe, 'keep'));
+        }
       }
     });
     onCleanup(t, () => verifyRestored());
@@ -145,7 +140,7 @@ for (const kind of ['file ancestor', 'inaccessible read'] as const) {
         const identity = childProcess.spawnSync('whoami.exe', ['/user', '/fo', 'csv', '/nh'], { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
         const sid = identity.stdout?.match(/S-1-\d+(?:-\d+)+/)?.[0];
         assert.ok(identity.status === 0 && sid, 'fixture token identity lookup failed');
-        const acl = join(dir, 'saved-acl'), restored = join(dir, 'restored-acl');
+        const acl = join(dir, 'saved-acl'), canonical = join(dir, 'canonical-acl'), restored = join(dir, 'restored-acl');
         const aclCommand = (args: string[]) => {
           const result = childProcess.spawnSync('icacls.exe', args, { windowsHide: true, stdio: 'ignore' });
           assert.equal(result.status, 0, 'fixture ACL operation failed');
@@ -154,13 +149,20 @@ for (const kind of ['file ancestor', 'inaccessible read'] as const) {
         // lstat can query metadata despite deny; assert a real denied read.
         aclCommand([probe, '/save', acl, '/t', '/q']);
         restore = () => aclCommand([dirname(probe), '/restore', acl, '/q']);
+        // icacls restore canonicalizes auto-inheritance metadata and leaf
+        // inheritance flags. Establish that native form before denial, then
+        // require exact bytes on a second round trip and after denied reads.
+        restore();
+        aclCommand([probe, '/save', canonical, '/t', '/q']);
+        restore = () => aclCommand([dirname(probe), '/restore', canonical, '/q']);
         verifyRestored = () => {
           aclCommand([probe, '/save', restored, '/t', '/q']);
-          const before = readFileSync(acl), after = readFileSync(restored);
-          const descriptors = (bytes: Buffer) => bytes.toString('utf16le').split(/\r?\n/).filter(line => line.startsWith('D:')).map(line => line.replace(/S-1-\d+(?:-\d+)+/g, sid => 'S-MASKED'));
-          console.log('SAFE_ACL_COMPARE ' + JSON.stringify({ equal: before.equals(after), beforeBytes: before.length, afterBytes: after.length, before: descriptors(before), after: descriptors(after) }));
-          assert.deepEqual(after, before, 'all owned ACLs must be restored exactly');
+          assert.deepEqual(readFileSync(restored), readFileSync(canonical), 'all owned canonical ACLs must be restored exactly');
         };
+        restore(); verifyRestored();
+        localPlatform('check-private', probe, { directory: true });
+        localPlatform('check-private', join(probe, 'keep'));
+        assert.equal(readFileSync(join(probe, 'keep'), 'utf8'), bytes);
         // Native-private children have protected DACLs: deny the actual
         // read target explicitly before denying its container.
         aclCommand([join(probe, 'keep'), '/deny', `*${sid}:(F)`, '/q']);
@@ -332,48 +334,29 @@ function mockLiveProcesses(t: TestContext, pipe: string) {
 }
 
 test('Windows live connector exposes fatal helper loss only after fencing, and a replacement regains readiness', { skip: !windows, timeout: 15000 }, async t => {
-  console.log('LIVE_PROBE connector stage=1 before');
   const s = await liveBinding(t), { helpers, children } = mockLiveProcesses(t, s.fake.socketPath);
-  console.log('LIVE_PROBE connector stage=1 after');
   const clock = fakeClock(Date.now()), log = memoryLog(), reports: { reason?: string }[] = [];
   const start = () => startCodexConnector({ env: s.env, log, clock, postRuntimeStatus: async (_b, snapshot) => { reports.push(snapshot); return true; } });
   const first = start(); onCleanup(t, () => first.stop());
-  console.log('LIVE_PROBE connector stage=2 before');
   await until(() => s.watches() === 1 && s.fake.subscribers(s.id).length === 1, 'live bound watch and subscription');
-  console.log('LIVE_PROBE connector stage=2 after');
-  console.log('LIVE_PROBE connector stage=3 before');
   clock.advance(CODEX_RELOAD_MS); await until(s.ready, 'ready live binding before helper death');
-  console.log('LIVE_PROBE connector stage=3 after');
   const oldSubscriber = s.fake.subscribers(s.id)[0], firstChildren = [...children]; assert.equal(helpers.length, 1);
   helpers[0].kill();
-  console.log('LIVE_PROBE connector stage=4 before');
   assert.deepEqual(await first.stopped, { reason: 'status_lock_lost' }); // no explicit stop/signal
-  console.log('LIVE_PROBE connector stage=4 after');
   assert.equal(s.fake.subscribers(s.id).length, 0, 'fatal outcome waits for unsubscribe');
-  console.log('LIVE_PROBE connector stage=5 before');
   await until(() => firstChildren.every(c => c.exitCode !== null || c.signalCode !== null), 'owned children exit after fenced transport close');
-  console.log('LIVE_PROBE connector stage=5 after');
   assert.equal(reports.some(r => r.reason === 'stopped'), false, 'no offline report after singleton loss');
   const count = children.length; clock.advance(CODEX_RELOAD_MS * 2);
   assert.equal(children.length, count, 'old connector never self-revives without a singleton');
   const second = start(); onCleanup(t, () => second.stop());
-  console.log('LIVE_PROBE connector stage=6 before');
   await until(() => s.watches() === 2 && s.fake.subscribers(s.id).length === 1, 'replacement live binding');
-  console.log('LIVE_PROBE connector stage=6 after');
   assert.notEqual(s.fake.subscribers(s.id)[0], oldSubscriber); assert.equal(helpers.length, 2);
-  console.log('LIVE_PROBE connector stage=7 before');
   clock.advance(CODEX_RELOAD_MS); await until(s.ready, 'replacement readiness');
-  console.log('LIVE_PROBE connector stage=7 after');
   const replacementStatus = readFileSync(s.path + '.status.json', 'utf8');
-  console.log('LIVE_PROBE connector stage=8 before');
   await first.stop(); assert.equal(readFileSync(s.path + '.status.json', 'utf8'), replacementStatus, 'old cleanup cannot delete successor readiness');
-  console.log('LIVE_PROBE connector stage=8 after');
-  console.log('LIVE_PROBE connector stage=9 before');
   await second.stop(); assert.deepEqual(await second.stopped, { reason: 'stopped' });
-  console.log('LIVE_PROBE connector stage=9 after');
   assert.equal(existsSync(s.path + '.status.json'), false); assert.equal(reports.at(-1)?.reason, 'stopped');
 });
-
 
 test('Windows standalone live runner exits 1 on actual helper death and restarts ready, normal stop remains exit 0', { skip: !windows, timeout: 15000 }, async t => {
   const s = await liveBinding(t), pidFile = join(s.home, 'helper.pid');
@@ -415,13 +398,7 @@ test('Windows embedded live helper loss stops the launcher nonzero, then a fresh
   onCleanup(t, async () => {
     // The harness owns its stop-before-delete callback, then its fake hub.
     const errors: unknown[] = [];
-    for (const close of daemonCleanup) { try { await close(); } catch (error) {
-          const message = error instanceof Error ? error.message : "";
-          const code = ["EACCES", "EPERM", "ENOENT", "ENOTDIR"].find(code => (error as NodeJS.ErrnoException)?.code === code) ?? "OTHER";
-          const reason = ["fixture ACL operation failed", "all owned ACLs must be restored exactly", "secret file must be a regular file readable only by its owner"].find(known => message.startsWith(known)) ?? "other-assertion";
-          console.log(`SAFE_CLEANUP_PROBE stage=${cleanupStage} code=${code} reason=${reason}`);
-          errors.push(error);
-        } }
+    for (const close of daemonCleanup) { try { await close(); } catch (error) { errors.push(error); } }
     if (errors.length) throw new AggregateError(errors, 'daemon fixture cleanup failed');
   });
   const h = await harness({ after: close => { daemonCleanup.push(() => close(t)); } }, { env: s.env });
