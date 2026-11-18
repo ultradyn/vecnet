@@ -5,6 +5,11 @@ import { appendFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { releaseJobCount } from './schedule.mjs';
+// R5 acceptance audit took4s and post checkout rounded to0s; artifact
+// verification was skipped (failed preflight), so8s is headroom, not a
+// measured completion guarantee. Tags retain both14s publish caps plus7s
+// verification/cleanup. The completed-run audit still enforces actual <300s.
+export const acceptanceReserve = (event, ref) => event === 'push' && ref?.startsWith('refs/tags/v') ? 35 : 8;
 export function audit(run,jobs,{sha,now=new Date().toISOString(),preflight=false,reserve=0,currentJob,expectedJobs}={}) {
  const violations=[];const instant=value=>Date.parse(value);
  if(!sha||run.head_sha!==sha)violations.push('source SHA mismatch');
@@ -49,7 +54,7 @@ if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.ur
  // Preflight excludes only its own live job, located by its exact Actions name.
  const current=mode==='preflight'?jobs.find(j=>j.name==='accept'&&j.status==='in_progress'):undefined;
  if(mode==='preflight'&&!current)throw new Error('missing current acceptance job');
- const result=audit(run,jobs,{sha,preflight:mode==='preflight',reserve:45,currentJob:current?.id,expectedJobs:releaseJobCount()-(mode==='preflight'?1:0)});
+ const result=audit(run,jobs,{sha,preflight:mode==='preflight',reserve:acceptanceReserve(process.env.GITHUB_EVENT_NAME,process.env.GITHUB_REF),currentJob:current?.id,expectedJobs:releaseJobCount()-(mode==='preflight'?1:0)});
  console.log(JSON.stringify(result,null,2));await writeFile('budget-audit.json',JSON.stringify(result,null,2));
  if(!result.pass)process.exitCode=1;
  else if(mode==='preflight'&&process.env.GITHUB_ENV)await appendFile(process.env.GITHUB_ENV,`CI_RUN_DEADLINE=${Date.parse(run.created_at)+299000}\n`);

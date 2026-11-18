@@ -747,3 +747,57 @@ func TestMigration0022UpgradesFrom0021(t *testing.T) {
 		t.Fatalf("identity seed changed across 0022: %v", err)
 	}
 }
+
+// Explicit per-database policy must neither mutate process environment nor leak
+// NORMAL to other stores. Pin all four connections to catch one-connection PRAGMA
+// overrides which silently leave new pooled connections at FULL.
+func TestOpenExplicitSynchronousIsPoolWideAndIsolated(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	for _, tc := range []struct {
+		mode string
+		want int
+	}{{"normal", 1}, {"full", 2}} {
+		t.Run(tc.mode, func(t *testing.T) {
+			t.Parallel()
+			db, err := store.OpenWithSynchronous(filepath.Join(t.TempDir(), "explicit.db"), tc.mode)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			var conns []*sql.Conn
+			for range 4 {
+				conn, err := db.Conn(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				conns = append(conns, conn)
+				var got int
+				if err := conn.QueryRowContext(ctx, `PRAGMA synchronous`).Scan(&got); err != nil || got != tc.want {
+					t.Fatalf("policy=%s got=%d want=%d err=%v", tc.mode, got, tc.want, err)
+				}
+			}
+			for _, conn := range conns {
+				conn.Close()
+			}
+			if err := db.SetMeta(ctx, "fixture", "independent"); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	db, err := store.Open(filepath.Join(t.TempDir(), "default.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var got int
+	if err := db.QueryRow(`PRAGMA synchronous`).Scan(&got); err != nil || got != 2 {
+		t.Fatalf("default FULL changed: %d %v", got, err)
+	}
+	for _, policy := range []string{"", "off", "typo"} {
+		if db, err := store.OpenWithSynchronous(filepath.Join(t.TempDir(), "invalid.db"), policy); err == nil {
+			db.Close()
+			t.Fatalf("unsafe explicit policy %q accepted", policy)
+		}
+	}
+}

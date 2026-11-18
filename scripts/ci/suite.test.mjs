@@ -41,7 +41,7 @@ test('real Go discovery and every scheduled command execute all roots exactly on
   if(process.platform!=='win32')await writeFile(path.join(shim,'go'),'#!/bin/sh\nif [ "$1" = test ]; then echo repeated-compilation >&2; exit 99; fi\nexec '+JSON.stringify(execFileSync('which',['go'],{encoding:'utf8'}).trim())+' "$@"\n',{mode:0o755});
 
   const passed = [], executions = [];
-  for (let lane = 0; lane < 12; lane++) for (let group = 0; group < 2; group++) {
+  for (let lane = 0; lane < 6; lane++) for (let group = 0; group < 4; group++) {
     const output = execFileSync(process.execPath,[suite,'go',String(lane),String(group)],{cwd,encoding:'utf8',timeout:45000,env:{...process.env,PATH:shim+path.delimiter+process.env.PATH},maxBuffer:4*1024*1024});
     executions.push(...output.split('\n').filter(line => line.startsWith('ci-package ')));
     for (const line of output.split('\n')) {
@@ -57,7 +57,7 @@ test('real Go discovery and every scheduled command execute all roots exactly on
   // command RED; no compile/relink needed to exercise failure propagation.
   const {planGo}=await import('./schedule.mjs');
   const scheduled=planGo(inventory).findIndex(tasks=>tasks.some(p=>p.pkg==='ci-fixture/small'));
-  assert.throws(()=>execFileSync(process.execPath,[suite,'go',String(scheduled%12),String(Math.floor(scheduled/12))],{
+  assert.throws(()=>execFileSync(process.execPath,[suite,'go',String(scheduled%6),String(Math.floor(scheduled/6))],{
     cwd,env:{...env,CI_SCHEDULE_FAIL:'1'},encoding:'utf8',stdio:'pipe',timeout:45000,
   }),error=>{
     assert.match(error.stdout,/scheduled assertion fails/);

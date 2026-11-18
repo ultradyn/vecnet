@@ -98,10 +98,7 @@ func StartWith(t *testing.T, cfgFn func(*hub.Config)) *Env {
 func StartWithServer(t *testing.T, cfgFn func(*hub.Config), srvFn func(*http.Server)) *Env {
 	t.Helper()
 	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "hub.db"))
-	if err != nil {
-		t.Fatalf("testhub: open store: %v", err)
-	}
+	db := FreshStore(t, filepath.Join(dir, "hub.db"))
 	clock := &FakeClock{t: time.Now().UTC().Truncate(time.Millisecond)}
 	return startDB(t, db, dir, clock, cfgFn, srvFn)
 }

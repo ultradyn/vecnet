@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { audit } from './audit.mjs';
+import { audit, acceptanceReserve } from './audit.mjs';
 const at = seconds => new Date(Date.UTC(2026,0,1)+seconds*1000).toISOString();
 const run={head_sha:'abc',created_at:at(0),status:'completed',conclusion:'success'};
 const job={id:1,name:'tests',status:'completed',conclusion:'success',completed_at:at(100),steps:[{name:'setup',conclusion:'success',started_at:at(40),completed_at:at(50)}]};
@@ -21,4 +21,11 @@ test('preflight inspects its own already-completed setup and refuses missing mat
  const result=audit({...run,status:'in_progress'},[job,own],{sha:'abc',preflight:true,reserve:45,currentJob:2,expectedJobs:1,now:at(151)});
  assert.ok(result.violations.some(x=>x.includes('accept/setup')));
  assert.ok(audit(run,[job],{sha:'abc',expectedJobs:2}).violations.some(x=>x.includes('missing/unexpected jobs')));
+});
+
+test('preflight reserves publication only for a pushed version tag',()=>{
+ assert.equal(acceptanceReserve('pull_request','refs/pull/1/merge'),8);
+ assert.equal(acceptanceReserve('push','refs/heads/master'),8);
+ assert.equal(acceptanceReserve('workflow_dispatch','refs/tags/v1.2.3'),8);
+ assert.equal(acceptanceReserve('push','refs/tags/v1.2.3'),35);
 });

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { planGo, bounded, releaseJobCount } from './schedule.mjs';
+import { planGo, bounded, releaseJobCount, goLanes, goGroups } from './schedule.mjs';
 const inventory = [
  {pkg:'heavy', names:Array.from({length:48},(_,i)=>`Test${i}`), binary:'heavy'},
  {pkg:'small', names:['Example','FuzzSeed'],binary:'small'},
@@ -52,7 +52,9 @@ test('bounded failures stop queued work, drain active work and propagate failure
  assert.deepEqual(starts,[0,1]);assert.equal(drained,true);
 });
 test('acceptance cardinality includes every native lane and existing release gate',()=>{
- assert.equal(releaseJobCount(),55);
+ assert.equal(goLanes,6);
+ assert.equal(goGroups,4);
+ assert.equal(releaseJobCount(),37);
 });
 test('scheduled partitions distribute all no-test packages, not just packages with roots',()=>{
  const empty=Array.from({length:46},(_,i)=>({pkg:`empty${i}`,names:[],binary:null}));

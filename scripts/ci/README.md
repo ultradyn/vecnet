@@ -1,7 +1,7 @@
 # Release CI scheduling and acceptance
 
 The workflow preserves full native Linux x64 / Windows x64 / Windows ARM64
-Go, Node and E2E coverage. Twelve native Go lanes per platform execute two
+Go, Node and E2E coverage. Six native Go lanes per platform execute four
 complete whole-root groups each (24 disjoint partitions). Three independent
 Linux producer jobs cross-compile platform-selected test packages once in six
 bounded groups, after cold-dependency stages; source/hash-bound bundles include
@@ -9,8 +9,10 @@ native test2json. Consumers validate/copy to private physical temp, discover
 root names natively, then execute binaries with original package cwd—no native
 toolchain setup, relinking or repeated go test driver. Packages with20+roots
 are partitioned whole-root; smaller/no-test packages remain complete.
-`go-timings.json` records R4 measured slow roots and positive package-cost
-fallbacks, including the supplied native FULL hub probe. Deterministic weighted
+`go-timings.json` records complete R5 PASS root maxima across all native Go
+logs, Windows maximum of x64/ARM, with positive R4 package fallbacks for
+unobserved roots. Censored package failures are not root duration observations.
+These pre-fixture-correction costs are placement hints, not runtime forecasts. Deterministic weighted
 placement balances whole roots, then batches each package's roots within a
 partition. It is not a coverage allowlist: discovery alone supplies the inventory,
 and unknown/new roots always receive a positive cost. Each group runs at most
@@ -19,15 +21,21 @@ status; a failure stops queued work and drains the other worker. Native
 copy/list discovery also has at most two workers. The enclosing budget owns the
 entire group and all descendants; no per-child budget multiplication.
 
-Each platform's twelve consumers wait only for its matching producer, not the
+Each platform's six consumers wait only for its matching producer, not the
 slowest of all three compile jobs. YAML step/strategy anchors share identical
-commands, not extra platform exceptions. There are 55 executed jobs including
-acceptance (54 before it); `schedule.mjs` supplies the audit cardinality. More
-native runners trade serial runtime for hosted concurrency, artifact transfer
-and queue overhead. R4 timing replay is only a placement estimate, not native
-GREEN; actual queue/setup/Windows FULL tails must satisfy the same limits.
+commands, not extra platform exceptions. There are 37 executed jobs including
+acceptance (36 before it); `schedule.mjs` supplies the audit cardinality. Eighteen Go
+consumers replace36: R5 public FREE concurrency queued Linux starts until249s
+and ARM until280s. Fewer consumers cut artifact/setup work and queue waves,
+while retaining all24partitions. Actual native timings still must satisfy all limits.
 New roots/examples/fuzz seeds and small/no-test packages remain conserved.
-No SQLite override: production and test default FULL remains unchanged.
+Disposable testhub/preference stores copy a closed fully migrated image into
+independent files, then regenerate identity material. They still use store.Open
+and its default FULL policy. Two measured retention stress fixtures explicitly
+select per-database NORMAL: the interval model and100/10000-boundary policy
+history startup/SQL-page guard. No process environment override, skips, or
+assertion changes. Default/migration/reopen/compaction contracts and real
+packaged E2E still exercise FULL; production store.Open is unchanged.
 
 Four independent target builds produce exact-source/version/toolchain/hash
 receipts and all eight CLI/hub binaries. Node/E2E reuse those fresh matching
@@ -55,8 +63,9 @@ exit0/7 with detached grandchildren, inherited/ignored pipes, cancellation,
 timeout, literal arguments, and actual discovered Go execution conservation.
 
 `accept` audits finished source-bound jobs/steps including setup/post/action
-and queue time, fails on any missing/failed/incomplete evidence, requires45s
-remaining reserve before publication, and exports an absolute overall deadline.
+and queue time, fails on any missing/failed/incomplete evidence, reserves8s
+after non-tag preflight (R5 audit4s/posts0s; verification unmeasured) or35s for tags
+(two14s publication caps plus7s verification/cleanup), and exports an absolute overall deadline.
 All remaining commands cap themselves to that deadline with cleanup reserve;
 publish/release commands additionally have14s caps. No retries mask failures.
 The completed-run `Release budget acceptance` workflow checks the entire run

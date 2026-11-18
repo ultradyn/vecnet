@@ -1,8 +1,8 @@
 // Scheduling policy only. Discovery, not timing observations, determines coverage.
-export const goLanes = 12;
-export const goGroups = 2;
+export const goLanes = 6;
+export const goGroups = 4;
 export const goPartitions = goLanes * goGroups;
-// target4 + compile3 + build1 + Go36 + Node3 + E2E3 + artifact4 + accept1.
+// target4 + compile3 + build1 + Go18 + Node3 + E2E3 + artifact4 + accept1.
 export const releaseJobCount = () => 4 + 3 + 1 + 3 * goLanes + 3 + 3 + 4 + 1;
 const compare = (a, b) => a < b ? -1 : a > b ? 1 : 0;
 const cost = n => {
@@ -27,9 +27,9 @@ export function planGo(inventory, profile = {}) {
   work.sort((a,b)=>b.cost-a.cost || compare(a.row.pkg,b.row.pkg) || compare(a.selected[0]??'',b.selected[0]??''));
   const bins = Array.from({length:goPartitions},()=>({load:0, tasks:new Map()}));
   for (const item of work) {
-    // Partition n belongs to lane n%12, group floor(n/12). Balance lane
+    // Partition n belongs to lane n%goLanes, group floor(n/goLanes). Balance lane
     // totals as a tie breaker so early stragglers do not share a native runner.
-    const laneLoad = lane => bins[lane].load + bins[lane+goLanes].load;
+    const laneLoad = lane => Array.from({length:goGroups},(_,group)=>bins[group*goLanes+lane].load).reduce((a,b)=>a+b,0);
     let index = 0;
     for (let i=1;i<bins.length;i++) {
       if (bins[i].load < bins[index].load || (bins[i].load===bins[index].load && laneLoad(i%goLanes)<laneLoad(index%goLanes))) index=i;

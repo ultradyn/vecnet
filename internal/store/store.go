@@ -37,7 +37,11 @@ const dsnParams = "_txlock=immediate" +
 const synchronousEnv = "VECNET_SQLITE_SYNCHRONOUS"
 
 func synchronousPragma() (string, error) {
-	switch v := strings.ToLower(os.Getenv(synchronousEnv)); v {
+	return parseSynchronous(os.Getenv(synchronousEnv))
+}
+
+func parseSynchronous(value string) (string, error) {
+	switch v := strings.ToLower(value); v {
 	case "", "full":
 		return "&_pragma=synchronous(FULL)", nil
 	case "normal":
@@ -61,6 +65,25 @@ func Open(path string) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
+	return open(path, sync)
+}
+
+// OpenWithSynchronous opens a database with an explicit connection-wide WAL
+// policy ("full" or "normal"), independent of the process environment. Prefer
+// Open for operator-configured stores. NORMAL is suitable only when loss of
+// recent acknowledged transactions on power failure is acceptable.
+func OpenWithSynchronous(path, policy string) (*DB, error) {
+	if policy == "" {
+		return nil, fmt.Errorf("store: explicit synchronous policy required")
+	}
+	sync, err := parseSynchronous(policy)
+	if err != nil {
+		return nil, err
+	}
+	return open(path, sync)
+}
+
+func open(path, sync string) (*DB, error) {
 	// Initialize only a truly empty SQLite file, before WAL or the first table
 	// allocates pages. An existing NONE database must never be converted here.
 	if err := initializeEmpty(path); err != nil {

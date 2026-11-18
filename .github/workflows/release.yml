@@ -251,7 +251,7 @@ jobs:
     strategy: &native-go-strategy
       fail-fast: false
       matrix:
-        lane: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+        lane: [0, 1, 2, 3, 4, 5]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps: &native-go-steps
@@ -275,12 +275,18 @@ jobs:
       - name: Validate and discover matching native Go test binaries
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs consume-go
-      - name: Complete Go roots group 1 of 2
+      - name: Complete Go roots group 1 of 4
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs go ${{ matrix.lane }} 0
-      - name: Complete Go roots group 2 of 2
+      - name: Complete Go roots group 2 of 4
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs go ${{ matrix.lane }} 1
+      - name: Complete Go roots group 3 of 4
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs go ${{ matrix.lane }} 2
+      - name: Complete Go roots group 4 of 4
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node scripts/ci/suite.mjs go ${{ matrix.lane }} 3
 
   test-go-windows-x64:
     needs: test-compile-windows-x64
@@ -463,6 +469,7 @@ jobs:
           path: dist
           merge-multiple: true
       - name: Pin OIDC npm before acceptance
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 npm install --global npm@12.0.1 --ignore-scripts --no-audit --no-fund
       - name: Audit source-bound jobs and reserve remaining overall time
