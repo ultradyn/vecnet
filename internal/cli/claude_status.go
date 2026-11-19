@@ -58,15 +58,18 @@ type claudeStatusBinding struct {
 
 // claudeStatusResult is the passive CLI output. owner is "registered" only
 // for a fresh exact live writer; mode stays "legacy" (or "opted_out" after a
-// durable disable), pending_count is always 0, and nothing here ever claims a
-// native-ready state.
+// durable disable), pending_count and blocked_pending_limit report the
+// durable claim ledger's unresolved set and cap state for this recipient
+// (zero and false with no recorded delivery activity), and nothing here ever
+// claims a native-ready state.
 type claudeStatusResult struct {
-	Version      int    `json:"version"`
-	Owner        string `json:"owner"`
-	Mode         string `json:"mode"`
-	Reason       string `json:"reason,omitempty"`
-	Generation   string `json:"generation,omitempty"`
-	PendingCount int    `json:"pending_count"`
+	Version             int    `json:"version"`
+	Owner               string `json:"owner"`
+	Mode                string `json:"mode"`
+	Reason              string `json:"reason,omitempty"`
+	Generation          string `json:"generation,omitempty"`
+	PendingCount        int    `json:"pending_count"`
+	BlockedPendingLimit bool   `json:"blocked_pending_limit"`
 }
 
 // claudeSettingsFile is the host's versioned Claude settings document; the
@@ -202,6 +205,14 @@ func (a *app) readClaudeStatus(ctx context.Context, scope claudeScope) (claudeSt
 		return claudeStatusResult{}, err
 	}
 	result := claudeStatusResult{Version: 1, Owner: "none", Mode: "legacy", PendingCount: 0}
+	// The durable claim ledger is factual whatever the passive modes say:
+	// unresolved native reservations and the staging cap state are reported
+	// even when no host is live.
+	summary, err := a.claudeClaimsSummary(claudeBindingKey(scope))
+	if err != nil {
+		return claudeStatusResult{}, err
+	}
+	result.PendingCount, result.BlockedPendingLimit = summary.Pending, summary.BlockedPendingLimit
 	settings, err := a.claudeSettings()
 	if err != nil {
 		return claudeStatusResult{}, err
@@ -307,6 +318,10 @@ func (a *app) cmdClaude(args []string) error {
 		return a.cmdClaudeRuntimeSnapshot()
 	case "status":
 		return a.cmdClaudeStatus(args[1:])
+	case "deliveries":
+		return a.cmdClaudeDeliveries(args[1:])
+	case "resolve":
+		return a.cmdClaudeResolve(args[1:])
 	case "disable", "enable":
 		return a.cmdClaudeDisableEnable(args[0], args[1:])
 	case "deliver":
@@ -314,7 +329,7 @@ func (a *app) cmdClaude(args []string) error {
 		// deliberately absent from the usage line above.
 		return a.cmdClaudeDeliver(args[1:])
 	}
-	return usageErr("claude: expected runtime-snapshot, status, disable or enable")
+	return usageErr("claude: expected runtime-snapshot, status, deliveries, resolve, disable or enable")
 }
 
 // cmdClaudeRuntimeSnapshot is the read-only host child: a versioned,
@@ -455,6 +470,9 @@ func (a *app) cmdClaudeStatus(args []string) error {
 		fmt.Fprintf(&out, "reason: %s\n", result.Reason)
 	}
 	fmt.Fprintf(&out, "pending_count: %d\n", result.PendingCount)
+	if result.BlockedPendingLimit {
+		fmt.Fprintln(&out, "blocked_pending_limit: true")
+	}
 	fmt.Fprint(a.stdout, out.String())
 	return nil
 }

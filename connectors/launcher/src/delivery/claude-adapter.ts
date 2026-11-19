@@ -355,9 +355,16 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Ho
    * exact predecessor: fence it against the current admission, then either
    * reschedule it with the current owner or release it fenced. A foreign
    * `attempting` claim may have written bytes: retain and surface `uncertain`,
-   * never resend. Tombstones of every other state survive untouched. */
+   * never resend. Tombstones survive untouched by default (fail closed): the
+   * only retirement is a claim carrying an independently confirmed hub ack
+   * observation — a field this adapter never infers or sets itself. */
   async function recoverScope(row: ClaudeSnapshotBinding, admitted: Set<string>): Promise<void> {
     for (const claim of claims()) {
+      if (claim.hubAckObserved === true) {
+        kv.delete(CLAIM_PREFIX + claim.deliveryId); // Confirmed ack retires the tombstone.
+        log.info('claude_delivery_claim_retired', { deliveryId: claim.deliveryId });
+        continue;
+      }
       if (claim.scope !== row.binding_key) {
         // Another admitted scope recovers its own rows in its own lane; a
         // scope that vanished from the snapshot is fenced, never resent.

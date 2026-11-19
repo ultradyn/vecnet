@@ -355,6 +355,23 @@ test('tombstones survive repeated reconcile until a confirmed hub ack', async t 
   for (const claim of f.kv.claims()) assert.notEqual(claim.hubAckObserved, true, 'no hub ack is ever inferred');
 });
 
+test('a confirmed hub ack retires the tombstone; without one it survives', async t => {
+  const f = fixture(t);
+  f.kv.kv.set('claude-claims:claim:dly_acked', JSON.stringify(seededClaim({
+    deliveryId: 'dly_acked', messageId: 'msg_' + ulid(80), state: 'released',
+    disposition: 'attempted', dispositionReason: 'write_completed_no_presentation_proof',
+    hubAckObserved: true,
+  })));
+  f.kv.kv.set('claude-claims:claim:dly_plain', JSON.stringify(seededClaim({
+    deliveryId: 'dly_plain', state: 'refused', disposition: 'refused',
+    dispositionReason: 'connect_refused_or_timeout', hubAckObserved: false,
+  })));
+  f.adapter.start();
+  await settle();
+  assert.equal(f.kv.claim('dly_acked'), undefined, 'a confirmed hub ack observation retires the tombstone at reconcile');
+  assert.notEqual(f.kv.claim('dly_plain'), undefined, 'without a confirmed ack the tombstone survives (fail closed)');
+});
+
 test('stop fences new work and drains an in-flight transport', async t => {
   let released!: (value: DeliverExit) => void;
   const release = new Promise<DeliverExit>(resolve => { released = resolve; });

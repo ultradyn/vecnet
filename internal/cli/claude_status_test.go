@@ -148,16 +148,18 @@ func TestClaudeStatusDisableEnableLeavesLegacy(t *testing.T) {
 		t.Fatalf("addressed opt-out was not recorded: %+v", doc.OptOuts)
 	}
 
-	// Neither surface ever claims pending work or a native path, and no
-	// forward-looking deliveries/resolve subcommand exists.
+	// Without recorded delivery activity the passive status still claims no
+	// pending work, the bounded deliveries list stays empty and redacted, and
+	// a resolve without arguments refuses.
 	if result := claudeStatusJSON(t, env, "--net", "p", "claude", "status", "--json"); result.PendingCount != 0 {
 		t.Fatalf("passive status reported pending work: %+v", result)
 	}
-	if code, _, _ := claudeStatusRun(t, env, "--net", "p", "claude", "deliveries"); code == 0 {
-		t.Fatal("claude deliveries exists")
+	if code, out, _ := claudeStatusRun(t, env, "--net", "p", "claude", "deliveries", "--json"); code != 0 ||
+		!strings.Contains(out, `"deliveries":[]`) || strings.Contains(out, "peer_A") {
+		t.Fatalf("deliveries without a ledger must stay empty and redacted: %d %s", code, out)
 	}
 	if code, _, _ := claudeStatusRun(t, env, "--net", "p", "claude", "resolve"); code == 0 {
-		t.Fatal("claude resolve exists")
+		t.Fatal("claude resolve without arguments must refuse")
 	}
 
 	// The addressed enable clears only the addressed opt-out.
