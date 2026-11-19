@@ -40,11 +40,41 @@ func TestLauncherFixtureNodeJobLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(root) })
-	// Alias the real test binary, not Node. Exercise the same JS helper and
-	// explicit TestMain utility entry used by suite.mjs with real native bytes.
+	// Copy the real test binary independently so concurrent repair packets
+	// still see a single-link running executable. Exercise the same JS helper
+	// and explicit TestMain utility entry used by suite.mjs with real native bytes.
 	binary := filepath.Join(root, platform.Exe("cli.test"))
-	if err := os.Link(exe, binary); err != nil {
+	if err := cliFixtureWriteFile(binary, launcherTestRead(t, exe), 0o700); err != nil {
 		t.Fatal(err)
+	}
+	// Hold the bundle image while checking the real repair admission boundary:
+	// another native packet may repair using this same running test executable.
+	current, err := launcherCurrentBinary()
+	if err != nil {
+		t.Fatal("bundle fixture invalidated running executable admission:", err)
+	}
+	identity := func(path string) os.FileInfo {
+		t.Helper()
+		file, err := os.Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer file.Close()
+		// Open-handle stat also captures the file ID on Windows.
+		info, err := file.Stat()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return info
+	}
+	if os.SameFile(identity(exe), identity(binary)) {
+		t.Fatal("bundle fixture aliases the running executable")
+	}
+	if !bytes.Equal(current, launcherTestRead(t, binary)) {
+		t.Fatal("bundle fixture differs from genuine CLI bytes")
+	}
+	if err := platform.PrivateFile(binary); err != nil {
+		t.Fatal("bundle fixture must remain private and single-link:", err)
 	}
 	cwd, err := os.Getwd()
 	if err != nil {

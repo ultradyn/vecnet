@@ -38,6 +38,8 @@ const cost = n => {
 };
 // Resource admission for discovered Windows roots, not coverage selection.
 const repairRoot = 'TestLauncherWindowsManagedRepairPreservesServiceIntent';
+const invitationMatrixRoot = 'TestInviteHubURLResponseRefusesUnsafe';
+const reservedWindowsRoots = new Set([repairRoot, invitationMatrixRoot]);
 const exclusiveGoRoots = new Map([
   ['github.com/XertroV/vecnet/internal/httpapi',['TestSlowSSEConsumerDoesNotBlockSend']],
   ['github.com/XertroV/vecnet/internal/cli',[
@@ -49,6 +51,8 @@ const exclusiveGoRoots = new Map([
     'TestLauncherWindowsInstallRejectsUnsafeExecutableBeforeExecution',
     'TestLauncherWindowsRepairPendingDriftUnit',
     repairRoot,
+    // The complete refusal matrix exceeded its owner alongside ordinary work.
+    invitationMatrixRoot,
   ]],
 ]);
 export function planGo(inventory, profile = {}, {lanes=goLanes,platform=process.platform} = {}) {
@@ -95,11 +99,11 @@ export function planGo(inventory, profile = {}, {lanes=goLanes,platform=process.
       let best;
       for(const [i,bin] of bins.entries()){
         const candidate=add(bin.tasks), [elapsed,pressure]=windowsGroupCost(candidate.tasks);
-        const sharesRepair=candidate.tasks.length>1&&candidate.tasks.some(t=>t.exclusive&&t.selected[0]===repairRoot);
-        // Keep one existing group for the whole repair root. It passed at 28s
-        // while its remaining pool hit the owner; even 50s must leave no tail.
+        const sharesReserved=candidate.tasks.length>1&&candidate.tasks.some(t=>t.exclusive&&reservedWindowsRoots.has(t.selected[0]));
+        // Give each observed long matrix one existing group with no competitors
+        // or queued remainder. Discovery still places every other root.
         // The 37s soft target leaves residual/noise headroom, never omits work.
-        const score=[Number(sharesRepair),Math.max(0,elapsed-37),laneLoad(i%lanes)+elapsed-bin.load,elapsed,pressure];
+        const score=[Number(sharesReserved),Math.max(0,elapsed-37),laneLoad(i%lanes)+elapsed-bin.load,elapsed,pressure];
         // Compare lexicographically; the first equal slot wins deterministically.
         const diff=best?.score.findIndex((v,j)=>v!==score[j]);
         if(!best||(diff>=0&&score[diff]<best.score[diff]))best={bin,tasks:candidate.tasks,elapsed,score};

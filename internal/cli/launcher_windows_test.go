@@ -337,9 +337,15 @@ func TestLauncherWindowsRepairResumesInterruptedTaskPublication(t *testing.T) {
 			before := launcherTestRead(t, art.Path)
 			manager.failRegister = failure == "register"
 			manager.failRestart = failure == "restart"
-			if _, err := a.repairLauncherArtifact(project, art); err == nil {
+			_, repairErr := a.repairLauncherArtifact(project, art)
+			if repairErr == nil {
 				t.Fatal("manager failure advanced repair")
 			}
+			wantFailure := map[string]string{"register": "injected registration failure", "restart": "injected restart failure"}[failure]
+			if !strings.Contains(repairErr.Error(), wantFailure) {
+				t.Fatalf("repair did not reach %s failure: %v; task calls: %v", failure, repairErr, manager.calls)
+			}
+			t.Logf("interrupted repair: %v; task calls: %v", repairErr, manager.calls)
 			if !bytes.Equal(before, launcherTestRead(t, art.Path)) {
 				t.Fatal("advanced applied ownership")
 			}
@@ -353,8 +359,9 @@ func TestLauncherWindowsRepairResumesInterruptedTaskPublication(t *testing.T) {
 			}
 			manager.failRegister = false
 			manager.failRestart = false
+			manager.calls = nil
 			if _, err := a.repairLauncherArtifact(project, art); err != nil {
-				t.Fatal(err)
+				t.Fatalf("resume repair: %v; task calls: %v", err, manager.calls)
 			}
 			if !manager.state.Active || manager.state.Enabled {
 				t.Fatal("failed restart recovery lost original intent")

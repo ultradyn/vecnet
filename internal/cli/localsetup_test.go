@@ -286,13 +286,27 @@ func TestEnrollmentRejectedInvitationCannotReplayOldCredential(t *testing.T) {
 	}
 	t.Chdir(t.TempDir())
 	f.env["CODEX_THREAD_ID"] = bindT1
-	rejected := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Error(w, "rejected", http.StatusUnauthorized) }))
+	var redemptions atomic.Int32
+	rejected := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/enrol" {
+			http.NotFound(w, r)
+			return
+		}
+		redemptions.Add(1)
+		http.Error(w, "rejected", http.StatusUnauthorized)
+	}))
 	defer rejected.Close()
 	var calls atomic.Int32
 	a := &app{ctx: context.Background(), stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{}, getenv: func(k string) string { return f.env[k] }, localRuntime: func(context.Context) error { calls.Add(1); return usageErr("runtime reached") }}
-	if err := a.cmdEnrol([]string{"--hub", rejected.URL, "--token", "invitation", "--profile", "p"}); err == nil {
+	enrolErr := a.cmdEnrol([]string{"--hub", rejected.URL, "--token", "invitation", "--profile", "p"})
+	if enrolErr == nil {
 		t.Fatal("expected rejected invitation")
 	}
+	var rejectedError *hubError
+	if !errors.As(enrolErr, &rejectedError) || rejectedError.Status != http.StatusUnauthorized || redemptions.Load() != 1 {
+		t.Fatalf("expected one rejected POST /v1/enrol (HTTP 401): error=%T: %v; redemptions=%d", enrolErr, enrolErr, redemptions.Load())
+	}
+	t.Logf("invitation reached HTTP %d; redemptions=%d", rejectedError.Status, redemptions.Load())
 	if err := a.retryLocalEnrollments(); err != nil {
 		t.Fatalf("canceled enrollment remains actionable: %v", err)
 	}

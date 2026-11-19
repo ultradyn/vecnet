@@ -12,11 +12,13 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/XertroV/vecnet/connectors"
@@ -549,9 +551,34 @@ func (a *app) launcherInstall(p launcherPaths, o opts) error {
 	defer releaseBin()
 	ctx, cancel := context.WithTimeout(a.ctx, 5*time.Second)
 	defer cancel()
+	probeStart := time.Now()
 	version, err := launcherNodeOutput(ctx, node)
-	if err != nil || !launcherNodeVersion(string(version)) {
-		return usageErr("launcher requires Node 22.18 or newer; pass --node /absolute/path/to/node")
+	probeElapsed := time.Since(probeStart).Round(time.Millisecond)
+	// A failed command tells us nothing about Node's version. Classify the
+	// context first: CommandContext commonly reports a killed process instead
+	// of the deadline that killed it. Never include arbitrary command output.
+	if cause := ctx.Err(); cause != nil {
+		reason := "timed out"
+		if errors.Is(a.ctx.Err(), context.Canceled) {
+			reason = "canceled"
+		} else if errors.Is(a.ctx.Err(), context.DeadlineExceeded) {
+			reason = "caller deadline exceeded"
+		}
+		return fmt.Errorf("launcher Node --version probe %s after %s: %w", reason, probeElapsed, cause)
+	}
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return fmt.Errorf("launcher Node --version probe exited with code %d after %s", exitErr.ExitCode(), probeElapsed)
+		}
+		var errno syscall.Errno
+		if errors.As(err, &errno) {
+			return fmt.Errorf("launcher Node --version probe could not execute after %s (OS error %d)", probeElapsed, errno)
+		}
+		return fmt.Errorf("launcher Node --version probe could not execute after %s", probeElapsed)
+	}
+	if !launcherNodeVersion(string(version)) {
+		return usageErr("launcher Node --version returned unsupported or invalid version output; launcher requires Node 22.18 or newer; pass --node /absolute/path/to/node")
 	}
 	vecnetConfig, err := configPath(a.getenv)
 	if err != nil {
