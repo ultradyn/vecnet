@@ -108,16 +108,6 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      - name: Save Go compilation and module caches
-        if: steps.go-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        timeout-minutes: 1
-        with:
-          path: |
-            ${{ runner.temp }}/ci-go-cache/build
-            ${{ runner.temp }}/ci-go-cache/modules
-          key: ${{ steps.go-cache.outputs.cache-primary-key }}
-
   build:
     needs: target
     runs-on: ubuntu-24.04
@@ -305,16 +295,6 @@ jobs:
           path: dist/go-test-archive/go-tests.tar.zst
           if-no-files-found: error
           retention-days: 7
-
-      - name: Save Go compilation and module caches
-        if: steps.go-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        timeout-minutes: 1
-        with:
-          path: |
-            ${{ runner.temp }}/ci-go-cache/build
-            ${{ runner.temp }}/ci-go-cache/modules
-          key: ${{ steps.go-cache.outputs.cache-primary-key }}
 
   test-compile-windows-x64:
     runs-on: ubuntu-24.04
