@@ -1,6 +1,6 @@
 # Claude Code delivery through the shared Vecnet daemon
 
-**Date:** 2026-11-19 · **Status:** proposed for review, not implementation approval.
+**Date:** 2026-11-19 · **Status:** approved and implemented — slices 1–3 shipped on branch `claude-inbox-delivery` (foundation, claims + fake transport, Linux pointer-only canary); slice 4+ (default `wake`, named content, replies, other platforms) remains gated per the acceptance table.
 
 [Compatibility results](../../research/2026-11-19-claude-code-inbox-compatibility.md) · [Sanitized captures](../../research/evidence/claude-inbox-2.1.322.json) · [Hub protocol](../../PROTOCOL.md) · [Existing Codex connector](../../connectors/codex-appserver.md)
 
