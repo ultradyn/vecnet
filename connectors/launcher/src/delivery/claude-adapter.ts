@@ -339,6 +339,7 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Ho
         clock.timer(1000, () => { if (running) schedulePass(); });
       });
       releases.set(row.binding_key, release);
+      log.info('claude_delivery_scope_admitted', { scope: row.binding_key, generation: row.generation });
     }
   }
 
@@ -437,6 +438,7 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Ho
           cursor: event.cursor, predecessor, priority: 'hold', state: 'held', attemptId: randomBytes(16).toString('hex'),
           disposition: 'held', dispositionReason: 'inbox_only', hubAckObserved: false,
           createdAt: now, updatedAt: now });
+        log.info('claude_delivery_claim_held', { deliveryId: event.deliveryId, scope: row.binding_key, reason: 'inbox_only' });
         existing.add(event.deliveryId);
         cursor = event.cursor;
         continue;
@@ -457,6 +459,7 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Ho
         hubAckObserved: false, createdAt: now, updatedAt: now,
       };
       save(claim); // Durable reservation before anything else can happen.
+      log.info('claude_delivery_claim_reserved', { deliveryId: claim.deliveryId, scope: claim.scope });
       existing.add(claim.deliveryId);
       staged.push(claim);
       cursor = event.cursor;
@@ -483,6 +486,12 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Ho
     claim.state = 'attempting';
     claim.updatedAt = clock.now();
     save(claim);
+    log.info('claude_delivery_claim_attempting', { deliveryId: claim.deliveryId, scope: claim.scope, attemptId: claim.attemptId });
+    // Canary test seam: SIGKILL this process after `attempting` is durable
+    // but before any byte can leave, so a harness can replay the crash
+    // window deterministically. The adapter exists only behind the explicit
+    // experimental canary opt-in, and this var is never set in production.
+    if (env.VECNET_CLAUDE_DELIVERY_CRASH_BEFORE_WRITE === '1') process.kill(process.pid, 'SIGKILL');
     inFlight.add(claim.deliveryId);
     try {
       const exit = await transport({ bindingKey: row.binding_key, generation: claim.generation,
@@ -500,10 +509,12 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Ho
         claim.disposition = 'uncertain';
         claim.dispositionReason = 'write_failed_or_partial';
       }
+      log.info('claude_delivery_disposition', { deliveryId: claim.deliveryId, scope: claim.scope, exit, state: claim.state, disposition: claim.disposition, reason: claim.dispositionReason });
     } catch {
       claim.state = 'uncertain';
       claim.disposition = 'uncertain';
       claim.dispositionReason = 'transport_outcome_unknown';
+      log.warn('claude_delivery_disposition', { deliveryId: claim.deliveryId, scope: claim.scope, exit: null, state: claim.state, disposition: claim.disposition, reason: claim.dispositionReason });
     } finally {
       inFlight.delete(claim.deliveryId);
       claim.updatedAt = clock.now();

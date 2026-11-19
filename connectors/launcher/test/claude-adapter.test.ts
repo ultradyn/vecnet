@@ -180,6 +180,39 @@ test('the attempting state is durably persisted before the transport is invoked'
   assert.equal(f.kv.claim('dly_' + ulid(1))!.state, 'released', 'the attempt still settles its disposition');
 });
 
+test('the claim lifecycle is logged: admission, reserved, attempting, disposition', async t => {
+  // The daemon's stderr log is the operator-facing proof chain for a native
+  // delivery; every durable transition emits one opaque line (task 9). A
+  // hold marker logs its inbox-only quarantine, a wake logs the reserved and
+  // attempting commitments and the helper's exit disposition.
+  const f = fixture(t);
+  f.setPages([{ events: [deliveryEvent('e1.1', 1, { priority: 'hold' }), deliveryEvent('e1.2', 2)] }]);
+  f.adapter.start();
+  await settle();
+  const msgs = f.log.entries.map(e => e.msg);
+  const at = (needle: string) => msgs.indexOf(needle);
+  const admitted = at('claude_delivery_scope_admitted');
+  const held = at('claude_delivery_claim_held');
+  const reserved = at('claude_delivery_claim_reserved');
+  const attempting = at('claude_delivery_claim_attempting');
+  const disposition = at('claude_delivery_disposition');
+  assert.ok(admitted >= 0, 'the admitted scope is logged once per generation');
+  assert.ok(held >= 0, 'an inbox-only hold is logged as quarantined');
+  assert.ok(reserved > admitted && attempting > reserved && disposition > attempting, 'the wake chain is logged in commit order');
+  const heldMeta = f.log.entries.find(e => e.msg === 'claude_delivery_claim_held')!.meta as Record<string, unknown>;
+  assert.equal(heldMeta.deliveryId, 'dly_' + ulid(1));
+  assert.equal(heldMeta.reason, 'inbox_only');
+  const dispo = f.log.entries.find(e => e.msg === 'claude_delivery_disposition')!.meta as Record<string, unknown>;
+  assert.equal(dispo.deliveryId, 'dly_' + ulid(2));
+  assert.equal(dispo.state, 'released');
+  assert.equal(dispo.disposition, 'attempted');
+  assert.equal(dispo.exit, 0, 'the helper exit code is part of the chain');
+  for (const entry of f.log.entries) {
+    const meta = JSON.stringify(entry.meta ?? {});
+    assert.ok(!/hello|body|secret/i.test(meta), 'log lines never carry message bodies or credentials');
+  }
+});
+
 test('hold is never transported and never acked', async t => {
   const f = fixture(t);
   f.setPages([{ events: [deliveryEvent('e1.1', 1, { priority: 'hold' })] }]);
