@@ -225,3 +225,54 @@ adapted as needed and rerun.
 Use disposable owned threads, private hub/config/home state, exact thread/turn
 receipts and model-context canaries for new acceptance. Source tests alone cannot
 complete the installation and rollout checklist in issue #68.
+
+### Installed busy Fly acceptance (Linux, opt-in)
+
+`scripts/codex-busy-fly-smoke.mjs` defaults to `SKIPPED`; importing it has no
+live effects. The operator prepares a minimal working provider config (including
+an absolute auth helper when needed under a new HOME) and a private mode-0600
+JSON file containing `{ "hub": "https://…", "operatorSecret": "…" }`.
+Use the existing schema-1 installed manifest, with `version`, `release`, `node`
+and `unit`. The runner reads that manifest and never operates its service unit.
+
+```sh
+CODEX_BIN=/absolute/native/codex \
+CODEX_BUSY_CONFIG=/private/working-config.toml \
+VECNET_BUSY_INSTALL_MANIFEST="$HOME/.local/share/vecnet-codex/manifest.json" \
+VECNET_BUSY_AUTH=/private/busy-auth.json \
+VECNET_BUSY_FLY_SMOKE=1 \
+/absolute/node --disable-warning=ExperimentalWarning --experimental-strip-types \
+  scripts/codex-busy-fly-smoke.mjs --run
+```
+
+For the tested native Codex 0.170.0 / `gpt-6.1-sol` / `llmp` route, the default
+`untrusted_as_tool_output = true` accepted the exact steer and receipt but lacked
+nonce recognition in idle and busy controls. The supplied private
+`CODEX_BUSY_CONFIG` used this single setting change:
+
+```toml
+[features]
+untrusted_as_tool_output = false
+```
+
+Both controls then recognized the nonce, and the canonical runner passed all
+four acceptance checks with installed 0.2.6 bytes unchanged. This observation is
+specific to that route. API context retains `kind: untrusted`, and the strict
+steer, receipt and nonce oracle remains required.
+
+Run this only as the operator's live acceptance step. It starts an owned private
+native daemon and the **installed** standalone delivery process, creates exactly
+two disposable session peers, and sends only between those peers. PASS requires
+an observed connector `turn/steer` success returning the exact busy turn ID,
+the owner-derived receipt, and the model's exact `FACT delivery nonce` while that
+same turn remains `inProgress`. It then checks deferred `wake_idle`, excluded
+`hold`, quiet lifecycle hooks and urgent-delivery recovery after a process restart.
+
+The private evidence directory contains installed-byte identities, process
+metadata, phase-tagged RPC metadata and a cleanup journal. Cleanup failure or
+interruption cannot PASS. If peer disabling cannot be verified, retain that
+directory and its private cleanup authority; reconcile only the exact journaled
+names/IDs with the operator API before removing secrets. The parent-prepared input
+files remain the operator's responsibility. Offline tests prove harness behavior;
+only a successful new live run establishes installed-connector acceptance, and
+neither result establishes that installed bytes equal the current source branch.

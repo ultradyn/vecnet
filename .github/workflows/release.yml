@@ -466,6 +466,10 @@ jobs:
       - name: Test release guards and cross-platform wrappers
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node --test --test-concurrency=2 scripts/npm/release.test.mjs scripts/npm/npm-command.test.mjs scripts/npm/wrapper.test.mjs scripts/npm/verify-artifact.test.mjs scripts/ci/npm-tool.test.mjs scripts/ci/github-release.test.mjs
+      - name: Test offline Codex busy delivery acceptance
+        if: runner.os == 'Linux'
+        timeout-minutes: 1
+        run: node scripts/ci/budget.mjs 53000 node --test --test-concurrency=1 scripts/codex-busy-rpc-tap.test.mjs scripts/codex-busy-fly-smoke.test.mjs scripts/codex-isolation-smoke.test.mjs
       - name: Test Windows artifact evidence helper
         timeout-minutes: 1
         if: runner.os == 'Windows'
