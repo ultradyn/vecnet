@@ -107,6 +107,7 @@ messaging:
   thread archive <id>                             archive in the operator view
   thread unarchive <id>                           unarchive in the operator view
   peers
+  whoami [--json]                      authenticated credential kind and identity
   groups create <peer…> | groups add <grp> <peer…> | groups list | groups unarchive <grp>
   presence set <idle|working|blocked|offline> [--note T]
   presence subscribe <all|teams|none>
@@ -616,6 +617,8 @@ func (a *app) dispatchOnce(cmd string, args []string) error {
 		return a.cmdThread(args)
 	case "peers":
 		return a.cmdPeers(args)
+	case "whoami":
+		return a.cmdWhoami(args)
 	case "groups":
 		return a.cmdGroups(args)
 	case "presence":
