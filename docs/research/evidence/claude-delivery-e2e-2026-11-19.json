@@ -74,7 +74,10 @@
             ]
           }
         },
-        "teardown_verified": true
+        "teardown_verified": true,
+        "documented_limits": [
+          "idle-path injection only: the pointer lands while the session sits idle (queue-operation enqueue plus a peer-origin turn); busy-turn queued_command placement is a separately gated experiment, neither exercised nor claimed"
+        ]
       },
       "artifacts": [
         {
@@ -713,7 +716,10 @@
             "raw_disposition": "disposed"
           }
         },
-        "teardown_verified": true
+        "teardown_verified": true,
+        "documented_limits": [
+          "idle-path injection only: the pointer lands while the session sits idle (queue-operation enqueue plus a peer-origin turn); busy-turn queued_command placement is a separately gated experiment, neither exercised nor claimed"
+        ]
       },
       "artifacts": [
         {

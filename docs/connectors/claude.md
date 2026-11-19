@@ -1,19 +1,29 @@
-# Claude passive status
+# Claude passive status and the delivery ledger
 
-Claude Code conversations stay on the legacy hook path. What exists today is
-passive: an exact local session root can be registered, and the shared
-delivery daemon reports a passive status for one addressed recipient. No hub
-request, no Claude-side output, and no native delivery claim is ever made.
+Claude Code conversations stay on the legacy hook path by default. What exists
+today is passive by construction: an exact local session root can be
+registered, the shared delivery daemon reports a passive status for one
+addressed recipient, and the daemon records durable disposition claims for any
+native delivery it attempts. No command here acknowledges the hub, and the
+legacy hook path is never removed.
 
 ## Linux prerequisites
 
-Session registration is qualified for Linux with Claude Code 2.1.322 or newer.
+Session registration is qualified per exact build: Linux x86-64 with Claude
+Code **2.1.322** (the qualified-baseline list is exact-match, not "or newer" —
+`claudeVersionQualifiedBuilds` in `internal/cli/claude_status.go`). A build not
+on that list reports `version_qualified: false` and stays on the legacy path.
+
 Registration proves, through the kernel and Claude's own private session
 registry, that the registering hook is a child of the exact live Claude
 process (`/proc` start identity, boot id, OS-user ownership, the canonical
 config root, and a private messaging socket of the right type). Other
 platforms, missing evidence and unsupported builds stay on the legacy path
-and report `unsupported`; nothing is guessed.
+and report `unsupported`; nothing is guessed. In particular the build version
+is never guessed or probed: registration requires the session host to supply
+`CLAUDE_PID`, `CLAUDE_CODE_SESSION_ID` and `CLAUDE_CODE_VERSION` in the hook's
+environment, and a missing or malformed value leaves registration on the
+legacy path.
 
 Enrollment is the single ordinary setup action, exactly as for Codex:
 
@@ -21,9 +31,15 @@ Enrollment is the single ordinary setup action, exactly as for Codex:
 vecnet enrol --hub https://YOUR-HUB --token - --profile P
 ```
 
-Run it inside the intended Claude conversation. The session's own SessionStart
-hook registers the exact root passively; the hook itself emits nothing and
-performs no network request.
+Run it inside the intended Claude conversation when you want the session root
+registered. When `vecnet enrol` runs where no live Claude host identity is
+present (no `CLAUDE_PID`/`CLAUDE_CODE_SESSION_ID`/`CLAUDE_CODE_VERSION`), it
+prints `credentials saved; automatic setup unsupported: …` — the profile is
+enrolled, but session registration stays on the legacy hook path until a
+session hook registers the root. Inside a session, the silent SessionStart
+hook performs the passive registration (no hub request, no output); the
+first verified user prompt can also register or renew it before the ordinary
+legacy delivery path, byte-identically.
 
 ## Status
 
@@ -44,8 +60,11 @@ The output is passive only:
   addressed binding is present at the current generation. Anything else is
   `none` with a `reason`.
 - `mode` stays `legacy`, or becomes `opted_out` after a durable disable.
-- `pending_count` is always `0`. There is no `deliveries` or `resolve`
-  subcommand; native delivery does not exist yet, and status never claims it.
+- `pending_count` is factual, not fixed: it counts the addressed scope's
+  unresolved native delivery claims (`reserved`, `attempting` or `uncertain`)
+  in the durable ledger, and `blocked_pending_limit` reports whether the
+  scope's staging window is latched on the 128-claim pending cap. Both come
+  from the ledger and are reported even when no host is live.
 
 The daemon publishes one private sidecar,
 `$HOME/.local/state/vecnet/codex/bindings.json.claude-status.json`, next to
@@ -55,6 +74,43 @@ never a socket path, config content or credential. A crashed daemon leaves a
 stale file behind; stale heartbeats, dead or reused PIDs, mismatched boot or
 start identities, wrong generations, or a released lease never count as a
 live owner. Checking the lease never unlinks it.
+
+## Deliveries and resolve
+
+```sh
+vecnet --net P claude deliveries            # bounded disposition list
+vecnet --net P claude deliveries --json
+vecnet --net P claude resolve <delivery-id> --expect-generation G --keep-inbox
+vecnet --net P claude resolve <delivery-id> --expect-generation G --retry --confirm-duplicate-risk
+```
+
+`claude deliveries` reads only the durable claim ledger the delivery host
+owns (`delivery.sqlite` beside the bindings authority): opaque ids, states,
+dispositions and reasons for the addressed scope — never message bodies,
+credentials or scope coordinates. At most 256 rows are shown; only the oldest
+settled rows are hidden and the truncation is noted.
+
+`claude resolve` settles exactly one claim by delivery id. `--keep-inbox`
+quarantines it inbox-only (native promotion stops, the delivery stays
+readable, nothing is acknowledged). `--retry` re-arms one fresh native
+attempt, only after the explicit duplicate-risk confirmation and a fresh
+admission check; it refuses held or hold-priority claims (hold is inbox-only,
+full stop) and claims still owing a native disposition (`reserved` or
+`attempting`). Nothing in Go retires a claim tombstone.
+
+## Native delivery canary (experimental, default off)
+
+The daemon's native pointer-delivery adapter exists only behind an explicit
+experimental opt-in: `VECNET_CLAUDE_DELIVERY_CANARY=1` in the delivery
+daemon's environment. Without it nothing changes: no native claim is made and
+every message flows through the legacy hook path exactly as before. With it,
+the daemon stages bounded wake candidates per admitted scope, records the
+durable claim lifecycle above, and invokes the single-shot `claude deliver`
+helper; it never acknowledges the hub (read/accepted/processed cursors stay
+untouched), `hold` and `wake_idle` never enter a native batch, and the
+daemon's inbox read uses `vecnet inbox --no-display-proof` so it never
+records legacy hook display state — a later UserPromptSubmit hook still shows
+what the daemon merely observed.
 
 ## Disable and enable
 
