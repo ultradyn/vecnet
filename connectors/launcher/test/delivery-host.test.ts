@@ -1,14 +1,15 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import type { TestContext } from 'node:test';
 import { fakeClock, memoryLog } from '../../hub-client/testing/fixtures.ts';
-import { openStatusPublisher } from '../src/codex/connector-status.ts';
+import { codexAuthority } from '../src/codex/connector.ts';
+import { openDeliveryLease, openStatusPublisher } from '../src/codex/connector-status.ts';
 import { startDeliveryHost } from '../src/delivery/host.ts';
 import type { HostedAdapter } from '../src/delivery/host.ts';
 import { harness, until } from './daemon-harness.ts';
@@ -79,6 +80,125 @@ test('delivery host preserves exact legacy election and drains adapters before r
   await until(() => existsSync(s.status), 'the second host takes over');
   assert.equal(contenders, 1);
   assert.deepEqual(inode(s.lock), original);
+});
+
+test('hosted authority refuses a symbolic link at the bindings leaf', unix, t => {
+  const s = fixture(t);
+  const state = dirname(s.authority);
+  mkdirSync(state, { recursive: true, mode: 0o700 });
+  const ordinaryFile = join(state, 'registry.json');
+  writeFileSync(ordinaryFile, '', { mode: 0o600 });
+  symlinkSync(ordinaryFile, s.authority);
+  assert.equal(codexAuthority(s.env), undefined);
+});
+
+test('delivery host keeps its elected bindings and recovery paths across a configuration change', unix, async t => {
+  const s = fixture(t), other = fixture(t);
+  const env = { ...s.env };
+  mkdirSync(dirname(other.authority), { recursive: true, mode: 0o700 });
+  writeFileSync(other.authority, '{', { mode: 0o600 });
+  const host = startDeliveryHost({ ...s, env, openLease: async (path, uid, options) => {
+    const lease = await openDeliveryLease(path, uid, options);
+    env.HOME = other.env.HOME;
+    return lease;
+  } });
+  s.cleanup.push(() => host.stop());
+  await until(() => existsSync(s.status), 'Codex readiness at the elected location');
+  assert.equal(existsSync(join(dirname(other.authority), 'delivery.sqlite')), false, 'recovery must not move to the newly configured home');
+  assert.ok(statSync(join(dirname(s.authority), 'delivery.sqlite')).size > 0, 'recovery opens at the elected location');
+  assert.ok(s.log.entries.some(e => e.msg === 'codex_connector_disabled' && e.meta?.reason === 'no_bindings_file'));
+  assert.ok(!s.log.entries.some(e => e.msg === 'codex_bindings_invalid'), 'bindings must not be read from the newly configured home');
+  await assertLegacyExcluded(s);
+});
+
+test('delivery host retries only at its original canonical home', unix, async t => {
+  const s = fixture(t), other = fixture(t);
+  const home = join(s.env.HOME, 'configured-home');
+  symlinkSync(s.env.HOME, home, 'dir');
+  const incumbent = await openDeliveryLease(s.authority, euid, { env: s.env });
+  assert.ok(incumbent);
+  s.cleanup.push(() => incumbent.close());
+  const host = startDeliveryHost({ ...s, env: { ...s.env, HOME: home } });
+  s.cleanup.push(() => host.stop());
+  await until(() => s.log.entries.some(e => e.msg === 'codex_connector_duplicate'), 'host waits for the incumbent');
+  const original = inode(s.lock);
+
+  unlinkSync(home);
+  symlinkSync(other.env.HOME, home, 'dir');
+  await incumbent.close();
+  s.clock.advance(10_000);
+  const otherRecovery = join(dirname(other.authority), 'delivery.sqlite');
+  await until(() => existsSync(otherRecovery) || s.log.entries.some(e => e.msg === 'codex_recovery_refused'), 'retry checks the configured home');
+  assert.equal(existsSync(otherRecovery), false, 'retry must not initialize recovery at the new location');
+  assert.equal(existsSync(s.status), false, 'host stays unelected until the original home is restored');
+
+  unlinkSync(home);
+  symlinkSync(s.env.HOME, home, 'dir');
+  s.clock.advance(10_000);
+  await until(() => existsSync(s.status), 'host takes over at the original home');
+  assert.ok(statSync(join(dirname(s.authority), 'delivery.sqlite')).size > 0);
+  assert.deepEqual(inode(s.lock), original);
+  await assertLegacyExcluded(s);
+});
+
+test('delivery host retries a repairable registry leaf refusal at its fixed location', unix, async t => {
+  const s = fixture(t);
+  const state = dirname(s.authority);
+  mkdirSync(state, { recursive: true, mode: 0o700 });
+  const ordinaryFile = join(state, 'registry.json');
+  writeFileSync(ordinaryFile, '', { mode: 0o600 });
+  symlinkSync(ordinaryFile, s.authority);
+  const refused = () => s.log.entries.filter(e => e.msg === 'codex_connector_disabled' && e.meta?.reason === 'unsafe_registry_leaf').length;
+
+  const host = startDeliveryHost(s);
+  s.cleanup.push(() => host.stop());
+  await until(() => refused() === 1, 'host refuses the unsafe registry leaf');
+  assert.equal(existsSync(s.status), false, 'a refused leaf never elects');
+
+  s.clock.advance(10_000);
+  await until(() => refused() === 2, 'the repairable refusal is retried');
+  assert.equal(existsSync(s.status), false, 'the symlink still refuses');
+
+  unlinkSync(s.authority);
+  s.clock.advance(10_000);
+  await until(() => existsSync(s.status), 'host elects at the original location after repair');
+  await assertLegacyExcluded(s);
+
+  // An unlocatable authority is permanent: no location was ever selected.
+  const other = fixture(t);
+  const permanent = startDeliveryHost({ ...other, env: { ...other.env, VECNET_CODEX_BINDINGS: join(other.env.HOME, 'elsewhere.json') } });
+  other.cleanup.push(() => permanent.stop());
+  await until(() => other.log.entries.some(e => e.msg === 'codex_connector_disabled' && e.meta?.reason === 'invalid_authority_path'), 'override mismatch is permanent');
+  other.clock.advance(10_000);
+  other.clock.advance(10_000);
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(other.log.entries.filter(e => e.msg === 'codex_connector_disabled').length, 1, 'an unlocatable authority never retries');
+  assert.equal(existsSync(other.status), false);
+});
+
+test('delivery host fences a replaced state directory instead of reading replacement bindings', unix, async t => {
+  const s = fixture(t);
+  const state = dirname(s.authority);
+  const host = startDeliveryHost(s);
+  s.cleanup.push(() => host.stop());
+  await until(() => existsSync(s.status), 'host elected');
+
+  const moved = join(dirname(state), 'codex.moved');
+  renameSync(state, moved);
+  mkdirSync(state, { recursive: true, mode: 0o700 });
+  // A plausible-looking replacement row; parsing it would log a refusal.
+  writeFileSync(s.authority, JSON.stringify({ version: 1, bindings: [{
+    profile: 'replacement', hub: 'https://hub.example', caller: 'attacker', as: '',
+    config_path: '/nonexistent/config.toml', codex_home: '/nonexistent/home',
+    thread_id: '01234567-89ab-cdef-0123-456789abcdef', generation: '0123456789abcdef0123456789abcdef',
+    created_at: '2026-01-01T00:00:00Z', expires_at: '2027-01-01T00:00:00Z',
+  }] }), { mode: 0o600 });
+
+  s.clock.advance(10_000);
+  await until(() => s.log.entries.some(e => e.msg === 'codex_state_directory_replaced'), 'the replaced directory is fenced');
+  assert.ok(!s.log.entries.some(e => e.msg === 'codex_bindings_invalid' || e.msg === 'codex_bindings_refused'), 'replacement bindings must never be parsed');
+  assert.deepEqual(await host.stopped, { reason: 'status_lock_lost' });
+  assert.equal(existsSync(join(state, 'delivery.sqlite')), false, 'no recovery is opened at the replacement directory');
 });
 
 test('delivery host reports lease loss only after both adapters drain', unix, async t => {

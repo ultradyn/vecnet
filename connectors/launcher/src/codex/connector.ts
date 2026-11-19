@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, realpathSync } from 'node:fs';
+import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import type { Clock, Log } from '../../../hub-client/src/ports.ts';
 import type { KeyValue } from '../backend.ts';
@@ -31,31 +31,86 @@ export interface CodexConnector {
   removeLauncherBinding(threadId: string, codexHome?: string): void;
 }
 
-/** One authority for the OS user, independent of profiles, configs, and XDG.
- * An override may only name this same canonical path. Unknown HOME fails closed. */
-export function codexBindingsPath(env: NodeJS.ProcessEnv): string | undefined {
+export type CodexAuthority = Readonly<{ home: string; bindings: string }>;
+const stateComponents = ['.local', 'state', 'vecnet', 'codex'];
+const unsafe = () => new Error('unsafe state path');
+
+/** Fixed canonical selection for the OS user, independent of profiles, configs,
+ * and XDG. An override may only name this same canonical path. Unknown HOME
+ * fails closed. The registry leaf itself is validated separately, so a leaf
+ * refusal can be repaired without moving the elected location. */
+export function codexAuthorityLocation(env: NodeJS.ProcessEnv): CodexAuthority | undefined {
   const selectedHome = userHome(env);
   if (!selectedHome) return;
   try {
     const home = realpathSync(selectedHome);
-    const expected = canonicalPath(join(home, '.local', 'state', 'vecnet', 'codex', 'bindings.json'));
-    if (env.VECNET_CODEX_BINDINGS && canonicalPath(env.VECNET_CODEX_BINDINGS) !== expected) return;
-    return expected;
+    const state = join(home, ...stateComponents);
+    if (canonicalPath(state) !== state) return;
+    const bindings = join(state, 'bindings.json');
+    const override = env.VECNET_CODEX_BINDINGS;
+    if (override) {
+      const absolute = resolve(override);
+      if (join(canonicalPath(dirname(absolute)), basename(absolute)) !== bindings) return;
+    }
+    return { home, bindings };
   } catch { return; }
 }
 
-/** Check every descendant before SQLite can open its database or sidecars.
- * HOME is canonicalized, but state-directory symlinks are never followed. */
-export function codexRecoveryPath(env: NodeJS.ProcessEnv): string {
-  const unsafe = () => new Error('unsafe state path');
-  const uid = process.geteuid?.();
+/** The registry leaf may be absent, but never a symlink, a non-regular file,
+ * or (on Windows) a natively unsafe private file. Refusals are repairable at
+ * the same fixed location. */
+export function validCodexRegistryLeaf(a: CodexAuthority, env: NodeJS.ProcessEnv): boolean {
+  try {
+    const entry = lstatSync(a.bindings);
+    if (!entry.isFile() || entry.isSymbolicLink()) return false;
+    // Node does not expose all Windows reparse tags; the native check does.
+    if (process.platform === 'win32') localPlatform('check-private', a.bindings, { env });
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'ENOENT';
+  }
+}
+
+/** One authority for the OS user: a fixed location whose registry leaf validates. */
+export function codexAuthority(env: NodeJS.ProcessEnv): CodexAuthority | undefined {
+  const location = codexAuthorityLocation(env);
+  return location && validCodexRegistryLeaf(location, env) ? location : undefined;
+}
+
+/** Preserve the independent connector's legacy path resolution. */
+export function codexBindingsPath(env: NodeJS.ProcessEnv): string | undefined {
   const selectedHome = userHome(env);
-  if (!selectedHome || process.platform !== 'win32' && uid === undefined) throw unsafe();
-  const home = realpathSync(selectedHome);
+  if (!selectedHome) return;
+  try {
+    const bindings = canonicalPath(join(realpathSync(selectedHome), ...stateComponents, 'bindings.json'));
+    if (env.VECNET_CODEX_BINDINGS && canonicalPath(env.VECNET_CODEX_BINDINGS) !== bindings) return;
+    return bindings;
+  } catch { return; }
+}
+
+export function isCurrentCodexAuthority(env: NodeJS.ProcessEnv, authority: CodexAuthority): boolean {
+  const current = codexAuthority(env);
+  return current?.home === authority.home && current.bindings === authority.bindings;
+}
+
+/** Check every descendant before SQLite can open its database or sidecars.
+ * Revalidation may reject the original authority, but never select another. */
+export function codexRecoveryPath(env: NodeJS.ProcessEnv, authority?: CodexAuthority): string {
+  const uid = process.geteuid?.();
+  if (process.platform !== 'win32' && uid === undefined) throw unsafe();
+  let home: string;
+  if (authority) {
+    if (!isCurrentCodexAuthority(env, authority)) throw unsafe();
+    home = authority.home;
+  } else {
+    const selectedHome = userHome(env);
+    if (!selectedHome) throw unsafe();
+    home = realpathSync(selectedHome);
+  }
+  const state = join(home, ...stateComponents);
+  const database = join(state, 'delivery.sqlite');
   if (process.platform === 'win32') {
-    const state = join(home, '.local', 'state', 'vecnet', 'codex');
     localPlatform('mkdir-private', state, { env });
-    const database = join(state, 'delivery.sqlite');
     for (const file of [database, database + '-wal', database + '-shm', database + '-journal']) {
       try {
         const st = lstatSync(file);
@@ -71,13 +126,12 @@ export function codexRecoveryPath(env: NodeJS.ProcessEnv): string {
   };
   checkDir(home, false);
   let path = home;
-  for (const component of ['.local', 'state', 'vecnet', 'codex']) {
+  for (const component of stateComponents) {
     path = join(path, component);
     try { mkdirSync(path, { mode: 0o700 }); }
     catch (e) { if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e; }
     checkDir(path, component === 'codex');
   }
-  const database = join(path, 'delivery.sqlite');
   for (const file of [database, database + '-wal', database + '-shm', database + '-journal']) {
     try {
       const st = lstatSync(file);
@@ -126,6 +180,13 @@ function openRecovery(database: string, clock: Clock, legacy?: KeyValue) {
   } catch (error) { ledger.close(); throw error; }
 }
 
+/** Kernel identity of a directory; a pathname recheck can never be satisfied
+ * by moving the original aside and creating a replacement. */
+function directoryIdentity(path: string): { dev: number; ino: number } {
+  const st = statSync(path);
+  return { dev: st.dev, ino: st.ino };
+}
+
 /** Resolve existing ancestors too, before the authority has been created. */
 function canonicalPath(path: string): string {
   const absolute = resolve(path);
@@ -148,13 +209,26 @@ const fingerprint = (b: Binding) => b.origin + ':' + bindingFingerprint(b);
 
 /** One engine per authoritative canonical home/thread, one connector per file.
  * Launcher registrations supply lifecycle callbacks, never delivery authority. */
-export function startCodexConnector(o: { kv?: KeyValue; clock: Clock; log: Log; env: NodeJS.ProcessEnv; openRpc?: typeof openCodexRpc; postRuntimeStatus?: RuntimeStatusPost; lease?: DeliveryLease; leaseLost?: AbortSignal }): CodexConnector {
+export function startCodexConnector(o: {
+  kv?: KeyValue; clock: Clock; log: Log; env: NodeJS.ProcessEnv; openRpc?: typeof openCodexRpc; postRuntimeStatus?: RuntimeStatusPost;
+} & ({ lease?: undefined; authority?: never } | { lease: DeliveryLease; authority: CodexAuthority }) & { leaseLost?: AbortSignal }): CodexConnector {
   const log = redactingLog(o.log), { clock } = o;
   const euid = process.geteuid?.() ?? -1;
   const recoveryEnv = { ...o.env };
   const env = Object.fromEntries(Object.entries(o.env).filter((e): e is [string, string] => typeof e[1] === 'string'));
   const reporter = createRuntimeStatusReporter({ clock, log, post: o.postRuntimeStatus ?? runtimeStatusPost(o.env.VECNET_BIN || 'vecnet', env) });
-  const path = codexBindingsPath(o.env), limit = codexMaxBindings(o.env);
+  const path = o.authority?.bindings ?? codexBindingsPath(o.env), limit = codexMaxBindings(o.env);
+  // Identity of the elected state directory, captured at election. Pathname
+  // reads must never be satisfied by a moved-and-replaced directory while the
+  // lease and recovery keep the original.
+  const electedState = o.authority !== undefined && path !== undefined ? directoryIdentity(dirname(path)) : undefined;
+  function electedStateIntact(): boolean {
+    if (electedState === undefined || path === undefined) return true;
+    try {
+      const current = directoryIdentity(dirname(path));
+      return current.dev === electedState.dev && current.ino === electedState.ino;
+    } catch { return false; }
+  }
   const entries = new Map<string, Entry>(), registrations = new Map<string, Binding>();
   let stopped = false, stopping: Promise<void> | undefined, chain: Promise<void> = Promise.resolve(), timer: { cancel(): void } | undefined;
   let recovery: ReturnType<typeof openRecovery> | undefined;
@@ -200,8 +274,16 @@ export function startCodexConnector(o: { kv?: KeyValue; clock: Clock; log: Log; 
     lostCleanup = Promise.allSettled([...entries.keys()].map(retire));
     void stopConnector().catch(() => { log.warn('codex_connector_cleanup_failed'); });
   }
+  /** The elected state directory changed identity: fence before any hosted
+   * registry read can consume replacement bindings. */
+  function onAuthorityLost() {
+    if (stopReason === 'status_lock_lost') return;
+    log.warn('codex_state_directory_replaced');
+    onLeaseLost();
+  }
   async function reload() {
-    const s = readBindings(path, euid, env);
+    if (!electedStateIntact()) { onAuthorityLost(); return; }
+    const s = readBindings(path, euid, env, o.authority !== undefined);
     fileChanged(s);
     if (!publisher && path !== undefined) {
       if (o.lease) publisher = createStatusPublisher(path, o.lease, env);
@@ -219,7 +301,8 @@ export function startCodexConnector(o: { kv?: KeyValue; clock: Clock; log: Log; 
     if (!publisher || stopped) return;
     if (!publisher.valid()) { onLeaseLost(); return; }
     if (!recovery) {
-      try { recovery = openRecovery(codexRecoveryPath(recoveryEnv), clock, o.kv); }
+      // Recheck private state before SQLite opens it, using the elected authority.
+      try { recovery = openRecovery(codexRecoveryPath(recoveryEnv, o.authority), clock, o.kv); }
       catch { log.warn('codex_recovery_refused'); publisher.publish(clock.now(), []); return; }
     }
     const listed = s.state === 'ok' ? s.bindings : [];
@@ -303,7 +386,8 @@ export function startCodexConnector(o: { kv?: KeyValue; clock: Clock; log: Log; 
           created_at: Number.isFinite(input.createdAt) ? new Date(input.createdAt).toISOString() : '',
           expires_at: Number.isFinite(input.expiresAt) ? new Date(input.expiresAt).toISOString() : '',
           attended: input.attended, idle_dormant_hours: input.idleDormantMs === undefined ? undefined : input.idleDormantMs / 3_600_000 });
-        const s = readBindings(path, euid, env);
+        if (!electedStateIntact()) { onAuthorityLost(); return; }
+        const s = readBindings(path, euid, env, o.authority !== undefined);
         const authority = b && s.state === 'ok' ? s.bindings.find(row => bindingFingerprint(row) === bindingFingerprint(b)) : undefined;
         if (!b || !authority || clock.now() >= b.expiresAt || typeof input.ensureLoaded !== 'function') {
           log.warn('codex_launcher_binding_unauthorized', { threadId: input.threadId });

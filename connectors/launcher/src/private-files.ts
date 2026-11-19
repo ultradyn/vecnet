@@ -25,7 +25,7 @@ export function localPlatform(command: string, path: string, options: { env?: En
   return result.stdout;
 }
 
-interface ReadOptions { exactMode?: number; owner?: number; env?: Environment }
+interface ReadOptions { exactMode?: number; owner?: number; env?: Environment; noFollow?: boolean }
 function validate(st: Stats, options: ReadOptions): void {
   if (!st.isFile()) throw new PrivateFileError('not_file');
   if (options.owner !== undefined && st.uid !== options.owner) throw new PrivateFileError('foreign_owner');
@@ -41,7 +41,7 @@ export function readPrivateFileSync(path: string, options: ReadOptions = {}): st
     if (st.size > MAX_PRIVATE_BYTES) throw new PrivateFileError('size');
     return localPlatform('read-private', path, { env: options.env });
   }
-  const fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK | (options.noFollow ? constants.O_NOFOLLOW : 0));
   try {
     validate(fstatSync(fd), options);
     const bytes = Buffer.alloc(MAX_PRIVATE_BYTES + 1);

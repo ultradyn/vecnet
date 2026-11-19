@@ -87,11 +87,11 @@ function parseAuthorityJSON(raw: string): unknown {
 }
 
 /** A single bad row invalidates the authority; never choose a winner by file order. */
-export function readBindings(path: string | undefined, euid: number, env?: Environment): FileState {
+export function readBindings(path: string | undefined, euid: number, env?: Environment, noFollow = false): FileState {
   if (path === undefined) return { state: 'unlocatable' };
   let raw: string;
   try {
-    raw = readPrivateFileSync(path, { owner: euid, env });
+    raw = readPrivateFileSync(path, { owner: euid, env, noFollow });
   } catch (e) {
     if (e instanceof PrivateFileError) return { state: e.code === 'size' ? 'invalid' : 'refused', reason: e.code };
     return (e as NodeJS.ErrnoException).code === 'ENOENT' ? { state: 'absent' } : { state: 'invalid', reason: 'unreadable' };

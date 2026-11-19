@@ -3,7 +3,7 @@ import { isAbsolute } from 'node:path';
 import { stderrLog, systemClock } from '../daemon.ts';
 import { userHome } from '../../../hub-client/src/platform.ts';
 import { localPlatform } from '../private-files.ts';
-import { codexBindingsPath, codexRecoveryPath } from './connector.ts';
+import { codexAuthority, codexRecoveryPath } from './connector.ts';
 import { startDeliveryHost } from '../delivery/host.ts';
 import type { DeliveryHost } from '../delivery/host.ts';
 
@@ -30,13 +30,13 @@ async function main(): Promise<void> {
     ? 'VECNET_BIN must be an absolute native executable with a safe owner and DACL'
     : 'VECNET_BIN must be an absolute executable owned by this user or root and not writable by others'); }
   process.umask(0o077);
-  let home: string;
+  let env: NodeJS.ProcessEnv;
   try {
-    home = realpathSync(selectedHome);
-    codexRecoveryPath({ ...process.env, HOME: home });
+    env = { ...process.env, HOME: realpathSync(selectedHome), VECNET_BIN: bin };
+    const authority = codexAuthority(env);
+    if (!authority) throw unsafe();
+    codexRecoveryPath(env, authority);
   } catch { throw unsafe(); }
-  const env = { ...process.env, HOME: home, VECNET_BIN: bin };
-  if (!codexBindingsPath(env)) throw unsafe();
   let stop!: () => void;
   const interrupted = new Promise<void>(resolve => { stop = resolve; });
   process.once('SIGTERM', stop); process.once('SIGINT', stop);

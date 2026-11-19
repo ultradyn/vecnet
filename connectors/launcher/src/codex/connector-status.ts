@@ -58,15 +58,19 @@ function windowsLock(path: string, env: Environment, onLost: () => void): Promis
 /** Unix retains flock on the inherited open file description between
  * heartbeats. Never unlink the lock inode. Windows uses a held native helper;
  * there is deliberately no insecure lock-file/PID fallback on either OS. */
-export async function openDeliveryLease(bindingsPath: string, euid: number, options: { env?: Environment; onLost?: () => void } = {}): Promise<DeliveryLease | undefined> {
+export async function openDeliveryLease(bindingsPath: string, euid: number, options: { env?: Environment; onLost?: () => void; pinnedBindings?: boolean } = {}): Promise<DeliveryLease | undefined> {
   let fd: number | undefined, lock: DeliveryLease | undefined;
   const env = options.env ?? process.env;
   try {
     if (process.platform === 'win32') localPlatform('mkdir-private', dirname(bindingsPath), { env });
     else mkdirSync(dirname(bindingsPath), { recursive: true, mode: 0o700 });
-    let authority: string;
-    try { authority = realpathSync(bindingsPath); }
-    catch { authority = join(realpathSync(dirname(bindingsPath)), basename(bindingsPath)); }
+    // The host already validated a canonical directory and fixed bindings leaf.
+    // Never resolve that leaf again when deriving its lock and status paths.
+    let authority = bindingsPath;
+    if (!options.pinnedBindings) {
+      try { authority = realpathSync(bindingsPath); }
+      catch { authority = join(realpathSync(dirname(bindingsPath)), basename(bindingsPath)); }
+    }
     const path = authority + '.status.json';
     if (process.platform === 'win32') {
       lock = await windowsLock(path + '.lock', env, options.onLost ?? (() => {}));
