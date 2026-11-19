@@ -384,7 +384,7 @@ jobs:
     strategy: &windows-go-strategy
       fail-fast: false
       matrix:
-        lane: [0, 1, 2, 3, 4, 5, 6, 7]
+        lane: [0, 1, 2, 3, 4, 5]
     runs-on: windows-2025
     timeout-minutes: 5
     env:

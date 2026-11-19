@@ -1,8 +1,8 @@
 # Release CI scheduling and acceptance
 
 The workflow preserves full native Linux x64 / Windows x64 / Windows ARM64
-Go, Node and E2E coverage. Two Linux and eight Windows lanes per platform execute
-four complete whole-root groups each (8 Linux / 32 Windows partitions). Three independent
+Go, Node and E2E coverage. Two Linux and six Windows lanes per platform execute
+four complete whole-root groups each (8 Linux / 24 Windows partitions). Three independent
 Linux producer jobs cross-compile platform-selected test packages once in six
 bounded groups, after cold-dependency stages; source/hash-bound bundles include
 native test2json. Consumers validate/copy to private physical temp, discover
@@ -58,14 +58,31 @@ ATTEMPT [INVENTORY_JSON]`. Without inventory the importer emits root costs only,
 not whole-package elapsed. Inventory JSON binds `sha`, `run`, `attempt` and a
 `platforms` map (`linux`, `windows-x64`, `windows-arm` → package/root arrays).
 The importer requires the exact Go lane names and unique job IDs of
-one complete geometry: historical 6+6+6, previous 2+6+6 or current 2+8+8.
-Job metadata must match source/run/attempt and completion. Both modern
-geometries (2+6+6 and 2+8+8) require matching `run.json` and each indexed log's
-SHA256 and byte length. Equal 18-log totals never identify modern versus historical receipt policy. The output
+one complete geometry: historical 6+6+6 or current 2+6+6. Job metadata must
+match source/run/attempt and completion; the current archive also requires
+matching `run.json` and each indexed log's SHA256 and byte length. The output
 retains the raw log hashes. R12 supplies 2,557 Linux and 2,548 Windows observed
 PASS roots, with 89 censored records. Of 2,559 Linux and 2,592 Windows discovered
 roots, 2 Linux and 44 Windows roots have no PASS weight. The profile never
 selects coverage.
+
+The reduced `TestStateConcurrentWriters` fixture changed at `4db57b7a` from
+1,600 claim attempts to 128, retaining eight competing writers and its property
+assertions. Its Windows hint is reset from 21.69s for the old workload to the
+2.21s complete-PASS maximum (x64 1.93s / ARM 2.21s) in source-bound run
+`44471440331`, attempt 1, source `5946a271`. `rootHintAdjustments` records the
+exact root, raw log hashes/lengths and fixture hash unchanged since that change;
+all other hints, Linux values, censored records and original source metadata
+remain intact. The run itself failed on two other x64 group deadlines.
+
+With existing six Windows lanes, four groups and 33 jobs, replay over all 2,629
+Windows roots reduces modeled maximum group load from 50.087s to 41.803s
+(8.284s more headroom); worst lane rises from 129.140s to 135.273s. Forty-four
+roots lack PASS weights and 101 observations remain censored. These are
+execution placement estimates, excluding queue/setup/acceptance, and require
+fresh strict native evidence. The unpublished eight-lane experiment is archived
+at `archive/ci80-eight-lanes-7a4698b1`; its 37 jobs conflicted with the trusted
+default-branch external audit's 33-job policy. Existing geometry is restored.
 
 Deterministic weighted
 placement balances whole roots, then forms package packets within a partition:
@@ -136,8 +153,8 @@ policy, not assuming the cold Release bin will pass or meet the budget.
 
 Each platform's consumers wait only for its matching producer, not the
 slowest of all three compile jobs. YAML step/strategy anchors share identical
-commands, not coverage exceptions. There are 37 executed jobs including acceptance
-(36 before it); `schedule.mjs` supplies the audit cardinality. R12 completed
+commands, not coverage exceptions. There are33 executed jobs including acceptance
+(32 before it); `schedule.mjs` supplies the audit cardinality. R12 completed
 in 351s, with a 60s Linux Node artifact download and a failing ARM Go group.
 The critical path was ARM Go lane 4, then acceptance; Linux Go started up to
 49s after its producer and also finished late. Replaying the same R12 PASS
@@ -146,20 +163,8 @@ from 161s to 142s versus stale placement. With archived producer times,
 consumer setup/post, observed queue delay and acceptance, the model still
 lands around 352s. Linux 4/6 and Windows 8 lanes did not support a sub-300s
 run in the queue model, and alternative packet caps offered little ARM gain.
-That historical comparison kept job count, packet caps, isolation and all
-deadlines unchanged. Those models are not a native pass or evidence that the
-clipboard failure is fixed.
-
-R4's complete 33-job run at `5946a271` removed the cache-save tail but two
-x64 groups still exhausted the 51.5s native budget with unfinished roots.
-Eight Windows lanes now spread work across 32 groups per architecture; Linux
-stays at two lanes, and ordinary worker widths remain six Windows/four Linux.
-Replay of that run's PASS maxima over all 2,629 Windows roots reduced modeled
-worst group load from 50.087s to 41.314s and worst lane from 129.140s to 117.624s.
-The replay retains 44 roots without PASS weights and 101 censored records;
-placement uses the unchanged timing profile. These execution-only estimates
-exclude queue/setup/acceptance costs and require fresh strict hosted evidence.
-
+Job count, packet caps, isolation and all deadlines are unchanged. These
+models are not a native pass or evidence that the clipboard failure is fixed.
 Source producers retain full discovery. Native Go, package and acceptance
 consumers restore source from their producer artifacts; Node/E2E retain sparse
 checkouts. Non-tag assembly checkout is shallow; pushed version tags retain

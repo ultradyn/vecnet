@@ -3230,7 +3230,7 @@
         "TestHookInstallCodexRefusesFailedDiscovery": 11.66,
         "TestLauncherWindowsRepairPendingDriftTask": 18.02,
         "TestLauncherSetupACPOpaqueArgumentsWrite": 13.87,
-        "TestStateConcurrentWriters": 21.69,
+        "TestStateConcurrentWriters": 2.21,
         "TestWatchAdoptsFollowByOtherCommand": 4.14,
         "TestReceivedNoticeCLI": 9.81,
         "TestInviteHubURLResponsePreservesSafeOutput": 8.51,
@@ -6052,5 +6052,44 @@
       }
     ]
   },
-  "evidence": "Archived native run44452063212 attempt1 sourcefb111b30f65ab84226a59e626e4f06a410268575, all14 native Go logs. Complete PASS root maxima (Windows maxx64/ARM); whole-package process elapsed maxima only with matching inventory and median complete-root fallbacks. Failed/unfinished roots and package executions explicitly censored. Zero-rounded PASS costs floored0.01s. Startup median from nonnegative package PASS elapsed minus summed roots, excluding overlapping same-package processes. No postchange native measurements or predicted gains; discovery supplies coverage. Unobserved roots use positive package fallback or0.1s."
+  "evidence": "Archived native run44452063212 attempt1 sourcefb111b30f65ab84226a59e626e4f06a410268575, all14 native Go logs. Complete PASS root maxima (Windows maxx64/ARM); whole-package process elapsed maxima only with matching inventory and median complete-root fallbacks. Failed/unfinished roots and package executions explicitly censored. Zero-rounded PASS costs floored0.01s. Startup median from nonnegative package PASS elapsed minus summed roots, excluding overlapping same-package processes. No postchange native measurements or predicted gains; discovery supplies coverage. Unobserved roots use positive package fallback or0.1s.",
+  "rootHintAdjustments": [
+    {
+      "platform": "windows",
+      "package": "github.com/XertroV/vecnet/internal/cli",
+      "root": "TestStateConcurrentWriters",
+      "previousSeconds": 21.69,
+      "seconds": 2.21,
+      "reason": "Reset the placement cost after the fixture changed from 1600 to 128 claim attempts; maximum complete PASS from both Windows architectures for identical reduced fixture bytes. This is not a global profile refresh or native budget proof.",
+      "source": {
+        "sha": "5946a2719036829bc6ab5d4693b4c35a1afe90dc",
+        "run": 44471440331,
+        "attempt": 1,
+        "conclusion": "failure",
+        "logs": [
+          {
+            "id": 135382040932,
+            "name": "test-go-windows-x64 (1)",
+            "bytes": 1956785,
+            "sha256": "e64ceffffbb720094dc48d0fc60879b23d9f67e4a8664926b47cc491653561b6",
+            "action": "pass",
+            "elapsed": 1.93
+          },
+          {
+            "id": 135381957601,
+            "name": "test-go-windows-arm (1)",
+            "bytes": 1990193,
+            "sha256": "15e858ba2cafe207c1f858673d70a9960f1a53e8550b2fade835bfe2146b7467",
+            "action": "pass",
+            "elapsed": 2.21
+          }
+        ]
+      },
+      "fixture": {
+        "path": "internal/cli/hookstate_test.go",
+        "changedAt": "4db57b7ac841a56d53ad8cbee954a6cae84b08ea",
+        "sha256": "af7ca6c6cfaa88f7eac2cf28d6e0ec964c9faeea3ed81eba3a918cb9b94a046b"
+      }
+    }
+  ]
 }
