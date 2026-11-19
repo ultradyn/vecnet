@@ -7,9 +7,9 @@ import { fileURLToPath } from 'node:url';
 import { releaseJobCount } from './schedule.mjs';
 // R5 acceptance audit took4s and post checkout rounded to0s; artifact
 // verification was skipped (failed preflight), so8s is headroom, not a
-// measured completion guarantee. Tags retain both14s publish caps plus7s
+// measured completion guarantee. Tags retain40s npm +14s GitHub caps plus7s
 // verification/cleanup. The completed-run audit still enforces actual <300s.
-export const acceptanceReserve = (event, ref) => event === 'push' && ref?.startsWith('refs/tags/v') ? 35 : 8;
+export const acceptanceReserve = (event, ref) => event === 'push' && ref?.startsWith('refs/tags/v') ? 61 : 8;
 export function audit(run,jobs,{sha,now=new Date().toISOString(),preflight=false,reserve=0,currentJob,expectedJobs}={}) {
  const violations=[];const instant=value=>Date.parse(value);
  if(!sha||run.head_sha!==sha)violations.push('source SHA mismatch');

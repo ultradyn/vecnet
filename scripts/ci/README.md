@@ -111,7 +111,8 @@ roots that failed cold Node admission in R16: `TestLauncherWindowsInstallPreview
 `TestLauncherWindowsInstallRejectsUnsafeExecutableBeforeExecution`. In the R21
 full run its first valid cold Node probe failed under the ARM64 ordinary pool;
 the same root passed in isolation in a separate diagnostic, after other tests.
-It still runs all five original independently cold cases. Each exclusive root runs serially
+It still runs all five original cases with independently isolated, prepared
+mutable images; cold admission is covered separately. Each exclusive root runs serially
 before the ordinary packet pool in its assigned group, with the same process
 isolation, root filter and deadlines. The repair root still runs all four
 original cases together, alone in its existing group slot: R16 recorded a
@@ -295,10 +296,13 @@ publication still pins npm 12.0.1 explicitly. Native timing remains required.
 
 The audit includes setup/post/action and queue time, fails on any
 missing/failed/incomplete evidence, reserves8s
-after non-tag preflight (R5 audit4s/posts0s; verification unmeasured) or35s for tags
-(two14s publication caps plus7s verification/cleanup), and exports an absolute overall deadline.
+after non-tag preflight (R5 audit4s/posts0s; verification unmeasured) or61s for tags
+(40s npm +14s GitHub publication caps plus7s verification/cleanup), and exports an absolute overall deadline.
 All remaining commands cap themselves to that deadline with cleanup reserve;
-publish/release commands additionally have14s caps. No retries mask failures.
+npm publication additionally has a40s cap and GitHub Release creation a14s cap.
+The npm helper shares a38s internal deadline across lookup/upload/verification;
+after one successful upload it polls only registry visibility for at most5s,
+within that deadline. Publication is never retried. No retries mask failures.
 The completed-run `Release budget acceptance` workflow checks the entire run
 including acceptance/publication/post steps under the same strict <300s and
 <60s policy. It publishes the explicit commit status **Release budget acceptance** on the

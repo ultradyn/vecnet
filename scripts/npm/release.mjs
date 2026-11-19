@@ -28,11 +28,22 @@ export function checkPublished(existing, info, integrity) {
   }
 }
 
-async function publish(info) {
-  const archive = path.join(root, 'dist', info.tarball);
+export async function publish(info, {
+  cwd = root, fetch = globalThis.fetch, exec = execFileSync, now = Date.now,
+  sleep = ms => new Promise(resolve => setTimeout(resolve, ms)),
+} = {}) {
+  // Leave startup/exit headroom inside the40s CI owner. That owner also
+  // enforces the inherited absolute overall run deadline.
+  const deadline = now() + 38_000;
+  const remaining = () => {
+    const ms = deadline - now();
+    if (ms <= 0) throw new Error('npm publication budget exhausted; check registry before rerunning');
+    return ms;
+  };
+  const archive = path.join(cwd, 'dist', info.tarball);
   const integrity = `sha512-${createHash('sha512').update(await readFile(archive)).digest('base64')}`;
   const response = await fetch(`${registry}vecnet/${info.version}`, {
-    headers: { 'Cache-Control': 'no-cache' }, signal: AbortSignal.timeout(30_000),
+    headers: { 'Cache-Control': 'no-cache' }, signal: AbortSignal.timeout(Math.min(5_000, remaining())),
   });
   if (response.ok) {
     checkPublished(await response.json(), info, integrity);
@@ -44,13 +55,13 @@ async function publish(info) {
     'publish', archive, '--ignore-scripts', '--access', 'public', '--tag', info.npmTag,
     '--registry', registry,
   ]);
-  execFileSync(npm.file, npm.args, { cwd: root, stdio: 'inherit', windowsHide: true });
-  // npm can accept an upload before its asynchronous processing completes.
-  // Do not report a successful release until the tested artifact is served.
-  const deadline = Date.now() + 5 * 60_000;
-  while (Date.now() < deadline) {
-    const published = await fetch(`${registry}vecnet/${info.version}?release-check=${Date.now()}`, {
-      headers: { 'Cache-Control': 'no-cache' }, signal: AbortSignal.timeout(15_000),
+  exec(npm.file, npm.args, { cwd, stdio: 'inherit', windowsHide: true, timeout: remaining() });
+  // Only registry visibility is polled after a successful upload. Never retry
+  // publication, even if the registry has not exposed the tested bytes yet.
+  const visibilityDeadline = Math.min(deadline, now() + 5_000);
+  while (now() < visibilityDeadline) {
+    const published = await fetch(`${registry}vecnet/${info.version}?release-check=${now()}`, {
+      headers: { 'Cache-Control': 'no-cache' }, signal: AbortSignal.timeout(Math.min(2_000, visibilityDeadline - now())),
     });
     if (published.ok) {
       checkPublished(await published.json(), info, integrity);
@@ -58,10 +69,11 @@ async function publish(info) {
       return;
     }
     if (published.status !== 404) throw new Error(`npm publication verification failed with HTTP ${published.status}`);
-    console.log('Waiting for npm to finish processing the release');
-    await new Promise(resolve => setTimeout(resolve, 10_000));
+    console.log('Waiting briefly for npm registry visibility');
+    const delay = Math.min(500, visibilityDeadline - now());
+    if (delay > 0) await sleep(delay);
   }
-  throw new Error('npm accepted the upload but did not serve the release within five minutes; rerun this workflow');
+  throw new Error('npm accepted the upload but the release is not visible within the publication budget; check registry before rerunning');
 }
 
 async function main() {
