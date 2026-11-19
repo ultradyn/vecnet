@@ -606,7 +606,14 @@ func (a *app) registerClaudeRoot(ctx context.Context, scope claudeScope, root cl
 	if err != nil {
 		return none, err
 	}
-	if settings, err := a.claudeSettings(); err == nil && settings.Disabled {
+	// The global-disable refusal fails closed on an unreadable or invalid
+	// settings document, exactly as readClaudeStatus treats it: unknown
+	// policy state never registers.
+	settings, err := a.claudeSettings()
+	if err != nil {
+		return none, err
+	}
+	if settings.Disabled {
 		return none, errClaudeDisabledGlobal
 	}
 	if slices.ContainsFunc(doc.OptOuts, func(s claudeScope) bool { return claudeSameRecipient(s, scope) }) {

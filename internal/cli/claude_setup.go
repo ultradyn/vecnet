@@ -455,7 +455,10 @@ func (a *app) reconcileClaudeEnrollment(ctx context.Context, r claudeEnrollment)
 			return fail(err)
 		}
 		if _, err := a.registerClaudeRoot(ctx, scope, root); err != nil {
-			if errors.Is(err, errClaudeOptOut) {
+			// Both durable opt-outs settle the record in the stable
+			// disabled phase (as the hook path's claudeSetupResultFor
+			// maps them); anything else stays retryable pending.
+			if errors.Is(err, errClaudeOptOut) || errors.Is(err, errClaudeDisabledGlobal) {
 				return stop(claudeEnrollmentDisabled, err)
 			}
 			return fail(err)

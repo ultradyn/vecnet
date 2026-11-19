@@ -732,6 +732,8 @@ func TestClaudeHelperProcess(t *testing.T) {
 		claudeHelperClaude()
 	case "register":
 		claudeHelperRegister()
+	case "reconcile":
+		claudeHelperReconcile()
 	case "hook":
 		claudeHelperHook()
 	default:
@@ -813,6 +815,78 @@ type claudeHookResult struct {
 	Stderr string `json:"stderr"`
 }
 
+// claudeHelperReconcile runs one enrollment reconciliation with an isolated
+// environment, as a real child of the claimed Claude process.
+func claudeHelperReconcile() {
+	result := os.Getenv("VECNET_CLAUDE_RESULT")
+	fail := func(msg string) {
+		raw, _ := json.Marshal(localSetupResult{State: "pending", Reason: msg})
+		_ = os.WriteFile(result, raw, 0o600)
+		os.Exit(0)
+	}
+	raw, err := os.ReadFile(os.Getenv("VECNET_CLAUDE_PAYLOAD"))
+	if err != nil {
+		fail("payload: " + err.Error())
+	}
+	var payload struct {
+		Env    map[string]string `json:"env"`
+		Record claudeEnrollment  `json:"record"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		fail("payload: " + err.Error())
+	}
+	a := &app{ctx: context.Background(), stdout: io.Discard, stderr: io.Discard, getenv: func(k string) string { return payload.Env[k] }}
+	res := a.reconcileClaudeEnrollment(context.Background(), payload.Record)
+	out, _ := json.Marshal(res)
+	_ = os.WriteFile(result, out, 0o600)
+	os.Exit(0)
+}
+
+// reconcile runs one enrollment reconciliation from a child of this tree.
+func (tr *claudeTree) reconcile(record claudeEnrollment, env map[string]string) localSetupResult {
+	tr.f.t.Helper()
+	tr.f.seq++
+	base := filepath.Join(tr.f.dir, fmt.Sprintf("job-%s-%d", tr.name, tr.f.seq))
+	payload := base + "-payload.json"
+	result := base + "-result.json"
+	if env == nil {
+		env = map[string]string{}
+	}
+	merged := map[string]string{}
+	for k, v := range tr.f.env {
+		merged[k] = v
+	}
+	for k, v := range env {
+		merged[k] = v
+	}
+	raw, err := json.Marshal(struct {
+		Env    map[string]string `json:"env"`
+		Record claudeEnrollment  `json:"record"`
+	}{merged, record})
+	if err != nil {
+		tr.f.t.Fatal(err)
+	}
+	if err := os.WriteFile(payload, raw, 0o600); err != nil {
+		tr.f.t.Fatal(err)
+	}
+	tr.job("reconcile", payload, result)
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		raw, err := os.ReadFile(result)
+		if err == nil {
+			var r localSetupResult
+			if json.Unmarshal(raw, &r) == nil && r.State != "" {
+				_ = os.Remove(result)
+				return r
+			}
+		}
+		if time.Now().After(deadline) {
+			tr.f.t.Fatalf("reconcile job on tree %s produced no result", tr.name)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // claudeHelperHook runs one hook invocation inside the real hook worker,
 // with an isolated environment, the job's stdin and captured output.
 func claudeHelperHook() {
@@ -843,4 +917,34 @@ func claudeHelperHook() {
 	raw, _ = json.Marshal(claudeHookResult{Stdout: out.String(), Stderr: errs.String()})
 	_ = os.WriteFile(result, raw, 0o600)
 	os.Exit(0)
+}
+
+// TestClaudeRegistrationGlobalDisableFailsClosedOnBadSettings covers the
+// task 5 review finding: the global-disable refusal in registerClaudeRoot
+// must fail closed when the versioned Claude settings are unreadable or
+// invalid (as readClaudeStatus already does), never skip the refusal and
+// register through an unknown policy state.
+func TestClaudeRegistrationGlobalDisableFailsClosedOnBadSettings(t *testing.T) {
+	f := newClaudeRegFixture(t)
+	a := f.startTree("a")
+	a.sessionRecord(a.pid, "S1", a.socket)
+
+	// An unreadable settings document must itself refuse registration.
+	os.MkdirAll(filepath.Dir(claudeStatePath(f.dir, claudeSettingsName)), 0o700)
+	if err := os.WriteFile(claudeStatePath(f.dir, claudeSettingsName), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	refuseReg(t, a.reg(f.scope("p"), a.root("S1"), nil), "invalid claude settings state")
+	if n := f.storedBindingCount(t); n != 0 {
+		t.Fatalf("registration through an unreadable settings document left %d rows", n)
+	}
+
+	// A valid document without the disable flag keeps registration working,
+	// proving the fail-closed branch is the settings reader, not a blanket
+	// refusal.
+	if err := os.WriteFile(claudeStatePath(f.dir, claudeSettingsName), []byte(`{"version":1,"disabled":false}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mustReg(t, a.reg(f.scope("p"), a.root("S1"), nil))
+	f.assertPassive()
 }

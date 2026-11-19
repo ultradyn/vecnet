@@ -10,6 +10,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +18,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // claudeHookEnv is the full host-tree evidence of tree tr for session.
@@ -224,6 +226,57 @@ func TestClaudeSetupFirstRootPromptKeepsLegacyOutput(t *testing.T) {
 	}
 	if extra := hits.Load() - baseHits.Load(); extra != 0 {
 		t.Fatalf("registration changed the hub requests: %d extra", extra)
+	}
+	f.assertPassive()
+}
+
+// TestClaudeSetupReconcileGlobalDisableIsStableDisabled covers the task 5
+// review finding: reconciliation that hits the durable global disable must
+// settle the enrollment record in the stable disabled phase (matching the
+// hook path's claudeSetupResultFor mapping), not leave it retryable pending.
+func TestClaudeSetupReconcileGlobalDisableIsStableDisabled(t *testing.T) {
+	f := newClaudeRegFixture(t)
+	a := f.startTree("a")
+	a.sessionRecord(a.pid, "S1", a.socket)
+
+	// One committed enrollment record for profile p at this config, exactly
+	// as the post-redemption commit leaves it.
+	intent := "0123456789abcdef0123456789abcdef"
+	secret := "vn_peer_test"
+	if err := saveConfig(f.config, Config{Profiles: map[string]Profile{
+		"p": {Hub: f.hub, Secret: secret, PeerID: "peer_A",
+			EnrollmentIntent: intent, EnrollmentCredential: hookDigest([]byte(secret)),
+			EnrollmentHub: f.hub, EnrollmentCaller: "peer_A"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	record := claudeEnrollment{
+		IntentID: intent, Hub: f.hub, Caller: "peer_A",
+		Config: f.config, Profile: "p", ConfigRoot: a.configRoot,
+		State: claudeEnrollmentPending, UpdatedAt: time.Now().UTC(),
+	}
+
+	// The durable global disable refuses the registration inside
+	// reconciliation; the record must settle disabled, not stay pending.
+	if err := f.app().setClaudeGlobalDisable(context.Background(), true); err != nil {
+		t.Fatal(err)
+	}
+	result := a.reconcile(record, a.claudeHookEnv("S1"))
+	if result.State != claudeEnrollmentDisabled {
+		t.Fatalf("reconcile under global disable settled %q (%s), want %q", result.State, result.Reason, claudeEnrollmentDisabled)
+	}
+	if !strings.Contains(result.Reason, "disabled globally") {
+		t.Fatalf("reconcile lost the disable reason: %q", result.Reason)
+	}
+	records, err := f.app().claudeEnrollments()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 || records[0].State != claudeEnrollmentDisabled || claudeEnrollmentRetryable(records[0].State) {
+		t.Fatalf("saved enrollment record is not stably disabled: %+v", records)
+	}
+	if n := f.storedBindingCount(t); n != 0 {
+		t.Fatalf("globally disabled reconcile registered %d rows", n)
 	}
 	f.assertPassive()
 }
