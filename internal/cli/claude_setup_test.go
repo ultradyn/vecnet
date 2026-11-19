@@ -273,8 +273,11 @@ func TestClaudeSetupReplacementProfileStaysUntouched(t *testing.T) {
 }
 
 // TestClaudeRuntimeSnapshotRedaction covers the private runtime-snapshot
-// child's redaction (parked from task 3): only opaque keys and generations
-// leave the registry.
+// child's redaction (parked from task 3, extended in task 7): opaque keys,
+// generations, passive states, the admission booleans and the hub/profile
+// coordinates the host's own scoped children need. The root's private
+// coordinates — config root, session id, socket path, process identity and
+// build version — never leave the registry.
 func TestClaudeRuntimeSnapshotRedaction(t *testing.T) {
 	d, err := canonicalCodexPath(t.TempDir())
 	if err != nil {
@@ -319,9 +322,10 @@ func TestClaudeRuntimeSnapshotRedaction(t *testing.T) {
 	if err := json.Unmarshal(top["bindings"], &rows); err != nil || len(rows) != 1 {
 		t.Fatalf("snapshot rows have unexpected fields: %q", out.String())
 	}
-	// A row is exactly the opaque key, the generation and the passive state
-	// (plus its fixed reason when the root is not live).
-	if len(rows[0]) != 3 && len(rows[0]) != 4 {
+	// A row is exactly the opaque key, the generation, the passive state
+	// (plus its fixed reason when the root is not live), the admission
+	// booleans and the scope coordinates.
+	if len(rows[0]) != 6 && len(rows[0]) != 7 {
 		t.Fatalf("snapshot rows have unexpected fields: %q", out.String())
 	}
 	if string(rows[0]["binding_key"]) != jsonString(claudeBindingKey(scope)) {
@@ -333,7 +337,28 @@ func TestClaudeRuntimeSnapshotRedaction(t *testing.T) {
 	if string(rows[0]["state"]) != jsonString("blocked") {
 		t.Fatalf("a root with no live evidence must report blocked: %q", out.String())
 	}
-	for _, marker := range []string{"SNAPSHOT-REDACT", "/home/user", "peer_A", "hub.example.com", "4242", "vecnet.toml"} {
+	// The task-7 admission gate and the host's child-spawn coordinates.
+	var admission struct {
+		Live             bool `json:"live"`
+		Policy           bool `json:"policy"`
+		VersionQualified bool `json:"version_qualified"`
+	}
+	if err := json.Unmarshal(rows[0]["admission"], &admission); err != nil || admission.Policy != true ||
+		admission.Live != false || admission.VersionQualified != claudeVersionQualified("2.1.322") {
+		t.Fatalf("admission evidence missing or wrong: %q", rows[0]["admission"])
+	}
+	var scopeRow struct {
+		Profile     string `json:"profile"`
+		HubEndpoint string `json:"hub_endpoint"`
+		Caller      string `json:"caller"`
+		Recipient   string `json:"recipient"`
+	}
+	if err := json.Unmarshal(rows[0]["scope"], &scopeRow); err != nil || scopeRow.Profile != "p" ||
+		scopeRow.HubEndpoint != "https://hub.example.com" || scopeRow.Caller != "peer_A" || scopeRow.Recipient != "peer_A" {
+		t.Fatalf("scope coordinates missing or wrong: %q", rows[0]["scope"])
+	}
+	// The root's private coordinates never leave the registry.
+	for _, marker := range []string{"SNAPSHOT-REDACT", "/home/user", "4242", "vecnet.toml", "2.1.322"} {
 		if strings.Contains(out.String(), marker) {
 			t.Fatalf("snapshot leaked %q: %s", marker, out.String())
 		}

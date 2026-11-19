@@ -22,3 +22,6 @@ func claudeBootID() string { return "" }
 func claudeHostLive(pid int, start string) bool { return false }
 
 func claudeSingletonHeld(lock string) bool { return false }
+
+// Without platform process evidence, no stored uid can be confirmed.
+func claudeProcUser(pid, uid int) error { return errClaudeUnsupported }

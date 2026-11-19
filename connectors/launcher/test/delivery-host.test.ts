@@ -359,3 +359,75 @@ test('registered Claude root is visible through the same host across restart',
   assert.equal(existsSync(claudeSidecar), false, 'orderly stop removes the owned sidecar');
   assert.deepEqual(inode(s.lock), original);
 });
+
+// Task 7: the native Claude delivery adapter rides the same host only behind
+// the explicit experimental canary flag. One private CLI stub stands in for
+// the packaged children on both sides of the flag; nothing here reaches a
+// hub or a real Claude socket.
+function claudeCanaryStub(t: TestContext, home: string, admitted: boolean): { calls: () => string[]; bin: string } {
+  const key = 'ab'.repeat(32), generation = '01'.repeat(16);
+  const calls = join(home, 'stub-calls.log');
+  const stub = join(home, 'vecnet-stub');
+  const snapshot = JSON.stringify(admitted
+    ? { version: 1, bindings: [{ binding_key: key, generation, state: 'registered',
+        admission: { live: true, policy: true, version_qualified: true },
+        scope: { profile: 'p', hub_endpoint: 'https://hub.example', caller: 'peer_A', recipient: 'peer_A' } }] }
+    : { version: 1, bindings: [] });
+  const inbox = JSON.stringify({ events: [
+    { cursor: 'e1.1', type: 'delivery', data: { delivery_id: 'dly_00000000000000000000000001',
+      message: { message_id: 'msg_00000000000000000000000001', thread_id: 'thr_01ARZ3NDEKTSV4RRFFQ69G5FAV', kind: 'message', priority: 'wake' } } },
+  ], next_cursor: 'e1.1' });
+  const wake = JSON.stringify({ type: 'delivery', data: { message: { priority: 'wake' } } });
+  writeFileSync(stub, [
+    '#!/bin/sh',
+    `printf '%s\\n' "$*" >> ${JSON.stringify(calls)}`,
+    'if [ "$1" = claude ] && [ "$2" = runtime-snapshot ]; then',
+    `  printf '%s\\n' ${JSON.stringify(snapshot)}`,
+    '  exit 0',
+    'fi',
+    'if [ "$1" = claude ] && [ "$2" = deliver ]; then',
+    '  exit 0',
+    'fi',
+    'if [ "$1" = --net ] && [ "$3" = watch ]; then',
+    `  printf '%s\\n' ${JSON.stringify(wake)}`,
+    '  exec sleep 300',
+    'fi',
+    'if [ "$1" = --net ] && [ "$3" = inbox ]; then',
+    `  printf '%s\\n' ${JSON.stringify(inbox)}`,
+    '  exit 0',
+    'fi',
+    'exit 1',
+    '',
+  ].join('\n'), { mode: 0o700 });
+  t.after(() => { try { rmSync(stub, { force: true }); } catch { /* gone */ } });
+  return { calls: () => { try { return readFileSync(calls, 'utf8').trim().split('\n').filter(Boolean); } catch { return []; } }, bin: stub };
+}
+
+test('claude native delivery is absent by default and rides the host behind the explicit canary flag',
+  { skip: process.platform === 'win32' && 'Unix flock and CLI stub fixture', timeout: 30_000 }, async t => {
+    const off = fixture(t);
+    const offStub = claudeCanaryStub(t, off.env.HOME, true);
+    const offEnv = { ...off.env, VECNET_BIN: offStub.bin };
+    const offHost = startDeliveryHost({ ...off, env: offEnv });
+    off.cleanup.push(() => offHost.stop());
+    await until(() => existsSync(off.status), 'host elects with the canary off');
+    await new Promise(resolve => setTimeout(resolve, 300));
+    for (const line of offStub.calls()) {
+      assert.equal(line, 'claude runtime-snapshot', `the default host spawns only the passive snapshot child: ${line}`);
+    }
+
+    const on = fixture(t);
+    const onStub = claudeCanaryStub(t, on.env.HOME, true);
+    const onEnv = { ...on.env, VECNET_BIN: onStub.bin, VECNET_CLAUDE_DELIVERY_CANARY: '1' };
+    const onHost = startDeliveryHost({ ...on, env: onEnv, claudeDeliveryCanary: true });
+    on.cleanup.push(() => onHost.stop());
+    await until(() => existsSync(on.status), 'host elects with the canary on');
+    await until(() => onStub.calls().some(line => line.startsWith('claude deliver --binding-key ')),
+      'the canary adapter resolves a binding and invokes the transport child', 15_000);
+    const deliver = onStub.calls().find(line => line.startsWith('claude deliver --binding-key '))!;
+    assert.ok(deliver.includes('--expect-generation '), 'the transport child carries the generation fence');
+    assert.ok(!deliver.includes('--socket '), 'the endpoint is registry-resolved, never on the command line');
+    assert.ok(!deliver.includes('--ack'), 'no child ever acknowledges');
+    await onHost.stop();
+    assert.equal(existsSync(on.status), false);
+  });

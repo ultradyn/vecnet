@@ -1,9 +1,11 @@
 import type { Clock, Log } from '../../../hub-client/src/ports.ts';
 import type { KeyValue } from '../backend.ts';
+import { openLedger } from '../ledger.ts';
 import { CODEX_RELOAD_MS, codexAuthorityLocation, codexRecoveryPath, isCurrentCodexAuthority, startCodexConnector, validCodexRegistryLeaf } from '../codex/connector.ts';
 import type { CodexConnector, CodexConnectorOutcome } from '../codex/connector.ts';
 import { openDeliveryLease } from '../codex/connector-status.ts';
 import type { DeliveryLease } from '../codex/connector-status.ts';
+import { createClaudeDeliveryAdapter } from './claude-adapter.ts';
 import { createWatchPool } from './watch-pool.ts';
 import type { WatchPool } from './watch-pool.ts';
 
@@ -12,6 +14,14 @@ export interface HostedAdapter {
   start(): void;
   /** Fence new work synchronously, then await cleanup. */
   stop(): Promise<void>;
+}
+/** Run hosted adapters as one: each starts in order, and stop() awaits every
+ * cleanup even if one fails. */
+function composeHosted(adapters: HostedAdapter[]): HostedAdapter {
+  return {
+    start() { for (const adapter of adapters) adapter.start(); },
+    stop() { return Promise.all(adapters.map(adapter => adapter.stop())).then(() => { }); },
+  };
 }
 export interface DeliveryHostOptions {
   env: NodeJS.ProcessEnv;
@@ -23,6 +33,12 @@ export interface DeliveryHostOptions {
   auxiliary?: () => HostedAdapter;
   /** Notification-watch pool owned by this host; defaults to a fresh pool. */
   watchPool?: WatchPool;
+  /** Experimental pointer-only Claude native-delivery canary (task 7).
+   * Default off: the delivery adapter is constructed only when this explicit
+   * opt-in is set — `claude enable` alone can never turn it on. Its durable
+   * claim ledger lives in the canonical per-user state domain (the shared
+   * delivery database beside the elected bindings), in both host modes. */
+  claudeDeliveryCanary?: boolean;
 }
 
 /** Both service entrypoints elect here, and only the host releases the lease. */
@@ -88,8 +104,26 @@ export function startDeliveryHost(o: DeliveryHostOptions): DeliveryHost {
     void codex.stopped.then(outcome => { if (outcome.reason === 'status_lock_lost') onLost(); });
     if (stopping) return;
     for (const apply of pending.splice(0)) apply(codex);
+    // The caller's adapter (passive Claude status) always rides the lease;
+    // the experimental native-delivery canary composes beside it only when
+    // the explicit opt-in flag is set. `auxiliary` names whatever already
+    // exists, so a failure partway through still drains the started part.
+    const adapters: HostedAdapter[] = [];
     try {
-      auxiliary = o.auxiliary?.();
+      const base = o.auxiliary?.();
+      if (base) { adapters.push(base); auxiliary = base; }
+      if (o.claudeDeliveryCanary) {
+        const ledger = openLedger(codexRecoveryPath(env, location), clock);
+        const delivery = createClaudeDeliveryAdapter({ pool: watchPool, clock, log, kv: ledger.kv('claude'), env });
+        const canary: HostedAdapter = {
+          start: () => delivery.start(),
+          stop: async () => { try { await delivery.stop(); } finally { ledger.close(); } },
+        };
+        adapters.push(canary);
+        auxiliary = adapters.length === 1 ? canary : composeHosted(adapters);
+      } else if (adapters.length === 0) {
+        auxiliary = undefined;
+      }
       if (!stopping) auxiliary?.start();
     } catch {
       log.warn('delivery_auxiliary_start_failed');

@@ -635,10 +635,12 @@ func (a *app) registerClaudeRoot(ctx context.Context, scope claudeScope, root cl
 // --- read-only runtime snapshot for the shared delivery host ---
 
 type claudeSnapshotBinding struct {
-	BindingKey string `json:"binding_key"`
-	Generation string `json:"generation"`
-	State      string `json:"state"`
-	Reason     string `json:"reason,omitempty"`
+	BindingKey string                  `json:"binding_key"`
+	Generation string                  `json:"generation"`
+	State      string                  `json:"state"`
+	Reason     string                  `json:"reason,omitempty"`
+	Admission  claudeSnapshotAdmission `json:"admission"`
+	Scope      claudeSnapshotScope     `json:"scope"`
 }
 
 type claudeRuntimeSnapshot struct {

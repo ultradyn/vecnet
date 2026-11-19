@@ -10,7 +10,17 @@ import type { HostedAdapter } from './host.ts';
  * Only opaque coordinates: a binding key, its generation, a passive state and
  * a fixed reason. Never a socket path, config content or credential. */
 export type ClaudeBindingState = 'registered' | 'unsupported' | 'opted_out' | 'blocked';
-export interface ClaudeSnapshotBinding { binding_key: string; generation: string; state: ClaudeBindingState; reason?: string }
+/** Native-delivery admission gate (task 7): process liveness, durable policy
+ * consent, and the qualified compatibility range. Booleans only. */
+export interface ClaudeSnapshotAdmission { live: boolean; policy: boolean; version_qualified: boolean }
+/** The coordinates the shared host needs to open its own scoped CLI children
+ * for this recipient. Hub coordinates and profile name only: no config paths,
+ * no socket paths, no session ids. */
+export interface ClaudeSnapshotScope { profile: string; as?: string; hub_endpoint: string; caller: string; recipient: string }
+export interface ClaudeSnapshotBinding {
+  binding_key: string; generation: string; state: ClaudeBindingState; reason?: string;
+  admission?: ClaudeSnapshotAdmission; scope?: ClaudeSnapshotScope;
+}
 export interface ClaudeSnapshot { version: 1; bindings: ClaudeSnapshotBinding[] }
 
 /** The host status sidecar (bindings.json.claude-status.json next to the
@@ -54,6 +64,26 @@ function hostIdentity(): { pid: number; start: string; boot: string } | undefine
   } catch { return; }
 }
 
+function validAdmission(input: unknown): ClaudeSnapshotAdmission | undefined {
+  if (input === null || typeof input !== 'object') return;
+  const a = input as Record<string, unknown>;
+  if (typeof a.live !== 'boolean' || typeof a.policy !== 'boolean' || typeof a.version_qualified !== 'boolean') return;
+  return { live: a.live, policy: a.policy, version_qualified: a.version_qualified };
+}
+
+function validScope(input: unknown): ClaudeSnapshotScope | undefined {
+  if (input === null || typeof input !== 'object') return;
+  const s = input as Record<string, unknown>;
+  if (typeof s.profile !== 'string' || s.profile.length < 1 || s.profile.length > 128) return;
+  if (s.as !== undefined && (typeof s.as !== 'string' || s.as.length > 128)) return;
+  for (const field of ['hub_endpoint', 'caller', 'recipient'] as const) {
+    if (typeof s[field] !== 'string' || s[field]!.length < 1 || s[field]!.length > 256) return;
+  }
+  return s.as === undefined
+    ? { profile: s.profile, hub_endpoint: s.hub_endpoint as string, caller: s.caller as string, recipient: s.recipient as string }
+    : { profile: s.profile, as: s.as, hub_endpoint: s.hub_endpoint as string, caller: s.caller as string, recipient: s.recipient as string };
+}
+
 function validSnapshot(input: unknown): ClaudeSnapshot | undefined {
   if (input === null || typeof input !== 'object') return;
   const s = input as Record<string, unknown>;
@@ -66,10 +96,18 @@ function validSnapshot(input: unknown): ClaudeSnapshot | undefined {
     if (typeof b.generation !== 'string' || !GENERATION.test(b.generation)) return;
     if (!STATES.includes(b.state as ClaudeBindingState)) return;
     if (b.reason !== undefined && (typeof b.reason !== 'string' || b.reason.length > 256)) return;
-    // Only whitelisted fields ever reach the sidecar.
-    bindings.push(b.reason === undefined
+    const admission = b.admission === undefined ? undefined : validAdmission(b.admission);
+    if (b.admission !== undefined && admission === undefined) return;
+    const scope = b.scope === undefined ? undefined : validScope(b.scope);
+    if (b.scope !== undefined && scope === undefined) return;
+    // Admission and scope coordinates stay in the adapter's snapshot; the
+    // status sidecar below republishes only the whitelisted passive fields.
+    const binding: ClaudeSnapshotBinding = b.reason === undefined
       ? { binding_key: b.binding_key, generation: b.generation, state: b.state as ClaudeBindingState }
-      : { binding_key: b.binding_key, generation: b.generation, state: b.state as ClaudeBindingState, reason: b.reason });
+      : { binding_key: b.binding_key, generation: b.generation, state: b.state as ClaudeBindingState, reason: b.reason };
+    if (admission) binding.admission = admission;
+    if (scope) binding.scope = scope;
+    bindings.push(binding);
   }
   return { version: 1, bindings };
 }
@@ -129,7 +167,9 @@ export function createClaudeStatus(o: {
     const data = JSON.stringify({
       version: 1, updated_at: new Date(clock.now()).toISOString(),
       host_pid: identity.pid, host_start: identity.start, boot_id: identity.boot,
-      bindings: snapshot.bindings,
+      // The sidecar is a strict status document read by a strict decoder:
+      // admission and scope coordinates never leak into it.
+      bindings: snapshot.bindings.map(({ admission: _admission, scope: _scope, ...binding }) => binding),
     } satisfies ClaudeStatusFile);
     if (Buffer.byteLength(data) > MAX_BYTES) { log.warn('claude_status_too_large'); return; }
     const temp = sidecar + '.' + randomUUID() + '.tmp';

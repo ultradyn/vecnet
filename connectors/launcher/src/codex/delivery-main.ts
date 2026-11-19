@@ -4,6 +4,7 @@ import { stderrLog, systemClock } from '../daemon.ts';
 import { userHome } from '../../../hub-client/src/platform.ts';
 import { localPlatform } from '../private-files.ts';
 import { codexAuthority, codexRecoveryPath } from './connector.ts';
+import { claudeDeliveryCanaryEnabled } from '../delivery/claude-adapter.ts';
 import { createClaudeStatus, spawnClaudeSnapshot } from '../delivery/claude-status.ts';
 import { startDeliveryHost } from '../delivery/host.ts';
 import type { DeliveryHost } from '../delivery/host.ts';
@@ -47,6 +48,9 @@ async function main(): Promise<void> {
     host = startDeliveryHost({
       env, clock: systemClock, log,
       // Passive Claude status rides this host's lease; it never elects one.
+      // The native-delivery adapter exists only behind the explicit
+      // experimental canary opt-in (default off; `claude enable` cannot set it).
+      claudeDeliveryCanary: claudeDeliveryCanaryEnabled(env),
       auxiliary: () => createClaudeStatus({ env, clock: systemClock, log, fetchSnapshot: spawnClaudeSnapshot(env) }),
     });
     await Promise.race([interrupted, host.stopped]);

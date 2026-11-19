@@ -17,6 +17,8 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"runtime"
+	"slices"
 	"strings"
 	"time"
 )
@@ -39,11 +41,11 @@ var (
 // claudeStatusFile is the host's heartbeat sidecar: strict v1, owner-only,
 // with the writer's exact Linux PID/start/boot identity.
 type claudeStatusFile struct {
-	Version   int                  `json:"version"`
-	UpdatedAt time.Time            `json:"updated_at"`
-	HostPID   int                  `json:"host_pid"`
-	HostStart string               `json:"host_start"`
-	BootID    string               `json:"boot_id"`
+	Version   int                   `json:"version"`
+	UpdatedAt time.Time             `json:"updated_at"`
+	HostPID   int                   `json:"host_pid"`
+	HostStart string                `json:"host_start"`
+	BootID    string                `json:"boot_id"`
 	Bindings  []claudeStatusBinding `json:"bindings"`
 }
 
@@ -317,8 +319,10 @@ func (a *app) cmdClaude(args []string) error {
 
 // cmdClaudeRuntimeSnapshot is the read-only host child: a versioned,
 // redacted view of the private registry. It contains only opaque keys,
-// generations and passive states — never socket paths, config contents or
-// credentials — and never parses the registry host-side beyond validation.
+// generations, passive states, the native-delivery admission booleans and
+// the hub/profile coordinates the host's own scoped children need — never
+// socket paths, session ids, config contents or credentials — and never
+// parses the registry host-side beyond validation.
 func (a *app) cmdClaudeRuntimeSnapshot() error {
 	ctx, cancel := context.WithTimeout(a.localRegistryContext(), 5*time.Second)
 	defer cancel()
@@ -340,9 +344,61 @@ func (a *app) cmdClaudeRuntimeSnapshot() error {
 		state, reason := claudeBindingPassiveState(b, rows.OptOuts, settings.Disabled)
 		snapshot.Bindings = append(snapshot.Bindings, claudeSnapshotBinding{
 			BindingKey: claudeBindingKey(b.claudeScope), Generation: b.Generation, State: state, Reason: reason,
+			Admission: claudeAdmissionEvidence(b, rows.OptOuts, settings.Disabled),
+			Scope: claudeSnapshotScope{
+				Profile: b.Profile, As: b.As, HubEndpoint: b.HubEndpoint, Caller: b.Caller, Recipient: b.Recipient,
+			},
 		})
 	}
 	return a.emitValue(snapshot)
+}
+
+// claudeSnapshotAdmission is the native-delivery gate for one stored row
+// (task 7): process liveness with start/boot identity, durable policy
+// consent, and the qualified compatibility range. Booleans only; no paths.
+type claudeSnapshotAdmission struct {
+	Live             bool `json:"live"`
+	Policy           bool `json:"policy"`
+	VersionQualified bool `json:"version_qualified"`
+}
+
+// claudeSnapshotScope carries only the coordinates the shared host needs to
+// open its own scoped CLI children (watch, inbox) for this recipient: the
+// profile name and hub/caller/recipient identities. No config paths.
+type claudeSnapshotScope struct {
+	Profile     string `json:"profile"`
+	As          string `json:"as,omitempty"`
+	HubEndpoint string `json:"hub_endpoint"`
+	Caller      string `json:"caller"`
+	Recipient   string `json:"recipient"`
+}
+
+// claudeVersionQualifiedBuilds is the qualified compatibility baseline: Linux
+// x86-64 Claude Code 2.1.322 is the initial lab baseline, and unknown or
+// untested builds stay legacy until qualified — no version-number guessing.
+var claudeVersionQualifiedBuilds = []string{"2.1.322"}
+
+func claudeVersionQualified(version string) bool {
+	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
+		return false
+	}
+	return slices.Contains(claudeVersionQualifiedBuilds, version)
+}
+
+// claudeAdmissionEvidence computes the native-delivery admission booleans:
+// live is exact process evidence (this boot, live pid, start identity, OS
+// user), policy is the absence of both durable opt-outs, and version
+// qualification is the compatibility range. The deliver helper recomputes
+// the same evidence under the registry lock before resolving an endpoint.
+func claudeAdmissionEvidence(b claudeBinding, optOuts []claudeScope, globalDisable bool) claudeSnapshotAdmission {
+	policy := !globalDisable && !slices.ContainsFunc(optOuts, func(s claudeScope) bool {
+		return claudeSameRecipient(s, b.claudeScope)
+	})
+	live := false
+	if boot := claudeBootID(); boot != "" && b.BootID == boot && claudeHostLive(b.PID, b.ProcessStart) {
+		live = claudeProcUser(b.PID, b.UID) == nil
+	}
+	return claudeSnapshotAdmission{Live: live, Policy: policy, VersionQualified: claudeVersionQualified(b.Version)}
 }
 
 // claudeBindingPassiveState classifies one stored row for the snapshot:
