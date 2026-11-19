@@ -308,7 +308,7 @@ func (a *app) readClaudeStatus(ctx context.Context, scope claudeScope) (claudeSt
 // generic maintenance.
 func (a *app) cmdClaude(args []string) error {
 	if len(args) == 0 {
-		return usageErr("claude: expected runtime-snapshot, status, disable or enable")
+		return usageErr("claude: expected runtime-snapshot, status, deliveries, resolve, disable or enable")
 	}
 	switch args[0] {
 	case "runtime-snapshot":
