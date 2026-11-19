@@ -80,9 +80,7 @@ Windows roots reduces modeled maximum group load from 50.087s to 41.803s
 (8.284s more headroom); worst lane rises from 129.140s to 135.273s. Forty-four
 roots lack PASS weights and 101 observations remain censored. These are
 execution placement estimates, excluding queue/setup/acceptance, and require
-fresh strict native evidence. The unpublished eight-lane experiment is archived
-at `archive/ci80-eight-lanes-7a4698b1`; its 37 jobs conflicted with the trusted
-default-branch external audit's 33-job policy. Existing geometry is restored.
+fresh strict native evidence.
 
 Deterministic weighted
 placement balances whole roots, then forms package packets within a partition:
