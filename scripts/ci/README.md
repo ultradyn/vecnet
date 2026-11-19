@@ -303,6 +303,62 @@ npm publication additionally has a40s cap and GitHub Release creation a14s cap.
 The npm helper shares a38s internal deadline across lookup/upload/verification;
 after one successful upload it polls only registry visibility for at most5s,
 within that deadline. Publication is never retried. No retries mask failures.
+
+## npm publication recovery
+
+Immediately after a successful upload, before any visibility request, the
+Actions summary records a full `accepted` receipt binding source, version,
+tarball and integrity. Verification failures append a failure indication while
+retaining that receipt and failing the step, without pending/verified output.
+Pre-upload lookup failures or failed uploads do not record acceptance.
+
+A successful upload followed only by404 responses through that visibility
+window now returns **pending**, rather than failing or claiming npm availability.
+The publication step emits `state=pending` or `state=verified` for the GitHub
+Release step and records a JSON receipt in its existing Actions summary. The
+receipt binds the full source commit, package version, tested tarball filename,
+and SHA-512 integrity. `verified` means registry metadata matches that integrity;
+upload errors, lookup/transport errors and conflicting integrity still fail.
+The summary is the receipt store; there is no new job or artifact transfer.
+
+Pending publication creates a clearly described **draft** GitHub Release, with
+the tested assets and no claim that npm is available. Existing drafts remain
+drafts even on verified recovery: the controller must verify actual public
+tarball bytes before finalizing them or installing. Pending state against an
+existing public GitHub Release fails for controller review. A green pending
+upload result does not change an earlier failed run or establish public npm
+availability; the completed-run budget acceptance status remains required.
+
+Do not rerun the publish command or a tagged workflow while that version is
+pending: the summary receipt is evidence, not a cross-run upload lock. Keep the
+same version and wait for registry visibility. Once metadata appears, the
+existing exact-integrity recovery path skips uploading, but do not invoke it
+while the version still returns404. There is no reason to reauthenticate merely
+because an accepted version is processing.
+
+Controller recovery uses the original source/run's tested `npm-release`
+artifact, not a repacked archive. Confirm its version/source/integrity against
+the Actions receipt and its `SHA256SUMS`. From the directory containing `dist`,
+these bounded, read-only commands compare the public tarball with those bytes
+(set `version` from the receipt;404 remains pending):
+
+```bash
+version=VERSION_FROM_RECEIPT
+public_archive=$(mktemp)
+(cd dist && sha256sum --check SHA256SUMS) &&
+  curl --fail --silent --show-error --max-time 15 \
+    "https://registry.npmjs.org/vecnet/-/vecnet-$version.tgz" --output "$public_archive" &&
+  cmp "dist/vecnet-$version.tgz" "$public_archive"
+```
+
+Only after that comparison succeeds and the exact-source budget acceptance
+passes may the controller finalize an existing draft. That evidence can come
+from accepted source CI; recovery does not require a new successful tag run to
+replace a failed upload attempt. Replace pending notes with verified release notes:
+`gh release edit "v$version" --draft=false --notes-file VERIFIED_RELEASE_NOTES.md`.
+Remove the temporary public archive after inspection. None of these recovery
+commands upload to npm, create a new version, or repair an earlier failed run.
+
 The completed-run `Release budget acceptance` workflow checks the entire run
 including acceptance/publication/post steps under the same strict <300s and
 <60s policy. It publishes the explicit commit status **Release budget acceptance** on the

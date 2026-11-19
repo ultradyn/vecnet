@@ -465,7 +465,7 @@ jobs:
         run: node scripts/ci/budget.mjs 53000 node --test --test-concurrency=2 scripts/ci/budget.test.mjs scripts/ci/ownership.test.mjs scripts/ci/partition.test.mjs scripts/ci/schedule.test.mjs scripts/ci/go-profile.test.mjs scripts/ci/node-schedule.test.mjs scripts/ci/native-node.test.mjs scripts/ci/windows-owner.test.mjs scripts/ci/audit.test.mjs scripts/ci/status.test.mjs scripts/npm/assemble.test.mjs
       - name: Test release guards and cross-platform wrappers
         timeout-minutes: 1
-        run: node scripts/ci/budget.mjs 53000 node --test --test-concurrency=2 scripts/npm/release.test.mjs scripts/npm/npm-command.test.mjs scripts/npm/wrapper.test.mjs scripts/npm/verify-artifact.test.mjs scripts/ci/npm-tool.test.mjs
+        run: node scripts/ci/budget.mjs 53000 node --test --test-concurrency=2 scripts/npm/release.test.mjs scripts/npm/npm-command.test.mjs scripts/npm/wrapper.test.mjs scripts/npm/verify-artifact.test.mjs scripts/ci/npm-tool.test.mjs scripts/ci/github-release.test.mjs
       - name: Test Windows artifact evidence helper
         timeout-minutes: 1
         if: runner.os == 'Windows'
@@ -666,6 +666,7 @@ jobs:
         timeout-minutes: 1
         run: node scripts/ci/budget.mjs 53000 node scripts/npm/verify-artifact.mjs
       - name: Publish tested tarball through OIDC
+        id: npm-publication
         timeout-minutes: 1
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         env:
@@ -680,4 +681,5 @@ jobs:
           TAG: ${{ needs.build.outputs.tag }}
           TARBALL: ${{ needs.build.outputs.tarball }}
           NPM_TAG: ${{ needs.build.outputs.npm-tag }}
+          NPM_STATE: ${{ steps.npm-publication.outputs.state }}
         run: node scripts/ci/budget.mjs 14000 bash scripts/ci/github-release.sh

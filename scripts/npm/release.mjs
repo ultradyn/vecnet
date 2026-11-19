@@ -31,7 +31,11 @@ export function checkPublished(existing, info, integrity) {
 export async function publish(info, {
   cwd = root, fetch = globalThis.fetch, exec = execFileSync, now = Date.now,
   sleep = ms => new Promise(resolve => setTimeout(resolve, ms)),
+  source, output, summary,
 } = {}) {
+  if ((output || summary) && !/^[0-9a-f]{40}$/.test(source ?? '')) {
+    throw new Error('Publication receipt requires the full source commit SHA');
+  }
   // Leave startup/exit headroom inside the40s CI owner. That owner also
   // enforces the inherited absolute overall run deadline.
   const deadline = now() + 38_000;
@@ -42,13 +46,27 @@ export async function publish(info, {
   };
   const archive = path.join(cwd, 'dist', info.tarball);
   const integrity = `sha512-${createHash('sha512').update(await readFile(archive)).digest('base64')}`;
+  const record = async (state, message) => {
+    const receipt = { state, source, version: info.version, tarball: info.tarball, integrity };
+    console.log(message);
+    if (summary) await appendFile(summary, `## npm publication: ${state}\n\n${message}\n\n\`\`\`json\n${JSON.stringify(receipt, null, 2)}\n\`\`\`\n`);
+    return receipt;
+  };
+  const complete = async state => {
+    const message = state === 'pending'
+      ? 'npm accepted the upload, but it is not yet verified visible in the public registry. Keep the GitHub Release as a draft. Do not republish this version; verify the public tarball against the tested artifact before finalizing the draft or installing.'
+      : 'Registry metadata matches the tested artifact integrity. An existing draft still requires controller verification of the public tarball before finalization or installation.';
+    const receipt = await record(state, message);
+    if (output) await appendFile(output, `state=${state}\n`);
+    return receipt;
+  };
   const response = await fetch(`${registry}vecnet/${info.version}`, {
     headers: { 'Cache-Control': 'no-cache' }, signal: AbortSignal.timeout(Math.min(5_000, remaining())),
   });
   if (response.ok) {
     checkPublished(await response.json(), info, integrity);
     console.log(`vecnet@${info.version} is already published with the same tarball; continuing release recovery`);
-    return;
+    return complete('verified');
   }
   if (response.status !== 404) throw new Error(`npm version lookup failed with HTTP ${response.status}`);
   const npm = npmInvocation([
@@ -56,24 +74,34 @@ export async function publish(info, {
     '--registry', registry,
   ]);
   exec(npm.file, npm.args, { cwd, stdio: 'inherit', windowsHide: true, timeout: remaining() });
+  await record('accepted', 'npm accepted the upload; registry visibility has not been verified. Do not republish this version, even if verification or a later release step fails.');
   // Only registry visibility is polled after a successful upload. Never retry
   // publication, even if the registry has not exposed the tested bytes yet.
-  const visibilityDeadline = Math.min(deadline, now() + 5_000);
-  while (now() < visibilityDeadline) {
-    const published = await fetch(`${registry}vecnet/${info.version}?release-check=${now()}`, {
-      headers: { 'Cache-Control': 'no-cache' }, signal: AbortSignal.timeout(Math.min(2_000, visibilityDeadline - now())),
-    });
-    if (published.ok) {
-      checkPublished(await published.json(), info, integrity);
-      console.log(`Verified vecnet@${info.version} is available from npm with the tested integrity`);
-      return;
+  try {
+    const visibilityDeadline = Math.min(deadline, now() + 5_000);
+    while (now() < visibilityDeadline) {
+      const published = await fetch(`${registry}vecnet/${info.version}?release-check=${now()}`, {
+        headers: { 'Cache-Control': 'no-cache' }, signal: AbortSignal.timeout(Math.min(2_000, visibilityDeadline - now())),
+      });
+      if (published.ok) {
+        checkPublished(await published.json(), info, integrity);
+        console.log(`Verified vecnet@${info.version} is available from npm with the tested integrity`);
+        return complete('verified');
+      }
+      if (published.status !== 404) throw new Error(`npm publication verification failed with HTTP ${published.status}`);
+      console.log('Waiting briefly for npm registry visibility');
+      const delay = Math.min(500, visibilityDeadline - now());
+      if (delay > 0) await sleep(delay);
     }
-    if (published.status !== 404) throw new Error(`npm publication verification failed with HTTP ${published.status}`);
-    console.log('Waiting briefly for npm registry visibility');
-    const delay = Math.min(500, visibilityDeadline - now());
-    if (delay > 0) await sleep(delay);
+    return complete('pending');
+  } catch (error) {
+    try {
+      await record('verification-failed', `npm accepted the upload, but verification failed: ${error?.message ?? String(error)}. Do not republish this version; inspect the acceptance receipt and verify public bytes before recovery.`);
+    } catch (receiptError) {
+      console.error(`Could not record verification failure: ${receiptError.message}`);
+    }
+    throw error;
   }
-  throw new Error('npm accepted the upload but the release is not visible within the publication budget; check registry before rerunning');
 }
 
 async function main() {
@@ -96,7 +124,9 @@ async function main() {
       if (process.env.GITHUB_EVENT_NAME !== 'push' || process.env.GITHUB_REF_TYPE !== 'tag') {
         throw new Error('Publishing requires a pushed version tag');
       }
-      await publish(info);
+      await publish(info, {
+        source: process.env.GITHUB_SHA, output: process.env.GITHUB_OUTPUT, summary: process.env.GITHUB_STEP_SUMMARY,
+      });
       break;
     default:
       throw new Error('Usage: node scripts/npm/release.mjs info|check-tag TAG|publish');

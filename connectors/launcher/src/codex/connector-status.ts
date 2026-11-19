@@ -77,7 +77,7 @@ export async function openStatusPublisher(bindingsPath: string, euid: number, op
       lock = { valid: () => true, async close() { closeSync(held); } };
     }
     const held = lock;
-    let closed = false, owned: { dev: number; ino: number } | undefined;
+    let closed = false, owned: { dev: bigint; ino: bigint } | undefined;
     return {
       valid: () => !closed && held.valid(),
       publish(now, entries) {
@@ -97,14 +97,15 @@ export async function openStatusPublisher(bindingsPath: string, euid: number, op
             renameSync(temp, path);
           } finally { try { unlinkSync(temp); } catch {} }
         }
-        owned = lstatSync(path);
+        owned = lstatSync(path, { bigint: true });
       },
       async close() {
         if (closed) return;
         closed = true;
         try {
-          const current = lstatSync(path);
+          const current = lstatSync(path, { bigint: true });
           // Once ownership is lost another publisher may have replaced it.
+          // NTFS file IDs are uint64; number Stats can alias distinct owners.
           if (held.valid() && owned && current.dev === owned.dev && current.ino === owned.ino) unlinkSync(path);
         } catch {} finally { await held.close(); }
       },
