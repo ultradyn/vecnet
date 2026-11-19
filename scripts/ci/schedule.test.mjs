@@ -10,7 +10,7 @@ test('weighted whole-root schedule conserves discovered additions and indivisibl
  const input=structuredClone(inventory);input[0].names.push('TestNew');
  const profile={packages:{heavy:1},roots:{heavy:{Test0:30,Test1:25}}};
  const plan=planGo(input,profile);
- assert.equal(plan.length,24);
+ assert.equal(plan.length,32);
  const tasks=plan.flat();
  assert.deepEqual(tasks.filter(t=>t.pkg==='heavy').flatMap(t=>t.selected).sort(),input[0].names.sort());
  assert.equal(tasks.filter(t=>t.pkg==='small').length,1);
@@ -52,10 +52,10 @@ test('bounded failures stop queued work, drain active work and propagate failure
  assert.deepEqual(starts,[0,1]);assert.equal(drained,true);
 });
 test('acceptance cardinality includes every native lane and existing release gate',()=>{
- assert.equal(goLanes,6);
+ assert.equal(goLanes,8);
  assert.equal(goGroups,4);
- assert.equal(releaseJobCount(),33);
- assert.equal(nativeGoLanes('linux'),2);assert.equal(nativeGoLanes('win32'),6);
+ assert.equal(releaseJobCount(),37);
+ assert.equal(nativeGoLanes('linux'),2);assert.equal(nativeGoLanes('win32'),8);
  const input=[{pkg:'p',names:Array.from({length:401},(_,i)=>`Test${i}`)}];
  for(const platform of ['linux','win32']){
   const plan=planGo(input,{}, {lanes:nativeGoLanes(platform)});
@@ -362,7 +362,7 @@ test('Windows reserves an existing group for the complete invitation refusal mat
   ...Array.from({length:30},(_,i)=>({pkg:`ordinary${i}`,names:['TestOrdinary']}))];
  const profile={roots:{[pkg]:{[matrix]:29.34,[repair]:28}},startup:0.049};
  const bins=planGo(input,profile,{platform:'win32'});
- assert.equal(bins.length,24,'reserve existing groups without adding lanes or steps');
+ assert.equal(bins.length,32,'reserve configured groups without adding steps');
  const matrixBin=bins.find(g=>g.some(t=>t.pkg===pkg&&t.selected.includes(matrix)));
  assert.equal(matrixBin.length,1,'the long matrix must have no competing or queued ordinary packets');
  assert.deepEqual(matrixBin[0].selected,[matrix]);
@@ -463,7 +463,7 @@ async function virtualGroupElapsed(tasks) {
  return now;
 }
 
-for(const count of [144,240])test(`Windows balances ${count} ordinary packets before lane totals beside reserved roots`,async()=>{
+for(const count of [goLanes*24,goLanes*40])test(`Windows balances ${count} ordinary packets before lane totals beside reserved roots`,async()=>{
  const pkg='github.com/XertroV/vecnet/internal/cli';
  const reserved=['TestLauncherWindowsManagedRepairPreservesServiceIntent','TestInviteHubURLResponseRefusesUnsafe'];
  const input=[{pkg,names:reserved,binary:'cli'},
@@ -471,7 +471,7 @@ for(const count of [144,240])test(`Windows balances ${count} ordinary packets be
  const profile={roots:{[pkg]:{[reserved[0]]:32,[reserved[1]]:30}},
   packages:Object.fromEntries(input.slice(1).map(row=>[row.pkg,6]))};
  const bins=planGo(input,profile,{platform:'win32'});
- assert.equal(bins.length,24);
+ assert.equal(bins.length,32);
  const elapsed=await Promise.all(bins.map(virtualGroupElapsed));
  const ordinary=bins.map((tasks,i)=>({tasks,elapsed:elapsed[i]})).filter(g=>!g.tasks.some(t=>t.exclusive));
  assert.ok(ordinary.every(g=>g.elapsed<=12),`ordinary load must fit two six-worker waves: ${ordinary.map(g=>g.elapsed)}`);
@@ -522,7 +522,7 @@ test('Windows linked-worktree real-Git root finishes before ordinary admission i
  const pkg='github.com/XertroV/vecnet/internal/cli',root='TestHookInstallWarnsLinkedWorktree';
  const input=[{pkg,names:[root,root+'Extended','Example','FuzzSeed'],binary:'real-cli',directory:'original'},
   {pkg:'other',names:[root],binary:'other'}, {pkg:'empty',names:[],binary:null},
-  ...Array.from({length:144},(_,i)=>({pkg:`ordinary${i}`,names:['TestWork'],binary:`bin${i}`}))];
+  ...Array.from({length:goLanes*24},(_,i)=>({pkg:`ordinary${i}`,names:['TestWork'],binary:`bin${i}`}))];
  const profile={packages:Object.fromEntries(input.slice(3).map(row=>[row.pkg,1]))};
  const bins=planGo(input,profile,{platform:'win32'});
  const group=bins.find(tasks=>tasks.some(t=>t.pkg===pkg&&t.selected.includes(root)));
@@ -553,7 +553,7 @@ test('Windows linked-worktree real-Git root finishes before ordinary admission i
  const keys=(pkg,names)=>(names.length?names:['']).map(name=>`${pkg}/${name}`);
  const expected=input.flatMap(row=>keys(row.pkg,row.names)).sort();
  assert.deepEqual(bins.flat().flatMap(t=>keys(t.pkg,t.selected)).sort(),expected);
- assert.equal(bins.length,24);assert.equal(releaseJobCount(),33);
+ assert.equal(bins.length,32);assert.equal(releaseJobCount(),37);
  for(const platform of ['linux','darwin']){
   const packets=planGo(input,profile,{platform,lanes:nativeGoLanes(platform)}).flat();
   assert.ok(packets.every(t=>!t.exclusive));
