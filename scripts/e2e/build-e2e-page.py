@@ -66,7 +66,8 @@ def publish(src: Path, dst: Path) -> None:
                 keep = [block for block in content if (
                     (block["type"] == "text" and message["role"] == "user"
                      and block.get("text", "").startswith(("Another Claude session sent a message:",
-                                                              "READY: acknowledge and stay idle.")))
+                                                              "READY: acknowledge and stay idle.",
+                                                              "SETUP: enroll the disposable receiver.")))
                     or (block["type"] == "tool_use" and block.get("name") == "Bash"
                         and "vec.sh inbox" in block.get("input", {}).get("command", ""))
                     or (block["type"] == "tool_result"
@@ -112,8 +113,9 @@ for f in index:
     labels = []
     for marker, name in (
             ("READY: e2e receiver idle", "session ready (stub model online)"),
-            ("Vecnet message available.", "native pointer visible"),
-            ("(end of fetched inbox data)", "stub-issued inbox fetch complete")):
+            ("Vecnet message available.", "native pointer preview visible"),
+            ("(end of fetched inbox data)", "stub-issued inbox fetch complete"),
+            (f"Find {results['positive']['message_id']} in thread", "expanded pointer with message ID")):
         if marker in text and name not in used_labels:
             labels.append(name)
             used_labels.add(name)
@@ -128,7 +130,8 @@ chain_keys = ("claude_delivery_scope_admitted", "claude_delivery_claim_held",
 chain = [d for d in daemon_lines if any(k in d["line"] for k in chain_keys) and d["t"] is not None]
 
 for ev_name in ("00-run-meta.json", "10-hub-init.txt", "11-hub-serve.log", "20-enrol-sender.txt",
-                "21-enrol-claude-rx.txt", "22-config.toml.redacted", "23-hook-install.txt",
+                "21-enrol-claude-rx.txt", "22-config.toml.redacted",
+                "23-runtime-stage.txt" if "enrollment" in results else "23-hook-install.txt",
                 "30-daemon-env.txt", "31-stub-observed.jsonl", "32-runtime-snapshot.json",
                 "40-send-wake.json", "40b-send-wake-cli.txt", "41-hub-delivery.json",
                 "50-daemon.log", "51-daemon-chain.txt", "60-transcript-rows.json",
@@ -147,7 +150,11 @@ E = html.escape
 
 
 def chain_rows():
+    enrol = ('''<tr><td>0 · automatic enrollment</td><td>real in-session CLI enroll registers the live root and stages the embedded runtime through a private scheduler fixture</td>
+        <td><a href="assets/21-enrol-claude-rx.txt">enrol output</a> · <a href="assets/23-runtime-stage.txt">runtime stage</a></td></tr>'''
+             if "enrollment" in results else "")
     return f"""
+      {enrol}
       <tr><td>1 · hub send receipt</td><td>sender CLI + hub row</td>
         <td><a href="assets/40-send-wake.json">send --json</a> · <a href="assets/41-hub-delivery.json">hub delivery row</a></td></tr>
       <tr><td>2 · daemon admission</td><td>binding registered, live/policy/version-qualified</td>
@@ -160,7 +167,7 @@ def chain_rows():
         <td>player frames below</td></tr>
       <tr><td>6 · model fetch via the packaged CLI</td><td>stub-issued Bash <code>vec.sh inbox</code>; fetched marker in pane and request</td>
         <td>frames · <a href="assets/31-stub-observed.jsonl">stub observations</a></td></tr>
-      <tr><td>7 · transcript rows</td><td>queue-operation + peer-origin conversation row</td>
+      <tr><td>7 · transcript rows</td><td>one enqueue, one peer-origin turn and one matching fetch pair</td>
         <td><a href="assets/60-transcript-rows.json">extracted rows</a></td></tr>
       <tr><td>8 · no hub ack</td><td>acks table empty; every delivery still <code>queued</code></td>
         <td><a href="assets/73-hub-acks.json">acks</a> · <a href="assets/74-hub-delivery-states.json">delivery states</a></td></tr>"""
@@ -211,7 +218,7 @@ page = f"""<!doctype html>
         <section class="workspace-section prose" id="overview" aria-labelledby="overview-title">
           <h2 id="overview-title">Overview</h2>
           <p>Run <code>{E(summary['nonce'])}</code> at {E(meta['started'])}, commit <code>{E(results['build']['commit'][:12])}</code>, Claude Code <strong>{E(results['build']['claude'])}</strong> (the qualified lab baseline). The whole chain — disposable loopback hub, freshly enrolled peers, the standalone delivery daemon under <code>VECNET_CLAUDE_DELIVERY_CANARY=1</code>, the Claude session and its scripted loopback model stub — ran inside one bubblewrap network namespace with loopback as its only interface. No paid provider was reachable at any point.</p>
-          <p>The one test-env provision: <code>CLAUDE_CODE_VERSION</code> for the disposable session was exported by the harness from its own <code>claude --version</code> observation; the qualified-baseline check never guesses a version, and production activation stays gated behind the canary opt-in.</p>
+          <p><code>CLAUDE_CODE_VERSION</code> was exported by the harness for the disposable session and its enrollment child from its own <code>claude --version</code> observation; the qualified-baseline check never guesses a version, and production activation stays gated behind the canary opt-in.</p>
           <p><strong>Run results:</strong> released/attempted · hold inbox-only · crash uncertain, no resend · pending limit latched · zero hub acks.</p>
         </section>
         <section class="workspace-section" id="chain" aria-labelledby="chain-title">
@@ -238,11 +245,11 @@ page = f"""<!doctype html>
           <h2 id="controls-title">Negative controls</h2>
           <dl>
             <dt>Hold stays inbox-only</dt>
-            <dd>Delivery <code>{E(hold['delivery_id'])}</code> quarantined <code>{E(hold['state'])}</code>/<code>{E(hold['disposition'])}</code>; no native pointer, no transcript row, still readable in the inbox (<a href="assets/71-hold-inbox.json">inbox read</a>), never acked.</dd>
+            <dd>Delivery <code>{E(hold['delivery_id'])}</code> quarantined <code>{E(hold['state'])}</code>/<code>{E(hold['disposition'])}</code>; no native pointer in any captured frame, no transcript row, still readable in the inbox (<a href="assets/71-hold-inbox.json">inbox read</a>), never acked.</dd>
             <dt>SIGKILL between <code>attempting</code> and the write</dt>
-            <dd>The canary crash seam killed the daemon after <code>attempting</code> was durable and before any byte could leave (exit 137). The replacement host recovered the claim to <code>{E(crash['final_state'])}</code> (<code>{E(crash['reason'])}</code>) and never resent: the parsed claim is unchanged after a later reconcile tick and the transcript holds zero rows for the marker (<a href="assets/82-crash-claim.json">claim record</a>).</dd>
+            <dd>The canary crash seam killed the daemon after <code>attempting</code> was durable and before any byte could leave (exit 137). No captured frame contains a native pointer for this control message. The replacement host recovered the claim to <code>{E(crash['final_state'])}</code> (<code>{E(crash['reason'])}</code>) and never resent: the parsed claim is unchanged after a later reconcile tick and the transcript holds zero rows for the marker (<a href="assets/82-crash-claim.json">claim record</a>).</dd>
             <dt>The pending limit with 129 unresolved claims</dt>
-            <dd>With 128 unresolved claims seeded for the live scope (plus the crash control's uncertain claim), the new wake message <code>{E(cap['delivery_id'])}</code> was never staged: pending {E(str(cap['pending']))}, <code>blocked_pending_limit</code> latched, no native write (<a href="assets/92-cap-deliveries.json">deliveries</a> · <a href="assets/93-cap-status.json">status</a>).</dd>
+            <dd>With 128 unresolved claims seeded for the live scope (plus the crash control's uncertain claim), the new wake message <code>{E(cap['delivery_id'])}</code> was never staged: pending {E(str(cap['pending']))}, <code>blocked_pending_limit</code> latched, nothing staged for that delivery and no captured frame contains its native pointer (<a href="assets/92-cap-deliveries.json">deliveries</a> · <a href="assets/93-cap-status.json">status</a>).</dd>
             <dt>No acknowledgement, anywhere</dt>
             <dd>The hub's <code>acks</code> table is empty and all four deliveries remain <code>queued</code>: the adapter, the hooks, the inbox reads and the fetch never ack (<a href="assets/73-hub-acks.json">acks</a> · <a href="assets/74-hub-delivery-states.json">states</a>).</dd>
           </dl>
@@ -250,7 +257,7 @@ page = f"""<!doctype html>
         <section class="workspace-section prose" id="evidence" aria-labelledby="evidence-title">
           <h2 id="evidence-title">Evidence &amp; teardown</h2>
           <p>Every published evidence artifact sits beside this page under <code>assets/</code>; the committed index with SHA-256 digests is <code>docs/research/evidence/claude-delivery-e2e-2026-11-19.json</code> in the vecnet repository. Full daemon log: <a href="assets/50-daemon.log">50-daemon.log</a>; enrolments and receipts: <a href="assets/20-enrol-sender.txt">sender</a> · <a href="assets/21-enrol-claude-rx.txt">receiver</a> · <a href="assets/40b-send-wake-cli.txt">send output</a>; transcript rows: <a href="assets/60-transcript-rows.json">60-transcript-rows.json</a>.</p>
-          <p>Teardown was verified in the same run: the <code>vecnet-test-*</code> tmux session was killed on its private server, the server itself reported <em>no server running</em>, and the default server listed no <code>vecnet-test-*</code> sessions (<a href="assets/99-teardown.txt">teardown record</a>).</p>
+          <p>Teardown was verified in the same run: the <code>vecnet-test-*</code> tmux session was killed on its private server, the server itself reported <em>no server running</em>, and the default server listed no <code>vecnet-test-*</code> sessions (<a href="assets/99-teardown.txt">teardown record</a>). Raw lab state: <strong>{E(results.get("teardown", {}).get("raw_disposition", "not disposed by this historical harness"))}</strong>.</p>
           <details class="disclosure-row">
             <summary>How the run was isolated</summary>
             <div class="disclosure-row__content"><p>Fresh hub (<code>vecnet-hub init</code> + loopback listen), two freshly enrolled throwaway peers, a private HOME for the registry/ledger, a private Claude config root with an explicit private messaging socket, and a bubblewrap network namespace whose only interface is loopback. The model backend is a scripted Messages-API stub on loopback; stray vendor probes were answered by a lab-CA TLS catch-all proxy so nothing ever left the namespace. No user hub identity, user session, or paid provider was involved.</p></div>

@@ -21,14 +21,19 @@ model backend is a scripted loopback stub reached through a lab CA proxy,
 and the whole chain has no route off the loopback interface. The only
 test-env provision beyond the repo's own code is CLAUDE_CODE_VERSION, which
 this harness observes from `claude --version` itself and exports for the
-disposable session (the qualified-baseline check never guesses a version).
+disposable session and its enrol child (the baseline check never guesses
+a version). Real in-session enrollment stages the runtime via a private
+scheduler fixture, not the host systemd manager.
 
 Teardown is verified: the vecnet-test-<nonce> tmux session is killed on its
 private server, the server is asserted gone, hub/daemon/stub stop, and the
 default server is checked for stray vecnet-test-* sessions.
 
-Usage: python3 scripts/e2e/claude-delivery-e2e.py [--repo SRC]
-The gallery is built separately from the finished run directory.
+Usage: python3 scripts/e2e/claude-delivery-e2e.py [--repo SRC] [--keep-evidence]
+The gallery is built separately from the finished run directory. By default
+only the private evidence/ and frames/ exports remain. --keep-evidence
+retains raw diagnostics and credentials in the mode-0700 run directory
+under /tmp/ve2e-runs; do not publish that directory.
 """
 
 import argparse
@@ -43,6 +48,7 @@ import subprocess
 import sys
 import threading
 import time
+import tomllib
 import uuid
 from pathlib import Path
 
@@ -99,6 +105,92 @@ def parse_json_output(text: str) -> dict:
     raise Fail(f"no JSON object in output: {text[:300]!r}")
 
 
+PREVIEW = "Message from @Vecnet: Vecnet message available."
+ADMISSION = "claude_delivery_scope_admitted"
+CLAIM_EVENTS = ("claude_delivery_claim_reserved", "claude_delivery_claim_attempting",
+                "claude_delivery_disposition")
+
+
+def ordered_lifecycle(events, scope, generation, delivery_id):
+    # Admission is scope-level (it precedes staging a delivery ID); join it
+    # to the runtime snapshot by binding and generation, then match claims by ID.
+    claims = [(i, row) for i, row in enumerate(events)
+              if row.get("deliveryId") == delivery_id and row.get("msg") in CLAIM_EVENTS]
+    if (tuple(row["msg"] for _, row in claims) != CLAIM_EVENTS
+            or any(row.get("scope") != scope for _, row in claims)):
+        raise Fail(f"expected one ordered reserved/attempting/disposition for {delivery_id}: {claims}")
+    admission = next((row for row in reversed(events[:claims[0][0]])
+                      if row.get("msg") == ADMISSION and row.get("scope") == scope), None)
+    if not admission or admission.get("generation") != generation:
+        raise Fail(f"no preceding admission for {scope}/{generation} on {delivery_id}")
+    return [admission, *(row for _, row in claims)]
+
+
+def has_pointer(text, message_id):
+    return isinstance(text, str) and re.search(
+        rf"Vecnet message available\.\s+Find\s+{re.escape(message_id)}\s+in\s+thread\b", text
+    ) is not None
+
+
+def verify_control_frames(paths, message_id, marker):
+    for path in paths:
+        text = path.read_text()
+        if has_pointer(text, message_id) or marker in text:
+            raise Fail(f"control {message_id} leaked into {path.name}")
+
+
+def transcript_proof(rows, message_id, fetch_cmd, marker):
+    enqueues, peers, calls, results = [], [], [], []
+    for i, row in enumerate(rows):
+        if row.get("type") == "queue-operation" and row.get("operation") == "enqueue" \
+                and has_pointer(row.get("content"), message_id):
+            enqueues.append(i)
+        origin = row.get("origin") or {}
+        if row.get("type") == "user" and origin.get("kind") == "peer" \
+                and has_pointer(origin.get("body"), message_id):
+            peers.append(i)
+        blocks = row.get("message", {}).get("content")
+        for block in blocks if isinstance(blocks, list) else []:
+            if (row.get("type") == "assistant" and block.get("type") == "tool_use"
+                    and block.get("name") == "Bash" and block.get("input", {}).get("command") == fetch_cmd):
+                calls.append((i, block.get("id")))
+            if row.get("type") == "user" and block.get("type") == "tool_result":
+                results.append((i, block))
+    if list(map(len, (enqueues, peers, calls))) != [1, 1, 1]:
+        raise Fail(f"expected one enqueue, peer turn and fetch call for {message_id}: "
+                   f"found {len(enqueues)}, {len(peers)}, {len(calls)}")
+    call_i, tool_id = calls[0]
+    related = [(i, b) for i, b in results if tool_id and b.get("tool_use_id") == tool_id]
+    if len(related) != 1:
+        raise Fail(f"expected one result for {tool_id}: found {len(related)}")
+    result_i, result = related[0]
+    if not enqueues[0] < peers[0] < call_i < result_i or result.get("is_error"):
+        raise Fail(f"enqueue, peer turn and successful tool pair out of order for {message_id}")
+    try:
+        messages = [event["data"]["message"] for event in json.loads(result["content"])["events"]
+                    if "message" in event.get("data", {})]
+        match = [m for m in messages if m["message_id"] == message_id
+                 and marker in m["content"]["text"]]
+    except (KeyError, TypeError, ValueError) as e:
+        raise Fail(f"fetch result was not inbox JSON: {e}") from e
+    if len(match) != 1:
+        raise Fail(f"fetch result did not contain exactly one matching message {message_id}")
+    return [rows[i] for i in (enqueues[0], peers[0], call_i, result_i)], tool_id
+
+
+def dispose_run(run, keep_evidence):
+    if keep_evidence:
+        return "retained privately"
+    for path in run.iterdir():
+        if path.name in ("evidence", "frames"):
+            continue
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+    return "disposed"
+
+
 def _ulid(n: int) -> str:
     digits = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
     s = ""
@@ -117,7 +209,7 @@ import json, sys, uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = int(sys.argv[1]); LOG = open(sys.argv[2], "a", buffering=1)
-FETCH_CMD = sys.argv[3]
+FETCH_CMD, ENROL_CMD = sys.argv[3:5]
 
 
 def block_text(messages):
@@ -173,7 +265,16 @@ class H(BaseHTTPRequestHandler):
             return
         messages = req.get("messages") or []
         text = block_text(messages)
-        if has_tool_result(messages):
+        if "Vecnet message available." in text and not any(
+            isinstance(b, dict) and b.get("tool_use_id") == "toolu_e2e_fetch_1"
+            for m in messages for b in m.get("content", [])
+        ):
+            blocks = [{"type": "text", "text": "A Vecnet pointer arrived. Fetching the inbox now."},
+                      {"type": "tool_use", "id": "toolu_e2e_fetch_1", "name": "Bash",
+                       "input": {"command": FETCH_CMD,
+                                 "description": "Read this session's Vecnet inbox"}}]
+            stop = "tool_use"
+        elif has_tool_result(messages) and "Vecnet message available." in text:
             # Echo the inbox result only, never the startup context or prompt.
             result = next((b.get("content", "") for m in reversed(messages)
                            for b in m.get("content", []) if isinstance(b, dict)
@@ -183,12 +284,13 @@ class H(BaseHTTPRequestHandler):
                        "text": "Vecnet inbox fetch completed. The tool output was:\n" + body +
                                "\n(end of fetched inbox data)"}]
             stop = "end_turn"
-        elif "Vecnet message available." in text:
-            blocks = [{"type": "text", "text": "A Vecnet pointer arrived. Fetching the inbox now."},
-                      {"type": "tool_use", "id": "toolu_e2e_fetch_1", "name": "Bash",
-                       "input": {"command": FETCH_CMD,
-                                 "description": "Read this session's Vecnet inbox"}}]
+        elif "SETUP: enroll the disposable receiver." in text and not has_tool_result(messages):
+            blocks = [{"type": "tool_use", "id": "toolu_e2e_enrol_1", "name": "Bash",
+                       "input": {"command": ENROL_CMD, "description": "Enroll the disposable receiver"}}]
             stop = "tool_use"
+        elif "SETUP: enroll the disposable receiver." in text and "READY: acknowledge" not in text:
+            blocks = [{"type": "text", "text": "Disposable receiver enrollment finished."}]
+            stop = "end_turn"
         elif "READY" in text:
             blocks = [{"type": "text", "text": "READY: e2e receiver idle; stub model online."}]
             stop = "end_turn"
@@ -356,7 +458,13 @@ class Harness:
         self.cfg = self.home / ".config/vecnet/config.toml"
         self.sock_name = f"ve2e{self.nonce}"
         self.claude_bin = Path("/home/xertrov/.local/bin/claude")
-        self.node_bin = Path("/home/xertrov/.local/bin/node")
+        self.node_bin = Path("/home/xertrov/.local/bin/node").resolve()
+        self.fetch_cmd = f"{run}/vec.sh inbox --json --limit 8"
+        self.enrol_cmd = f"{run}/enrol-receiver.sh"
+        self.unit = "vecnet-codex-delivery.service"
+        self.runtime = None
+        self.frame_thread = None
+        self.frame_error = None
         self.transcript = None
         self.hub_url = None
         self.operator_secret = None
@@ -448,7 +556,7 @@ class Harness:
             "nonce": self.nonce, "tmux_session": self.session, "commit": commit,
             "claude_version_observed": self.claude_version,
             "claude_code_version_provision":
-                "CLAUDE_CODE_VERSION for the disposable session is exported by this "
+                "CLAUDE_CODE_VERSION for the disposable session and its enrol child is exported by this "
                 "harness from its own `claude --version` observation (disclosed "
                 "test-env provision; production activation stays gated)",
             "canary_opt_in":
@@ -474,11 +582,23 @@ class Harness:
              f"-subj /CN=api.anthropic.com -config san.cnf 2>/dev/null && "
              f"openssl x509 -req -in srv.csr -CA ca.pem -CAkey ca.key -CAcreateserial -out srv.pem "
              f"-days 2 -extfile san.cnf -extensions v3 2>/dev/null", "lab CA")
+        # Use the existing acceptance fixture for scheduler commands, never
+        # the host systemd user bus. The fixture starts the real staged runtime.
+        (d / ".automatic-session-fixture").write_text("fixture-v1")
+        adapter = (self.repo / 'scripts/automatic-session-smoke.mjs').as_uri()
+        fixture = json.dumps({"root": str(d), "home": str(self.home)})
+        (self.bin / "systemctl").write_text(
+            f"#!{self.node_bin}\n"
+            f"import {{ fixtureSystemctl }} from {json.dumps(adapter)};\n"
+            f"process.stdout.write(await fixtureSystemctl({fixture}, process.argv.slice(2)));\n")
+        # An extensionless launcher outside a package needs explicit ES-module mode.
+        (self.bin / "package.json").write_text('{"type":"module"}\n')
+        (self.bin / "systemctl").chmod(0o700)
         entry = (f"bwrap --ro-bind / / --dev /dev --proc /proc --ro-bind {d}/hosts /etc/hosts "
                  f"--tmpfs /tmp --bind {d} {d} --unshare-net -- "
-                 f"sh -c 'umask 022; unset XDG_CACHE_HOME XDG_CONFIG_HOME XDG_DATA_HOME "
-                 f"XDG_STATE_HOME XDG_RUNTIME_DIR; export TMUX_TMPDIR={d}/tdir; "
-                 f"exec tmux -f /dev/null -L {self.sock_name} "
+                 f"env -i HOME={self.home} PATH={self.bin}:/usr/bin:/bin TERM=xterm-256color "
+                 f"TMUX_TMPDIR={d}/tdir LC_ALL=C.UTF-8 "
+                 f"sh -c 'umask 022; exec tmux -f /dev/null -L {self.sock_name} "
                  f"new-session -d -s svc -x 200 -y 50'")
         subprocess.Popen(entry, shell=True, start_new_session=True,
                          stdout=open(d / "logs/tmux-entry.out", "w"), stderr=subprocess.STDOUT)
@@ -486,9 +606,9 @@ class Harness:
                    "private tmux server inside netns", timeout=20)
         self.tmux("new-window", "-d", "-n", "proxy",
                   f"python3 {d}/proxy.py {PROXY_PORT} {d} {d}/logs/proxy-observed.jsonl > {d}/logs/proxy.out 2>&1")
-        fetch_cmd = f"{d}/vec.sh inbox --json --limit 8"
         self.tmux("new-window", "-d", "-n", "stub",
-                  f"python3 {d}/stub.py {STUB_PORT} {d}/logs/stub-observed.jsonl {shlex.quote(fetch_cmd)} > {d}/logs/stub.out 2>&1")
+                  f"python3 {d}/stub.py {STUB_PORT} {d}/logs/stub-observed.jsonl "
+                  f"{shlex.quote(self.fetch_cmd)} {shlex.quote(self.enrol_cmd)} > {d}/logs/stub.out 2>&1")
         rc, out = 1, ""
         for _ in range(6):
             rc, out = self.in_netns(
@@ -547,30 +667,43 @@ class Harness:
                               self.operator_secret)["enrol_token"]
         claude_tok = self.api("/v1/admin/peers", {"kind": "session", "name": "claude-receiver"},
                               self.operator_secret)["enrol_token"]
-        for i, (name, tok) in enumerate((("sender", sender_tok), ("claude-rx", claude_tok))):
-            rc, out = self.cli(["enrol", "--hub", self.hub_url, "--token", tok,
-                                "--profile", name, "--allow-insecure-http"],
-                               name=f"enrol-{name}")
-            if rc != 0:
-                raise Fail(f"enrol {name} failed: {out}")
-            self.evidence_write(f"2{i}-enrol-{name}.txt", out.replace(tok, "<redacted-token>"))
-        cfgtext = self.cfg.read_text()
-        peers = dict(re.findall(r"\[profiles\.([A-Za-z0-9_-]+)\][^\[]*?peer_id = \"(peer_[A-Za-z0-9]+)\"",
-                                cfgtext, re.S))
-        self.sender_peer = peers.get("sender")
-        self.claude_peer = peers.get("claude-rx")
-        if not self.sender_peer or not self.claude_peer:
-            raise Fail(f"peer ids missing from config: {peers}")
-        self.evidence_write("22-config.toml.redacted",
-                            re.sub(r'(?im)^(\s*secret\s*=\s*)[^\r\n]+',
-                                   r'\1"<redacted>"', cfgtext))
-        log(f"enrolled sender={self.sender_peer} claude={self.claude_peer}")
+        rc, out = self.cli(["enrol", "--hub", self.hub_url, "--token", sender_tok,
+                            "--profile", "sender", "--allow-insecure-http"], name="enrol-sender")
+        if rc != 0:
+            raise Fail(f"sender enrol failed: {out}")
+        self.evidence_write("20-enrol-sender.txt", out.replace(sender_tok, "<redacted-token>"))
+        token_file = self.run / "receiver-invite"
+        token_file.write_text(claude_tok + "\n")
+        token_file.chmod(0o600)
+        # The Bash tool is a real descendant of the disposable Claude process.
+        # If Bash does not expose the session ID, read Claude's own live row
+        # for the host-provided PID; registerClaudeRoot verifies ancestry itself.
+        enrol = Path(self.enrol_cmd)
+        enrol.write_text(f"""#!/bin/sh
+set -eu
+output={self.logs / 'enrol-claude-rx.out'}
+exec >"$output" 2>&1
+trap 'printf "%s" "$?" > {self.logs / 'enrol-claude-rx.rc'}' EXIT
+: "${{CLAUDE_PID:?missing live Claude PID}}"
+: "${{CLAUDE_CODE_VERSION:?missing observed Claude version}}"
+if [ -z "${{CLAUDE_CODE_SESSION_ID:-}}" ]; then
+  CLAUDE_CODE_SESSION_ID=$(/usr/bin/python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["sessionId"])' "$CLAUDE_CONFIG_DIR/sessions/$CLAUDE_PID.json")
+  printf '%s\n' 'Session ID source: live Claude session registry'
+else
+  printf '%s\n' 'Session ID source: Claude Bash environment'
+fi
+export CLAUDE_CODE_SESSION_ID
+export PATH={self.bin}:/usr/bin:/bin VECNET_NODE={self.node_bin}
+printf 'Observed version in enrol child: %s\n' "$CLAUDE_CODE_VERSION"
+{self.bin / 'vecnet'} enrol --hub {self.hub_url} --token - --profile claude-rx --allow-insecure-http < {token_file}
+""")
+        enrol.chmod(0o700)
 
     def claude_session_up(self) -> None:
-        log("phase 4: hooks + settings, canary daemon, real Claude session")
+        log("phase 4: Claude session + automatic in-session enrollment")
         settings = {
             "crossSessionInbound": "accept",
-            "permissions": {"allow": [f"Bash({self.run}/vec.sh:*)"]},
+            "permissions": {"allow": [f"Bash({self.run}/vec.sh:*)", f"Bash({self.enrol_cmd})"]},
             "theme": "dark",
         }
         (self.cconfig / "settings.json").write_text(json.dumps(settings, indent=2))
@@ -579,27 +712,61 @@ class Harness:
             "firstStartTime": "2026-11-01T00:00:00.000Z", "firstStartVersion": "2.1.300",
             "hasCompletedOnboarding": True, "lastOnboardingVersion": "2.1.322",
             "numStartups": 3, "installMethod": "unknown", "autoUpdates": False}))
-        rc, out = self.cli(["hook", "install", "--client", "claude", "--profile", "claude-rx",
-                            "--settings", str(self.cconfig / "settings.json"),
-                            "--bin", str(self.bin / "vecnet"), "--write"], name="hook-install")
-        if rc != 0 or "wrote" not in out:
-            raise Fail(f"hook install failed: {out}")
-        self.evidence_write("23-hook-install.txt", out)
+        self.launch_claude()
+        self.send_prompt("SETUP: enroll the disposable receiver.")
+        rcfile = self.logs / "enrol-claude-rx.rc"
+        wait_until(lambda: rcfile.exists() and rcfile.read_text(), "in-session enrol completion", timeout=90)
+        out = (self.logs / "enrol-claude-rx.out").read_text()
+        self.evidence_write("21-enrol-claude-rx.txt", out)
+        phase = re.search(r"credentials saved; claude setup (registered|armed):", out)
+        if rcfile.read_text() != "0" or not phase:
+            raise Fail(f"automatic receiver enrollment failed: {out}")
+        manifest = json.loads((self.home / ".local/share/vecnet-codex/manifest.json").read_text())
+        self.runtime = Path(manifest["release"])
+        if self.runtime.parent != self.home / ".local/share/vecnet-codex":
+            raise Fail("staged runtime is outside the disposable HOME")
+        self.record("enrollment", {"phase": phase[1], "scheduler": "private systemctl fixture",
+                                   "runtime": "CLI-staged embedded release"})
+        # This fixture activation is passive. Stop it before reusing the exact
+        # staged runtime with plan-authorized canary/crash flags under tmux.
+        self.stop_managed_runtime()
+        profiles = tomllib.loads(self.cfg.read_text())["profiles"]
+        self.sender_peer = profiles["sender"]["peer_id"]
+        self.claude_peer = profiles["claude-rx"]["peer_id"]
+        public = ["[profiles]"]
+        for name in ("claude-rx", "sender"):
+            public.append(f"  [profiles.{name}]")
+            for key in ("hub", "hub_pubkey", "peer_id", "allow_insecure_http"):
+                public.append(f"    {key} = {json.dumps(profiles[name][key])}")
+            public.append('    secret = "<redacted>"')
+        self.evidence_write("22-config.toml.redacted", "\n".join(public) + "\n")
+        self.evidence_write("23-runtime-stage.txt",
+                            "Automatic enrollment staged the embedded delivery runtime via the private "
+                            "systemctl acceptance fixture, not the host manager. The passive fixture "
+                            "process was stopped before the staged release was relaunched in canary mode.\n"
+                            f"release digest: {self.runtime.name}\n")
         self.start_daemon()
         (self.evidence / "30-daemon-env.txt").write_text(
-            f"HOME={self.home}\nVECNET_CONFIG={self.cfg}\nVECNET_BIN={self.bin / 'vecnet'}\n"
+            f"HOME={self.home}\nVECNET_CONFIG={self.cfg}\nVECNET_BIN={self.runtime / 'vecnet'}\n"
             "VECNET_CLAUDE_DELIVERY_CANARY=1\nnode_flags=--experimental-strip-types\n")
-        self.launch_claude()
+        wait_until(lambda: "Disposable receiver enrollment finished." in self.pane_text(),
+                   "stub enrollment reply", timeout=45)
         self.drive_first_prompt()
+
+    def stop_managed_runtime(self) -> None:
+        if (self.run / "runtime-pid.json").exists():
+            rc, out = self.in_netns(f"{self.bin}/systemctl --user stop -- {self.unit}", name="stop-managed")
+            if rc or (self.run / "runtime-pid.json").exists():
+                raise Fail(f"private scheduler runtime did not stop: {out}")
 
     def start_daemon(self, seam: bool = False, tag: str = "daemon") -> None:
         if self.daemon_window:
             self.stop_daemon()
-        env = (f"HOME={self.home} VECNET_CONFIG={self.cfg} VECNET_BIN={self.bin / 'vecnet'} "
+        env = (f"HOME={self.home} VECNET_CONFIG={self.cfg} VECNET_BIN={self.runtime / 'vecnet'} VECNET_LOCAL_MAINTENANCE=0 "
                f"VECNET_CLAUDE_DELIVERY_CANARY=1"
                + (" VECNET_CLAUDE_DELIVERY_CRASH_BEFORE_WRITE=1" if seam else ""))
         script = self.run / f"{tag}.sh"
-        script.write_text(f"cd {self.repo}/connectors/launcher\n"
+        script.write_text(f"cd {self.runtime}/connectors/launcher\n"
                           f"echo $$ > {self.logs / (tag + '.pid')}\n"
                           f"exec env {env} {self.node_bin} --disable-warning=ExperimentalWarning "
                           f"--experimental-strip-types src/codex/delivery-main.ts\n")
@@ -647,6 +814,7 @@ class Harness:
     def launch_claude(self) -> None:
         env = " ".join([
             f"HOME={self.home}", f"CLAUDE_CONFIG_DIR={self.cconfig}",
+            f"CLAUDE_CODE_MESSAGING_SOCKET={self.sockdir}/claude.sock",
             f"ANTHROPIC_BASE_URL=http://127.0.0.1:{STUB_PORT}", "ANTHROPIC_API_KEY=dummy-e2e-key",
             f"HTTPS_PROXY=http://127.0.0.1:{PROXY_PORT}", f"HTTP_PROXY=http://127.0.0.1:{PROXY_PORT}",
             "NO_PROXY=127.0.0.1,localhost", f"NODE_EXTRA_CA_CERTS={self.run}/ca.pem",
@@ -679,11 +847,14 @@ class Harness:
                 and "Do you want to use this API key" not in text
                 and "Select login method" not in text)
 
-    def drive_first_prompt(self) -> None:
-        log("phase 5: first prompt -> passive registration -> admission")
-        self.tmux("send-keys", "-t", self.session, "-l", "READY: acknowledge and stay idle.")
+    def send_prompt(self, prompt):
+        self.tmux("send-keys", "-t", self.session, "-l", prompt)
         time.sleep(0.4)
         self.tmux("send-keys", "-t", self.session, "Enter")
+
+    def drive_first_prompt(self) -> None:
+        log("phase 5: ready prompt -> verify automatic registration and admission")
+        self.send_prompt("READY: acknowledge and stay idle.")
         wait_until(lambda: self._stub_request_matching("READY"), "stub READY request", timeout=60)
         wait_until(lambda: "READY: e2e receiver idle" in self.pane_text(),
                    "stub READY reply in pane", timeout=40)
@@ -723,7 +894,7 @@ class Harness:
         for b in snap.get("bindings", []):
             a = b.get("admission") or {}
             if b.get("state") == "registered" and a.get("live") and a.get("policy") \
-                    and a.get("version_qualified"):
+                    and a.get("version_qualified") and b.get("scope", {}).get("caller") == self.claude_peer:
                 return b
         return None
 
@@ -733,14 +904,26 @@ class Harness:
         def loop():
             i = 0
             while not self.frame_stop.is_set():
-                text = self.tmux("capture-pane", "-t", self.session, "-p", "-S", "-2000",
-                                 check=False)
+                text = self.tmux("capture-pane", "-t", self.session, "-p", "-S", "-2000")
                 (self.frames / f"frame-{i:04d}.txt").write_text(text)
                 self.frame_index.append({"n": i, "t": round(time.time() - self.started, 1),
                                          "file": f"frame-{i:04d}.txt"})
                 i += 1
                 time.sleep(0.6)
-        threading.Thread(target=loop, daemon=True).start()
+        def capture():
+            try:
+                loop()
+            except Exception as e:
+                self.frame_error = e
+        self.frame_thread = threading.Thread(target=capture, daemon=True)
+        self.frame_thread.start()
+
+    def stop_frame_capture(self):
+        self.frame_stop.set()
+        if self.frame_thread:
+            self.frame_thread.join()
+        if self.frame_error:
+            raise Fail(f"frame capture failed: {self.frame_error}")
 
     # ---------------------------------------------------- the proof chain ---
 
@@ -761,22 +944,11 @@ class Harness:
                        f"WHERE dly_id = '{self.delivery_id}'")
         wait_until(lambda: self._daemon_line("claude_delivery_disposition", self.delivery_id),
                    "daemon disposition line", timeout=90)
-        self.evidence_write("51-daemon-chain.txt", self._daemon_chain())
-        wait_until(lambda: "Vecnet message available." in self.pane_text(),
+        wait_until(lambda: PREVIEW in self.pane_text(),
                    "native pointer preview in pane", timeout=30)
-        # The stub-issued Bash fetch runs the packaged CLI; its output (the
-        # fetched inbox JSON with the marker) renders in the pane, and the
-        # tool_use row carrying the exact command lands in the transcript.
-        wait_until(lambda: self._transcript_rows("vec.sh inbox") >= 1,
-                   "stub-issued inbox fetch (transcript tool_use row)", timeout=60)
-        wait_until(lambda: self.marker in self.pane_text(),
-                   "fetched marker text in pane", timeout=60)
+        wait_until(lambda: self.marker in self.pane_text(), "fetched marker text in pane", timeout=60)
         wait_until(lambda: self._stub_request_matching(self.marker) is not None,
                    "stub received the fetched inbox content (tool result)", timeout=60)
-        wait_until(lambda: self._transcript_rows(self.message_id) >= 2,
-                   "transcript peer rows", timeout=30)
-        self.evidence_write("60-transcript-rows.json",
-                            json.dumps(self._transcript_extract(), indent=2))
         rc, out = self.cli(["--net", "claude-rx", "claude", "deliveries", "--json"],
                            name="deliveries-pos")
         self.evidence_write("62-claude-deliveries.json", out)
@@ -802,17 +974,6 @@ class Harness:
                 return line
         return None
 
-    def _daemon_chain(self) -> str:
-        try:
-            text = (self.logs / "daemon.log").read_text()
-        except FileNotFoundError:
-            return ""
-        keys = ("claude_delivery_scope_admitted", "claude_delivery_claim_held",
-                "claude_delivery_claim_reserved", "claude_delivery_claim_attempting",
-                "claude_delivery_disposition", "claude_delivery_uncertain_restart",
-                "claude_delivery_blocked_pending_limit")
-        return "\n".join(l for l in text.splitlines() if any(k in l for k in keys)) + "\n"
-
     def hub_query(self, name: str, sql: str) -> None:
         rc, out = self.in_netns(f"sqlite3 -json {self.hubdir}/hub.db {shlex.quote(sql)}",
                                 name="hubq")
@@ -826,17 +987,33 @@ class Harness:
         except (FileNotFoundError, AttributeError):
             return 0
 
-    def _transcript_extract(self) -> list:
-        rows = []
-        for line in self.transcript.read_text().splitlines():
-            try:
-                row = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            text = json.dumps(row)
-            if any(k in text for k in ("Vecnet message available", self.marker, "queue-operation")):
-                rows.append(row)
-        return rows
+    def finalize_proof(self):
+        raw = self.logs.joinpath("daemon.log").read_text().splitlines()
+        events = [json.loads(line) for line in raw if line.startswith("{")]
+        lifecycle = ordered_lifecycle(events, self.binding_key, self.generation, self.delivery_id)
+        if (lifecycle[-1].get("exit"), lifecycle[-1].get("state"),
+                lifecycle[-1].get("disposition")) != (0, "released", "attempted"):
+            raise Fail("wrong exit disposition in delivery lifecycle")
+        rows = [json.loads(line) for line in self.transcript.read_text().splitlines()]
+        selected, tool_id = transcript_proof(rows, self.message_id, self.fetch_cmd, self.marker)
+        self.evidence_write("51-daemon-chain.txt", "".join(json.dumps(r) + "\n" for r in lifecycle))
+        self.evidence_write("60-transcript-rows.json", json.dumps(selected, indent=2))
+        frames = [self.frames / f["file"] for f in self.frame_index]
+        preview_counts = [p.read_text().count(PREVIEW) for p in frames]
+        if max(preview_counts, default=0) != 1:
+            raise Fail("expected one collapsed pointer preview and no additional previews in any frame")
+        for name in ("hold", "crash", "cap"):
+            control = self.results[name]
+            message_id = control["message_id"]
+            marker = getattr(self, f"{name}_marker")
+            verify_control_frames(frames, message_id, marker)
+            if any(marker in json.dumps(row) or has_pointer(row.get("content"), message_id)
+                   or has_pointer((row.get("origin") or {}).get("body"), message_id)
+                   for row in rows):
+                raise Fail(f"control {message_id} reached the transcript")
+            control["pointer_frames"] = 0
+        self.results["positive"].update(enqueues=1, fetch_pairs=1, tool_use_id=tool_id,
+                                        lifecycle=[r["msg"] for r in lifecycle])
 
     # ---------------------------------------------------- negative controls --
 
@@ -849,7 +1026,8 @@ class Harness:
         if rc != 0:
             raise Fail(f"hold send failed: {out}")
         self.evidence_write("70-hold-send.json", out)
-        self.hold_delivery = parse_json_output(out)["deliveries"][0]["delivery_id"]
+        receipt = parse_json_output(out)
+        self.hold_delivery = receipt["deliveries"][0]["delivery_id"]
         wait_until(lambda: self._daemon_line("claude_delivery_claim_held", self.hold_delivery),
                    "hold quarantined in ledger", timeout=90)
         time.sleep(2)
@@ -868,7 +1046,7 @@ class Harness:
         if rc != 0 or self.hold_marker not in out:
             raise Fail(f"hold message not readable in inbox: rc={rc} out={out[:300]!r}")
         self.evidence_write("71-hold-inbox.json", out)
-        self.record("hold", {"delivery_id": self.hold_delivery, "state": claim["state"],
+        self.record("hold", {"delivery_id": self.hold_delivery, "message_id": receipt["message_id"], "state": claim["state"],
                              "disposition": claim["disposition"]})
         log(f"hold control complete: {self.hold_delivery} held/inbox-only")
 
@@ -884,11 +1062,14 @@ class Harness:
         if rc != 0:
             raise Fail(f"crash send failed: {out}")
         self.evidence_write("80-crash-send.json", out)
-        self.crash_delivery = parse_json_output(out)["deliveries"][0]["delivery_id"]
+        receipt = parse_json_output(out)
+        self.crash_delivery = receipt["deliveries"][0]["delivery_id"]
         self.start_daemon(seam=True, tag="daemon-seam")
         rcfile = self.logs / "daemon-seam.rc"
         wait_until(lambda: rcfile.exists(), "seam daemon self-kill", timeout=120)
         rc_text = rcfile.read_text().strip()
+        if rc_text != "137":
+            raise Fail(f"crash seam expected exit 137, got {rc_text}")
         attempting = [l for l in (self.logs / "daemon.log").read_text().splitlines()
                       if "claude_delivery_claim_attempting" in l and self.crash_delivery in l]
         if not attempting:
@@ -924,7 +1105,7 @@ class Harness:
         self.evidence_write("82-crash-claim.json", json.dumps(
             {"at_crash": claim, "after_restart": claim2,
              "transcript_rows": self._transcript_rows(self.crash_marker)}, indent=2))
-        self.record("crash", {"delivery_id": self.crash_delivery,
+        self.record("crash", {"delivery_id": self.crash_delivery, "message_id": receipt["message_id"],
                               "final_state": claim2["state"],
                               "reason": claim2.get("reason")})
         log(f"crash control complete: {self.crash_delivery} uncertain, no resend")
@@ -978,7 +1159,8 @@ class Harness:
         if rc != 0:
             raise Fail(f"cap send failed: {out}")
         self.evidence_write("90-cap-send.json", out)
-        self.cap_delivery = parse_json_output(out)["deliveries"][0]["delivery_id"]
+        receipt = parse_json_output(out)
+        self.cap_delivery = receipt["deliveries"][0]["delivery_id"]
         self.start_daemon(tag="daemon3")
         wait_until(lambda: self._daemon_line("claude_delivery_blocked_pending_limit"),
                    "blocked_pending_limit log line", timeout=120)
@@ -989,8 +1171,8 @@ class Harness:
         doc = parse_json_output(out)
         if doc.get("blocked_pending_limit") is not True:
             raise Fail(f"blocked_pending_limit not latched: {doc.get('blocked_pending_limit')}")
-        if doc.get("pending_count", 0) < 128:
-            raise Fail(f"pending count below the cap: {doc.get('pending_count')}")
+        if doc.get("pending_count") != 129:
+            raise Fail(f"expected 129 unresolved claims, got: {doc.get('pending_count')}")
         if any(c["delivery_id"] == self.cap_delivery for c in doc.get("deliveries", [])):
             raise Fail("cap message was staged despite the latch")
         if self._transcript_rows(self.cap_marker) != 0:
@@ -999,7 +1181,7 @@ class Harness:
         self.evidence_write("93-cap-status.json", out)
         if parse_json_output(out).get("blocked_pending_limit") is not True:
             raise Fail("claude status does not report the cap latch")
-        self.record("cap", {"delivery_id": self.cap_delivery,
+        self.record("cap", {"delivery_id": self.cap_delivery, "message_id": receipt["message_id"],
                             "pending": doc.get("pending_count"),
                             "blocked": doc.get("blocked_pending_limit")})
         log(f"cap control complete: pending={doc.get('pending_count')} blocked, "
@@ -1024,13 +1206,14 @@ class Harness:
 
     # ------------------------------------------------------------ teardown --
 
-    def teardown(self) -> None:
+    def teardown(self, keep_evidence) -> None:
         log("phase 11: verified teardown")
         errors = []
         gone = ""
         # Stop only this run's tracked daemon; never sweep host processes.
         try:
             self.stop_daemon()
+            self.stop_managed_runtime()
         except Exception as e:  # noqa: BLE001
             errors.append(f"daemon teardown: {e}")
         try:
@@ -1041,7 +1224,6 @@ class Harness:
                 errors.append(f"session {self.session} still listed: {listed!r}")
             self.tmux("kill-server", check=False)
             time.sleep(1)
-            gone = self.tmux("list-sessions", check=False)
             env = dict(os.environ, TMUX_TMPDIR=str(self.tdir))
             probe = subprocess.run(["tmux", "-L", self.sock_name, "list-sessions"],
                                    capture_output=True, text=True, env=env)
@@ -1050,14 +1232,10 @@ class Harness:
                 errors.append(f"private tmux server still up: {gone!r}")
         except Exception as e:  # noqa: BLE001
             errors.append(f"tmux teardown: {e}")
-        stray = sh("tmux list-sessions 2>&1 || true").stdout
-        if "vecnet-test-" in str(stray):
-            errors.append(f"stray vecnet-test-* sessions on the default server: {stray!r}")
-        self.evidence_write("99-teardown.txt",
-                            "private server: " + gone.strip() + "\n"
-                            "default server sessions:\n" + str(stray) +
-                            "no vecnet-test-* sessions remain: " +
-                            str("vecnet-test-" not in str(stray)).lower() + "\n")
+        names = sh(["tmux", "list-sessions", "-F", "#{session_name}"]).stdout.splitlines()
+        stray = [name for name in names if name.startswith("vecnet-test-")]
+        if stray:
+            errors.append("stray vecnet-test-* sessions on the default server")
         for src, dst in (("logs/daemon.log", "50-daemon.log"),
                          ("logs/hub.log", "11-hub-serve.log"),
                          ("logs/stub-observed.jsonl", "31-stub-observed.jsonl"),
@@ -1066,18 +1244,24 @@ class Harness:
             s = self.run / src
             if s.exists():
                 shutil.copyfile(s, self.evidence / dst)
-        try:
+        if self.frames.exists():
             (self.frames / "index.json").write_text(json.dumps(self.frame_index))
-        except Exception:  # noqa: BLE001
-            pass
         if errors:
             raise Fail("teardown errors: " + "; ".join(errors))
-        log("teardown verified: session killed, private server gone, no vecnet-test-* anywhere")
+        disposition = dispose_run(self.run, keep_evidence)
+        self.record("teardown", {"private_server_stopped": True, "default_server_strays": 0,
+                                 "raw_disposition": disposition})
+        self.evidence.mkdir(exist_ok=True)
+        self.evidence_write("99-teardown.txt", f"private server: {gone}\n"
+                            f"default server vecnet-test-* sessions: {len(stray)}\n"
+                            f"raw run state (hub DB, profiles, credentials, cert keys): {disposition}\n")
+        log(f"teardown verified; raw run state {disposition}")
 
     def finish(self) -> dict:
         self.record("finished", time.strftime("%Y-%m-%dT%H:%M:%S%z"))
         meta = {"run_dir": str(self.run), "nonce": self.nonce,
                 "results": self.results, "frames": len(self.frame_index)}
+        self.evidence.mkdir(exist_ok=True)
         (self.evidence / "98-summary.json").write_text(json.dumps(meta, indent=2))
         return meta
 
@@ -1085,6 +1269,8 @@ class Harness:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--repo", default=str(Path(__file__).resolve().parents[2]))
+    ap.add_argument("--keep-evidence", action="store_true",
+                    help="retain raw lab state (contains credentials) under the private run directory; never publish it")
     args = ap.parse_args()
     repo = Path(args.repo).resolve()
     base = Path("/tmp/ve2e-runs")
@@ -1104,14 +1290,21 @@ def main() -> int:
         h.crash_control()
         h.cap_control()
         h.no_ack_evidence()
+        h.stop_daemon()
+        h.stop_frame_capture()
+        h.finalize_proof()
     except Exception as e:  # noqa: BLE001
         log(f"FAIL: {e}")
         exit_code = 1
     finally:
-        h.frame_stop.set()
         try:
-            h.teardown()
+            h.stop_frame_capture()
         except Fail as e:
+            log(f"CAPTURE FAIL: {e}")
+            exit_code = exit_code or 1
+        try:
+            h.teardown(args.keep_evidence)
+        except Exception as e:
             log(f"TEARDOWN FAIL: {e}")
             exit_code = exit_code or 2
         meta = h.finish()
