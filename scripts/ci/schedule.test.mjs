@@ -441,3 +441,122 @@ test('Windows serial prefix adds only the exact unsafe-executable CLI root and k
  assert.deepEqual(beforeRelease,[unsafe]);
  assert.deepEqual(starts,[unsafe,0,1,2,3,4,5,6]);
 });
+
+// Drive the real serial-prefix/six-worker executor with a virtual clock.
+// This measures admission geometry without duplicating the planner's cost model.
+async function virtualGroupElapsed(tasks) {
+ let now=0,active=0,peak=0;const pending=[];
+ const run=runGoGroup(tasks,task=>new Promise(resolve=>{
+  active++;peak=Math.max(peak,active);
+  pending.push({at:now+task.cost,finish:()=>{active--;resolve();}});
+ }),nativeGoWorkers('win32'));
+ await turn();
+ while(pending.length){
+  now=Math.min(...pending.map(event=>event.at));
+  const due=pending.filter(event=>event.at===now);
+  for(const event of due)pending.splice(pending.indexOf(event),1);
+  for(const event of due)event.finish();
+  await turn();
+ }
+ await run;
+ assert.equal(active,0);assert.ok(peak<=6);
+ return now;
+}
+
+for(const count of [144,240])test(`Windows balances ${count} ordinary packets before lane totals beside reserved roots`,async()=>{
+ const pkg='github.com/XertroV/vecnet/internal/cli';
+ const reserved=['TestLauncherWindowsManagedRepairPreservesServiceIntent','TestInviteHubURLResponseRefusesUnsafe'];
+ const input=[{pkg,names:reserved,binary:'cli'},
+  ...Array.from({length:count},(_,i)=>({pkg:`ordinary${i}`,names:['TestWork'],binary:`bin${i}`}))];
+ const profile={roots:{[pkg]:{[reserved[0]]:32,[reserved[1]]:30}},
+  packages:Object.fromEntries(input.slice(1).map(row=>[row.pkg,6]))};
+ const bins=planGo(input,profile,{platform:'win32'});
+ assert.equal(bins.length,24);
+ const elapsed=await Promise.all(bins.map(virtualGroupElapsed));
+ const ordinary=bins.map((tasks,i)=>({tasks,elapsed:elapsed[i]})).filter(g=>!g.tasks.some(t=>t.exclusive));
+ assert.ok(ordinary.every(g=>g.elapsed<=12),`ordinary load must fit two six-worker waves: ${ordinary.map(g=>g.elapsed)}`);
+ assert.ok(bins.every(group=>group.length),`all existing groups can carry work for ${count} ordinary packets`);
+ for(const root of reserved){
+  const group=bins.find(tasks=>tasks.some(t=>t.selected.includes(root)));
+  assert.equal(group.length,1);assert.equal(group[0].exclusive,true);
+ }
+});
+
+test('Windows headroom placement conserves finite mixed discovery, identities and bounded packets',()=>{
+ const pkg='github.com/XertroV/vecnet/internal/cli';
+ const exclusive=['TestCodexHookWindowsInstalledCommandPreservesArgv','TestLauncherWindowsInstallPreviewAndExplicitIntent',
+  'TestLauncherWindowsInstallRejectsUnsafeDACLAndHardlinks','TestLauncherWindowsInstallRejectsUnsafeExecutableBeforeExecution',
+  'TestLauncherWindowsRepairPendingDriftUnit','TestLauncherWindowsManagedRepairPreservesServiceIntent','TestInviteHubURLResponseRefusesUnsafe'];
+ const input=[{pkg,names:[...exclusive,'TestNew','Example','FuzzSeed'],binary:'cli',directory:'source-cli'},
+  {pkg:ssePackage,names:[sseRoot,'TestNew'],binary:'httpapi',directory:'source-httpapi'},
+  {pkg:'split',names:Array.from({length:160},(_,i)=>`TestRoot${i}`).concat('TestUnknown'),binary:'split',directory:'source-split'},
+  {pkg:'unknown-package',names:['TestNew','Example','FuzzSeed'],binary:'unknown'},
+  {pkg:'empty',names:[],binary:null},
+  ...Array.from({length:144},(_,i)=>({pkg:`whole${i}`,names:['TestWork'],binary:`whole-bin${i}`}))];
+ const profile={startup:0.2,packages:{split:0.3},roots:{split:{TestRoot0:9},[pkg]:Object.fromEntries(exclusive.map((name,i)=>[name,20+i]))}};
+ const untouched=structuredClone(input),hints=structuredClone(profile);
+ const bins=planGo(input,profile,{platform:'win32'}),packets=bins.flat();
+ const keys=(pkg,names)=>(names.length?names:['']).map(name=>`${pkg}/${name}`);
+ assert.deepEqual(packets.flatMap(t=>keys(t.pkg,t.selected)).sort(),input.flatMap(t=>keys(t.pkg,t.names)).sort());
+ assert.equal(packets.filter(t=>t.exclusive).length,8);
+ for(const packet of packets){
+  const source=input.find(row=>row.pkg===packet.pkg);
+  assert.equal(packet.binary,source.binary);assert.equal(packet.directory,source.directory);
+  assert.deepEqual(packet.names,source.names);
+  if(packet.split){
+   assert.ok(packet.selected.length<=8);
+   assert.ok(packet.cost<=4.2+1e-9||packet.selected.length===1);
+  }
+  if(packet.exclusive)assert.equal(packet.selected.length,1);
+ }
+ assert.equal(packets.filter(t=>t.pkg==='empty').length,1);
+ assert.equal(packets.filter(t=>t.pkg==='unknown-package').length,1);
+ assert.deepEqual(planGo([...input].reverse(),profile,{platform:'win32'}),bins);
+ const placement=plan=>plan.map(group=>group.map(({names,selected,...packet})=>({...packet,selected:selected.toSorted()})));
+ assert.deepEqual(placement(planGo(input.map(row=>({...row,names:[...row.names].reverse()})),profile,{platform:'win32'})),placement(bins));
+ assert.deepEqual(input,untouched);assert.deepEqual(profile,hints);
+});
+
+
+test('Windows linked-worktree real-Git root finishes before ordinary admission in its existing group',async()=>{
+ const pkg='github.com/XertroV/vecnet/internal/cli',root='TestHookInstallWarnsLinkedWorktree';
+ const input=[{pkg,names:[root,root+'Extended','Example','FuzzSeed'],binary:'real-cli',directory:'original'},
+  {pkg:'other',names:[root],binary:'other'}, {pkg:'empty',names:[],binary:null},
+  ...Array.from({length:144},(_,i)=>({pkg:`ordinary${i}`,names:['TestWork'],binary:`bin${i}`}))];
+ const profile={packages:Object.fromEntries(input.slice(3).map(row=>[row.pkg,1]))};
+ const bins=planGo(input,profile,{platform:'win32'});
+ const group=bins.find(tasks=>tasks.some(t=>t.pkg===pkg&&t.selected.includes(root)));
+ const isolated=group.find(t=>t.pkg===pkg&&t.selected.includes(root));
+ const ordinary=group.filter(t=>t!==isolated);
+ assert.ok(ordinary.length>0,'use the ordinary tail in an existing group, not a reserved whole group');
+ const starts=[];let rootActive=false,overlap=0,finishRoot;
+ // Deliberately put ordinary work first; runGoGroup must enforce admission.
+ const run=runGoGroup([ordinary[0],isolated,...ordinary.slice(1)],async task=>{
+  if(task===isolated){
+   rootActive=true;starts.push(root);
+   await new Promise(resolve=>{finishRoot=resolve;});rootActive=false;
+  }else{
+   if(rootActive)overlap++;
+   starts.push(task.pkg);
+  }
+ },nativeGoWorkers('win32'));
+ await turn();const duringRoot=[...starts];
+ finishRoot?.();await run;
+ assert.equal(overlap,0,'no ordinary packet may start while the real-Git root is active');
+ assert.deepEqual(duringRoot,[root]);
+ assert.equal(starts.length,ordinary.length+1,'every queued ordinary packet still runs');
+ assert.deepEqual(isolated.selected,[root]);assert.equal(isolated.exclusive,true);assert.equal(isolated.split,true);
+ assert.equal(isolated.binary,'real-cli');assert.equal(isolated.directory,'original');
+ assert.equal(bins.flat().filter(t=>t.exclusive&&t.selected.includes(root)).length,1);
+ assert.ok(bins.flat().filter(t=>t.pkg==='other').every(t=>!t.exclusive));
+ assert.ok(bins.flat().filter(t=>t.selected.includes(root+'Extended')).every(t=>!t.exclusive));
+ const keys=(pkg,names)=>(names.length?names:['']).map(name=>`${pkg}/${name}`);
+ const expected=input.flatMap(row=>keys(row.pkg,row.names)).sort();
+ assert.deepEqual(bins.flat().flatMap(t=>keys(t.pkg,t.selected)).sort(),expected);
+ assert.equal(bins.length,24);assert.equal(releaseJobCount(),33);
+ for(const platform of ['linux','darwin']){
+  const packets=planGo(input,profile,{platform,lanes:nativeGoLanes(platform)}).flat();
+  assert.ok(packets.every(t=>!t.exclusive));
+  assert.deepEqual(packets.flatMap(t=>keys(t.pkg,t.selected)).sort(),expected);
+ }
+});

@@ -34,6 +34,7 @@ import (
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/hubid"
 	"github.com/XertroV/vecnet/internal/hubnotice"
+	"github.com/XertroV/vecnet/internal/ids"
 	"github.com/XertroV/vecnet/internal/inboxview"
 	"github.com/XertroV/vecnet/internal/opapi"
 )
@@ -55,6 +56,8 @@ messaging:
   send <recipient…> "text" (--wake|--wake-idle|--hold) [--thread ID] [--reply-to MSG]
        [--attach FILE]… [--title T] [--idempotency-key K]       text "-" reads stdin
        recipients are peer ids (or group/team ids); names are refused
+  send --thread <thr_ID> "text" (--wake|--wake-idle|--hold)
+       existing thread participants are the recipients; priority has no default
   reply <message_id> "text" (--wake|--wake-idle|--hold) [--thread ID] [--attach FILE]…
   react <message_id> <emoji|name> [--remove] [--wake|--wake-idle|--hold]
        default priority depends on the emoji: ✅ ❓ ❗ wake_idle, others hold
@@ -210,8 +213,21 @@ func RunContext(ctx context.Context, args []string, stdin io.Reader, stdout, std
 		fmt.Fprint(stderr, usageText)
 		return exitUsage
 	}
+	return a.exit(a.runCommand(rest))
+}
+
+// runCommand checks explicit typed arguments before startup can observe local
+// installations or schedule repair. Handlers use the same parser/checks, also
+// protecting internal callers and retries without a second flag grammar.
+func (a *app) runCommand(rest []string) error {
+	a.command = rest[0]
+	if _, scoped := idCommandFlags[rest[0]]; scoped {
+		if _, err := a.parseIDFlags(rest[0], rest[1:]); err != nil {
+			return err
+		}
+	}
 	a.localStartup(rest)
-	return a.exit(a.dispatch(rest[0], rest[1:]))
+	return a.dispatch(rest[0], rest[1:])
 }
 
 // app is one invocation.
@@ -222,6 +238,8 @@ type app struct {
 	getenv         func(string) string
 
 	net, as       string // --net, --as
+	asSet         bool   // explicit empty --as is different from omission
+	command       string // trusted command name for schema-help guidance
 	json          bool   // --json
 	inHook        bool   // hooks never TOFU or rewrite trust state
 	stdinConsumed bool   // a retry cannot consume stdin again
@@ -259,7 +277,7 @@ func (a *app) exit(err error) int {
 		fmt.Fprintln(a.stderr, me)
 		return exitUsage
 	case errors.As(err, &he):
-		fmt.Fprintf(a.stderr, "%s: %s\n", he.Code, he.Message)
+		fmt.Fprintln(a.stderr, he.format(a.command))
 		if he.Hint != "" {
 			fmt.Fprintln(a.stderr, he.Hint)
 		}
@@ -317,6 +335,7 @@ func (a *app) parseGlobal(args []string) (rest []string, help bool, err error) {
 				a.net = val
 			} else {
 				a.as = val
+				a.asSet = true
 			}
 		default:
 			rest = append(rest, arg)
@@ -847,6 +866,226 @@ func mergeSpec(specs ...map[string]flagKind) map[string]flagKind {
 	return out
 }
 
+// These are the existing command grammars, shared by preflight and handlers.
+// Only the bounded ID surfaces here participate; external/Codex IDs do not.
+var idCommandFlags = map[string]map[string]flagKind{
+	"send": mergeSpec(priorityFlags, map[string]flagKind{
+		"thread": strFlag, "reply-to": strFlag, "attach": multiFlag, "title": strFlag, "idempotency-key": strFlag,
+	}),
+	"reply": mergeSpec(priorityFlags, map[string]flagKind{
+		"thread": strFlag, "attach": multiFlag, "idempotency-key": strFlag,
+	}),
+	"react":        mergeSpec(priorityFlags, map[string]flagKind{"remove": boolFlag}),
+	"thread":       {"after": strFlag, "limit": strFlag},
+	"threads":      {"limit": strFlag},
+	"inbox":        {"since": strFlag, "ack": boolFlag, "limit": strFlag, "include-sender-chain": boolFlag},
+	"watch":        {"for-monitor": boolFlag, "since": strFlag, "auto-ack": boolFlag, "deliveries-only": boolFlag},
+	"presence":     {"note": strFlag},
+	"avatar":       nil,
+	"receipt":      {"note": strFlag},
+	"groups":       nil,
+	"ack":          nil,
+	"dead-letters": nil,
+}
+
+func (a *app) parseIDFlags(cmd string, args []string) (opts, error) {
+	o, err := parseFlags(cmd, args, idCommandFlags[cmd])
+	if err == nil {
+		err = a.checkIDArguments(cmd, o)
+	}
+	return o, err
+}
+
+// checkIDArguments leaves unparseable arity/subcommand syntax to the existing
+// handlers. Once syntax identifies an ID, it must precede priority/cache/IO.
+func (a *app) checkIDArguments(cmd string, o opts) error {
+	check := checkArgumentID
+	flag := func(name string, kind ids.Prefix) error {
+		if o.has(name) {
+			return check("--"+name, o.str(name), kind)
+		}
+		return nil
+	}
+	scopedAs := false
+	switch cmd {
+	case "send":
+		if len(o.pos) == 0 {
+			return nil
+		}
+		if len(o.pos) == 1 && !o.has("thread") {
+			return usageErr("send needs at least one recipient or --thread")
+		}
+		for _, recipient := range o.pos[:len(o.pos)-1] {
+			if err := check("recipient", recipient, ids.Peer, ids.Team, ids.Grp); err != nil {
+				return err
+			}
+		}
+		if err := flag("thread", ids.Thr); err != nil {
+			return err
+		}
+		if err := flag("reply-to", ids.Msg); err != nil {
+			return err
+		}
+		scopedAs = true
+	case "reply", "react":
+		if len(o.pos) != 2 {
+			return nil
+		}
+		if err := check("message", o.pos[0], ids.Msg); err != nil {
+			return err
+		}
+		if cmd == "reply" {
+			if err := flag("thread", ids.Thr); err != nil {
+				return err
+			}
+		}
+		scopedAs = true
+	case "thread":
+		if len(o.pos) == 0 {
+			return nil
+		}
+		switch o.pos[0] {
+		case "archive", "unarchive", "budget":
+			arity := 2
+			if o.pos[0] == "budget" {
+				arity = 3
+			}
+			if len(o.pos) != arity || o.has("after") || o.has("limit") {
+				return nil
+			}
+			if arity == 3 {
+				if n, err := strconv.Atoi(o.pos[2]); err != nil || n < 0 {
+					return nil
+				}
+			}
+			return check("thread", o.pos[1], ids.Thr)
+		default:
+			if len(o.pos) != 1 {
+				return nil
+			}
+			if err := check("thread", o.pos[0], ids.Thr); err != nil {
+				return err
+			}
+			return flag("after", ids.Msg)
+		}
+	case "receipt":
+		if len(o.pos) != 2 {
+			return nil
+		}
+		return check("delivery", o.pos[0], ids.Dly)
+	case "dead-letters":
+		if len(o.pos) == 2 && (o.pos[0] == "retry" || o.pos[0] == "discard") {
+			return check("delivery", o.pos[1], ids.Dly)
+		}
+	case "groups":
+		start := 0
+		switch {
+		case len(o.pos) >= 2 && o.pos[0] == "create":
+			start = 1
+		case len(o.pos) >= 3 && o.pos[0] == "add":
+			if err := check("group", o.pos[1], ids.Team, ids.Grp); err != nil {
+				return err
+			}
+			start = 2
+		case len(o.pos) == 2 && o.pos[0] == "unarchive":
+			return check("group", o.pos[1], ids.Team, ids.Grp)
+		default:
+			return nil
+		}
+		for _, member := range o.pos[start:] {
+			if err := check("member", member, ids.Peer); err != nil {
+				return err
+			}
+		}
+		scopedAs = true
+	case "ack":
+		if len(o.pos) != 1 {
+			return nil
+		}
+		if !canonicalCursor(o.pos[0]) {
+			return usageErr("cursor: expected eN.N cursor (opaque decimal epoch.sequence)")
+		}
+		scopedAs = true
+	case "inbox", "threads", "watch":
+		if len(o.pos) != 0 {
+			return nil
+		}
+		scopedAs = true
+	case "presence":
+		// subscribe applies to the credential, not to the peer selected by --as.
+		if len(o.pos) != 2 || o.pos[0] != "set" {
+			return nil
+		}
+		scopedAs = true
+	case "avatar":
+		if !(len(o.pos) == 2 && o.pos[0] == "set") && !(len(o.pos) == 1 && o.pos[0] == "clear") {
+			return nil
+		}
+		scopedAs = true
+	}
+	if scopedAs && (a.asSet || a.as != "") {
+		return check("--as", a.as, ids.Peer)
+	}
+	return nil
+}
+
+func checkArgumentID(field, value string, kinds ...ids.Prefix) error {
+	got, _, err := ids.Parse(value)
+	if err == nil {
+		for _, kind := range kinds {
+			if got == kind {
+				return nil
+			}
+		}
+	}
+	names := make([]string, len(kinds))
+	for i, kind := range kinds {
+		names[i] = string(kind) + "_"
+	}
+	expected := names[0]
+	if len(names) > 1 {
+		expected = strings.Join(names[:len(names)-1], ", ") + " or " + names[len(names)-1]
+	}
+	label := field
+	// Classify only fixed known prefixes; no malformed or received bytes are
+	// ever interpolated into a local error, even when they look like an ID.
+	head, _, _ := strings.Cut(value, "_")
+	kindName := map[string]string{"thr": "thread", "msg": "message", "dly": "delivery", "job": "job", "apr": "approval", "src": "source", "prn": "principal", "ntc": "notice", "blo": "blob"}[head]
+	if kindName != "" {
+		label += " looks like a " + kindName + " ID"
+	} else if canonicalCursor(value) {
+		label += " looks like a cursor"
+	}
+	msg := label + "; expected " + expected + " ID (uppercase 26-character Crockford suffix)"
+	if field == "recipient" {
+		if head == "thr" {
+			msg += `. Existing thread: vecnet send --thread <thr_ID> --hold "text" (or choose --wake/--wake-idle); addressed form: vecnet send <peer_ID> --thread <thr_ID> --hold "text"`
+		} else {
+			msg += "; display names are not addresses; use vecnet peers"
+		}
+	}
+	return usageErr(msg)
+}
+
+// Syntax only: never parse, normalize, increment or infer cursor epochs.
+func canonicalCursor(value string) bool {
+	if !strings.HasPrefix(value, "e") {
+		return false
+	}
+	epoch, sequence, ok := strings.Cut(value[1:], ".")
+	if !ok || epoch == "" || sequence == "" {
+		return false
+	}
+	for _, digits := range []string{epoch, sequence} {
+		for i := range digits {
+			if digits[i] < '0' || digits[i] > '9' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // readText returns text, or stdin when text is "-".
 func (a *app) readText(text string) (string, error) {
 	if text != "-" {
@@ -861,9 +1100,7 @@ func (a *app) readText(text string) (string, error) {
 }
 
 func (a *app) cmdSend(args []string) error {
-	o, err := parseFlags("send", args, mergeSpec(priorityFlags, map[string]flagKind{
-		"thread": strFlag, "reply-to": strFlag, "attach": multiFlag, "title": strFlag, "idempotency-key": strFlag,
-	}))
+	o, err := a.parseIDFlags("send", args)
 	if err != nil {
 		return err
 	}
@@ -889,9 +1126,7 @@ func (a *app) cmdSend(args []string) error {
 }
 
 func (a *app) cmdReply(args []string) error {
-	o, err := parseFlags("reply", args, mergeSpec(priorityFlags, map[string]flagKind{
-		"thread": strFlag, "attach": multiFlag, "idempotency-key": strFlag,
-	}))
+	o, err := a.parseIDFlags("reply", args)
 	if err != nil {
 		return err
 	}
@@ -912,6 +1147,9 @@ func (a *app) cmdReply(args []string) error {
 		if thread == "" {
 			return usageErr("unknown message id; pass --thread")
 		}
+	}
+	if err := checkArgumentID("reply thread", thread, ids.Thr); err != nil {
+		return err
 	}
 	req := envelope.SendRequest{Priority: prio, ThreadID: &thread, InReplyTo: &msgID}
 	return a.send(req, text, o)
@@ -934,7 +1172,7 @@ func reactPriority(o opts, emoji string) (string, error) {
 }
 
 func (a *app) cmdReact(args []string) error {
-	o, err := parseFlags("react", args, mergeSpec(priorityFlags, map[string]flagKind{"remove": boolFlag}))
+	o, err := a.parseIDFlags("react", args)
 	if err != nil {
 		return err
 	}
@@ -1282,7 +1520,7 @@ func oldestCursor(err error) (string, bool) {
 }
 
 func (a *app) cmdInbox(args []string) error {
-	o, err := parseFlags("inbox", args, map[string]flagKind{"since": strFlag, "ack": boolFlag, "limit": strFlag, "include-sender-chain": boolFlag})
+	o, err := a.parseIDFlags("inbox", args)
 	if err != nil {
 		return err
 	}
@@ -1377,7 +1615,7 @@ func (a *app) ack(c *client, cur string) error {
 }
 
 func (a *app) cmdAck(args []string) error {
-	o, err := parseFlags("ack", args, nil)
+	o, err := a.parseIDFlags("ack", args)
 	if err != nil {
 		return err
 	}
@@ -1459,7 +1697,7 @@ func limitQuery(o opts, q url.Values) error {
 }
 
 func (a *app) cmdThreads(args []string) error {
-	o, err := parseFlags("threads", args, map[string]flagKind{"limit": strFlag})
+	o, err := a.parseIDFlags("threads", args)
 	if err != nil {
 		return err
 	}
@@ -1495,7 +1733,7 @@ func (a *app) cmdThreads(args []string) error {
 }
 
 func (a *app) cmdThread(args []string) error {
-	o, err := parseFlags("thread", args, map[string]flagKind{"after": strFlag, "limit": strFlag})
+	o, err := a.parseIDFlags("thread", args)
 	if err != nil {
 		return err
 	}
@@ -1618,7 +1856,7 @@ func (a *app) cmdPeers(args []string) error {
 }
 
 func (a *app) cmdGroups(args []string) error {
-	o, err := parseFlags("groups", args, nil)
+	o, err := a.parseIDFlags("groups", args)
 	if err != nil {
 		return err
 	}
@@ -1699,7 +1937,7 @@ func (a *app) callQuery(method, path string, q url.Values, body, out any) error 
 // --- presence / receipt ---
 
 func (a *app) cmdPresence(args []string) error {
-	o, err := parseFlags("presence", args, map[string]flagKind{"note": strFlag})
+	o, err := a.parseIDFlags("presence", args)
 	if err != nil {
 		return err
 	}
@@ -1728,7 +1966,7 @@ func (a *app) cmdPresence(args []string) error {
 }
 
 func (a *app) cmdReceipt(args []string) error {
-	o, err := parseFlags("receipt", args, map[string]flagKind{"note": strFlag})
+	o, err := a.parseIDFlags("receipt", args)
 	if err != nil {
 		return err
 	}
@@ -2138,7 +2376,7 @@ func (a *app) teamList() error {
 }
 
 func (a *app) cmdDeadLetters(args []string) error {
-	o, err := parseFlags("dead-letters", args, nil)
+	o, err := a.parseIDFlags("dead-letters", args)
 	if err != nil {
 		return err
 	}

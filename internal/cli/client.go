@@ -51,7 +51,106 @@ type hubError struct {
 	Hint    string
 }
 
-func (e *hubError) Error() string { return e.Code + ": " + e.Message }
+func (e *hubError) Error() string { return e.format("") }
+
+// format projects only fixed public schema prose and recognized field paths.
+// Validator messages, rejected values and arbitrary Details properties may
+// carry credentials, URLs or terminal controls and are never presentation data.
+func (e *hubError) format(command string) string {
+	if e.Code != "invalid_body" {
+		return e.Code + ": " + e.Message
+	}
+	field, expected := invalidBodyField(e.Details)
+	if expected == "" {
+		help := "vecnet --help"
+		if _, known := idCommandFlags[command]; known {
+			help = "vecnet " + command + " --help"
+		}
+		expected = "request must match this command's schema; check " + help
+	} else {
+		expected = "expected " + expected
+	}
+	return "invalid_body: value does not satisfy the schema or hub constraint; " + field + "; " + expected
+}
+
+// invalidBodyField is a deliberately closed subset of the published schema
+// ($defs sendRequest, reactionRequest, attachmentReference and ID/cursor defs).
+// Validate the entire pointer before displaying it; never truncate a received
+// path to a safe-looking prefix. No allowed property contains RFC6901 escapes,
+// so escaped tokens cannot name one of these fields.
+func invalidBodyField(details map[string]any) (field, expected string) {
+	path, ok := details["path"].(string)
+	if !ok || len(path) > 256 || strings.Count(path, "/") > 16 {
+		return "field unavailable", ""
+	}
+	if path == "" {
+		return "field /", ""
+	}
+	exact := map[string]string{
+		"/recipients":   "array of 1 to 32 peer_, team_ or grp_ IDs",
+		"/thread_id":    "thr_ ID",
+		"/in_reply_to":  "msg_ ID",
+		"/as":           "peer_ ID",
+		"/message_id":   "msg_ ID",
+		"/delivery_id":  "dly_ ID",
+		"/cursor":       "eN.N cursor",
+		"/priority":     "wake, wake_idle or hold",
+		"/content":      "object containing text",
+		"/content/text": "text (at most 65536 characters)",
+		"/attachments":  "array of at most 16 attachment references",
+	}
+	if shape, known := exact[path]; known {
+		return "field " + path, shape
+	}
+	switch path {
+	case "/<unknown>", "/content/<unknown>", "/metadata/<unknown>":
+		return "field " + path, ""
+	}
+	parts := strings.Split(path, "/")
+	if len(parts) < 3 || parts[0] != "" || !diagnosticArrayIndex(parts[2]) {
+		return "field unavailable", ""
+	}
+	if parts[1] == "recipients" && len(parts) == 3 {
+		return "field " + path, "peer_, team_ or grp_ ID"
+	}
+	if parts[1] == "attachments" {
+		if len(parts) == 3 {
+			return "field " + path, "attachment reference"
+		}
+		if len(parts) == 4 {
+			if parts[3] == "<unknown>" {
+				return "field " + path, ""
+			}
+			shape, known := map[string]string{
+				"sha256":          "64 lowercase hexadecimal characters",
+				"size":            "integer byte count from 0 to 26214400 (R2 requires at least 1)",
+				"media_type":      "media type string (at most 128 characters)",
+				"name":            "name string (at most 255 characters)",
+				"origin_url":      "URI (at most 2048 characters)",
+				"blob_url":        "URI (at most 2048 characters)",
+				"blob_id":         "blo_ ID",
+				"retention_class": "1h, 6h, 12h, 1d, 7d, 30d or keep",
+				"expires_at":      "UTC timestamp, or null for keep",
+			}[parts[3]]
+			if known {
+				return "field " + path, shape
+			}
+		}
+	}
+	return "field unavailable", ""
+}
+
+func diagnosticArrayIndex(s string) bool {
+	if len(s) == 0 || len(s) > 10 || (len(s) > 1 && s[0] == '0') {
+		return false
+	}
+	for i := range s {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
 
 // netError is a transport failure talking to the hub: exit 3.
 type netError struct{ err error }
