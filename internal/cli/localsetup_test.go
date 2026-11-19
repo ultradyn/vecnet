@@ -17,6 +17,7 @@ import (
 )
 
 func TestAutomaticEnrollmentRetainsCredentialsAndRetriesWithoutToken(t *testing.T) {
+	localSetupPlainDirectoryGit(t)
 	home := localSetupHome(t)
 	project := t.TempDir()
 	t.Chdir(project)
@@ -85,6 +86,7 @@ func TestAutomaticEnrollmentDoesNotInferCodexThread(t *testing.T) {
 }
 
 func TestAllProjectRepairMigratesOtherCheckoutAndDefersMissing(t *testing.T) {
+	localSetupPlainDirectoryGit(t)
 	home := localSetupHome(t)
 	dirA := t.TempDir()
 	dirB := t.TempDir()
@@ -149,6 +151,7 @@ func TestLocalMaintenanceDoesNotRunForDeliveryChildrenOrStatus(t *testing.T) {
 }
 
 func TestAutomaticEnrollmentReadyUsesSavedRootAndPreservesGeneration(t *testing.T) {
+	localSetupPlainDirectoryGit(t)
 	f := newBindFixture(t)
 	if err := cliFixtureChmod(f.env["HOME"], 0700); err != nil {
 		t.Fatal(err)
@@ -199,13 +202,7 @@ func TestAutomaticEnrollmentReadyUsesSavedRootAndPreservesGeneration(t *testing.
 }
 
 func TestAutomaticEnrollmentCannotTransferOrRenewExpiredOwner(t *testing.T) {
-	// This plain project must give the hook guard Git's explicit non-repository
-	// answer. A missing git (empty PATH) would refuse setup before binding.
-	bin := t.TempDir()
-	cliFixtureProgram(t, bin, "git", "#!/bin/sh\nprintf 'fatal: not a git repository\\n' >&2\nexit 128\n", cliFixtureProgramSpec{Kind: "git-non-repository", Exit: 128})
-	t.Setenv("PATH", bin)
-	t.Setenv("NoDefaultCurrentDirectoryInExePath", "1")
-	t.Setenv("PATHEXT", ".EXE")
+	localSetupPlainDirectoryGit(t)
 	for _, expired := range []bool{false, true} {
 		t.Run(map[bool]string{false: "different-root", true: "expired"}[expired], func(t *testing.T) {
 			// Keep the listener outside the bubble and invoke its handler inline:
@@ -258,6 +255,7 @@ func TestAutomaticEnrollmentCannotTransferOrRenewExpiredOwner(t *testing.T) {
 }
 
 func TestAutomaticEnrollmentPersistsIntentBeforeConfigExists(t *testing.T) {
+	localSetupPlainDirectoryGit(t)
 	home := localSetupHome(t)
 	t.Chdir(t.TempDir())
 	codexHome := filepath.Join(home, "codex")
@@ -291,9 +289,7 @@ func TestEnrollmentRejectedInvitationIgnoresAmbientGit(t *testing.T) {
 
 // A rejected invitation must never authorize setup of a pre-existing profile.
 func TestEnrollmentRejectedInvitationCannotReplayOldCredential(t *testing.T) {
-	// This fixture uses a plain directory. Real Git identity has dedicated
-	// coverage; ambient Git startup must not consume the intent's real budget.
-	t.Setenv("PATH", t.TempDir())
+	localSetupPlainDirectoryGit(t)
 	f := newBindFixture(t)
 	if err := cliFixtureChmod(f.env["HOME"], 0700); err != nil {
 		t.Fatal(err)
@@ -337,6 +333,7 @@ func TestEnrollmentRejectedInvitationCannotReplayOldCredential(t *testing.T) {
 }
 
 func TestEnrollmentRequiresIntentPersistenceBeforeRedemption(t *testing.T) {
+	localSetupPlainDirectoryGit(t)
 	home := localSetupHome(t)
 	t.Chdir(t.TempDir())
 	codexHome := filepath.Join(home, "codex")
@@ -389,6 +386,7 @@ func commitEnrollmentFixture(t *testing.T, a *app, r *localEnrollment, caller st
 }
 
 func TestEnrollmentCommittedIntentRejectsCredentialReplacement(t *testing.T) {
+	localSetupPlainDirectoryGit(t)
 	for _, field := range []string{"secret", "hub", "peer", "marker", "live-caller"} {
 		t.Run(field, func(t *testing.T) {
 			f := newBindFixture(t)
@@ -464,6 +462,18 @@ func TestEnrollmentMissingThreadReportsUnsupportedWithoutRepairPromise(t *testin
 	}
 }
 
+// localSetupPlainDirectoryGit keeps plain-directory enrollment/repair fixtures
+// independent of ambient Git startup. Codex setup requires Git's explicit
+// non-repository response; a missing executable is an uncertain discovery.
+func localSetupPlainDirectoryGit(t *testing.T) {
+	t.Helper()
+	bin := t.TempDir()
+	cliFixtureProgram(t, bin, "git", "#!/bin/sh\nprintf 'fatal: not a git repository\\n' >&2\nexit 128\n", cliFixtureProgramSpec{Kind: "git-non-repository", Exit: 128})
+	t.Setenv("PATH", bin)
+	t.Setenv("NoDefaultCurrentDirectoryInExePath", "1")
+	t.Setenv("PATHEXT", ".EXE")
+}
+
 func localSetupHome(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
@@ -512,6 +522,7 @@ func enrollmentStatusRuntime(path string, done chan<- error, delay ...time.Durat
 }
 
 func TestAutomaticEnrollmentWaitsForNextConnectorStatus(t *testing.T) {
+	localSetupPlainDirectoryGit(t)
 	f := newBindFixture(t)
 	if err := cliFixtureChmod(f.env["HOME"], 0700); err != nil {
 		t.Fatal(err)
@@ -535,7 +546,17 @@ func TestAutomaticEnrollmentWaitsForNextConnectorStatus(t *testing.T) {
 	}
 }
 
+func TestEnrollmentFreshRecipientIgnoresAmbientGit(t *testing.T) {
+	tools := t.TempDir()
+	cliFixtureProgram(t, tools, "git", "#!/bin/sh\nexec /bin/sleep 5\n", cliFixtureProgramSpec{Kind: "git-timeout", Exit: 128})
+	t.Setenv("PATH", tools)
+	t.Setenv("PATHEXT", ".EXE")
+	t.Setenv("NoDefaultCurrentDirectoryInExePath", "1")
+	t.Run("slow-git", TestEnrollmentFreshRecipientConvergesWithConnectorStatus)
+}
+
 func TestEnrollmentFreshRecipientConvergesWithConnectorStatus(t *testing.T) {
+	localSetupPlainDirectoryGit(t)
 	home := localSetupHome(t)
 	project := t.TempDir()
 	t.Chdir(project)
@@ -595,6 +616,7 @@ func TestEnrollmentFreshRecipientConvergesWithConnectorStatus(t *testing.T) {
 }
 
 func TestEnrollmentInterruptedAfterConfigCommitResumesPreparedRecord(t *testing.T) {
+	localSetupPlainDirectoryGit(t)
 	f := newBindFixture(t)
 	if err := cliFixtureChmod(f.env["HOME"], 0700); err != nil {
 		t.Fatal(err)
@@ -656,6 +678,7 @@ func TestEnrollmentDurableSavePreservesOtherProfileMetadata(t *testing.T) {
 }
 
 func TestEnrollmentSupersededIntentDoesNotPreventLaterRepair(t *testing.T) {
+	localSetupPlainDirectoryGit(t)
 	f := newBindFixture(t)
 	if err := cliFixtureChmod(f.env["HOME"], 0700); err != nil {
 		t.Fatal(err)
