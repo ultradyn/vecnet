@@ -92,8 +92,10 @@ copies the source, checks private ownership and independent source-matching
 bytes, and runs the original real `--version` preparation with its 12s context.
 Only success publishes a path. Read-only packet fixtures validate and borrow
 that job image; they never remove it or fall back after an invalid path. Real
-installation admission and its 5s version probe still run. Cold admission and
-mutation cases retain independent never-executed copies. An `always()` step
+installation admission and its 5s version probe still run. Cold admission keeps
+an independent never-executed copy. Security mutation cases prepare their own
+independent mutable copy before valid setup; they never modify the job image.
+An `always()` step
 removes only the fixed fixture child of the native bundle, ignoring the published
 path as a cleanup target. Both new Windows-only steps retain the 53s owner and
 one-minute step deadline. This deduplicates preparation; the cause of the R35 ARM
