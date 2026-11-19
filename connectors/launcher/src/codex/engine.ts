@@ -5,7 +5,6 @@ import type { ChildProcess } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { statSync } from 'node:fs';
 import { join } from 'node:path';
-import { createInterface } from 'node:readline';
 import type { Clock, Log } from '../../../hub-client/src/ports.ts';
 import type { KeyValue } from '../backend.ts';
 import { planInput } from '../input-plan.ts';
@@ -13,6 +12,8 @@ import { redactingLog } from '../redact.ts';
 import { openCodexRpc, CodexRpcError } from './rpc.ts';
 import type { CodexRpc } from './rpc.ts';
 import { cliEnvironment, commandInvocation, terminateProcess, userHome } from '../../../hub-client/src/platform.ts';
+import { createWatchPool, spawnWatchChild } from '../delivery/watch-pool.ts';
+import type { WatchPool, WatchRequest } from '../delivery/watch-pool.ts';
 import type { RuntimeSnapshot } from './runtime-status.ts';
 import { buildThreadResume, buildThreadUnsubscribe, buildTurnStart, buildTurnSteer, buildTurnsPage, mapStatus, parseResumePolicy } from './protocol.ts';
 
@@ -33,6 +34,8 @@ export type Liveness = { live: true } | { live: false; reason: DormantReason };
 export interface EngineDeps {
   clock: Clock; log: Log; kv: KeyValue; vecnetBin: string; env: Record<string, string>;
   openRpc: typeof openCodexRpc; euid: number; debounceMs?: number; minGapMs?: number;
+  /** Shared notification-watch pool; engines without one get a private pool. */
+  watchPool?: WatchPool;
 }
 export interface Engine {
   start(): void; stop(): Promise<void>; state(): 'connecting' | 'ready' | 'unreachable' | 'refused_version';
@@ -59,7 +62,12 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
   if (b.configPath) env.VECNET_CONFIG = b.configPath;
   let ownershipChanged = !validOwner(owner) || !authorityPath(d.env);
   let rootVerified = false, watchVerified = false, authenticatedConfig: string | undefined;
-  let running = false, rpc: CodexRpc | undefined, watch: ChildProcess | undefined;
+  let running = false, rpc: CodexRpc | undefined, watchSub: (() => void) | undefined;
+  // A private pool keeps standalone engines self-contained; a shared pool lets
+  // verified identical streams reuse one notification child (delivery/watch-pool).
+  const ownsWatchPool = d.watchPool === undefined;
+  const watchPool = d.watchPool ?? createWatchPool({ log: d.log });
+  function stopWatch() { const release = watchSub; watchSub = undefined; release?.(); }
   let connectionState: ReturnType<Engine['state']> = 'connecting';
   let serverVersion: string | undefined;
   let status: unknown = { type: 'notLoaded' }, attached = false, archived = false, overLimit = false;
@@ -93,7 +101,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
   }
   const quarantined = new Set<string>();
   function quarantine(key: string) {
-    ownershipChanged = true; watch && terminateProcess(watch);
+    ownershipChanged = true; stopWatch();
     if (!quarantined.has(key)) { quarantined.add(key); log.warn('codex_recovery_quarantined', { threadId: b.threadId }); }
   }
   function parseRow(key: string): InflightRow | undefined {
@@ -224,7 +232,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
       const thread = obj(obj(result).thread);
       rootVerified = thread.id === owner.threadId && ['cli', 'vscode', 'exec', 'appServer'].includes(thread.source) && thread.parentThreadId == null;
       if (!rootVerified) {
-        watch && terminateProcess(watch); watchVerified = false;
+        stopWatch(); watchVerified = false;
         log.warn('codex_thread_source_unverified', { threadId: b.threadId });
       }
     }
@@ -651,7 +659,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
       r.attempt = randomBytes(16).toString('hex'); write(r);
       let guard;
       try { guard = await acquireGuard(d.vecnetBin, env, owner, r.claim, r.attempt, clock); }
-      catch { ownershipChanged = true; watch && terminateProcess(watch); log.warn('codex_binding_ownership_changed', { threadId: b.threadId }); return; }
+      catch { ownershipChanged = true; stopWatch(); log.warn('codex_binding_ownership_changed', { threadId: b.threadId }); return; }
       if (!running || !liveness().live || proofBlocksDelivery() || !guard.valid()) { await guard.finish('rejected'); await releaseInflight(r); return; }
       write(r);
       try {
@@ -744,7 +752,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     }
     historyRetry?.cancel(); historyRetry = undefined; historyRetryIndex = 0;
     if (!liveness().live || proofBlocksDelivery() || (action === 'steer' && (turn?.status !== 'inProgress' || typeof turn.id !== 'string'))) return;
-    if (!verifyOwner(env, owner, d.euid, clock.now())) { ownershipChanged = true; watch && terminateProcess(watch); return; }
+    if (!verifyOwner(env, owner, d.euid, clock.now())) { ownershipChanged = true; stopWatch(); return; }
     const nonce = randomBytes(12).toString('hex');
     kv.set('claiming:' + nonce, JSON.stringify({ owner, threadId: b.threadId, at: clock.now() }));
     let output: RecordValue;
@@ -759,11 +767,11 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     if (output.refused === 'identity_changed') {
       kv.set(identityKey, generation); identityChanged = true;
       kv.delete('claiming:' + nonce); await unsubscribe();
-      watch && terminateProcess(watch);
+      stopWatch();
       log.warn('codex_binding_identity_changed', { threadId: b.threadId }); return;
     }
     if (output.refused) {
-      ownershipChanged = true; kv.delete('claiming:' + nonce); watch && terminateProcess(watch); await unsubscribe(); return;
+      ownershipChanged = true; kv.delete('claiming:' + nonce); stopWatch(); await unsubscribe(); return;
     }
     if (!Array.isArray(output.deliveries) || !output.deliveries.every((id: unknown) => typeof id === 'string') ||
       !Array.isArray(output.entries ?? []) || (output.entries ?? []).some((e: unknown) => typeof obj(e).key !== 'string' || typeof obj(e).value !== 'string' || Buffer.byteLength(obj(e).value) > 1000)) {
@@ -785,7 +793,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
   }
   async function verifyAdmission(force = false) {
     if (!running || ownershipChanged || identityChanged || !rootVerified || clock.now() >= b.expiresAt) return;
-    if (!verifyOwner(env, owner, d.euid, clock.now())) { ownershipChanged = true; watch && terminateProcess(watch); return; }
+    if (!verifyOwner(env, owner, d.euid, clock.now())) { ownershipChanged = true; stopWatch(); return; }
     const signature = configSignature();
     if (!force && authenticatedConfig === signature) return;
     try {
@@ -793,7 +801,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
       if (result.verified !== true || signature !== configSignature()) throw new Error('ownership_unverified');
       authenticatedConfig = signature;
     } catch {
-      authenticatedConfig = undefined; watch && terminateProcess(watch);
+      authenticatedConfig = undefined; stopWatch();
       log.warn('codex_binding_auth_unverified', { threadId: b.threadId });
     }
   }
@@ -805,7 +813,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     // even the notification stream is started under this owner.
     if (rows().some(r => r.state !== 'pending') || ownershipChanged) return;
     if (!verifyOwner(env, owner, d.euid, clock.now())) {
-      ownershipChanged = true; watch && terminateProcess(watch);
+      ownershipChanged = true; stopWatch();
       log.warn('codex_binding_ownership_changed', { threadId: b.threadId });
       return;
     }
@@ -813,35 +821,33 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     startWatch();
   }
   function startWatch() {
-    if (!running || watch || !watchVerified || !rootVerified || ownershipChanged || identityChanged || clock.now() >= b.expiresAt) return;
+    if (!running || watchSub || !watchVerified || !rootVerified || ownershipChanged || identityChanged || clock.now() >= b.expiresAt) return;
     if (!verifyOwner(env, owner, d.euid, clock.now())) { ownershipChanged = true; return; }
     const invocation = commandInvocation([d.vecnetBin, ...baseArgs, 'watch', '--json'], env);
-    const child = spawn(invocation.file, invocation.args, { ...invocation, windowsHide: true, env, stdio: ['ignore', 'pipe', 'ignore'] });
-    watch = child;
-    // Set from the watch's own last line: it hit 401/403/204 (or another
-    // terminal 4xx) and will not reconnect (PROTOCOL §13.1).
-    let stoppedStatus: number | undefined;
-    const reader = createInterface({ input: child.stdout! });
-    reader.on('line', line => {
-      if (Buffer.byteLength(line) > 1_048_576) return;
-      try {
-        const event = obj(JSON.parse(line)), p = obj(obj(event.data).message).priority;
-        if (event.type === 'delivery' && (p === 'wake' || p === 'wake_idle')) arm();
-        const status = obj(event.data).status;
-        if (event.type === 'watch_stopped' && event.cursor === '' && Number.isInteger(status) && status >= 200 && status < 500) stoppedStatus = status;
-      } catch { /* The watch stream is a trigger, never turn input. */ }
-    });
-    child.on('error', () => { log.warn('codex_watch_unreachable', { threadId: b.threadId }); });
-    // 'close' follows the end of stdout, so the stop line has been read.
-    child.once('close', () => {
-      reader.close();
-      if (watch === child) watch = undefined;
+    // The bounded CLI check proves only the pinned hub and caller; it returns
+    // no pinned hub key or verified stream tuple, so the stream this command
+    // opens stays unproved. The scope discriminator below therefore stays
+    // exclusive to this binding until a CLI check returns the actual pinned
+    // hub identity, caller and stream scope. Never widen it (or change which
+    // stream this binding's invocation opens) just to increase reuse.
+    const request: WatchRequest = {
+      scope: {
+        hubIdentity: b.hub, endpoint: b.hub, streamOwner: b.caller, credentialSlot: configPath ?? 'unlocatable',
+        scope: 'exclusive:' + JSON.stringify([b.profile, b.as ?? null, b.caller, b.codexHome, b.threadId, b.generation ?? null, b.origin]),
+      },
+      revision: configSignature(),
+      start: () => spawnWatchChild({ command: invocation, env, log, context: { threadId: b.threadId } }),
+    };
+    watchSub = watchPool.subscribe(request, () => arm(), end => {
+      watchSub = undefined;
       if (!running || ownershipChanged || identityChanged || !rootVerified || authenticatedConfig === undefined) return;
-      if (stoppedStatus !== undefined) {
-        // Respawning would only repeat the refused request every second.
-        // Resume on a credential/config change or a binding renewal.
+      if (end.kind === 'terminal') {
+        // The watch's own last line: it hit 401/403/204 (or another terminal
+        // 4xx) and will not reconnect. Respawning would only repeat the
+        // refused request every second; resume on a credential/config change
+        // or a binding renewal (PROTOCOL §13.1).
         watchStopped = { config: configSignature(), expiresAt: b.expiresAt };
-        log.warn('codex_watch_stopped', { threadId: b.threadId, status: stoppedStatus });
+        log.warn('codex_watch_stopped', { threadId: b.threadId, status: end.status });
         return;
       }
       const timer = clock.timer(1000, () => { watchRetry = undefined; enqueue(verifyWatch); }); watchRetry = timer;
@@ -850,7 +856,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
   let watchRetry: { cancel(): void } | undefined;
   let watchStopped: { config: string; expiresAt: number } | undefined;
   function resumeWatch() {
-    if (!running || !watchStopped || watch || watchRetry) return;
+    if (!running || !watchStopped || watchSub || watchRetry) return;
     if (configSignature() === watchStopped.config && b.expiresAt === watchStopped.expiresAt) return;
     watchStopped = undefined;
     log.info('codex_watch_resumed', { threadId: b.threadId });
@@ -880,12 +886,15 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
       settlementRetry?.cancel(); settlementRetry = undefined; settlementRetryIndex = 0;
       // close() rejects the pending status RPC before stop drains the lane.
       completionProbe?.close();
-      const child = watch; watch = undefined;
-      const exits = [...children, ...(child ? [child] : [])].map(c => new Promise<void>(resolve => {
+      stopWatch();
+      const exits = [...children].map(c => new Promise<void>(resolve => {
         if (c.exitCode !== null || c.signalCode !== null) { resolve(); return; }
         c.once('close', () => resolve()); terminateProcess(c);
       }));
       await queue; await Promise.all(exits); receiptClears.clear();
+      // A private pool is drained here; a shared pool is drained by its owner
+      // after every engine has stopped, before the host releases the lease.
+      if (ownsWatchPool) await watchPool.close();
       // Drain the killed claim before releasing its nonce: Go may still be
       // committing it. Keep accepted/ambiguous inflight rows for recovery.
       await recoverClaims();

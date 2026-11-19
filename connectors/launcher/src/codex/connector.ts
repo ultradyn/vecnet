@@ -12,6 +12,8 @@ import { bindingFingerprint, parseBinding, readBindings, threadKey } from './con
 import type { FileState } from './connector-authority.ts';
 import { createStatusPublisher, openStatusPublisher } from './connector-status.ts';
 import type { DeliveryLease, StatusPublisher } from './connector-status.ts';
+import { createWatchPool } from '../delivery/watch-pool.ts';
+import type { WatchPool } from '../delivery/watch-pool.ts';
 import { createRuntimeStatusReporter, runtimeStatusPost } from './runtime-status.ts';
 import type { RuntimeStatusPost } from './runtime-status.ts';
 import { userHome } from '../../../hub-client/src/platform.ts';
@@ -211,12 +213,16 @@ const fingerprint = (b: Binding) => b.origin + ':' + bindingFingerprint(b);
  * Launcher registrations supply lifecycle callbacks, never delivery authority. */
 export function startCodexConnector(o: {
   kv?: KeyValue; clock: Clock; log: Log; env: NodeJS.ProcessEnv; openRpc?: typeof openCodexRpc; postRuntimeStatus?: RuntimeStatusPost;
+  /** Owned by the delivery host when hosted; a standalone connector drains its own. */
+  watchPool?: WatchPool;
 } & ({ lease?: undefined; authority?: never } | { lease: DeliveryLease; authority: CodexAuthority }) & { leaseLost?: AbortSignal }): CodexConnector {
   const log = redactingLog(o.log), { clock } = o;
   const euid = process.geteuid?.() ?? -1;
   const recoveryEnv = { ...o.env };
   const env = Object.fromEntries(Object.entries(o.env).filter((e): e is [string, string] => typeof e[1] === 'string'));
   const reporter = createRuntimeStatusReporter({ clock, log, post: o.postRuntimeStatus ?? runtimeStatusPost(o.env.VECNET_BIN || 'vecnet', env) });
+  // One notification pool per host: engines subscribe, the owner drains it.
+  const watchPool = o.watchPool ?? createWatchPool({ log });
   const path = o.authority?.bindings ?? codexBindingsPath(o.env), limit = codexMaxBindings(o.env);
   // Identity of the elected state directory, captured at election. Pathname
   // reads must never be satisfied by a moved-and-replaced directory while the
@@ -245,7 +251,7 @@ export function startCodexConnector(o: {
   }
   function launch(b: Binding, over: boolean): Entry {
     const engine = createEngine(b, { clock, log: o.log, kv: recovery!.kv, vecnetBin: o.env.VECNET_BIN || 'vecnet',
-      env, openRpc: o.openRpc ?? openCodexRpc, euid });
+      env, openRpc: o.openRpc ?? openCodexRpc, euid, watchPool });
     engine.setOverLimit(over);
     engine.start();
     return { binding: b, engine, print: fingerprint(b), over, expired: clock.now() >= b.expiresAt };
@@ -366,6 +372,9 @@ export function startCodexConnector(o: {
       // Keep the singleton on normal shutdown while bounded offline reports run.
       await reporter.stop();
       await Promise.allSettled([...entries.keys()].map(retire));
+      // Retired engines have detached; the shared children exit before the
+      // caller (host) can release the delivery lease.
+      await watchPool.close();
       await lostCleanup;
       try { recovery?.close(); }
       finally { recovery = undefined; await publisher?.close(); publisher = undefined; }

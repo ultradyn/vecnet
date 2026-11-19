@@ -4,6 +4,8 @@ import { CODEX_RELOAD_MS, codexAuthorityLocation, codexRecoveryPath, isCurrentCo
 import type { CodexConnector, CodexConnectorOutcome } from '../codex/connector.ts';
 import { openDeliveryLease } from '../codex/connector-status.ts';
 import type { DeliveryLease } from '../codex/connector-status.ts';
+import { createWatchPool } from './watch-pool.ts';
+import type { WatchPool } from './watch-pool.ts';
 
 export type DeliveryHost = CodexConnector;
 export interface HostedAdapter {
@@ -19,6 +21,8 @@ export interface DeliveryHostOptions {
   openLease?: typeof openDeliveryLease;
   startCodex?: typeof startCodexConnector;
   auxiliary?: () => HostedAdapter;
+  /** Notification-watch pool owned by this host; defaults to a fresh pool. */
+  watchPool?: WatchPool;
 }
 
 /** Both service entrypoints elect here, and only the host releases the lease. */
@@ -29,6 +33,9 @@ export function startDeliveryHost(o: DeliveryHostOptions): DeliveryHost {
   // The elected location is fixed for the host's lifetime; only its registry
   // leaf is revalidated, so a repairable refusal retries at the same place.
   const location = codexAuthorityLocation(env), euid = process.geteuid?.() ?? -1;
+  // The host owns the notification pool: engines subscribe to it, and it is
+  // drained (children exited) before the lease is released.
+  const watchPool = o.watchPool ?? createWatchPool({ log });
   const leaseLost = new AbortController();
   let markStopped!: (outcome: CodexConnectorOutcome) => void;
   const finished = new Promise<CodexConnectorOutcome>(resolve => { markStopped = resolve; });
@@ -76,7 +83,7 @@ export function startDeliveryHost(o: DeliveryHostOptions): DeliveryHost {
       return;
     }
     codex = (o.startCodex ?? startCodexConnector)({
-      env, clock, log, kv, lease, leaseLost: leaseLost.signal, authority: location,
+      env, clock, log, kv, lease, leaseLost: leaseLost.signal, authority: location, watchPool,
     });
     void codex.stopped.then(outcome => { if (outcome.reason === 'status_lock_lost') onLost(); });
     if (stopping) return;
@@ -116,6 +123,8 @@ export function startDeliveryHost(o: DeliveryHostOptions): DeliveryHost {
         ]);
         if (codexResult.status === 'rejected') throw codexResult.reason;
       } finally {
+        // Owned children exit before the lease can be released to another host.
+        await watchPool.close().catch(() => { log.warn('delivery_watch_pool_close_failed'); });
         try { await lease?.close(); }
         finally { markStopped({ reason: leaseLost.signal.aborted ? 'status_lock_lost' : 'stopped' }); }
       }
