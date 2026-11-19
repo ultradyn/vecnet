@@ -128,28 +128,35 @@ export async function runScenario(p) {
   finally {
     try { await p.cleanup(ownedThread, busy); cleanTrace(p.events); } catch { reason ??= 'local_cleanup_failed'; }
     try {
-      let rows = journal.peers.some(p => p.attempted) ? await listPeers() : [];
+      const attempted = journal.peers.filter(p => p.attempted);
+      // Listing availability must not gate disabling already journaled owned IDs.
+      let rows;
+      try { rows = attempted.length ? await listPeers() : []; } catch { /* Verification below remains mandatory. */ }
       let disableFailed = false;
-      for (const peer of journal.peers.filter(p => p.attempted)) {
+      for (const peer of attempted) {
         try {
-          const matching = rows.filter(row => row.name === peer.name);
-          // A response-lost creation may resolve to zero (not created), never retry.
-          requireThat(matching.length <= 1 && (!peer.id || matching[0]?.peer_id === peer.id), 'cleanup_identity_mismatch');
-          if (!matching.length) continue;
-          peer.id = matching[0].peer_id; peer.disabling = true; await save();
+          if (!peer.id) {
+            const matching = (rows ?? []).filter(row => row.name === peer.name);
+            requireThat(matching.length <= 1, 'cleanup_identity_mismatch');
+            if (!matching.length) continue; // Unknown creation remains unresolved, never absent.
+            requireThat(typeof matching[0].peer_id === 'string', 'cleanup_identity_mismatch');
+            peer.id = matching[0].peer_id;
+          }
+          peer.disabling = true; await save();
           await p.api('POST', `/v1/admin/peers/${encodeURIComponent(peer.id)}/disable`, 'operator');
         } catch { disableFailed = true; }
       }
-      rows = journal.peers.some(p => p.attempted) ? await listPeers() : [];
-      requireThat(journal.peers.filter(p => p.attempted).every(p => {
+      rows = attempted.length ? await listPeers() : [];
+      requireThat(attempted.every(p => {
         const matches = rows.filter(row => row.name === p.name);
-        return p.id ? matches.length === 1 && matches[0].peer_id === p.id && matches[0].disabled === true : matches.length === 0;
+        return p.id && matches.length === 1 && matches[0].peer_id === p.id && matches[0].disabled === true;
       }), 'peer_disable_unverified');
       peersVerified = true;
       requireThat(!disableFailed, 'peer_disable_action_failed');
     } catch { reason ??= 'peer_cleanup_failed'; }
     try { await p.finish(peersVerified); } catch { reason ??= 'secret_cleanup_failed'; }
   }
+  if (p.interrupted?.()) reason = 'interrupted';
   return { pass: !reason, ...(reason ? { reason } : {}), checks };
 }
 
@@ -262,6 +269,42 @@ function observer(ws, abort, commandStarted, completed) {
     close() { rejectAll(); ws.close(); } };
 }
 
+// Detached groups may outlive their leaders. Only this spawned session/group,
+// same-uid members with this run's private HOME authorize a group signal.
+async function stopOwnedGroup(group, home) {
+  if (!group) return;
+  const members = async () => {
+    const found = [];
+    for (const name of await readdir('/proc')) {
+      if (!/^\d+$/.test(name)) continue;
+      try {
+        const path = '/proc/' + name, raw = await readFile(join(path, 'stat'), 'utf8');
+        const fields = raw.slice(raw.lastIndexOf(')') + 2).split(' ');
+        if (Number(fields[2]) !== group || ['Z', 'X'].includes(fields[0])) continue;
+        requireThat(Number(fields[3]) === group && (await stat(path)).uid === process.geteuid(), 'child_group_identity_mismatch');
+        requireThat((await readFile(join(path, 'environ'), 'utf8')).split('\0').includes('HOME=' + home), 'child_group_identity_mismatch');
+        found.push({ pid: Number(name), start: fields[19] });
+      } catch (e) { if (!['ENOENT', 'ESRCH'].includes(e.code)) throw e; }
+    }
+    return found;
+  };
+  const signal = async kind => {
+    const owned = await members();
+    if (!owned.length) return;
+    // Recheck start identities immediately before signalling the owned group.
+    const current = await members();
+    requireThat(current.every(p => owned.some(o => o.pid === p.pid && o.start === p.start)), 'child_group_identity_changed');
+    if (current.length) try { process.kill(-group, kind); } catch (e) { if (e.code !== 'ESRCH') throw e; }
+  };
+  await signal('SIGTERM');
+  const end = Date.now() + 3000;
+  while ((await members()).length && Date.now() < end) await new Promise(r => setTimeout(r, 40));
+  if ((await members()).length) await signal('SIGKILL');
+  const killed = Date.now() + 1000;
+  while ((await members()).length && Date.now() < killed) await new Promise(r => setTimeout(r, 20));
+  requireThat((await members()).length === 0, 'child_group_survived');
+}
+
 export async function livePorts(inputs) {
   const root = await mkdtemp(join(tmpdir(), 'vn-busy-')); await chmod(root, 0o700);
   const env = childEnvironment(root, inputs.bin, `${dirname(inputs.node)}:${dirname(inputs.codex)}:/usr/local/bin:/usr/bin:/bin`);
@@ -271,11 +314,12 @@ export async function livePorts(inputs) {
     await privateWrite(join(env.CODEX_HOME, 'config.toml'), await readFile(inputs.provider));
     await privateWrite(join(root, 'cleanup-auth.json'), JSON.stringify(inputs.auth));
   } catch { await rm(root, { recursive: true, force: true }); throw new SmokeFailure('private_preparation_failed'); }
-  const abort = new AbortController(), events = [], children = [], commands = new Set(), completed = new Set();
+  const abort = new AbortController(), events = [], children = [], ownedChildren = [], commands = new Set(), completed = new Set();
   const evidence = { installedVersion: inputs.manifest.version, before: inputs.before, children, events, phases: 0 };
   let rpc, tap, delivery, daemonAttempted = false, rendezvous, originalTarget, target, linkIdentity, linked = false, cleaning = false, launchedAt = 0;
-  const signal = () => { abort.abort(); evidence.interrupted = true; };
-  process.once('SIGINT', signal); process.once('SIGTERM', signal);
+  const interruptedResult = result => { if (abort.signal.aborted) { result.pass = false; result.reason = 'interrupted'; } };
+  const signal = () => { evidence.interrupted = true; abort.abort(); if (evidence.result) interruptedResult(evidence.result); };
+  process.on('SIGINT', signal); process.on('SIGTERM', signal);
   const persist = () => privateWrite(join(root, 'evidence.json'), JSON.stringify(evidence, null, 2));
   const sleep = ms => new Promise((resolve, reject) => {
     if (abort.signal.aborted && !cleaning) { reject(new SmokeFailure('interrupted')); return; }
@@ -304,14 +348,20 @@ export async function livePorts(inputs) {
       done.then(r => { clearTimeout(timer); resolve(r); }, e => { clearTimeout(timer); reject(e); });
     });
     if (!persistent) timer = setTimeout(() => kill('SIGKILL'), 25000);
-    return { c, done: persistent ? done : boundedDone(27000), kill, async stop() { kill('SIGTERM'); const t = setTimeout(() => kill('SIGKILL'), 3000); try { await boundedDone(5000); } finally { clearTimeout(t); } } };
+    let stopped = false;
+    const owned = { c, done: persistent ? done : boundedDone(27000), kill, async stop() {
+      if (stopped) return;
+      await stopOwnedGroup(c.pid, env.HOME);
+      await boundedDone(1000); stopped = true;
+    } };
+    ownedChildren.push(owned); return owned;
   }
   const run = async (command, args, input) => {
     const owned = child(command, args, input);
     const interrupted = () => owned.kill('SIGTERM');
     if (!cleaning) abort.signal.addEventListener('abort', interrupted, { once: true });
     try { const r = await owned.done; requireThat(r.code === 0 && !r.tooLarge, 'child_command_failed'); return r.stdout; }
-    finally { abort.signal.removeEventListener('abort', interrupted); }
+    finally { abort.signal.removeEventListener('abort', interrupted); await owned.stop(); }
   };
   const cli = (...args) => run(inputs.bin, ['--net', 'busy', '--json', ...args]);
   const modules = {};
@@ -350,7 +400,7 @@ export async function livePorts(inputs) {
     return found;
   }
   const p = {
-    root, cwd, releaseFile, events, now: Date.now, nonce: () => randomBytes(16).toString('hex'), sleep,
+    root, cwd, releaseFile, events, interrupted: () => abort.signal.aborted, now: Date.now, nonce: () => randomBytes(16).toString('hex'), sleep,
     journal: j => privateWrite(join(root, 'cleanup-journal.json'), JSON.stringify(j, null, 2)),
     async api(method, path, auth, body) {
       requireThat(cleaning || !abort.signal.aborted, 'interrupted');
@@ -442,7 +492,7 @@ export async function livePorts(inputs) {
       // Finish the proof trace while clients are connected, before archival can
       // cause connector disconnects. A separate observer performs cleanup only.
       await attempt(closeTap);
-      if (delivery) await attempt(() => delivery.stop());
+      for (const owned of ownedChildren) await attempt(() => owned.stop());
       rpc?.close(); rpc = undefined;
       if (thread && target) {
         await attempt(async () => {
@@ -487,18 +537,30 @@ export async function livePorts(inputs) {
       await persist(); requireThat(errors.length === 0, 'local_cleanup_failed');
     },
     async finish(verified) {
-      try {
-        evidence.peersDisabledVerified = verified;
-        if (verified) {
-          for (const path of [join(root, 'cleanup-auth.json'), join(env.CODEX_HOME, 'config.toml'), env.VECNET_CONFIG]) await rm(path, { force: true });
-          // Native provider/profile caches remain private during the run; remove
-          // them after remote authority is verified disabled, retaining evidence.
-          if (!evidence.localCleanupFailed) for (const path of [env.HOME, env.XDG_CONFIG_HOME, env.XDG_CACHE_HOME, env.XDG_DATA_HOME, env.TMPDIR]) await rm(path, { recursive: true, force: true });
-        }
-        await persist();
-      } finally { process.removeListener('SIGINT', signal); process.removeListener('SIGTERM', signal); }
+      evidence.peersDisabledVerified = verified;
+      if (verified) {
+        for (const path of [join(root, 'cleanup-auth.json'), join(env.CODEX_HOME, 'config.toml'), env.VECNET_CONFIG]) await rm(path, { force: true });
+        // Native provider/profile caches remain private during the run; remove
+        // them after remote authority is verified disabled, retaining evidence.
+        if (!evidence.localCleanupFailed) for (const path of [env.HOME, env.XDG_CONFIG_HOME, env.XDG_CACHE_HOME, env.XDG_DATA_HOME, env.TMPDIR]) await rm(path, { recursive: true, force: true });
+      }
+      await persist();
     },
-    record: async result => { evidence.result = result; await persist(); },
+    async record(result) {
+      evidence.result = result; interruptedResult(result);
+      const wasPassing = result.pass;
+      await persist();
+      // A signal can arrive after serialization but before the durable rename.
+      if (wasPassing && abort.signal.aborted) { interruptedResult(result); await persist(); }
+    },
+    async report(result) {
+      await p.record(result);
+      // Keep the latch and durable verdict aligned through the reporting boundary.
+      if (abort.signal.aborted) await p.record(result);
+      if (result.pass) console.log(`PASS: installed busy Fly acceptance; evidence ${root}`);
+      else { console.error(`FAIL: ${result.reason}; evidence ${root}`); process.exitCode = 1; }
+    },
+    dispose() { process.removeListener('SIGINT', signal); process.removeListener('SIGTERM', signal); },
   };
   const began = Date.now();
   return p;
@@ -510,11 +572,9 @@ export async function main(argv = process.argv.slice(2), input = process.env) {
   try {
     const validated = await validateInputs(input);
     p = await livePorts(validated);
-    const result = await runScenario(p); await p.record(result);
-    if (result.pass) console.log(`PASS: installed busy Fly acceptance; evidence ${p.root}`);
-    else { console.error(`FAIL: ${result.reason}; evidence ${p.root}`); process.exitCode = 1; }
+    await p.report(await runScenario(p));
   } catch (error) {
     console.error(`FAIL: ${error instanceof SmokeFailure ? error.message : 'preflight_failed'}; evidence ${p?.root ?? 'not-created'}`); process.exitCode = 1;
-  }
+  } finally { p?.dispose(); }
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) await main();

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, readlink, rm, stat, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -204,7 +204,7 @@ test('private installed inputs are copied with safe modes; byte drift and unsafe
     await chmod(auth, 0o600);
     await write(auth, JSON.stringify({ hub: 'http://fixture.invalid', operatorSecret: 'fixture-secret' }));
     await assert.rejects(() => validateInputs(input), /auth_input_invalid/);
-  } finally { await p?.finish(true); if (p) await rm(p.root, { recursive: true, force: true }); await rm(root, { recursive: true, force: true }); }
+  } finally { await p?.finish(true); p?.dispose(); if (p) await rm(p.root, { recursive: true, force: true }); await rm(root, { recursive: true, force: true }); }
 });
 
 test('rendezvous restoration preserves a replacement and restores only the unchanged owned symlink', async () => {
@@ -218,4 +218,174 @@ test('rendezvous restoration preserves a replacement and restores only the uncha
     await assert.rejects(() => restoreOwnedRendezvous(link, '/owned-relay', '/original', second), /rendezvous_changed/);
     assert.equal(await readlink(link), '/unrelated');
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+
+for (const phase of ['cleanup', 'verification', 'finish']) test(`interruption during ${phase} latches failure while cleanup continues`, async () => {
+  const f = fixture(); let interrupted = false;
+  f.p.interrupted = () => interrupted;
+  const cleanup = f.p.cleanup, api = f.p.api, finish = f.p.finish;
+  f.p.cleanup = async (...args) => { await cleanup(...args); if (phase === 'cleanup') interrupted = true; };
+  f.p.api = async (...args) => {
+    const response = await api(...args);
+    if (phase === 'verification' && args[0] === 'GET' && f.actions.some(a => a.endsWith('/disable'))) interrupted = true;
+    return response;
+  };
+  f.p.finish = async verified => { await finish(verified); if (phase === 'finish') interrupted = true; };
+  const result = await runScenario(f.p);
+  assert.equal(result.pass, false);
+  assert.equal(result.reason, 'interrupted');
+  assert.equal(f.actions.filter(a => a.endsWith('/disable')).length, 2);
+  assert.ok(f.peers.slice(1).every(p => p.disabled));
+  assert.equal(f.actions.at(-1), 'deleted-secrets');
+});
+
+async function localPorts() {
+  const inputRoot = await mkdtemp(join(tmpdir(), 'busy-local-'));
+  const provider = join(inputRoot, 'provider');
+  await writeFile(provider, 'model = "local-fixture"\n', { mode: 0o600 });
+  const identity = { fixture: true };
+  const p = await livePorts({ provider, node: process.execPath, codex: process.execPath, bin: process.execPath,
+    entry: join(inputRoot, 'leader.mjs'), manifest: { version: 'v0.0.0' }, auth: { hub: 'https://fixture.invalid', operatorSecret: 'fake' },
+    before: identity, identity: async () => identity });
+  return { p, inputRoot, async close() { p.dispose?.(); await p.finish(false); p.dispose?.(); await rm(p.root, { recursive: true, force: true }); await rm(inputRoot, { recursive: true, force: true }); } };
+}
+
+for (const signal of ['SIGINT', 'SIGTERM']) test(`production ${signal} handler survives finish and corrects persisted success`, async () => {
+  const f = await localPorts();
+  try {
+    await f.p.cleanup(); await f.p.finish(true);
+    process.emit(signal);
+    const result = { pass: true, checks: [] };
+    await f.p.record(result);
+    const evidence = JSON.parse(await readFile(join(f.p.root, 'evidence.json'), 'utf8'));
+    assert.equal(evidence.interrupted, true);
+    assert.equal(evidence.result.pass, false);
+    assert.equal(evidence.result.reason, 'interrupted');
+  } finally { await f.close(); }
+});
+
+test('unknown creation retains intent and authority when empty listings precede a delayed commit', async () => {
+  const f = fixture(), api = f.p.api, local = await localPorts();
+  let delayed;
+  try {
+    const journal = f.p.journal, finish = f.p.finish;
+    f.p.journal = async j => { await journal(j); await local.p.journal(j); };
+    f.p.cleanup = () => local.p.cleanup();
+    f.p.finish = async verified => { await local.p.finish(verified); await finish(verified); };
+    f.p.api = async (...args) => {
+      if (args[0] === 'POST' && args[1] === '/v1/admin/peers') {
+        await api(...args); delayed = f.peers.pop(); throw Error('request outcome unknown');
+      }
+      return api(...args);
+    };
+    const result = await runScenario(f.p);
+    f.peers.push(delayed); // The server commits only AFTER both bounded cleanup listings.
+    assert.equal(result.pass, false);
+    assert.equal(f.actions.filter(a => a === 'POST /v1/admin/peers').length, 1);
+    assert.equal(f.actions.at(-1), 'retained-secrets');
+    const durable = JSON.parse(await readFile(join(local.p.root, 'cleanup-journal.json'), 'utf8'));
+    assert.ok(durable.peers.some(p => p.attempted && p.name === delayed.name && !p.id));
+    assert.equal((await stat(join(local.p.root, 'cleanup-auth.json'))).mode & 0o777, 0o600);
+    assert.equal(await readFile(join(local.p.root, 'home/.codex/config.toml'), 'utf8'), 'model = "local-fixture"\n');
+    assert.equal(delayed.disabled, false);
+  } finally { await local.close(); }
+});
+
+for (const failure of ['initial', 'all']) test(`known peers are independently disabled despite ${failure} cleanup listing failure`, async () => {
+  const f = fixture(), api = f.p.api; let cleaning = false, gets = 0;
+  f.p.cleanup = async () => { cleaning = true; f.actions.push('cleanup'); };
+  f.p.api = async (...args) => {
+    if (cleaning && args[0] === 'GET' && (++gets === 1 || failure === 'all')) throw Error('listing unavailable');
+    return api(...args);
+  };
+  const result = await runScenario(f.p);
+  assert.equal(f.actions.filter(a => a.endsWith('/disable')).length, 2);
+  assert.ok(f.peers.slice(1).every(p => p.disabled));
+  assert.equal(f.peers[0].disabled, false);
+  assert.equal(result.pass, failure === 'initial', result.reason);
+  assert.equal(f.actions.at(-1), failure === 'initial' ? 'deleted-secrets' : 'retained-secrets');
+});
+
+async function activeProcess(pid) {
+  try { const s = await readFile(`/proc/${pid}/stat`, 'utf8'); return !['Z', 'X'].includes(s.slice(s.lastIndexOf(')') + 2).split(' ')[0]); }
+  catch (e) { if (e.code === 'ENOENT') return false; throw e; }
+}
+async function until(fn) {
+  const end = Date.now() + 4000;
+  while (Date.now() < end) { if (await fn()) return; await new Promise(r => setTimeout(r, 20)); }
+  assert.fail('local fixture deadline');
+}
+
+test('owned group teardown kills a descendant without CODEX_HOME after early leader exit and preserves another group', async () => {
+  const f = await localPorts(); let leader, descendant, unrelated;
+  try {
+    const entry = join(f.inputRoot, 'leader.mjs'), pidFile = join(f.p.cwd, 'descendant.pid');
+    await writeFile(entry, `import { spawn } from 'node:child_process';
+const env = { ...process.env }; delete env.CODEX_HOME;
+const c = spawn(process.execPath, ['-e', "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"], { env, stdio: 'ignore' });
+await import('node:fs/promises').then(fs => fs.writeFile('descendant.pid', String(c.pid))); c.unref();`);
+    unrelated = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore', env: { HOME: join(f.p.root, 'home') } });
+    await f.p.launch();
+    await until(async () => { try { descendant = Number(await readFile(pidFile, 'utf8')); return descendant > 0; } catch { return false; } });
+    leader = JSON.parse(await readFile(join(f.p.root, 'evidence.json'), 'utf8')).children[0].pid;
+    await until(async () => !await activeProcess(leader));
+    assert.equal(await activeProcess(descendant), true);
+    assert.ok(!(await readFile(`/proc/${descendant}/environ`, 'utf8')).split('\0').some(v => v.startsWith('CODEX_HOME=')));
+    await f.p.cleanup();
+    assert.equal(await activeProcess(descendant), false, 'owned descendant survived leader exit');
+    assert.equal(await activeProcess(unrelated.pid), true, 'unrelated group was signalled');
+  } finally {
+    if (leader) { try { process.kill(-leader, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; } }
+    if (unrelated) { try { process.kill(-unrelated.pid, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; } await new Promise(r => unrelated.exitCode !== null || unrelated.signalCode !== null ? r() : unrelated.once('close', r)); }
+    await f.close();
+  }
+});
+
+
+test('interruption after evidence serialization is durably rewritten as failure', async () => {
+  const f = await localPorts();
+  try {
+    await f.p.cleanup(); await f.p.finish(true);
+    const result = { pass: true, checks: [] }, recording = f.p.record(result);
+    process.emit('SIGTERM'); // record has serialized PASS and is awaiting its file write.
+    await recording;
+    const evidence = JSON.parse(await readFile(join(f.p.root, 'evidence.json'), 'utf8'));
+    assert.equal(evidence.interrupted, true);
+    assert.equal(evidence.result.pass, false);
+    assert.equal(evidence.result.reason, 'interrupted');
+  } finally { await f.close(); }
+});
+
+for (const signal of ['SIGINT', 'SIGTERM']) test(`production reporting rejects repeated OS ${signal} after record completes`, () => {
+  const source = `
+    import { livePorts } from ${JSON.stringify(new URL('./codex-busy-fly-smoke.mjs', import.meta.url).href)};
+    import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
+    import { join } from 'node:path'; import { tmpdir } from 'node:os';
+    const f = await (${localPorts.toString()})();
+    try {
+      await f.p.cleanup(); await f.p.finish(true);
+      const record = f.p.record; let fired = false;
+      f.p.record = async result => {
+        await record(result);
+        if (!fired) {
+          fired = true;
+          for (let i = 0; i < 2; i++) { process.kill(process.pid, '${signal}'); await new Promise(r => setTimeout(r, 20)); }
+        }
+      };
+      await f.p.report({ pass: true, checks: [] });
+      const e = JSON.parse(await readFile(join(f.p.root, 'evidence.json'), 'utf8'));
+      console.log(JSON.stringify({ interrupted: e.interrupted, result: e.result }));
+    } finally { await f.close(); }
+  `;
+  const r = spawnSync(process.execPath, ['--input-type=module', '-e', source], { encoding: 'utf8', timeout: 5000,
+    env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: tmpdir() } });
+  assert.equal(r.status, 1, r.stderr);
+  assert.equal(r.signal, null);
+  assert.doesNotMatch(r.stdout, /PASS/);
+  assert.match(r.stderr, /FAIL: interrupted/);
+  const evidence = JSON.parse(r.stdout.trim());
+  assert.equal(evidence.interrupted, true);
+  assert.equal(evidence.result.pass, false);
+  assert.equal(evidence.result.reason, 'interrupted');
 });
