@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -49,6 +49,8 @@ async function publication(t, { uploadMs = 0, lookup = () => response(404), uplo
   const uploads = [], lookups = [], waits = [];
   const options = {
     cwd, now: () => elapsed,
+    source: '1234567890abcdef1234567890abcdef12345678',
+    output: path.join(cwd, 'github-output'), summary: path.join(cwd, 'github-summary'),
     sleep: async ms => { waits.push(ms); elapsed += ms; },
     fetch: async (url, options) => {
       assert.equal(options.headers['Cache-Control'], 'no-cache');
@@ -68,7 +70,9 @@ async function publication(t, { uploadMs = 0, lookup = () => response(404), uplo
 
 test('slow successful upload polls briefly for exact registry visibility without republishing', async t => {
   const context = await publication(t, { uploadMs: 24_000, lookup: n => n < 4 ? response(404) : response(200, published) });
-  await publish(info, context.options);
+  const result = await publish(info, context.options);
+  assert.equal(result.state, 'verified');
+  assert.equal(result.integrity, published.dist.integrity);
   assert.ok(context.elapsed() < 40_000, `publication took ${context.elapsed()}ms`);
   assert.equal(context.uploads.length, 1);
   const { args, options } = context.uploads[0];
@@ -83,9 +87,12 @@ test('slow successful upload polls briefly for exact registry visibility without
   assert.ok(context.waits.length > 0 && context.waits.every(ms => ms <= 1000));
 });
 
-test('accepted upload with an invisible version fails within40s without another upload', async t => {
+test('accepted upload with an invisible version returns pending within40s without another upload', async t => {
   const context = await publication(t, { uploadMs: 35_000 });
-  await assert.rejects(publish(info, context.options), /npm accepted the upload/);
+  assert.deepEqual(await publish(info, context.options), {
+    state: 'pending', source: '1234567890abcdef1234567890abcdef12345678',
+    version: '0.1.1', tarball: 'vecnet-0.1.1.tgz', integrity: published.dist.integrity,
+  });
   assert.ok(context.elapsed() < 40_000, `publication took ${context.elapsed()}ms`);
   assert.equal(context.uploads.length, 1);
   assert.ok(context.lookups.length > 1);
@@ -94,7 +101,7 @@ test('accepted upload with an invisible version fails within40s without another 
 
 test('fast successful upload gets only a short registry visibility window', async t => {
   const context = await publication(t);
-  await assert.rejects(publish(info, context.options), /npm accepted the upload/);
+  assert.equal((await publish(info, context.options)).state, 'pending');
   assert.ok(context.elapsed() < 6000, `visibility polling took ${context.elapsed()}ms`);
   assert.equal(context.uploads.length, 1);
 });
@@ -103,7 +110,7 @@ test('already published exact bytes recover without uploading; different bytes f
   for (const [metadata, error] of [[published, undefined], [{ ...published, dist: { integrity: 'different' } }, /different contents/]]) {
     const context = await publication(t, { lookup: () => response(200, metadata) });
     if (error) await assert.rejects(publish(info, context.options), error);
-    else await publish(info, context.options);
+    else assert.equal((await publish(info, context.options)).state, 'verified');
     assert.equal(context.uploads.length, 0);
     assert.equal(context.lookups.length, 1);
   }
@@ -116,6 +123,45 @@ test('failed upload propagates without visibility polling or a duplicate publica
   assert.equal(context.uploads.length, 1);
   assert.equal(context.lookups.length, 1);
   assert.deepEqual(context.waits, []);
+  await assert.rejects(readFile(context.options.output), { code: 'ENOENT' });
+  await assert.rejects(readFile(context.options.summary), { code: 'ENOENT' });
+});
+
+test('Actions receives pending or verified state and a source/version/integrity-bound summary receipt', async t => {
+  for (const state of ['pending', 'verified']) {
+    const context = await publication(t, {
+      lookup: n => state === 'verified' && n > 1 ? response(200, published) : response(404),
+    });
+    await writeFile(context.options.output, 'earlier=value\n');
+    await writeFile(context.options.summary, 'Earlier evidence\n');
+    await publish(info, context.options);
+    const output = await readFile(context.options.output, 'utf8');
+    assert.match(output, /^earlier=value\n/);
+    assert.match(output, new RegExp(`^state=${state}$`, 'm'));
+    const summary = await readFile(context.options.summary, 'utf8');
+    assert.match(summary, /^Earlier evidence\n/);
+    const receipt = JSON.parse(/```json\n([\s\S]*?)\n```/.exec(summary)?.[1] || 'null');
+    assert.deepEqual(receipt, {
+      state, source: '1234567890abcdef1234567890abcdef12345678', version: '0.1.1',
+      tarball: 'vecnet-0.1.1.tgz', integrity: published.dist.integrity,
+    });
+    if (state === 'pending') {
+      assert.match(summary, /not yet verified visible/i);
+      assert.match(summary, /do not (?:reupload|republish)/i);
+      assert.match(summary, /draft/i);
+    }
+  }
+});
+
+test('lookup transport failures remain failures after a successful upload, with no pending receipt', async t => {
+  const failure = new Error('registry request timed out');
+  const context = await publication(t, { lookup: n => {
+    if (n > 1) throw failure;
+    return response(404);
+  } });
+  await assert.rejects(publish(info, context.options), error => error === failure);
+  assert.equal(context.uploads.length, 1);
+  await assert.rejects(readFile(context.options.output), { code: 'ENOENT' });
 });
 
 test('registry errors and post-upload integrity mismatches fail without retrying publication', async t => {
@@ -128,5 +174,7 @@ test('registry errors and post-upload integrity mismatches fail without retrying
     await assert.rejects(publish(info, context.options), error);
     assert.equal(context.uploads.length, uploads);
     assert.deepEqual(context.waits, []);
+    await assert.rejects(readFile(context.options.output), { code: 'ENOENT' });
+    await assert.rejects(readFile(context.options.summary), { code: 'ENOENT' });
   }
 });
