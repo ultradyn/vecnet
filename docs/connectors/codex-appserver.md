@@ -245,6 +245,21 @@ VECNET_BUSY_FLY_SMOKE=1 \
   scripts/codex-busy-fly-smoke.mjs --run
 ```
 
+For the tested native Codex 0.170.0 / `gpt-6.1-sol` / `llmp` route, the default
+`untrusted_as_tool_output = true` accepted the exact steer and receipt but lacked
+nonce recognition in idle and busy controls. The supplied private
+`CODEX_BUSY_CONFIG` used this single setting change:
+
+```toml
+[features]
+untrusted_as_tool_output = false
+```
+
+Both controls then recognized the nonce, and the canonical runner passed all
+four acceptance checks with installed 0.2.6 bytes unchanged. This observation is
+specific to that route. API context retains `kind: untrusted`, and the strict
+steer, receipt and nonce oracle remains required.
+
 Run this only as the operator's live acceptance step. It starts an owned private
 native daemon and the **installed** standalone delivery process, creates exactly
 two disposable session peers, and sends only between those peers. PASS requires
