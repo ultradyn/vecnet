@@ -159,6 +159,27 @@ test('an admitted binding subscribes one exclusive watch and delivers a wake poi
   assert.match(f.kv.scope(KEY)!.cursor as string, /e1\.1/);
 });
 
+test('the attempting state is durably persisted before the transport is invoked', async t => {
+  // The write-ordering pin: at the moment the transport runs, the canonical
+  // kv row for the delivery under attempt must already say `attempting`.
+  // Reading the ledger inside the injected transport fake is the only place
+  // this is observable; a reorder (transport first, persist later) would see
+  // `reserved` here instead.
+  const observed: Array<string | undefined> = [];
+  const f = fixture(t, {
+    transport: async frame => {
+      const claim = f.kv.claims().find(c => c.msgId === frame.msgId);
+      observed.push(claim?.state);
+      return 0;
+    },
+  });
+  f.setPages([{ events: [deliveryEvent('e1.1', 1)] }]);
+  f.adapter.start();
+  await settle();
+  assert.deepEqual(observed, ['attempting'], 'the durable claim must say attempting before any byte can leave');
+  assert.equal(f.kv.claim('dly_' + ulid(1))!.state, 'released', 'the attempt still settles its disposition');
+});
+
 test('hold is never transported and never acked', async t => {
   const f = fixture(t);
   f.setPages([{ events: [deliveryEvent('e1.1', 1, { priority: 'hold' })] }]);
