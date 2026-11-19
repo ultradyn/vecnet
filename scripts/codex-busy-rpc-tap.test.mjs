@@ -2,8 +2,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import net from 'node:net';
+import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, chmod, lstat, readFile, readdir, rm, unlink, writeFile, symlink } from 'node:fs/promises';
+import { mkdir, mkdtemp, chmod, lstat, readFile, readdir, readlink, rename, rm, unlink, writeFile, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -58,12 +59,14 @@ async function fixture(t, options = {}) {
   const server = net.createServer(socket => peers.push(capture(socket)));
   server.listen(targetPath);
   await once(server, 'listening');
-  let tap;
+  let tap, closeObserved = false;
   t.after(async () => {
     for (const c of [...clients, ...peers]) c.socket.destroy();
-    await tap?.close();
-    await new Promise(resolve => server.close(resolve));
-    await rm(dir, { recursive: true, force: true });
+    try { await tap?.close().catch(error => { if (!closeObserved) throw error; }); }
+    finally {
+      await new Promise(resolve => server.close(resolve));
+      await rm(dir, { recursive: true, force: true });
+    }
   });
   tap = await startRpcTap({ listenPath, targetPath, onEvent: event => events.push(event), ...options });
   async function connect() {
@@ -82,7 +85,12 @@ async function fixture(t, options = {}) {
     await until(() => pair.c.bytes().length >= upgraded.length, 'response upgrade');
     return pair;
   }
-  return { dir, listenPath, targetPath, peers, clients, events, tap, connect, opened };
+  async function closeOutcome() {
+    try { await tap.close(); return 'resolved'; }
+    catch (error) { return error.message; }
+    finally { closeObserved = true; }
+  }
+  return { dir, listenPath, targetPath, peers, clients, events, tap, connect, opened, closeOutcome };
 }
 
 const identity = { id: 2, method: 'turn/steer', threadId: 'thread-a', expectedTurnId: 'turn-a', receiptKey: 'vn.a' };
@@ -398,3 +406,109 @@ test('close records incomplete pending proof and removes private listener artifa
   const next = await startRpcTap({ listenPath: f.listenPath, targetPath: f.targetPath, onEvent: () => {} });
   await next.close();
 });
+
+test('documented IPC server transfer does not inherit binder auto-unlink authority', { timeout: 5000 }, async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'rpc-ipc-'));
+  const path = join(dir, 'socket');
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const child = spawn(process.execPath, ['-e', `
+    const server = require('node:net').createServer();
+    setTimeout(() => process.exit(2), 1500).unref();
+    server.listen(process.argv[1], () => {
+      process.send('listener', server, error => process.exit(error ? 1 : 0));
+    });
+  `, path], { env: {}, stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });
+  const exited = once(child, 'exit');
+  t.after(async () => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); await exited; });
+  const [message, server] = await once(child, 'message');
+  t.after(() => server.listening && new Promise(resolve => server.close(resolve)));
+  assert.equal(message, 'listener');
+  assert.ok(server instanceof net.Server && server.listening);
+  assert.deepEqual(await exited, [0, null]);
+  assert.ok((await lstat(path)).isSocket(), 'binder exit must leave its name for the receiver');
+  server.on('connection', socket => socket.end('TRANSFERRED'));
+  const client = net.createConnection(path), chunks = [];
+  client.on('data', bytes => chunks.push(bytes));
+  await once(client, 'end');
+  assert.equal(Buffer.concat(chunks).toString(), 'TRANSFERRED');
+  await unlink(path);
+  await writeFile(path, 'UNRELATED');
+  const before = await lstat(path);
+  await new Promise(resolve => server.close(resolve));
+  assert.equal((await lstat(path)).ino, before.ino);
+  assert.equal(await readFile(path, 'utf8'), 'UNRELATED');
+});
+
+test('binder is reaped before publication and close leaves no helper or pinned directory handles', { timeout: 5000 }, async t => {
+  const childrenPath = `/proc/self/task/${process.pid}/children`;
+  const before = (await readFile(childrenPath, 'utf8')).trim();
+  const f = await fixture(t);
+  assert.equal((await readFile(childrenPath, 'utf8')).trim(), before, 'start must await binder exit and IPC closure');
+  const privateName = (await readdir(f.dir)).find(name => name.startsWith('.rpc-tap-'));
+  const privateDir = join(f.dir, privateName);
+  await f.tap.close();
+  assert.equal((await readFile(childrenPath, 'utf8')).trim(), before);
+  assert.deepEqual(await directoryDescriptors(privateDir), []);
+  assert.deepEqual(await directoryDescriptors(f.dir), []);
+});
+
+async function directoryDescriptors(path) {
+  const found = [];
+  for (const fd of await readdir('/proc/self/fd')) {
+    try {
+      const target = await readlink(`/proc/self/fd/${fd}`);
+      if (target === path || target === path + ' (deleted)') found.push(fd);
+    } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  }
+  return found;
+}
+
+for (const change of ['private bound socket replacement', 'renamed private directory with replacement at original name']) {
+  test(`I1 preserves ${change} and reports incomplete ownership cleanup`, { timeout: 5000 }, async t => {
+    const f = await fixture(t);
+    const { c, s } = await f.opened();
+    const privateName = (await readdir(f.dir)).find(name => name.startsWith('.rpc-tap-'));
+    assert.ok(privateName);
+    const privateDir = join(f.dir, privateName), movedDir = join(f.dir, 'moved-owned-directory');
+    const ownedDirectory = await lstat(privateDir);
+    const descriptors = [...await directoryDescriptors(f.dir), ...await directoryDescriptors(privateDir)];
+    assert.equal(descriptors.length, 2, 'parent and private directory handles are pinned');
+    let replacement, before;
+    if (change === 'private bound socket replacement') {
+      replacement = join(privateDir, 'socket');
+      await unlink(replacement);
+      await writeFile(replacement, 'UNRELATED_REPLACEMENT');
+    } else {
+      await rename(privateDir, movedDir);
+      await mkdir(privateDir, { mode: 0o700 });
+      replacement = privateDir;
+    }
+    before = await lstat(replacement);
+    const closed = [once(c.socket, 'close'), once(s.socket, 'close')];
+    const outcome = await f.closeOutcome();
+    await Promise.all(closed);
+    const after = await lstat(replacement).catch(() => undefined);
+    assert.ok(after, 'unrelated replacement must survive close');
+    assert.equal(after.ino, before.ino, 'replacement inode must be unchanged');
+    assert.equal(after.dev, before.dev);
+    if (change === 'private bound socket replacement') {
+      assert.equal(await readFile(replacement, 'utf8'), 'UNRELATED_REPLACEMENT');
+      assert.deepEqual((await readdir(privateDir)).sort(), ['socket']);
+    } else {
+      assert.deepEqual(await readdir(privateDir), []);
+      assert.equal((await lstat(movedDir)).ino, ownedDirectory.ino, 'retain renamed owned directory without guessing another pathname');
+      assert.deepEqual(await readdir(movedDir), [], 'owned socket is removed via its pinned directory');
+    }
+    assert.equal(outcome, 'tap_cleanup_failed', 'ownership loss must not resolve as successful cleanup');
+    assert.equal(await f.closeOutcome(), 'tap_cleanup_failed', 'repeated close retains its failed result');
+    assert.ok(f.events.some(event => event.kind === 'failure' && event.reason === 'cleanup_error'));
+    await assert.rejects(lstat(f.listenPath), { code: 'ENOENT' });
+    assert.ok((await lstat(f.targetPath)).isSocket());
+    for (const fd of descriptors) {
+      const target = await readlink(`/proc/self/fd/${fd}`).catch(() => undefined);
+      assert.ok(![f.dir, privateDir, movedDir].flatMap(path => [path, path + ' (deleted)']).includes(target), 'owned directory descriptor must be closed');
+    }
+    assert.deepEqual((await readdir(f.dir)).sort(), change === 'private bound socket replacement'
+      ? [privateName, 'target'].sort() : [privateName, 'moved-owned-directory', 'target'].sort());
+  });
+}

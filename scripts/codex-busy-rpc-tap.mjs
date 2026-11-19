@@ -1,11 +1,13 @@
 // Private, offline-testable observation of the installed connector's real wire.
 // The pipes own transport/backpressure; the parsers never write to either peer.
 import net from 'node:net';
+import { fork } from 'node:child_process';
 import { constants } from 'node:fs';
 import { constants as bufferConstants } from 'node:buffer';
 import { open, lstat, link, unlink, mkdtemp, rmdir } from 'node:fs/promises';
 import { dirname, basename, isAbsolute } from 'node:path';
 import { createHash } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 
 const MAX_HEADER = 16 * 1024;
 const MAX_PENDING = 1024;
@@ -23,6 +25,49 @@ async function statOrMissing(path) {
     if (error.code === 'ENOENT') return undefined;
     throw error;
   }
+}
+
+// Receiving a net.Server through documented IPC adopts the listening descriptor
+// without the binder's libuv filename/unlink authority. The binder exits without
+// calling server.close(); the kernel closes its descriptors but leaves the name.
+async function bindListener(path) {
+  const child = fork(fileURLToPath(import.meta.url), ['--rpc-tap-bind', path], {
+    env: {}, execArgv: [], stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+  });
+  let server, failed = false;
+  const receivedError = () => { failed = true; };
+  child.on('error', receivedError);
+  child.on('message', (message, handle) => {
+    if (message !== 'rpc-tap-listener' || !(handle instanceof net.Server) || server) {
+      failed = true;
+      handle?.close?.();
+      child.kill('SIGKILL');
+      return;
+    }
+    server = handle;
+    server.on('error', receivedError);
+  });
+  const deadline = setTimeout(() => { failed = true; child.kill('SIGKILL'); }, 2500);
+  const code = await new Promise(resolve => child.once('close', code => resolve(code)));
+  clearTimeout(deadline);
+  if (failed || code !== 0 || !server?.listening) {
+    if (server?.listening) await new Promise(resolve => server.close(resolve));
+    throw new Error('tap_bind_failed');
+  }
+  server.off('error', receivedError);
+  return server;
+}
+
+if (process.argv[1] === fileURLToPath(import.meta.url) && process.argv[2] === '--rpc-tap-bind' && process.send) {
+  const server = net.createServer();
+  // A disconnected/crashed caller cannot leave a helper alive. No inherited
+  // environment, output or arbitrary error crosses this private IPC channel.
+  setTimeout(() => process.exit(1), 2000).unref();
+  process.once('disconnect', () => process.exit(1));
+  server.once('error', () => process.exit(1));
+  server.listen(process.argv[3], () => {
+    process.send('rpc-tap-listener', server, error => process.exit(error ? 1 : 0));
+  });
 }
 
 function headers(bytes, client, state) {
@@ -187,8 +232,8 @@ export async function startRpcTap({ listenPath, targetPath, onEvent, maxMessageB
     }
   }
 
-  let parent, privateHandle, privateDir, ownedSocket, published = false;
-  const server = net.createServer(clientSocket => {
+  let parent, privateHandle, privateDir, privateIdentity, ownedSocket, server, published = false;
+  const accept = clientSocket => {
     const connectionId = ++nextConnection;
     let client = 'unknown', initialized = false, failed = false;
     const pending = new Map(), handshake = {};
@@ -295,28 +340,36 @@ export async function startRpcTap({ listenPath, targetPath, onEvent, maxMessageB
     clientSocket.pipe(upstream);
     upstream.pipe(clientSocket);
     if (closing || sinkFailed) connection.destroy();
-  });
-  // Keep an error handler after listen as well; no transport error may become an
-  // uncaught exception or include system paths in the exported trace.
-  server.on('error', () => { if (published && !closing) emit(0, 'unknown', { kind: 'failure', reason: 'listener_error' }); });
+  };
 
   async function removeOwned(path) {
     const current = await statOrMissing(path);
-    if (!current) return;
-    if (current.isSocket() && sameInode(current, ownedSocket)) await unlink(path);
-    else emit(0, 'unknown', { kind: 'failure', reason: 'listener_replaced' });
+    if (!current) return true;
+    if (current.isSocket() && sameInode(current, ownedSocket)) { await unlink(path); return true; }
+    emit(0, 'unknown', { kind: 'failure', reason: 'listener_replaced' });
+    return false;
   }
   async function cleanup() {
     let cleanupFailed = false;
     const attempt = async action => { try { await action(); } catch { cleanupFailed = true; } };
-    // Node/libuv unlinks its bound path on close. Bind a private socket and
-    // publish a hard link so that auto-unlink can never delete a replacement at
-    // listenPath. Pinned directory handles also survive parent renames.
-    if (server.listening) await attempt(() => new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve())));
+    // This transferred handle has no bound filename: close cannot auto-unlink
+    // any private/public replacement. All namespace cleanup remains below.
+    if (server?.listening) await attempt(() => new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve())));
     if (published) await attempt(() => removeOwned(`/proc/self/fd/${parent.fd}/${basename(listenPath)}`));
-    if (ownedSocket && privateHandle) await attempt(() => removeOwned(`/proc/self/fd/${privateHandle.fd}/socket`));
+    if (ownedSocket && privateHandle) await attempt(async () => {
+      if (!await removeOwned(`/proc/self/fd/${privateHandle.fd}/socket`)) cleanupFailed = true;
+    });
+    if (privateDir) await attempt(async () => {
+      const current = await statOrMissing(privateDir);
+      // Do not guess a new pathname after a rename. Retain the moved owned
+      // directory and the replacement; closing descriptors still proceeds.
+      if (!current?.isDirectory() || !sameInode(current, privateIdentity)) {
+        cleanupFailed = true;
+        return;
+      }
+      await rmdir(privateDir); // A retained replacement inside it yields ENOTEMPTY.
+    });
     if (privateHandle) await attempt(() => privateHandle.close());
-    if (privateDir) await attempt(() => rmdir(privateDir));
     if (parent) await attempt(() => parent.close());
     if (cleanupFailed || sinkFailed) {
       emit(0, 'unknown', { kind: 'failure', reason: 'cleanup_error' });
@@ -341,12 +394,14 @@ export async function startRpcTap({ listenPath, targetPath, onEvent, maxMessageB
     if (await statOrMissing(`${anchored}/${basename(listenPath)}`)) throw new Error('tap_path_exists');
     privateDir = await mkdtemp(`${anchored}/.rpc-tap-`);
     privateHandle = await open(privateDir, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
-    const socketPath = `/proc/self/fd/${privateHandle.fd}/socket`;
-    await new Promise((resolve, reject) => {
-      server.once('error', reject);
-      server.listen(socketPath, () => { server.off('error', reject); resolve(); });
-    });
+    privateIdentity = await privateHandle.stat();
+    // The helper must resolve the caller's pinned directory, not its own FD.
+    const socketPath = `/proc/${process.pid}/fd/${privateHandle.fd}/socket`;
+    server = await bindListener(socketPath);
+    server.on('connection', accept);
+    server.on('error', () => { if (published && !closing) emit(0, 'unknown', { kind: 'failure', reason: 'listener_error' }); });
     ownedSocket = await lstat(socketPath);
+    if (!ownedSocket.isSocket()) throw new Error('tap_bind_failed');
     await link(socketPath, `${anchored}/${basename(listenPath)}`); // Atomic EEXIST; never overwrite.
     published = true;
     return { close };
