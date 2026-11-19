@@ -514,7 +514,7 @@ func (a *app) dispatch(cmd string, args []string) error {
 	// enrol has no profile yet (a 410 there must not follow another one);
 	// guide makes no hub request.
 	switch cmd {
-	case "watch", "hook", "mcp", "profile", "enrol", "enroll", "guide":
+	case "watch", "hook", "mcp", "profile", "enrol", "enroll", "guide", "claude":
 		return err
 	}
 	followed, followErr := a.followFailure(err)
@@ -591,6 +591,10 @@ func (a *app) dispatchOnce(cmd string, args []string) error {
 		return a.cmdHook(args)
 	case "codex":
 		return a.cmdCodex(args, time.Now)
+	case "claude":
+		// Read-only snapshot child for the shared delivery host; it never
+		// performs hub requests or generic maintenance.
+		return a.cmdClaude(args)
 	case "threads":
 		return a.cmdThreads(args)
 	case "thread":
