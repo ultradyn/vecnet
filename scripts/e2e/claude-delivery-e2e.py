@@ -133,14 +133,48 @@ def has_pointer(text, message_id):
 
 
 def verify_control_frames(paths, message_id, marker):
+    message_token = re.compile(rf"(?<![\w]){re.escape(message_id)}(?![\w])")
     for path in paths:
         text = path.read_text()
-        if has_pointer(text, message_id) or marker in text:
+        if message_token.search(text) or marker in text:
             raise Fail(f"control {message_id} leaked into {path.name}")
 
 
+def inbox_messages(content):
+    """Extract message objects from CLI inbox JSON, if this is an inbox result.
+
+    CLI warnings may precede the payload, so parse the last JSON object line
+    (same convention as parse_json_output). Raises ValueError/KeyError/TypeError
+    for outputs that are not inbox JSON; callers treat that as an unrelated call.
+    """
+    if isinstance(content, list):
+        content = "\n".join(b["text"] for b in content if b.get("type") == "text")
+    for line in reversed(content.strip().splitlines()):
+        line = line.strip()
+        if line.startswith("{"):
+            return [event["data"]["message"] for event in json.loads(line)["events"]
+                    if "message" in event.get("data", {})]
+    raise ValueError(f"no JSON object in tool result: {content[:120]!r}")
+
+
+def successful_fetches(results, message_id):
+    """Identify successful inbox results by message ID, regardless of the command."""
+    matches = []
+    for i, block in results:
+        if block.get("is_error"):
+            continue
+        try:
+            messages = [m for m in inbox_messages(block.get("content")) if m.get("message_id") == message_id]
+        except (AttributeError, KeyError, TypeError, ValueError):
+            continue  # unrelated tool output
+        if messages:
+            matches.append((i, block.get("tool_use_id"), messages))
+    return matches
+
+
 def transcript_proof(rows, message_id, fetch_cmd, marker):
-    enqueues, peers, calls, results = [], [], [], []
+    enqueues, peers, results = [], [], []
+    calls = {}
     for i, row in enumerate(rows):
         if row.get("type") == "queue-operation" and row.get("operation") == "enqueue" \
                 and has_pointer(row.get("content"), message_id):
@@ -151,30 +185,26 @@ def transcript_proof(rows, message_id, fetch_cmd, marker):
             peers.append(i)
         blocks = row.get("message", {}).get("content")
         for block in blocks if isinstance(blocks, list) else []:
-            if (row.get("type") == "assistant" and block.get("type") == "tool_use"
-                    and block.get("name") == "Bash" and block.get("input", {}).get("command") == fetch_cmd):
-                calls.append((i, block.get("id")))
+            if row.get("type") == "assistant" and block.get("type") == "tool_use" and block.get("id"):
+                calls.setdefault(block["id"], []).append((i, block))
             if row.get("type") == "user" and block.get("type") == "tool_result":
                 results.append((i, block))
-    if list(map(len, (enqueues, peers, calls))) != [1, 1, 1]:
-        raise Fail(f"expected one enqueue, peer turn and fetch call for {message_id}: "
-                   f"found {len(enqueues)}, {len(peers)}, {len(calls)}")
-    call_i, tool_id = calls[0]
-    related = [(i, b) for i, b in results if tool_id and b.get("tool_use_id") == tool_id]
-    if len(related) != 1:
-        raise Fail(f"expected one result for {tool_id}: found {len(related)}")
-    result_i, result = related[0]
-    if not enqueues[0] < peers[0] < call_i < result_i or result.get("is_error"):
-        raise Fail(f"enqueue, peer turn and successful tool pair out of order for {message_id}")
-    try:
-        messages = [event["data"]["message"] for event in json.loads(result["content"])["events"]
-                    if "message" in event.get("data", {})]
-        match = [m for m in messages if m["message_id"] == message_id
-                 and marker in m["content"]["text"]]
-    except (KeyError, TypeError, ValueError) as e:
-        raise Fail(f"fetch result was not inbox JSON: {e}") from e
-    if len(match) != 1:
-        raise Fail(f"fetch result did not contain exactly one matching message {message_id}")
+    if len(enqueues) != 1 or len(peers) != 1:
+        raise Fail(f"expected one enqueue and one peer turn for {message_id}: "
+                   f"found {len(enqueues)}, {len(peers)}")
+    fetches = successful_fetches(results, message_id)
+    if len(fetches) != 1:
+        raise Fail(f"expected exactly one successful fetch result for {message_id}, found {len(fetches)}")
+    result_i, tool_id, matches = fetches[0]
+    if len(calls.get(tool_id, ())) != 1 or sum(b.get("tool_use_id") == tool_id for _, b in results) != 1:
+        raise Fail(f"expected one call and one result for {tool_id}")
+    (call_i, call), = calls[tool_id]
+    if (not enqueues[0] < peers[0] < call_i < result_i or call.get("name") != "Bash"
+            or call.get("input", {}).get("command") != fetch_cmd):
+        raise Fail(f"expected an ordered enqueue, peer turn and packaged CLI fetch for {message_id}")
+    if len(matches) != 1 or not isinstance(matches[0].get("content"), dict) \
+            or marker not in matches[0]["content"].get("text", ""):
+        raise Fail(f"fetch result did not contain exactly one matching message {message_id} with its marker")
     return [rows[i] for i in (enqueues[0], peers[0], call_i, result_i)], tool_id
 
 
