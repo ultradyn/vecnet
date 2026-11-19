@@ -353,6 +353,40 @@ test('Windows keeps an existing group free of any repair tail even with cheap or
  assert.equal(repairBin[0].exclusive,true);
 });
 
+test('Windows reserves an existing group for the complete invitation refusal matrix without dropping neighbors',()=>{
+ const pkg='github.com/XertroV/vecnet/internal/cli';
+ const matrix='TestInviteHubURLResponseRefusesUnsafe';
+ const repair='TestLauncherWindowsManagedRepairPreservesServiceIntent';
+ const input=[{pkg,names:[matrix,repair,matrix+'Extended','TestNew','Example','FuzzSeed'],binary:'real-cli',directory:'source'},
+  {pkg:'other',names:[matrix]}, {pkg:'empty',names:[],binary:null},
+  ...Array.from({length:30},(_,i)=>({pkg:`ordinary${i}`,names:['TestOrdinary']}))];
+ const profile={roots:{[pkg]:{[matrix]:29.34,[repair]:28}},startup:0.049};
+ const bins=planGo(input,profile,{platform:'win32'});
+ assert.equal(bins.length,24,'reserve existing groups without adding lanes or steps');
+ const matrixBin=bins.find(g=>g.some(t=>t.pkg===pkg&&t.selected.includes(matrix)));
+ assert.equal(matrixBin.length,1,'the long matrix must have no competing or queued ordinary packets');
+ assert.deepEqual(matrixBin[0].selected,[matrix]);
+ assert.equal(matrixBin[0].exclusive,true);
+ assert.equal(matrixBin[0].split,true);
+ assert.equal(matrixBin[0].binary,'real-cli');
+ assert.equal(matrixBin[0].directory,'source');
+ const repairBin=bins.find(g=>g.some(t=>t.pkg===pkg&&t.selected.includes(repair)));
+ assert.equal(repairBin.length,1);
+ assert.notEqual(matrixBin,repairBin);
+ const keys=(pkg,names)=>(names.length?names:['']).map(name=>`${pkg}/${name}`);
+ const discovered=input.flatMap(t=>keys(t.pkg,t.names)).sort();
+ const packets=bins.flat();
+ assert.deepEqual(packets.flatMap(t=>keys(t.pkg,t.selected)).sort(),discovered);
+ assert.ok(packets.filter(t=>t.pkg==='other').every(t=>!t.exclusive));
+ assert.equal(JSON.stringify(bins),JSON.stringify(planGo([...input].reverse(),profile,{platform:'win32'})));
+ const linux=planGo(input,profile,{platform:'linux',lanes:2}).flat();
+ assert.ok(linux.every(t=>!t.exclusive));
+ assert.deepEqual(linux.flatMap(t=>keys(t.pkg,t.selected)).sort(),discovered);
+ const absent=planGo([{pkg,names:['TestNew']}],profile,{platform:'win32'}).flat();
+ assert.deepEqual(absent.flatMap(t=>t.selected),['TestNew']);
+ assert.ok(absent.every(t=>!t.exclusive));
+});
+
 test('Windows placement prices the serial prefix separately and leaves whole repair no queued remainder',()=>{
  const pkg='github.com/XertroV/vecnet/internal/cli';
  const repair='TestLauncherWindowsManagedRepairPreservesServiceIntent';
