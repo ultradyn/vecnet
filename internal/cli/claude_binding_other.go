@@ -12,3 +12,7 @@ func claudeRootAncestry(root claudeRoot) error { return errClaudeUnsupported }
 // claudeProcessFenced fails closed: without qualified platform evidence no
 // transition that requires fencing may proceed.
 func claudeProcessFenced(pid int, start, boot string) bool { return false }
+
+// claudeBootID reports no boot identity here, so the setup path's evidence
+// builder returns the same typed unsupported refusal as validateClaudeRoot.
+func claudeBootID() string { return "" }

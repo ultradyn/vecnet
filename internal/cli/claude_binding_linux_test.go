@@ -29,7 +29,8 @@ import (
 	"time"
 )
 
-const claudeFixtureVersion = "2.1.322"
+// claudeFixtureVersion lives in claude_setup_test.go so every platform's
+// tests can share it.
 
 type claudeRegResult struct {
 	OK      bool          `json:"ok"`
@@ -259,12 +260,7 @@ func (tr *claudeTree) reg(scope claudeScope, root claudeRoot, env map[string]str
 	if err := os.WriteFile(payload, raw, 0o600); err != nil {
 		tr.f.t.Fatal(err)
 	}
-	if _, err := tr.jobs.WriteString(payload + " " + result + "\n"); err != nil {
-		tr.f.t.Fatal(err)
-	}
-	if err := tr.jobs.Flush(); err != nil {
-		tr.f.t.Fatal(err)
-	}
+	tr.job("register", payload, result)
 	deadline := time.Now().Add(30 * time.Second)
 	for {
 		raw, err := os.ReadFile(result)
@@ -279,6 +275,69 @@ func (tr *claudeTree) reg(scope claudeScope, root claudeRoot, env map[string]str
 			tr.f.t.Fatalf("registration job on tree %s produced no result", tr.name)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// hook runs one hook invocation from a child of this tree, through the
+// real hookRun path, and captures its output.
+func (tr *claudeTree) hook(env map[string]string, args []string, stdin string) claudeHookResult {
+	tr.f.t.Helper()
+	tr.f.seq++
+	base := filepath.Join(tr.f.dir, fmt.Sprintf("job-%s-%d", tr.name, tr.f.seq))
+	payload := base + "-payload.json"
+	result := base + "-result.json"
+	merged := map[string]string{}
+	for k, v := range tr.f.env {
+		merged[k] = v
+	}
+	for k, v := range env {
+		merged[k] = v
+	}
+	raw, err := json.Marshal(struct {
+		Env   map[string]string `json:"env"`
+		Args  []string          `json:"args"`
+		Stdin string            `json:"stdin"`
+	}{merged, args, stdin})
+	if err != nil {
+		tr.f.t.Fatal(err)
+	}
+	if err := os.WriteFile(payload, raw, 0o600); err != nil {
+		tr.f.t.Fatal(err)
+	}
+	tr.job("hook", payload, result)
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		raw, err := os.ReadFile(result)
+		if err == nil {
+			var r claudeHookResult
+			if json.Unmarshal(raw, &r) == nil {
+				_ = os.Remove(result)
+				return r
+			}
+		}
+		if time.Now().After(deadline) {
+			tr.f.t.Fatalf("hook job on tree %s produced no result", tr.name)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// job submits one helper job line for a child of this tree.
+func (tr *claudeTree) job(role, payload, result string) {
+	tr.f.t.Helper()
+	line, err := json.Marshal(struct {
+		Role    string `json:"role"`
+		Payload string `json:"payload"`
+		Result  string `json:"result"`
+	}{role, payload, result})
+	if err != nil {
+		tr.f.t.Fatal(err)
+	}
+	if _, err := tr.jobs.WriteString(string(line) + "\n"); err != nil {
+		tr.f.t.Fatal(err)
+	}
+	if err := tr.jobs.Flush(); err != nil {
+		tr.f.t.Fatal(err)
 	}
 }
 
@@ -663,7 +722,8 @@ func TestClaudeRegistrationOptOutSurvivesRepair(t *testing.T) {
 
 // TestClaudeHelperProcess is re-entered as a subprocess: "claude" is the
 // fake Claude process owning claimed roots; "register" is its child that
-// performs one registration with an isolated environment.
+// performs one registration with an isolated environment; "hook" is its
+// child that runs one real hook invocation.
 func TestClaudeHelperProcess(t *testing.T) {
 	switch os.Getenv("VECNET_CLAUDE_HELPER_ROLE") {
 	case "":
@@ -672,6 +732,8 @@ func TestClaudeHelperProcess(t *testing.T) {
 		claudeHelperClaude()
 	case "register":
 		claudeHelperRegister()
+	case "hook":
+		claudeHelperHook()
 	default:
 		fmt.Fprintln(os.Stderr, "unknown helper role")
 	}
@@ -695,15 +757,22 @@ func claudeHelperClaude() {
 		if line == "" {
 			continue
 		}
-		payload, result, ok := strings.Cut(line, " ")
-		if !ok {
+		var job struct {
+			Role    string `json:"role"`
+			Payload string `json:"payload"`
+			Result  string `json:"result"`
+		}
+		if json.Unmarshal([]byte(line), &job) != nil || job.Payload == "" || job.Result == "" {
 			continue
+		}
+		if job.Role == "" {
+			job.Role = "register"
 		}
 		cmd := exec.Command(os.Args[0], "-test.run=^TestClaudeHelperProcess$")
 		cmd.Env = append(os.Environ(),
-			"VECNET_CLAUDE_HELPER_ROLE=register",
-			"VECNET_CLAUDE_PAYLOAD="+payload,
-			"VECNET_CLAUDE_RESULT="+result)
+			"VECNET_CLAUDE_HELPER_ROLE="+job.Role,
+			"VECNET_CLAUDE_PAYLOAD="+job.Payload,
+			"VECNET_CLAUDE_RESULT="+job.Result)
 		cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
 		_ = cmd.Run()
 	}
@@ -735,6 +804,43 @@ func claudeHelperRegister() {
 		out.Err = err.Error()
 	}
 	raw, _ = json.Marshal(out)
+	_ = os.WriteFile(result, raw, 0o600)
+	os.Exit(0)
+}
+
+type claudeHookResult struct {
+	Stdout string `json:"stdout"`
+	Stderr string `json:"stderr"`
+}
+
+// claudeHelperHook runs one hook invocation inside the real hook worker,
+// with an isolated environment, the job's stdin and captured output.
+func claudeHelperHook() {
+	result := os.Getenv("VECNET_CLAUDE_RESULT")
+	fail := func(msg string) {
+		raw, _ := json.Marshal(claudeHookResult{Stderr: msg})
+		_ = os.WriteFile(result, raw, 0o600)
+		os.Exit(0)
+	}
+	raw, err := os.ReadFile(os.Getenv("VECNET_CLAUDE_PAYLOAD"))
+	if err != nil {
+		fail("payload: " + err.Error())
+	}
+	var job struct {
+		Env   map[string]string `json:"env"`
+		Args  []string          `json:"args"`
+		Stdin string            `json:"stdin"`
+	}
+	if err := json.Unmarshal(raw, &job); err != nil {
+		fail("payload: " + err.Error())
+	}
+	var out, errs bytes.Buffer
+	a := &app{ctx: context.Background(), stdin: strings.NewReader(job.Stdin), stdout: &out, stderr: &errs, getenv: func(k string) string { return job.Env[k] }, inHook: true}
+	a.hookRun(job.Args, hookNow, func() {}, func(data []byte) error {
+		_, e := out.Write(data)
+		return e
+	}, 0)
+	raw, _ = json.Marshal(claudeHookResult{Stdout: out.String(), Stderr: errs.String()})
 	_ = os.WriteFile(result, raw, 0o600)
 	os.Exit(0)
 }

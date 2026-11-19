@@ -1158,28 +1158,39 @@ func TestHookSessionStartPolls(t *testing.T) {
 	if err := (stateFile{path}).update(context.Background(), func(s *hookState) error { s.LastPostToolPoll = now; return nil }); err != nil {
 		t.Fatal(err)
 	}
+	// SessionStart routes to passive registration only: no context, no
+	// poll, and no state change (registration is silent and local).
 	out, errs := runHook(t, env, "--event", "session-start")
-	ctx := contextOf(t, out)
-	for _, want := range []string{`"hookEventName":"SessionStart"`, hookTrust, `<vecnet-inbox untrusted="true">`, `text="pending"`} {
-		if !strings.Contains(out, want) && !strings.Contains(ctx, want) {
-			t.Fatalf("missing %q: out=%q stderr=%q", want, out, errs)
+	if out != "" || errs != "" || polls.Load() != 0 {
+		t.Fatalf("start: out=%q stderr=%q polls=%d", out, errs, polls.Load())
+	}
+	if s := readHookState(t, path); !s.LastPostToolPoll.Equal(now) || s.PollCursor != "e1.1" || len(s.Shown) != 0 {
+		t.Fatalf("state=%+v", s)
+	}
+	// The delivery that used to arrive on start now arrives on the first
+	// prompt of the session, unchanged.
+	prompt, promptErrs := runHookStdin(t, env, `{"hook_event_name":"UserPromptSubmit","session_id":"01234567-89ab-cdef-0123-456789abcdef"}`, "hook", "--profile", "p")
+	ctx := contextOf(t, prompt)
+	for _, want := range []string{hookTrust, `<vecnet-inbox untrusted="true">`, `text="pending"`} {
+		if !strings.Contains(prompt, want) && !strings.Contains(ctx, want) {
+			t.Fatalf("missing %q: out=%q stderr=%q", want, prompt, promptErrs)
 		}
 	}
 	if polls.Load() != 1 {
 		t.Fatalf("polls=%d, want 1", polls.Load())
 	}
-	if s := readHookState(t, path); !s.LastPostToolPoll.Equal(now) || s.PollCursor != "e1.2" || !reflect.DeepEqual(s.Shown, []string{"dly_2"}) {
+	if s := readHookState(t, path); s.PollCursor != "e1.2" || !reflect.DeepEqual(s.Shown, []string{"dly_2"}) {
 		t.Fatalf("state=%+v", s)
 	}
 	out, _ = runHook(t, env, "--event", "post-tool")
 	if out != "" || polls.Load() != 1 {
 		t.Fatalf("post-tool: out=%q polls=%d", out, polls.Load())
 	}
-	// A later start also records a new timestamp, even with no output.
+	// A later start still records a new timestamp only through a prompt.
 	now = now.Add(time.Second)
 	runHook(t, env, "--event", "session-start")
-	if s := readHookState(t, path); !s.LastPostToolPoll.Equal(now) {
-		t.Fatalf("start did not refresh poll time: %+v", s)
+	if s := readHookState(t, path); s.LastPostToolPoll.Equal(now) {
+		t.Fatalf("start refreshed the poll time: %+v", s)
 	}
 }
 
@@ -1194,15 +1205,21 @@ func TestHookSessionStartFirstRun(t *testing.T) {
 				}
 			})
 			env["CODEX_HOME"] = filepath.Join(t.TempDir(), "codex")
-			out, _ := runHookStdin(t, env, `{"hook_event_name":"SessionStart","source":"`+source+`"}`, "hook")
+			// The first-run backlog summary now arrives with the session's
+			// first prompt; SessionStart itself stays silent.
+			out, _ := runHookStdin(t, env, `{"hook_event_name":"UserPromptSubmit","session_id":"01234567-89ab-cdef-0123-456789abcdef"}`, "hook")
 			if got := contextOf(t, out); got != hookSummary(newHookHint("p", "", env["VECNET_CONFIG"]), 2, false) {
 				t.Fatalf("summary=%q", got)
 			}
-			if !strings.Contains(out, `"hookEventName":"SessionStart"`) {
+			if !strings.Contains(out, `"hookEventName":"UserPromptSubmit"`) {
 				t.Fatalf("event=%q", out)
 			}
 			if s := readHookState(t, path); s.PollCursor != "e1.900" || len(s.Shown) != 0 {
 				t.Fatalf("state=%+v", s)
+			}
+			start, startErrs := runHookStdin(t, env, `{"hook_event_name":"SessionStart","session_id":"01234567-89ab-cdef-0123-456789abcdef","source":"`+source+`"}`, "hook")
+			if start != "" || startErrs != "" {
+				t.Fatalf("start out=%q stderr=%q", start, startErrs)
 			}
 		})
 	}
@@ -1210,7 +1227,7 @@ func TestHookSessionStartFirstRun(t *testing.T) {
 
 func TestHookSessionStartSameContext(t *testing.T) {
 	var want string
-	for _, event := range []string{"session-start", "user-prompt", "post-tool"} {
+	for _, event := range []string{"user-prompt", "post-tool"} {
 		env, path := hookFixture(t, func(w http.ResponseWriter, r *http.Request) {
 			hookPage(w, []envelope.Event{hookEvent(2, `peer <tag> "😀"`)}, "e1.2")
 		})

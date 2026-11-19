@@ -135,6 +135,12 @@ func (a *app) localStartup(args []string) {
 			pending = true
 		}
 	}
+	claudeRecords, _ := worker.claudeEnrollments()
+	for _, r := range claudeRecords {
+		if claudeEnrollmentRetryable(r.State) {
+			pending = true
+		}
+	}
 	// A new executable must refresh the service's private copy as well. It is
 	// safe to start repair without an owner; it cannot create one absent pending
 	// enrollment intent.
@@ -404,6 +410,9 @@ func (a *app) cmdLocalRepair(args []string) error {
 		failures = append(failures, err)
 	}
 	if err := a.retryLocalEnrollments(); err != nil {
+		failures = append(failures, err)
+	}
+	if err := a.retryClaudeEnrollments(); err != nil {
 		failures = append(failures, err)
 	}
 	result := localRepairReport{localSetupResult: localSetupResult{State: "ready"}, Version: localSoftwareVersion(), BinarySHA256: localBinarySHA256, AttemptedAt: time.Now().UTC()}

@@ -909,8 +909,14 @@ func TestHookSessionStartAdmission(t *testing.T) {
 			beforeBinding, _ := os.ReadFile(bindingPath(path))
 			out, errs := runHookStdin(t, env, `{"hook_event_name":"SessionStart","session_id":"s1","source":"startup"}`, "hook", "--profile", "p")
 			if tc.rebind {
-				if !strings.Contains(contextOf(t, out), `text="secret text"`) || polls.Load() != 1 {
+				// SessionStart never claims or delivers; the session's next
+				// prompt takes the rebind window.
+				if out != "" || errs != "" || polls.Load() != 0 {
 					t.Fatalf("rebound start: out=%q stderr=%q polls=%d", out, errs, polls.Load())
+				}
+				out, errs = runHookAs(t, env, "s1", "p")
+				if !strings.Contains(contextOf(t, out), `text="secret text"`) || polls.Load() != 1 {
+					t.Fatalf("rebound prompt: out=%q stderr=%q polls=%d", out, errs, polls.Load())
 				}
 				if s := readHookState(t, path); s.Session != "s1" || s.SessionHow != bindRebind || !s.RebindUntil.IsZero() {
 					t.Fatalf("binding=%+v", s.hookBinding)
@@ -943,15 +949,15 @@ func TestHookSessionStartAdmission(t *testing.T) {
 				if !strings.Contains(contextOf(t, prompt), `text="secret text"`) || polls.Load() != 1 {
 					t.Fatalf("declared prompt failed to claim: %q polls=%d", prompt, polls.Load())
 				}
-				// Leave a new delivery for the already admitted SessionStart.
+				// Leave a new delivery for the session's next prompt.
 				seedSession(t, path, func(s *hookState) { s.Shown = nil; s.Displayed = nil; s.PollCursor = "e1.0" })
 			} else if tc.existing && (prompt != "" || polls.Load() != 0) {
 				t.Fatalf("automatic prompt claimed too early: %q polls=%d", prompt, polls.Load())
 			}
 			beforePolls := polls.Load()
-			out, _ = runHookStdin(t, env, `{"hook_event_name":"SessionStart","session_id":"s1","source":"resume"}`, "hook", "--profile", "p")
-			if !strings.Contains(contextOf(t, out), `text="secret text"`) || !strings.Contains(out, `"hookEventName":"SessionStart"`) || polls.Load() != beforePolls+1 {
-				t.Fatalf("admitted start: out=%q polls=%d", out, polls.Load())
+			out, _ = runHookAs(t, env, "s1", "p")
+			if !strings.Contains(contextOf(t, out), `text="secret text"`) || polls.Load() != beforePolls+1 {
+				t.Fatalf("admitted prompt: out=%q polls=%d", out, polls.Load())
 			}
 		})
 	}
@@ -1001,7 +1007,7 @@ func TestHookSessionStartMCPHints(t *testing.T) {
 		for _, mcp := range []string{"", "vecnet-p", "vecnet-q"} {
 			t.Run(strconv.FormatBool(summary)+"/"+mcp, func(t *testing.T) {
 				var want string
-				for _, event := range []string{"user-prompt", "session-start"} {
+				for _, event := range []string{"user-prompt", "post-tool"} {
 					env, path := hookFixture(t, func(w http.ResponseWriter, r *http.Request) {
 						if r.URL.Query().Get("after") == "head" {
 							hookPage(w, nil, "e1.0")
@@ -1027,7 +1033,7 @@ func TestHookSessionStartMCPHints(t *testing.T) {
 					if want == "" {
 						want = ctx
 					} else if ctx != want {
-						t.Fatalf("start context=%q, prompt context=%q", ctx, want)
+						t.Fatalf("%s context=%q, prompt context=%q", event, ctx, want)
 					}
 				}
 			})

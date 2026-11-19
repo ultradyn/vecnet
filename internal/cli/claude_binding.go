@@ -454,7 +454,8 @@ func claudeInvocationChecks(getenv func(string) string, root claudeRoot) error {
 // claudeScopeWitness ties the scope to the present config: the profile
 // must exist there, its hub must match, and a stored profile witness
 // (peer id or committed enrollment caller) must match the claimed caller.
-// Scope never comes from a profile name alone.
+// Scope never comes from a profile name alone, and a profile with no
+// witness at all cannot witness anything: shape-only matches refuse.
 func (a *app) claudeScopeWitness(scope claudeScope) error {
 	present, err := configPath(a.getenv)
 	if err != nil {
@@ -477,6 +478,9 @@ func (a *app) claudeScopeWitness(scope claudeScope) error {
 	}
 	if normalizeHub(p.Hub) != scope.HubEndpoint {
 		return usageErr("claude registration hub differs from the present config")
+	}
+	if p.PeerID == "" && p.EnrollmentCaller == "" {
+		return usageErr("claude registration requires a stored caller witness in the present config")
 	}
 	if p.PeerID != "" && p.PeerID != scope.Caller {
 		return usageErr("claude registration caller differs from the stored profile witness")

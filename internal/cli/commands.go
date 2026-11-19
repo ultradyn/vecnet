@@ -723,6 +723,22 @@ func (a *app) cmdEnrol(args []string) error {
 			return fmt.Errorf("enrol: setup intent was not saved; invitation was not redeemed: %w", err)
 		}
 	}
+	// The Claude durable intent is a separate flow with its own private
+	// document; the two environments never coexist in one run.
+	claudeIntent, claudePrepareErr := a.prepareClaudeEnrollment(name)
+	if errors.Is(claudePrepareErr, errClaudeEnrollmentHost) {
+		if intent == nil {
+			setup = localSetupResult{State: "unsupported", Reason: claudePrepareErr.Error()}
+		}
+	} else if claudePrepareErr != nil {
+		return fmt.Errorf("enrol: claude setup intent was not saved; invitation was not redeemed: %w", claudePrepareErr)
+	}
+	if claudeIntent != nil {
+		claudeIntent.Hub = normalizeHub(hubURL)
+		if err := a.saveClaudeEnrollment(*claudeIntent); err != nil {
+			return fmt.Errorf("enrol: claude setup intent was not saved; invitation was not redeemed: %w", err)
+		}
+	}
 	var out struct {
 		PeerID    string `json:"peer_id"`
 		Secret    string `json:"secret"`
@@ -742,6 +758,14 @@ func (a *app) cmdEnrol(args []string) error {
 			intent.UpdatedAt = time.Now().UTC()
 			if e := a.saveLocalEnrollment(*intent); e != nil {
 				fmt.Fprintf(a.stderr, "vecnet: could not record canceled setup: %v\n", e)
+			}
+		}
+		if claudeIntent != nil {
+			claudeIntent.State = claudeEnrollmentCanceled
+			claudeIntent.Reason = "enrollment request did not commit credentials; use a fresh or still-valid invitation"
+			claudeIntent.UpdatedAt = time.Now().UTC()
+			if e := a.saveClaudeEnrollment(*claudeIntent); e != nil {
+				fmt.Fprintf(a.stderr, "vecnet: could not record canceled claude setup: %v\n", e)
 			}
 		}
 		// "unauthenticated" alone reads as a revoked invite; say what else
@@ -775,6 +799,16 @@ func (a *app) cmdEnrol(args []string) error {
 		enrolled.EnrollmentHub = intent.Hub
 		enrolled.EnrollmentCaller = out.PeerID
 	}
+	if claudeIntent != nil {
+		// Same single commit for the Claude flow: the redeemed caller is the
+		// witness every later registration checks.
+		claudeIntent.Caller = out.PeerID
+		claudeIntent.State = claudeEnrollmentPending
+		enrolled.EnrollmentIntent = claudeIntent.IntentID
+		enrolled.EnrollmentCredential = hookDigest([]byte(out.Secret))
+		enrolled.EnrollmentHub = claudeIntent.Hub
+		enrolled.EnrollmentCaller = out.PeerID
+	}
 	cfg.Profiles[name] = enrolled
 	if err := saveConfigDurable(path, cfg); err != nil {
 		// The secret was issued once and is never printed (PROTOCOL §12, §14
@@ -789,16 +823,23 @@ func (a *app) cmdEnrol(args []string) error {
 	if intent != nil {
 		setup = a.reconcileLocalEnrollment(*intent)
 	}
+	if claudeIntent != nil {
+		setup = a.reconcileClaudeEnrollment(a.ctx, *claudeIntent)
+	}
 	if a.json {
 		return a.emitValue(map[string]any{"profile": name, "peer_id": out.PeerID, "name": out.Name, "config": path, "setup": setup})
 	}
 	fmt.Fprintf(a.stdout, "enrolled %s as profile %s (%s)\n", out.PeerID, name, path)
 	if setup.State == "pending" {
 		fmt.Fprintf(a.stdout, "credentials saved; session setup pending: %s (retry: vecnet repair)\n", setup.Reason)
-	} else if setup.State == "superseded" || setup.State == "canceled" {
+	} else if setup.State == "superseded" || setup.State == "canceled" || setup.State == claudeEnrollmentDisabled {
 		fmt.Fprintf(a.stdout, "credentials saved; automatic setup %s: %s\n", setup.State, setup.Reason)
 	} else if setup.State == "unsupported" {
 		fmt.Fprintf(a.stdout, "credentials saved; automatic setup unsupported: %s\n", setup.Reason)
+	} else if setup.State == claudeEnrollmentArmed || setup.State == claudeEnrollmentRegistered {
+		// The phase is the status: a saved credential never means native
+		// Claude delivery is ready; the legacy hook path is unchanged.
+		fmt.Fprintf(a.stdout, "credentials saved; claude setup %s: %s\n", setup.State, setup.Reason)
 	} else if setup.State == "ready" {
 		fmt.Fprintln(a.stdout, "session delivery ready")
 	}
