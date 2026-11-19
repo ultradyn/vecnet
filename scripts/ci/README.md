@@ -66,6 +66,22 @@ PASS roots, with 89 censored records. Of 2,559 Linux and 2,592 Windows discovere
 roots, 2 Linux and 44 Windows roots have no PASS weight. The profile never
 selects coverage.
 
+The reduced `TestStateConcurrentWriters` fixture changed at `4db57b7a` from
+1,600 claim attempts to 128, retaining eight competing writers and its property
+assertions. Its Windows hint is reset from 21.69s for the old workload to the
+2.21s complete-PASS maximum (x64 1.93s / ARM 2.21s) in source-bound run
+`44471440331`, attempt 1, source `5946a271`. `rootHintAdjustments` records the
+exact root, raw log hashes/lengths and fixture hash unchanged since that change;
+all other hints, Linux values, censored records and original source metadata
+remain intact. The run itself failed on two other x64 group deadlines.
+
+With existing six Windows lanes, four groups and 33 jobs, replay over all 2,629
+Windows roots reduces modeled maximum group load from 50.087s to 41.803s
+(8.284s more headroom); worst lane rises from 129.140s to 135.273s. Forty-four
+roots lack PASS weights and 101 observations remain censored. These are
+execution placement estimates, excluding queue/setup/acceptance, and require
+fresh strict native evidence.
+
 Deterministic weighted
 placement balances whole roots, then forms package packets within a partition:
 at most8 roots and4 estimated root seconds, plus one observed startup hint.
@@ -246,26 +262,21 @@ including embedded files, before reuse. The source hash is deliberately coarse;
 it does not replace Go input validation. Neither fallback crosses compiler,
 host, target or role boundaries.
 
-Explicit `actions/cache/save@v4` runs only after successful artifact production
-and upload, and only without an exact hit; it saves the restored primary key
-and the same two paths. Restore and save each have a one-minute cancellation
-guard, with no automatic cache-save post step. Compilation/module entries are
-reused; passing test results and source-bound final artifacts are not used to
-replace any build, compile, discovery or native execution command. Native
-consumers, assembly, publication and source/artifact policies are unchanged.
+Release producers restore existing remote snapshots only; their private caches
+remain writable for the current job. They publish no new snapshots and have no
+automatic cache-save post step. A 315 MB save stalled past the 60s guard after
+the required Windows ARM test bundle had uploaded, blocking its consumers;
+optional cache persistence must not delay required artifact delivery. Reuse
+replaces no build, compile, discovery or native execution command. Native
+consumers, assembly, publication and source/artifact validation are unchanged.
 
-A source-key miss can save a new full cache for each of seven producers;
-immutable exact hits are not refreshed. These caches have no configured size
-cap or retention period: repository cache quota/eviction limits availability,
-and cold misses still pay all compilation plus cache compression/upload costs.
-The schema can be bumped to invalidate entries. Neither warm-cache speedup nor
-cold-cache compliance is established here; actual native runs must still pass
-strict overall <300s and every-step <60s acceptance, including cache steps.
-
-Caches created for a GitHub PR merge ref cannot be reused on master.
-A green or warm PR run therefore establishes neither master/tag cache state
-nor timing. Cache action failures, including stalled saves reaching the guard,
-remain hard CI failures with no acceptance bypass.
+Existing snapshots can become less useful as inputs diverge, and repository
+cache quota/eviction can remove them. A miss still runs every cold dependency and
+compilation stage. Cold-cache and aging-snapshot performance require actual
+hosted evidence: strict overall <300s and every-step <60s acceptance, including
+restores, remains mandatory. Existing PR-merge-ref snapshots cannot be reused
+on master; a warm PR run establishes neither master/tag cache state nor timing.
+Restore failures remain hard CI failures with no acceptance bypass.
 
 `budget.mjs 53000 command [args...]` owns the complete command, not one child
 at a time. Linux uses a kernel child-subreaper: adopted descendants are killed

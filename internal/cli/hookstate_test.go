@@ -84,17 +84,25 @@ func readHookState(t *testing.T, path string) hookState {
 }
 
 func TestStateConcurrentWriters(t *testing.T) {
+	const (
+		writers = 8
+		ids     = 16
+	)
 	env := hookTestEnv(t)
 	path, err := statePath(func(k string) string { return env[k] }, "p", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var claims [200]atomic.Int32
-	var wg sync.WaitGroup
-	for i := 0; i < 8; i++ {
+	var claims [ids]atomic.Int32
+	var wg, ready sync.WaitGroup
+	ready.Add(writers)
+	start := make(chan struct{})
+	for i := 0; i < writers; i++ {
 		wg.Go(func() {
 			f := stateFile{path: path}
-			for j := 0; j < 200; j++ {
+			ready.Done()
+			<-start
+			for j := 0; j < ids; j++ {
 				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 				ok := f.claimOne(ctx, fmt.Sprintf("d%d", j))
 				cancel()
@@ -104,6 +112,8 @@ func TestStateConcurrentWriters(t *testing.T) {
 			}
 		})
 	}
+	ready.Wait()
+	close(start)
 	wg.Wait()
 	for i := range claims {
 		if n := claims[i].Load(); n != 1 {
@@ -111,8 +121,13 @@ func TestStateConcurrentWriters(t *testing.T) {
 		}
 	}
 	s := readHookState(t, path)
-	if len(s.Shown) != 200 {
-		t.Fatalf("stored %d ids, want 200", len(s.Shown))
+	if len(s.Shown) != ids {
+		t.Fatalf("stored %d ids, want %d", len(s.Shown), ids)
+	}
+	for i := range claims {
+		if id := fmt.Sprintf("d%d", i); !s.has(id) {
+			t.Errorf("stored state missing %s", id)
+		}
 	}
 	cliFixtureRequireMode(t, path, 0o600)
 	cliFixtureRequireMode(t, filepath.Dir(path), 0o700)
