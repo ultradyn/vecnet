@@ -316,7 +316,12 @@ func TestClaudeRuntimeSnapshotRedaction(t *testing.T) {
 		t.Fatalf("snapshot has unexpected top-level fields: %q", out.String())
 	}
 	var rows []map[string]json.RawMessage
-	if err := json.Unmarshal(top["bindings"], &rows); err != nil || len(rows) != 1 || len(rows[0]) != 2 {
+	if err := json.Unmarshal(top["bindings"], &rows); err != nil || len(rows) != 1 {
+		t.Fatalf("snapshot rows have unexpected fields: %q", out.String())
+	}
+	// A row is exactly the opaque key, the generation and the passive state
+	// (plus its fixed reason when the root is not live).
+	if len(rows[0]) != 3 && len(rows[0]) != 4 {
 		t.Fatalf("snapshot rows have unexpected fields: %q", out.String())
 	}
 	if string(rows[0]["binding_key"]) != jsonString(claudeBindingKey(scope)) {
@@ -324,6 +329,9 @@ func TestClaudeRuntimeSnapshotRedaction(t *testing.T) {
 	}
 	if string(rows[0]["generation"]) != jsonString("0123456789abcdef0123456789abcdef") {
 		t.Fatalf("generation missing: %q", out.String())
+	}
+	if string(rows[0]["state"]) != jsonString("blocked") {
+		t.Fatalf("a root with no live evidence must report blocked: %q", out.String())
 	}
 	for _, marker := range []string{"SNAPSHOT-REDACT", "/home/user", "peer_A", "hub.example.com", "4242", "vecnet.toml"} {
 		if strings.Contains(out.String(), marker) {

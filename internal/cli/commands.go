@@ -592,7 +592,8 @@ func (a *app) dispatchOnce(cmd string, args []string) error {
 	case "codex":
 		return a.cmdCodex(args, time.Now)
 	case "claude":
-		// Read-only snapshot child for the shared delivery host; it never
+		// Passive local surface: the host's read-only snapshot child, the
+		// status reader and the addressed disable/enable flags. It never
 		// performs hub requests or generic maintenance.
 		return a.cmdClaude(args)
 	case "threads":

@@ -177,7 +177,7 @@ func TestStageActivateUpgradeAndNoop(t *testing.T) {
 	if string(read(t, filepath.Join(r.Release, "vecnet"))) != "private-cli-v1" {
 		t.Fatal("wrong private binary")
 	}
-	for _, p := range []string{"connectors/launcher/package.json", "connectors/hub-client/package.json", "connectors/launcher/src/daemon.ts", "connectors/launcher/src/codex/delivery-main.ts", "connectors/hub-client/src/client.ts", "connectors/launcher/schema/launch-question.v1.schema.json"} {
+	for _, p := range []string{"connectors/launcher/package.json", "connectors/hub-client/package.json", "connectors/launcher/src/daemon.ts", "connectors/launcher/src/codex/delivery-main.ts", "connectors/launcher/src/delivery/claude-status.ts", "connectors/launcher/src/delivery/host.ts", "connectors/hub-client/src/client.ts", "connectors/launcher/schema/launch-question.v1.schema.json"} {
 		read(t, filepath.Join(r.Release, p))
 	}
 	unit := string(read(t, r.Unit))
@@ -376,7 +376,12 @@ func TestStagedImportsWithoutNodeModules(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	script := `await import('./connectors/launcher/src/daemon.ts'); const m=await import('./connectors/launcher/src/contract/launch-input.ts'); if(!m)process.exit(2);`
+	// The delivery imports (including the passive claude status adapter both
+	// host modes wire as their default auxiliary) must load from the staged
+	// tree alone, without node_modules and without renamed launch paths.
+	// delivery-main.ts itself stays loaded by its own entrypoint test: its
+	// import side effect runs main().
+	script := `await import('./connectors/launcher/src/daemon.ts'); const d=await import('./connectors/launcher/src/delivery/claude-status.ts'); const m=await import('./connectors/launcher/src/contract/launch-input.ts'); if(!m||typeof d.createClaudeStatus!=='function')process.exit(2);`
 	c := exec.Command(node, "--disable-warning=ExperimentalWarning", "--experimental-strip-types", "--input-type=module", "--eval", script)
 	c.Dir = r.Release
 	c.Env = []string{"HOME=" + o.Home, "PATH=/usr/bin:/bin"}

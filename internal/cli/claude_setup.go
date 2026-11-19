@@ -402,7 +402,7 @@ func claudeSetupResultFor(err error) localSetupResult {
 	switch {
 	case err == nil:
 		return localSetupResult{State: claudeEnrollmentRegistered}
-	case errors.Is(err, errClaudeOptOut):
+	case errors.Is(err, errClaudeOptOut), errors.Is(err, errClaudeDisabledGlobal):
 		return localSetupResult{State: claudeEnrollmentDisabled, Reason: err.Error()}
 	case errors.Is(err, errClaudeUnsupported):
 		return localSetupResult{State: "unsupported", Reason: err.Error()}

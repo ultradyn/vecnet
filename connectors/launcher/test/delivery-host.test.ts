@@ -288,3 +288,74 @@ test('embedded delivery takes over the managed entry’s lock after SIGKILL leav
   assert.equal(existsSync(s.status), false);
   assert.deepEqual(inode(s.lock), original);
 });
+
+test('registered Claude root is visible through the same host across restart',
+  { skip: process.platform === 'win32' && 'Unix flock and sidecar fixture', timeout: 30_000 }, async t => {
+  const s = fixture(t);
+  // A private stub stands in for the packaged CLI child: it answers only the
+  // claude runtime-snapshot request and records every invocation.
+  const key = 'cd'.repeat(32), generation = '02'.repeat(16);
+  const calls = join(s.env.HOME, 'stub-calls.log');
+  const stub = join(s.env.HOME, 'vecnet-stub');
+  writeFileSync(stub, [
+    '#!/bin/sh',
+    `printf '%s\\n' "$*" >> ${JSON.stringify(calls)}`,
+    'if [ "$1" = claude ] && [ "$2" = runtime-snapshot ]; then',
+    `  printf '%s\\n' ${JSON.stringify(JSON.stringify({ version: 1, bindings: [{ binding_key: key, generation, state: 'registered' }] }))}`,
+    '  exit 0',
+    'fi',
+    'exit 1',
+    '',
+  ].join('\n'), { mode: 0o700 });
+  const env = { ...s.env, VECNET_BIN: stub };
+  const claudeSidecar = s.authority + '.claude-status.json';
+
+  const entry = fileURLToPath(new URL('../src/codex/delivery-main.ts', import.meta.url));
+  const child = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', '--experimental-strip-types', entry], {
+    env, stdio: ['ignore', 'ignore', 'pipe'],
+  });
+  const exited = once(child, 'close');
+  let stderr = '';
+  child.stderr.on('data', data => { stderr += data; });
+  s.cleanup.push(async () => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); await exited; });
+  await until(() => existsSync(claudeSidecar) || child.exitCode !== null, 'managed entry publishes the claude sidecar', 15_000);
+  assert.equal(child.exitCode, null, stderr);
+  const first = JSON.parse(readFileSync(claudeSidecar, 'utf8'));
+  assert.equal(first.host_pid, child.pid);
+  assert.equal(first.boot_id, readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim());
+  assert.deepEqual(first.bindings, [{ binding_key: key, generation, state: 'registered' }]);
+  assert.deepEqual(JSON.parse(readFileSync(s.status, 'utf8')).version, 1, 'Codex v1 status stays alongside');
+  const original = inode(s.lock);
+
+  // A real crash leaves the sidecar behind: only a fresh live writer counts.
+  assert.ok(child.kill('SIGKILL'));
+  assert.deepEqual(await exited, [null, 'SIGKILL']);
+  assert.equal(existsSync(claudeSidecar), true, 'crash leaves the sidecar file');
+
+  // The other host mode (the embedded daemon) takes the same singleton and
+  // republishes the same root: no second daemon, no generation change.
+  const h = await harness(t, { env });
+  await until(() => {
+    if (!existsSync(claudeSidecar)) return false;
+    const doc = JSON.parse(readFileSync(claudeSidecar, 'utf8'));
+    return doc.host_pid === process.pid;
+  }, 'embedded host republishes the claude sidecar', 15_000);
+  const second = JSON.parse(readFileSync(claudeSidecar, 'utf8'));
+  assert.deepEqual(second.bindings, [{ binding_key: key, generation, state: 'registered' }], 'same root generation after restart');
+  assert.deepEqual(inode(s.lock), original, 'no second delivery singleton');
+  await assertLegacyExcluded(s);
+
+  // Passive only: the stub saw exactly the snapshot child, never a watch or a
+  // stream, and the daemon performed no delivery write. (The daemon's own
+  // startup presence report is pre-existing behavior and may race in.)
+  const seen = readFileSync(calls, 'utf8').trim().split('\n').filter(Boolean);
+  assert.ok(seen.length > 0, 'the snapshot child ran at least once');
+  for (const line of seen) assert.equal(line, 'claude runtime-snapshot', `unexpected CLI child: ${line}`);
+  assert.equal(h.sends().length, 0, 'no message writes');
+  assert.equal(h.receipts().length, 0, 'no receipt writes');
+  assert.ok(h.presence().length <= 1, `unexpected presence writes: ${h.presence().length}`);
+
+  await h.daemon.stop();
+  assert.equal(existsSync(claudeSidecar), false, 'orderly stop removes the owned sidecar');
+  assert.deepEqual(inode(s.lock), original);
+});

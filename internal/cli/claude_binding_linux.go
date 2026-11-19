@@ -209,3 +209,34 @@ func claudeProcessFenced(pid int, start, boot string) bool {
 	}
 	return false
 }
+
+// claudeHostLive proves the status writer is this host's exact live process:
+// a live pid whose current start identity is the one the sidecar recorded.
+func claudeHostLive(pid int, start string) bool {
+	if pid <= 1 || start == "" {
+		return false
+	}
+	alive, known := procAlive(pid)
+	if !known || !alive {
+		return false
+	}
+	now := procStart(pid)
+	return now != "" && now == start
+}
+
+// claudeSingletonHeld gathers evidence that the shared delivery singleton is
+// held, without ever unlinking or creating the lock: a fresh read-only
+// descriptor must fail flock. Failure to probe fails closed.
+func claudeSingletonHeld(lock string) bool {
+	fd, err := unix.Open(lock, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return false
+	}
+	defer unix.Close(fd)
+	if err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); err == nil {
+		return false // The probe acquired it: no host holds the singleton.
+	} else if !errors.Is(err, unix.EWOULDBLOCK) && !errors.Is(err, unix.EAGAIN) {
+		return false
+	}
+	return true
+}

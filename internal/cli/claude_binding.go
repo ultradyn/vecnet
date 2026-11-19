@@ -606,6 +606,9 @@ func (a *app) registerClaudeRoot(ctx context.Context, scope claudeScope, root cl
 	if err != nil {
 		return none, err
 	}
+	if settings, err := a.claudeSettings(); err == nil && settings.Disabled {
+		return none, errClaudeDisabledGlobal
+	}
 	if slices.ContainsFunc(doc.OptOuts, func(s claudeScope) bool { return claudeSameRecipient(s, scope) }) {
 		return none, errClaudeOptOut
 	}
@@ -627,32 +630,11 @@ func (a *app) registerClaudeRoot(ctx context.Context, scope claudeScope, root cl
 type claudeSnapshotBinding struct {
 	BindingKey string `json:"binding_key"`
 	Generation string `json:"generation"`
+	State      string `json:"state"`
+	Reason     string `json:"reason,omitempty"`
 }
 
 type claudeRuntimeSnapshot struct {
 	Version  int                     `json:"version"`
 	Bindings []claudeSnapshotBinding `json:"bindings"`
-}
-
-// cmdClaude hosts the claude connector surface. runtime-snapshot is the
-// private host child: a versioned, redacted, read-only view of the private
-// registry. It contains only opaque keys and generations, never socket
-// paths, config contents or credentials, and never parses the full
-// registry host-side.
-func (a *app) cmdClaude(args []string) error {
-	if len(args) == 0 || args[0] != "runtime-snapshot" {
-		return usageErr("claude: expected runtime-snapshot")
-	}
-	if len(args) > 1 {
-		return usageErr("claude runtime-snapshot: unexpected arguments")
-	}
-	rows, err := a.readClaudeBindings()
-	if err != nil {
-		return err
-	}
-	snapshot := claudeRuntimeSnapshot{Version: 1, Bindings: make([]claudeSnapshotBinding, 0, len(rows))}
-	for _, b := range rows {
-		snapshot.Bindings = append(snapshot.Bindings, claudeSnapshotBinding{BindingKey: claudeBindingKey(b.claudeScope), Generation: b.Generation})
-	}
-	return a.emitValue(snapshot)
 }

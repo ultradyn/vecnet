@@ -8,6 +8,7 @@ import type { Clock, EventStream, HubApi, Log } from '../../hub-client/src/ports
 import { createEventStream } from '../../hub-client/src/stream.ts';
 import type { SendRequest } from '../../hub-client/src/wire.ts';
 import type { Backend, BackendCapabilities, BackendHealth, PermissionMode, SessionHandle, SettleResult } from './backend.ts';
+import { createClaudeStatus, spawnClaudeSnapshot } from './delivery/claude-status.ts';
 import { startDeliveryHost } from './delivery/host.ts';
 import { ConfigError, parseDuration } from './config.ts';
 import type { LauncherConfig } from './config.ts';
@@ -514,7 +515,13 @@ export async function startDaemon(o: { cfg: LauncherConfig; hub?: HubApi; stream
     });
     every(cfg.presence.heartbeat_ms, async () => { await refreshHealth(); changed(); });
 
-    const delivery = startDeliveryHost({ kv: ledger.kv('codex'), clock, log, env: o.env ?? process.env });
+    // Passive Claude status is the default auxiliary adapter: it rides the
+    // elected host lease, never elects its own, and adds no stream or post.
+    const deliveryEnv = o.env ?? process.env;
+    const delivery = startDeliveryHost({
+      kv: ledger.kv('codex'), clock, log, env: deliveryEnv,
+      auxiliary: () => createClaudeStatus({ env: deliveryEnv, clock, log, fetchSnapshot: spawnClaudeSnapshot(deliveryEnv) }),
+    });
     // A dead delivery host must fail the embedded service as well, not leave a
     // healthy-looking launcher process that can never publish readiness again.
     void delivery.stopped.then(outcome => {

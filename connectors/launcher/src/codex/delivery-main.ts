@@ -4,6 +4,7 @@ import { stderrLog, systemClock } from '../daemon.ts';
 import { userHome } from '../../../hub-client/src/platform.ts';
 import { localPlatform } from '../private-files.ts';
 import { codexAuthority, codexRecoveryPath } from './connector.ts';
+import { createClaudeStatus, spawnClaudeSnapshot } from '../delivery/claude-status.ts';
 import { startDeliveryHost } from '../delivery/host.ts';
 import type { DeliveryHost } from '../delivery/host.ts';
 
@@ -42,7 +43,12 @@ async function main(): Promise<void> {
   process.once('SIGTERM', stop); process.once('SIGINT', stop);
   let host: DeliveryHost | undefined;
   try {
-    host = startDeliveryHost({ env, clock: systemClock, log: stderrLog() });
+    const log = stderrLog();
+    host = startDeliveryHost({
+      env, clock: systemClock, log,
+      // Passive Claude status rides this host's lease; it never elects one.
+      auxiliary: () => createClaudeStatus({ env, clock: systemClock, log, fetchSnapshot: spawnClaudeSnapshot(env) }),
+    });
     await Promise.race([interrupted, host.stopped]);
   } finally {
     try { await host?.stop(); }
