@@ -309,7 +309,7 @@ for (const failure of ['initial', 'all']) test(`known peers are independently di
 
 async function activeProcess(pid) {
   try { const s = await readFile(`/proc/${pid}/stat`, 'utf8'); return !['Z', 'X'].includes(s.slice(s.lastIndexOf(')') + 2).split(' ')[0]); }
-  catch (e) { if (e.code === 'ENOENT') return false; throw e; }
+  catch (e) { if (['ENOENT', 'ESRCH'].includes(e.code)) return false; throw e; }
 }
 async function until(fn) {
   const end = Date.now() + 4000;
