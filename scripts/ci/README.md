@@ -304,6 +304,14 @@ The npm helper shares a38s internal deadline across lookup/upload/verification;
 after one successful upload it polls only registry visibility for at most5s,
 within that deadline. Publication is never retried. No retries mask failures.
 
+## npm publication recovery
+
+Immediately after a successful upload, before any visibility request, the
+Actions summary records a full `accepted` receipt binding source, version,
+tarball and integrity. Verification failures append a failure indication while
+retaining that receipt and failing the step, without pending/verified output.
+Pre-upload lookup failures or failed uploads do not record acceptance.
+
 A successful upload followed only by404 responses through that visibility
 window now returns **pending**, rather than failing or claiming npm availability.
 The publication step emits `state=pending` or `state=verified` for the GitHub

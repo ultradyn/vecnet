@@ -39,6 +39,11 @@ const published = {
   dist: { integrity: 'sha512-7HJ8RzKS/Zj5BkNLRSPwCLGwhP1dHbgltO3R2fs9pLeXJa5kzKOauZTdhDrvV3sSYZCXw9X97/yyb8HUgqF9yw==' },
 };
 const response = (status, body) => new Response(body && JSON.stringify(body), { status });
+const receipts = summary => [...summary.matchAll(/```json\n([\s\S]*?)\n```/g)].map(match => JSON.parse(match[1]));
+const accepted = {
+  state: 'accepted', source: '1234567890abcdef1234567890abcdef12345678', version: '0.1.1',
+  tarball: 'vecnet-0.1.1.tgz', integrity: published.dist.integrity,
+};
 
 async function publication(t, { uploadMs = 0, lookup = () => response(404), uploadError } = {}) {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'vecnet-publish-'));
@@ -140,11 +145,10 @@ test('Actions receives pending or verified state and a source/version/integrity-
     assert.match(output, new RegExp(`^state=${state}$`, 'm'));
     const summary = await readFile(context.options.summary, 'utf8');
     assert.match(summary, /^Earlier evidence\n/);
-    const receipt = JSON.parse(/```json\n([\s\S]*?)\n```/.exec(summary)?.[1] || 'null');
-    assert.deepEqual(receipt, {
+    assert.deepEqual(receipts(summary), [accepted, {
       state, source: '1234567890abcdef1234567890abcdef12345678', version: '0.1.1',
       tarball: 'vecnet-0.1.1.tgz', integrity: published.dist.integrity,
-    });
+    }]);
     if (state === 'pending') {
       assert.match(summary, /not yet verified visible/i);
       assert.match(summary, /do not (?:reupload|republish)/i);
@@ -153,26 +157,47 @@ test('Actions receives pending or verified state and a source/version/integrity-
   }
 });
 
-test('lookup transport failures remain failures after a successful upload, with no pending receipt', async t => {
-  const failure = new Error('registry request timed out');
-  const context = await publication(t, { lookup: n => {
-    if (n > 1) throw failure;
-    return response(404);
-  } });
-  await assert.rejects(publish(info, context.options), error => error === failure);
-  assert.equal(context.uploads.length, 1);
-  await assert.rejects(readFile(context.options.output), { code: 'ENOENT' });
-});
+const transportFailure = new Error('registry request timed out');
+for (const [kind, verify, error, detail] of [
+  ['transport error', () => { throw transportFailure; }, failure => failure === transportFailure, /registry request timed out/],
+  ['HTTP error', () => response(503), /verification failed with HTTP 503/, /HTTP 503/],
+  ['integrity conflict', () => response(200, { ...published, dist: { integrity: 'different' } }), /different contents/, /different contents/],
+]) {
+  test(`post-upload ${kind} retains immediate acceptance evidence while failing without success output`, async t => {
+    let beforeVerification;
+    const context = await publication(t, { lookup: async n => {
+      if (n === 1) return response(404);
+      beforeVerification = await readFile(context.options.summary, 'utf8').catch(error => {
+        if (error.code === 'ENOENT') return '';
+        throw error;
+      });
+      return verify();
+    } });
+    await assert.rejects(publish(info, context.options), error);
+    assert.equal(context.uploads.length, 1);
+    assert.equal(context.lookups.length, 2);
+    assert.deepEqual(context.waits, []);
+    await assert.rejects(readFile(context.options.output), { code: 'ENOENT' });
+    assert.deepEqual(receipts(beforeVerification), [accepted], 'full acceptance receipt must exist before verification starts');
+    const summary = await readFile(context.options.summary, 'utf8');
+    assert.ok(summary.startsWith(beforeVerification), 'verification failure must retain the original acceptance evidence');
+    assert.deepEqual(receipts(summary)[0], accepted);
+    assert.match(summary, /verification failed/i);
+    assert.match(summary, detail);
+    assert.match(summary, /do not (?:reupload|republish)/i);
+    assert.ok(receipts(summary).every(receipt => !['pending', 'verified'].includes(receipt.state)));
+  });
+}
 
-test('registry errors and post-upload integrity mismatches fail without retrying publication', async t => {
-  for (const [lookup, error, uploads] of [
-    [() => response(503), /lookup failed with HTTP 503/, 0],
-    [n => response(n === 1 ? 404 : 503), /verification failed with HTTP 503/, 1],
-    [n => n === 1 ? response(404) : response(200, { ...published, dist: { integrity: 'different' } }), /different contents/, 1],
+test('pre-upload lookup failures and conflicting metadata fail without acceptance evidence or uploading', async t => {
+  for (const [lookup, error] of [
+    [() => response(503), /lookup failed with HTTP 503/],
+    [() => { throw transportFailure; }, failure => failure === transportFailure],
+    [() => response(200, { ...published, dist: { integrity: 'different' } }), /different contents/],
   ]) {
     const context = await publication(t, { lookup });
     await assert.rejects(publish(info, context.options), error);
-    assert.equal(context.uploads.length, uploads);
+    assert.equal(context.uploads.length, 0);
     assert.deepEqual(context.waits, []);
     await assert.rejects(readFile(context.options.output), { code: 'ENOENT' });
     await assert.rejects(readFile(context.options.summary), { code: 'ENOENT' });
