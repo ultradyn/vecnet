@@ -230,6 +230,7 @@ type app struct {
 	// explicit, so a verified hub follow redispatches the same submission.
 	retainedRequestID string
 	prefsCmd          bool                        // preferences exit codes and JSON errors
+	claudeDeliverCmd  bool                        // claude deliver's private 0/2/3/4 exit contract
 	localRuntime      func(context.Context) error // runtime port for disposable setup fixtures
 	// An explicit per-app inventory also enters the task check on other OSes
 	// for isolated repair fixtures. Nil retains native platform selection.
@@ -248,6 +249,9 @@ func (a *app) exit(err error) int {
 	}
 	if a.prefsCmd {
 		return a.exitPrefs(err)
+	}
+	if a.claudeDeliverCmd {
+		return a.exitClaudeDeliver(err)
 	}
 	var ue *usageError
 	var he *hubError

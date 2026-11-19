@@ -307,6 +307,10 @@ func (a *app) cmdClaude(args []string) error {
 		return a.cmdClaudeStatus(args[1:])
 	case "disable", "enable":
 		return a.cmdClaudeDisableEnable(args[0], args[1:])
+	case "deliver":
+		// Private single-shot transport child of the shared delivery host;
+		// deliberately absent from the usage line above.
+		return a.cmdClaudeDeliver(args[1:])
 	}
 	return usageErr("claude: expected runtime-snapshot, status, disable or enable")
 }
