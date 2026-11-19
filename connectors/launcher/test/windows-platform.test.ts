@@ -504,17 +504,27 @@ test('control proxy carries real WebSocket bytes and joins child close after tra
 });
 
 test('Windows live connector exposes fatal helper loss only after fencing, and a replacement regains readiness', { skip: !windows, timeout: 15000 }, async t => {
+  const started = performance.now();
+  const phase = (name: string) => t.diagnostic(`fatal-helper phase=${name} elapsed_ms=${Math.round(performance.now() - started)}`);
+  phase('fixture-start');
+  onCleanup(t, () => phase('cleanup-complete'));
   const s = await liveBinding(t), { helpers, children } = mockLiveProcesses(t, s.fake.socketPath);
+  phase('fixture-ready');
   const clock = fakeClock(Date.now()), log = memoryLog(), reports: { reason?: string }[] = [];
   const start = () => startCodexConnector({ env: s.env, log, clock, postRuntimeStatus: async (_b, snapshot) => { reports.push(snapshot); return true; } });
   const first = start(); onCleanup(t, () => first.stop());
   await until(() => s.watches() === 1 && s.fake.subscribers(s.id).length === 1, 'live bound watch and subscription');
+  phase('first-subscribed');
   clock.advance(CODEX_RELOAD_MS); await until(s.ready, 'ready live binding before helper death');
+  phase('first-ready');
   const oldSubscriber = s.fake.subscribers(s.id)[0], firstChildren = [...children]; assert.equal(helpers.length, 1);
   helpers[0].kill();
+  phase('helper-killed');
   assert.deepEqual(await first.stopped, { reason: 'status_lock_lost' }); // no explicit stop/signal
+  phase('first-fenced');
   assert.equal(s.fake.subscribers(s.id).length, 0, 'fatal outcome waits for unsubscribe');
   await until(() => firstChildren.every(c => c.exitCode !== null || c.signalCode !== null), 'owned children exit after fenced transport close');
+  phase('first-children-exited');
   assert.equal(reports.some(r => r.reason === 'stopped'), false, 'no offline report after singleton loss');
   const database = join(dirname(s.path), 'delivery.sqlite');
   localPlatform('check-private', database, { env: s.env });
@@ -522,15 +532,19 @@ test('Windows live connector exposes fatal helper loss only after fencing, and a
   assert.equal(codexRecoveryPath(s.env), database, 'closed recovery database admits the replacement');
   assert.deepEqual(readFileSync(database), recoveryBytes, 'replacement admission preserves recovery bytes');
   assert.equal(statSync(database, { bigint: true }).ino, recoveryIdentity.ino);
+  phase('recovery-readmitted');
   const count = children.length; clock.advance(CODEX_RELOAD_MS * 2);
   assert.equal(children.length, count, 'old connector never self-revives without a singleton');
   const second = start(); onCleanup(t, () => second.stop());
   await until(() => s.watches() === 2 && s.fake.subscribers(s.id).length === 1, 'replacement live binding');
+  phase('replacement-subscribed');
   assert.notEqual(s.fake.subscribers(s.id)[0], oldSubscriber); assert.equal(helpers.length, 2);
   clock.advance(CODEX_RELOAD_MS); await until(s.ready, 'replacement readiness');
+  phase('replacement-ready');
   const replacementStatus = readFileSync(s.path + '.status.json', 'utf8');
   await first.stop(); assert.equal(readFileSync(s.path + '.status.json', 'utf8'), replacementStatus, 'old cleanup cannot delete successor readiness');
   await second.stop(); assert.deepEqual(await second.stopped, { reason: 'stopped' });
+  phase('replacement-stopped');
   assert.equal(existsSync(s.path + '.status.json'), false); assert.equal(reports.at(-1)?.reason, 'stopped');
 });
 
