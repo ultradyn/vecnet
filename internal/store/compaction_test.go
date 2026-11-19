@@ -218,7 +218,38 @@ func TestCompactionPinnedReaderYieldsAndResumes(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
-	resumed, err := db.Maintain(context.Background(), store.MaintenanceOptions{ReclaimPages: 7, Target: time.Second})
+	// Statistics and checkpoint work count against the cooperative target.
+	// Reproduce a slow first probe exhausting a slice before reclaim starts.
+	slowProbe := true
+	opts := store.MaintenanceOptions{ReclaimPages: 7, Target: time.Second, AvailableBytes: func(context.Context) (int64, error) {
+		if slowProbe {
+			slowProbe = false
+			time.Sleep(time.Second + 10*time.Millisecond)
+		}
+		return 1 << 40, nil
+	}}
+	pages := pragmaInt(t, db, "page_count")
+	var resumed store.MaintenanceResult
+	for slice := 0; slice < 3; slice++ {
+		before := pragmaInt(t, db, "page_count")
+		resumed, err = db.Maintain(context.Background(), opts)
+		after := pragmaInt(t, db, "page_count")
+		t.Logf("resume slice %d: %+v, err=%v, physical pages=%d -> %d", slice+1, resumed, err, before, after)
+		if err != nil || resumed.ReclaimedPages < 0 || resumed.ReclaimedPages > 7 || before-after != resumed.ReclaimedPages || pages-after > 7 {
+			t.Fatalf("bounded resume: %+v %v", resumed, err)
+		}
+		if slice == 0 && (resumed.PausedReason != "time_budget" || resumed.ReclaimedPages != 0) {
+			t.Fatalf("slow probe did not exhaust the first slice: %+v", resumed)
+		}
+		if resumed.ReclaimedPages > 0 {
+			break
+		}
+		// Only a cooperative expiration permits a later slice. A permanent
+		// reader pin or checkpoint-only/no-op reclaim must still fail.
+		if resumed.PausedReason != "time_budget" {
+			t.Fatalf("reclaim did not resume after reader exit: %+v", resumed)
+		}
+	}
 	if err != nil || resumed.ReclaimedPages < 1 || resumed.Checkpoint.LogPages != resumed.Checkpoint.CheckpointedPages {
 		t.Fatalf("reclaim did not resume after reader exit: %+v %v", resumed, err)
 	}
