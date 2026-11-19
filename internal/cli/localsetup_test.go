@@ -278,8 +278,22 @@ func TestAutomaticEnrollmentPersistsIntentBeforeConfigExists(t *testing.T) {
 	}
 }
 
+// The canceled-invitation fixture must reach redemption even if an unrelated
+// Git on the caller's PATH would exhaust project discovery's real deadline.
+func TestEnrollmentRejectedInvitationIgnoresAmbientGit(t *testing.T) {
+	tools := t.TempDir()
+	cliFixtureProgram(t, tools, "git", "#!/bin/sh\nexec /bin/sleep 5\n", cliFixtureProgramSpec{Kind: "git-timeout", Exit: 128})
+	t.Setenv("PATH", tools)
+	t.Setenv("PATHEXT", ".EXE")
+	t.Setenv("NoDefaultCurrentDirectoryInExePath", "1")
+	t.Run("slow-git", TestEnrollmentRejectedInvitationCannotReplayOldCredential)
+}
+
 // A rejected invitation must never authorize setup of a pre-existing profile.
 func TestEnrollmentRejectedInvitationCannotReplayOldCredential(t *testing.T) {
+	// This fixture uses a plain directory. Real Git identity has dedicated
+	// coverage; ambient Git startup must not consume the intent's real budget.
+	t.Setenv("PATH", t.TempDir())
 	f := newBindFixture(t)
 	if err := cliFixtureChmod(f.env["HOME"], 0700); err != nil {
 		t.Fatal(err)
