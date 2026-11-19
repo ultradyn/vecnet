@@ -456,11 +456,11 @@ test('non-message kinds and non-delivery events never become native instructions
   assert.equal(f.kv.claims().length, 1);
 });
 
-test('child argument builders carry no ack and no raw endpoint coordinates', () => {
+test('child argument builders carry no ack, no display proof and no raw endpoint coordinates', () => {
   const inbox = claudeInboxArgs({ profile: 'p', hubEndpoint: 'https://hub.example', caller: 'peer_A', recipient: 'peer_A' }, 'e1.4');
-  assert.deepEqual(inbox, ['--net', 'p', 'inbox', '--json', '--limit', '32', '--since', 'e1.4']);
+  assert.deepEqual(inbox, ['--net', 'p', 'inbox', '--json', '--limit', '32', '--no-display-proof', '--since', 'e1.4']);
   const fresh = claudeInboxArgs({ profile: 'p', as: 'peer_B', hubEndpoint: 'https://hub.example', caller: 'peer_A', recipient: 'peer_B' }, undefined);
-  assert.deepEqual(fresh, ['--net', 'p', '--as', 'peer_B', 'inbox', '--json', '--limit', '32']);
+  assert.deepEqual(fresh, ['--net', 'p', '--as', 'peer_B', 'inbox', '--json', '--limit', '32', '--no-display-proof']);
   const deliver = claudeDeliverArgs({ bindingKey: KEY, generation: GEN, msgId: 'n'.repeat(26), threadId: THREAD, messageId: 'msg_01E8YQZ5N8W3C4R6T7A9A2B4CD' });
   assert.deepEqual(deliver, ['claude', 'deliver', '--binding-key', KEY, '--expect-generation', GEN,
     '--msg-id', 'n'.repeat(26), '--thread-id', THREAD, '--message-id', 'msg_01E8YQZ5N8W3C4R6T7A9A2B4CD']);
@@ -496,4 +496,48 @@ test('an unknown stream event type stalls the window', async t => {
   await settle();
   assert.equal(f.transportCalls.length, 0, 'an unknown event type is never skipped past');
   assert.equal(f.kv.scope(KEY)!.cursor, '', 'the checkpoint does not advance past an unknown event type');
+});
+
+test('peer-visible non-delivery events (reaction, hub_notice, operator_view) advance the window', async t => {
+  // The hub appends reaction, hub_notice and operator_view rows to peer logs
+  // (reactions.go, notices.go, operator_view.go); one of them ahead of a wake
+  // must never wedge the scope: the cursor stages past every known
+  // non-delivery type so the wake behind it still delivers.
+  const f = fixture(t);
+  f.setPages([{ events: [
+    { cursor: 'e1.0', type: 'reaction', deliveryId: '', messageId: '', threadId: '', priority: '', kind: '' },
+    { cursor: 'e1.0b', type: 'hub_notice', deliveryId: '', messageId: '', threadId: '', priority: '', kind: '' },
+    { cursor: 'e1.0c', type: 'operator_view', deliveryId: '', messageId: '', threadId: '', priority: '', kind: '' },
+    deliveryEvent('e1.1', 1),
+  ] }]);
+  f.adapter.start();
+  await settle();
+  assert.deepEqual(f.transportCalls.map(c => c.threadId), [THREAD], 'exactly the wake behind the non-delivery events is delivered');
+  assert.match(f.kv.scope(KEY)!.cursor as string, /e1\.1/, 'the checkpoint advances past known non-delivery events');
+});
+
+test('an operator resolution landing mid-attempt is never overwritten by the adapter', async t => {
+  // `claude resolve --keep-inbox` may fire while one attempt is in flight.
+  // The adapter must reload the durable row before recording its disposition:
+  // a foreign write (the operator's held row) wins and the stale in-memory
+  // copy is dropped, never saved over it.
+  let release!: (value: DeliverExit) => void;
+  const gate = new Promise<DeliverExit>(resolve => { release = resolve; });
+  const f = fixture(t, {
+    transport: async frame => { f.transportCalls.push(frame); return gate; },
+  });
+  f.setPages([{ events: [deliveryEvent('e1.1', 1)] }]);
+  f.adapter.start();
+  await settle();
+  assert.equal(f.transportCalls.length, 1, 'the attempt is in flight');
+  const id = 'dly_' + ulid(1);
+  const held = { ...f.kv.claim(id)!, state: 'held', disposition: 'held',
+    dispositionReason: 'operator_keep_inbox', updatedAt: 999_999 } as ClaudeClaimRecord;
+  f.kv.kv.set('claude-claims:claim:' + id, JSON.stringify(held)); // the operator's write lands now
+  release(0);
+  await settle();
+  const after = f.kv.claim(id)!;
+  assert.equal(after.state, 'held', 'the operator resolution survives the in-flight attempt');
+  assert.equal(after.dispositionReason, 'operator_keep_inbox');
+  assert.ok(f.log.entries.some(e => e.msg === 'claude_delivery_claim_superseded'), 'the superseded write is surfaced');
 });

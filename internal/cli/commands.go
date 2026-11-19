@@ -1332,12 +1332,12 @@ func oldestCursor(err error) (string, bool) {
 }
 
 func (a *app) cmdInbox(args []string) error {
-	o, err := parseFlags("inbox", args, map[string]flagKind{"since": strFlag, "ack": boolFlag, "limit": strFlag, "include-sender-chain": boolFlag})
+	o, err := parseFlags("inbox", args, map[string]flagKind{"since": strFlag, "ack": boolFlag, "limit": strFlag, "include-sender-chain": boolFlag, "no-display-proof": boolFlag})
 	if err != nil {
 		return err
 	}
 	if len(o.pos) != 0 {
-		return usageErr("usage: vecnet inbox [--since CURSOR] [--ack] [--limit N] [--include-sender-chain]")
+		return usageErr("usage: vecnet inbox [--since CURSOR] [--ack] [--limit N] [--include-sender-chain] [--no-display-proof]")
 	}
 	limit := 0
 	if o.has("limit") {
@@ -1408,7 +1408,14 @@ func (a *app) cmdInbox(args []string) error {
 			fmt.Fprintln(&output, line)
 		}
 	}
-	if err := a.displayInbox(c, name, evs, output.Bytes()); err != nil {
+	if o.has("no-display-proof") {
+		// The delivery host's machine read: the same bounded page, but no
+		// display proof is ever recorded, so the legacy hook state is
+		// untouched and a later UserPromptSubmit hook still shows the page.
+		if _, err := a.stdout.Write(output.Bytes()); err != nil {
+			return err
+		}
+	} else if err := a.displayInbox(c, name, evs, output.Bytes()); err != nil {
 		return err
 	}
 	if o.has("ack") && len(evs) > 0 {

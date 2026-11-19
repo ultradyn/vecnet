@@ -423,6 +423,31 @@ func TestInboxDisplayRequiresFreshIdentity(t *testing.T) {
 	}
 }
 
+// TestInboxNoDisplayProofMachineRead pins the delivery host's machine read:
+// `inbox --no-display-proof` prints the same bounded page but never publishes
+// display proof, so the legacy hook state stays untouched and a subsequent
+// UserPromptSubmit hook still shows the message the daemon merely observed.
+func TestInboxNoDisplayProofMachineRead(t *testing.T) {
+	f := newAppHookFixture(t)
+	f.add(t, "wake_idle", "hook must still show this", "")
+	got, _, _ := f.run(t, "busy", "wake")
+	appHookIDs(t, got) // deferred into replay, not shown yet
+	before := f.bytes(t)
+
+	var out bytes.Buffer
+	code, stderr := runDisplayInbox(t, f.env, &out, "--json", "inbox", "--since", "e1.0", "--no-display-proof")
+	if code != 0 || !strings.Contains(out.String(), "hook must still show this") {
+		t.Fatalf("machine read failed: %d %s %s", code, stderr, out.String())
+	}
+	if !bytes.Equal(before, f.bytes(t)) || len(inboxProof(t, f.path)) != 0 {
+		t.Fatal("the machine read published display proof or changed hook state")
+	}
+
+	// The legacy hook still delivers the unread message after the daemon read.
+	got, _, _ = f.run(t, "after-machine-read", "wake,wake_idle")
+	appHookIDs(t, got, "dly_1")
+}
+
 func TestInboxDisplayBusyStateStillPrints(t *testing.T) {
 	f := newAppHookFixture(t)
 	f.add(t, "wake_idle", "busy output", "")

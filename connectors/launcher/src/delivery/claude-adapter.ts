@@ -32,10 +32,12 @@ const KEY = /^[0-9a-f]{64}$/, GENERATION = /^[0-9a-f]{32}$/, CURSOR = /^.{1,256}
  * are known non-instructions and are staged past, while an unlisted kind
  * stalls the window (fail closed). */
 const MESSAGE_KINDS = ['message', 'approval_request', 'approval_response', 'job_status', 'reaction'] as const;
-/** Known stream event types (the envelope's closed set). Only `delivery`
- * carries a native candidate; every other known type advances the window,
- * while an unlisted type stalls it. */
-const EVENT_TYPES = ['delivery', 'receipt', 'presence', 'thread_updated', 'directory_updated', 'approval_expired'] as const;
+/** Known stream event types (the hub log's closed set: every type any hub
+ * code appends to a peer log). Only `delivery` carries a native candidate;
+ * every other known type advances the window — reaction, hub_notice and
+ * operator_view are peer-visible rows, and one of them ahead of a wake must
+ * never wedge the scope — while an unlisted type stalls it. */
+const EVENT_TYPES = ['delivery', 'receipt', 'presence', 'thread_updated', 'directory_updated', 'approval_expired', 'reaction', 'hub_notice', 'operator_view'] as const;
 const PRIORITIES = ['wake', 'wake_idle', 'hold'] as const;
 const STATES = ['reserved', 'attempting', 'held', 'refused', 'expired', 'uncertain', 'released'] as const;
 
@@ -113,11 +115,13 @@ export function claudeDeliveryCanaryEnabled(env: NodeJS.ProcessEnv): boolean {
 }
 
 /** The host's inbox read: bounded, strictly `--since` the durable staging
- * cursor, and never `--ack` — hub read/accepted/processed semantics stay
- * untouched and the adapter never claims cursor ownership. */
+ * cursor, never `--ack`, and `--no-display-proof` — hub read/accepted/processed
+ * semantics stay untouched, the adapter never claims cursor ownership, and the
+ * machine read never records legacy hook display state, so a later
+ * UserPromptSubmit hook still shows what the daemon merely observed. */
 export function claudeInboxArgs(coordinates: ClaudeDeliveryScopeCoordinates, cursor: string | undefined): string[] {
   return ['--net', coordinates.profile, ...(coordinates.as ? ['--as', coordinates.as] : []),
-    'inbox', '--json', '--limit', String(STAGE_BATCH), ...(cursor ? ['--since', cursor] : [])];
+    'inbox', '--json', '--limit', String(STAGE_BATCH), '--no-display-proof', ...(cursor ? ['--since', cursor] : [])];
 }
 
 /** The single-shot transport child: binding-key mode, so the endpoint and the
@@ -229,17 +233,33 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Ho
   const blockedLogged = new Set<string>();
 
   const save = (claim: ClaudeClaimRecord) => kv.set(CLAIM_PREFIX + claim.deliveryId, JSON.stringify(claim));
-  const claims = (): ClaudeClaimRecord[] => {
-    const rows: ClaudeClaimRecord[] = [];
+  /** True when the durable row moved past the exact bytes the adapter last
+   * read or wrote. An operator resolution (`claude resolve --keep-inbox` /
+   * `--retry`) may land between the read and the write; that foreign row wins
+   * and the stale in-memory copy is dropped, never saved over it. */
+  const superseded = (claim: ClaudeClaimRecord, baseline: string | undefined): boolean => {
+    if (baseline === undefined || kv.get(CLAIM_PREFIX + claim.deliveryId) === baseline) return false;
+    log.warn('claude_delivery_claim_superseded', { deliveryId: claim.deliveryId, scope: claim.scope });
+    return true;
+  };
+  const saveIfCurrent = (claim: ClaudeClaimRecord, baseline: string | undefined): boolean => {
+    if (superseded(claim, baseline)) return false;
+    save(claim);
+    return true;
+  };
+  const claimRows = (): Array<{ claim: ClaudeClaimRecord; raw: string }> => {
+    const rows: Array<{ claim: ClaudeClaimRecord; raw: string }> = [];
     for (const key of kv.keys(CLAIM_PREFIX)) {
+      const raw = kv.get(key)!;
       try {
-        const claim = claimValid(JSON.parse(kv.get(key)!));
-        if (claim) rows.push(claim);
+        const claim = claimValid(JSON.parse(raw));
+        if (claim) rows.push({ claim, raw });
         else log.warn('claude_delivery_claim_corrupt', { deliveryId: key.slice(CLAIM_PREFIX.length) });
       } catch { log.warn('claude_delivery_claim_corrupt', { deliveryId: key.slice(CLAIM_PREFIX.length) }); }
     }
     return rows;
   };
+  const claims = (): ClaudeClaimRecord[] => claimRows().map(row => row.claim);
   const pending = (scope: string) => claims().filter(c => c.scope === scope &&
     (c.state === 'reserved' || c.state === 'attempting' || c.state === 'uncertain')).length;
 
@@ -360,7 +380,7 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Ho
    * only retirement is a claim carrying an independently confirmed hub ack
    * observation — a field this adapter never infers or sets itself. */
   async function recoverScope(row: ClaudeSnapshotBinding, admitted: Set<string>): Promise<void> {
-    for (const claim of claims()) {
+    for (const { claim, raw } of claimRows()) {
       if (claim.hubAckObserved === true) {
         kv.delete(CLAIM_PREFIX + claim.deliveryId); // Confirmed ack retires the tombstone.
         log.info('claude_delivery_claim_retired', { deliveryId: claim.deliveryId });
@@ -371,24 +391,24 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Ho
         // scope that vanished from the snapshot is fenced, never resent.
         if (claim.state === 'reserved' && !admitted.has(claim.scope) && !inFlight.has(claim.deliveryId)) {
           claim.state = 'expired'; claim.disposition = 'released'; claim.dispositionReason = 'scope_absent';
-          claim.updatedAt = clock.now(); save(claim);
+          claim.updatedAt = clock.now(); saveIfCurrent(claim, raw);
         }
         continue;
       }
       if (inFlight.has(claim.deliveryId)) continue;
       if (claim.state === 'attempting') {
         claim.state = 'uncertain'; claim.disposition = 'uncertain'; claim.dispositionReason = 'restart_may_have_written';
-        claim.updatedAt = clock.now(); save(claim);
-        log.warn('claude_delivery_uncertain_restart', { scope: claim.scope });
+        claim.updatedAt = clock.now();
+        if (saveIfCurrent(claim, raw)) log.warn('claude_delivery_uncertain_restart', { scope: claim.scope });
         continue;
       }
       if (claim.state === 'reserved') {
         if (claim.generation !== row.generation) {
           claim.state = 'released'; claim.disposition = 'released'; claim.dispositionReason = 'fenced_generation_changed';
-          claim.updatedAt = clock.now(); save(claim);
+          claim.updatedAt = clock.now(); saveIfCurrent(claim, raw);
           continue;
         }
-        await attempt(row, claim); // Reschedule with the current owner.
+        await attempt(row, claim, raw); // Reschedule with the current owner.
       }
     }
   }
@@ -472,20 +492,24 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Ho
     kv.set(scopeKey, JSON.stringify(progress));
     // Fully staged work is attempted even when later staging stalled: the
     // stall stops the window, it does not strand already-reserved claims.
-    for (const claim of staged) await attempt(row, claim);
+    for (const claim of staged) await attempt(row, claim, JSON.stringify(claim));
     if (stalled) throw new Error('stalled_unknown_event');
   }
 
   /** One bounded transport attempt: commit `attempting` before any byte can
    * leave, await the transport (no guards held across it), then record the
-   * disposition. Exit 0 is write-completed and never presentation proof. */
-  async function attempt(row: ClaudeSnapshotBinding, claim: ClaudeClaimRecord): Promise<void> {
+   * disposition. Exit 0 is write-completed and never presentation proof. The
+   * durable row is re-read before every write: an operator resolution that
+   * landed mid-attempt supersedes this copy and is never overwritten. */
+  async function attempt(row: ClaudeSnapshotBinding, claim: ClaudeClaimRecord, baseline?: string): Promise<void> {
     if (!running) return;
+    if (superseded(claim, baseline)) return;
     claim.attemptId = randomBytes(16).toString('hex');
     claim.msgId = randomBytes(16).toString('hex');
     claim.state = 'attempting';
     claim.updatedAt = clock.now();
     save(claim);
+    const committed = JSON.stringify(claim);
     log.info('claude_delivery_claim_attempting', { deliveryId: claim.deliveryId, scope: claim.scope, attemptId: claim.attemptId });
     // Canary test seam: SIGKILL this process after `attempting` is durable
     // but before any byte can leave, so a harness can replay the crash
@@ -518,7 +542,7 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Ho
     } finally {
       inFlight.delete(claim.deliveryId);
       claim.updatedAt = clock.now();
-      save(claim);
+      saveIfCurrent(claim, committed);
     }
   }
 

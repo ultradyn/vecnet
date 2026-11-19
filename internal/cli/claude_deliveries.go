@@ -531,11 +531,6 @@ func (a *app) cmdClaudeResolve(args []string) error {
 		return err
 	}
 	key := claudeBindingKey(scope)
-	if retry {
-		if err := a.claudeResolveAdmission(key, expect); err != nil {
-			return err
-		}
-	}
 	path, err := claudeClaimsLedgerPath(a.getenv)
 	if err != nil {
 		return err
@@ -576,6 +571,24 @@ func (a *app) cmdClaudeResolve(args []string) error {
 	}
 	if claim.Generation != expect {
 		return usageErr("claude resolve: the claim generation moved; re-read `claude deliveries` — the stored state is unchanged")
+	}
+	if retry {
+		// Retry fences, checked before admission and before any mutation: a
+		// hold-priority delivery is inbox-only full stop (never re-armed for
+		// native transport however it settled), and a claim still owing a
+		// disposition (reserved, attempting) or already held cannot be re-armed
+		// under a live attempt. Only terminal claims are resolvable.
+		if claim.Priority == "hold" || claim.State == "held" {
+			return usageErr("claude resolve --retry: a held claim is inbox-only and is never re-armed for native transport")
+		}
+		switch claim.State {
+		case "refused", "uncertain", "released", "expired":
+		default:
+			return usageErr("claude resolve --retry: the claim is not in a resolvable state (it still owes a native disposition); re-read `claude deliveries`")
+		}
+		if err := a.claudeResolveAdmission(key, expect); err != nil {
+			return err
+		}
 	}
 	claim.UpdatedAt = float64(time.Now().UnixMilli())
 	state, human := "", ""

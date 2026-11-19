@@ -367,6 +367,61 @@ func TestClaudeResolveRefusals(t *testing.T) {
 	}
 }
 
+// TestClaudeResolveRetryRefusesHeldAndPending pins the retry fences: hold is
+// inbox-only full stop (a hold-priority claim is never re-armed for native
+// transport), a wake claim the operator already held stays held, and a claim
+// still owing a disposition (reserved/attempting) cannot be re-armed under a
+// live attempt. Every refusal leaves the stored row byte-identical.
+func TestClaudeResolveRetryRefusesHeldAndPending(t *testing.T) {
+	home, env := claudeStatusFixture(t)
+	holdPriority := claudeDeliveryClaimJSON(t, map[string]any{
+		"deliveryId": "dly_000000000000000000000000A1", "priority": "hold",
+		"state": "held", "disposition": "held", "dispositionReason": "inbox_only",
+	})
+	heldWake := claudeDeliveryClaimJSON(t, map[string]any{
+		"deliveryId": "dly_000000000000000000000000A2",
+		"state": "held", "disposition": "held", "dispositionReason": "operator_keep_inbox",
+	})
+	reserved := claudeDeliveryClaimJSON(t, map[string]any{
+		"deliveryId": "dly_000000000000000000000000A3", "state": "reserved",
+	})
+	attempting := claudeDeliveryClaimJSON(t, map[string]any{
+		"deliveryId": "dly_000000000000000000000000A4", "state": "attempting",
+	})
+	claudeDeliveryLedger(t, home, map[string]string{
+		claudeDeliveryClaimKey("dly_000000000000000000000000A1"): holdPriority,
+		claudeDeliveryClaimKey("dly_000000000000000000000000A2"): heldWake,
+		claudeDeliveryClaimKey("dly_000000000000000000000000A3"): reserved,
+		claudeDeliveryClaimKey("dly_000000000000000000000000A4"): attempting,
+	})
+	for name, want := range map[string][2]string{
+		"hold priority":    {"dly_000000000000000000000000A1", "inbox-only"},
+		"operator held":    {"dly_000000000000000000000000A2", "inbox-only"},
+		"still reserved":   {"dly_000000000000000000000000A3", "resolvable state"},
+		"still attempting": {"dly_000000000000000000000000A4", "resolvable state"},
+	} {
+		code, _, errs := claudeStatusRun(t, env, "--net", "p", "claude", "resolve", want[0],
+			"--expect-generation", claudeDeliveryTestGen, "--retry", "--confirm-duplicate-risk")
+		if code == 0 {
+			t.Fatalf("%s: retry re-armed a claim it must refuse", name)
+		}
+		if !strings.Contains(errs, want[1]) {
+			t.Fatalf("%s: refusal must name the claim state, got: %s", name, errs)
+		}
+	}
+	after := claudeDeliveryKV(t, home)
+	for id, want := range map[string]string{
+		claudeDeliveryClaimKey("dly_000000000000000000000000A1"): holdPriority,
+		claudeDeliveryClaimKey("dly_000000000000000000000000A2"): heldWake,
+		claudeDeliveryClaimKey("dly_000000000000000000000000A3"): reserved,
+		claudeDeliveryClaimKey("dly_000000000000000000000000A4"): attempting,
+	} {
+		if after[id] != want {
+			t.Fatalf("a retry refusal changed the stored claim %s: %s", id, after[id])
+		}
+	}
+}
+
 // TestClaudeResolveKeepInboxHolds pins the inbox-only resolution: the claim is
 // held (never promoted again), stays readable, and nothing acknowledges it.
 func TestClaudeResolveKeepInboxHolds(t *testing.T) {
