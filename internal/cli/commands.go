@@ -880,6 +880,8 @@ var idCommandFlags = map[string]map[string]flagKind{
 	"threads":      {"limit": strFlag},
 	"inbox":        {"since": strFlag, "ack": boolFlag, "limit": strFlag, "include-sender-chain": boolFlag},
 	"watch":        {"for-monitor": boolFlag, "since": strFlag, "auto-ack": boolFlag, "deliveries-only": boolFlag},
+	"presence":     {"note": strFlag},
+	"avatar":       nil,
 	"receipt":      {"note": strFlag},
 	"groups":       nil,
 	"ack":          nil,
@@ -1006,6 +1008,17 @@ func (a *app) checkIDArguments(cmd string, o opts) error {
 		scopedAs = true
 	case "inbox", "threads", "watch":
 		if len(o.pos) != 0 {
+			return nil
+		}
+		scopedAs = true
+	case "presence":
+		// subscribe applies to the credential, not to the peer selected by --as.
+		if len(o.pos) != 2 || o.pos[0] != "set" {
+			return nil
+		}
+		scopedAs = true
+	case "avatar":
+		if !(len(o.pos) == 2 && o.pos[0] == "set") && !(len(o.pos) == 1 && o.pos[0] == "clear") {
 			return nil
 		}
 		scopedAs = true
@@ -1924,7 +1937,7 @@ func (a *app) callQuery(method, path string, q url.Values, body, out any) error 
 // --- presence / receipt ---
 
 func (a *app) cmdPresence(args []string) error {
-	o, err := parseFlags("presence", args, map[string]flagKind{"note": strFlag})
+	o, err := a.parseIDFlags("presence", args)
 	if err != nil {
 		return err
 	}

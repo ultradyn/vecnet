@@ -564,3 +564,133 @@ func TestCLIOpaqueStreamCursorsPreserved(t *testing.T) {
 		}
 	}
 }
+
+// Missing scoped preflight (or checking only nonempty values) must fail before
+// maintenance, file inspection, stdin or any identity/command HTTP request.
+func TestCLIScopedPeerIDBeforeIO(t *testing.T) {
+	g := &idGuardTransport{}
+	old := http.DefaultTransport
+	http.DefaultTransport = g
+	t.Cleanup(func() { http.DefaultTransport = old })
+	commands := [][]string{
+		{"presence", "set", "idle", "--note", "note"},
+		{"avatar", "set", filepath.Join(t.TempDir(), "FILESECRET-missing")},
+		{"avatar", "clear"},
+	}
+	for ci, command := range commands {
+		for bi, bad := range []string{idThread, "peer_short", "", "peer_" + strings.ToLower(idSuffix), "SECRET\x1b[31m\n\u202e", "https://fixture.invalid?sig=SECRET"} {
+			for _, equals := range []bool{false, true} {
+				t.Run(fmt.Sprintf("command%d/bad%d/equals%v", ci, bi, equals), func(t *testing.T) {
+					env := idEnvironment(t, "http://127.0.0.1:1")
+					// The final value wins, including an explicit empty overwrite.
+					args := append([]string{"--as", idPeer}, command...)
+					if equals {
+						args = append(args, "--as="+bad)
+					} else {
+						args = append(args, "--as", bad)
+					}
+					var out, stderr bytes.Buffer
+					input := &idCountingReader{}
+					startup := 0
+					before := g.calls
+					code := RunContext(t.Context(), args, input, &out, &stderr, func(k string) string {
+						if k == "VECNET_LOCAL_MAINTENANCE" {
+							startup++
+						}
+						return env[k]
+					})
+					text := stderr.String()
+					if code != exitUsage || out.Len() != 0 || startup != 0 || input.reads != 0 || g.calls != before || !strings.Contains(text, "--as") || !strings.Contains(text, "expected peer_ ID") {
+						t.Fatalf("exit=%d out=%q stderr=%q startup=%d reads=%d requests=%d", code, out.String(), text, startup, input.reads, g.calls-before)
+					}
+					if len(text) > 400 || strings.Contains(text, "SECRET") || strings.ContainsAny(strings.TrimSuffix(text, "\n"), "\n\r\x1b\u202e") {
+						t.Fatalf("unsafe scoped ID diagnostic: %q", text)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestCLIScopedPeerIDGrammarAndValidPaths(t *testing.T) {
+	var method, path, as, body string
+	calls := 0
+	env := idFixtureHub(t, func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		method, path, as = r.Method, r.URL.Path, r.URL.Query().Get("as")
+		raw, _ := io.ReadAll(r.Body)
+		body = string(raw)
+		switch {
+		case r.URL.Path == "/v1/peers/me/avatar" && r.Method == http.MethodPut:
+			fmt.Fprint(w, `{"avatar":null}`)
+		case r.URL.Path == "/v1/presence" && r.Method == http.MethodPost,
+			r.URL.Path == "/v1/peers/me" && r.Method == http.MethodPatch,
+			r.URL.Path == "/v1/peers/me/avatar" && r.Method == http.MethodDelete:
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Errorf("unexpected scoped request: %s %s", r.Method, r.URL)
+			http.NotFound(w, r)
+		}
+	})
+	file := filepath.Join(t.TempDir(), idMessage)
+	if err := cliFixtureWriteFile(file, []byte("avatar-file-bytes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for i, tc := range []struct {
+		args             []string
+		method, path, as string
+		field, value     string
+	}{
+		{[]string{"presence", "--note", idMessage, "set", "idle", "--as=bad", "--as", idPeer}, "POST", "/v1/presence", idPeer, "note", idMessage},
+		{[]string{"--as=bad", "avatar", "set", "https://fixture.invalid/picture", "--as=" + idPeer}, "PUT", "/v1/peers/me/avatar", idPeer, "url", "https://fixture.invalid/picture"},
+		{[]string{"--as", idPeer, "avatar", "set", "--", file}, "PUT", "/v1/peers/me/avatar", idPeer, "", "avatar-file-bytes"},
+		{[]string{"avatar", "--as", idPeer, "clear"}, "DELETE", "/v1/peers/me/avatar", idPeer, "", ""},
+		{[]string{"presence", "set", "working"}, "POST", "/v1/presence", "", "state", "working"},
+		{[]string{"avatar", "clear"}, "DELETE", "/v1/peers/me/avatar", "", "", ""},
+		// subscribe is credential-wide and does not consume --as. Its existing
+		// ignored global value must not become a new peer-selection contract.
+		{[]string{"presence", "subscribe", "all", "--as=not-a-peer"}, "PATCH", "/v1/peers/me", "", "subscribe_presence", "all"},
+		{[]string{"presence", "subscribe", "none", "--as="}, "PATCH", "/v1/peers/me", "", "subscribe_presence", "none"},
+	} {
+		t.Run(fmt.Sprint(i), func(t *testing.T) {
+			before := calls
+			code, _, stderr := idRun(env, strings.NewReader(""), append([]string{"--json"}, tc.args...)...)
+			if code != exitOK || stderr != "" || calls != before+1 || method != tc.method || path != tc.path || as != tc.as {
+				t.Fatalf("valid scoped request changed: exit=%d stderr=%q calls=%d method=%s path=%s as=%q", code, stderr, calls-before, method, path, as)
+			}
+			if tc.field != "" {
+				var fields map[string]string
+				if json.Unmarshal([]byte(body), &fields) != nil || fields[tc.field] != tc.value {
+					t.Fatalf("scoped payload changed: %s", body)
+				}
+			} else if body != tc.value {
+				t.Fatalf("scoped bytes changed: %q want %q", body, tc.value)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"avatar", "set"}, "usage: vecnet avatar"},
+		{[]string{"avatar", "clear", "extra"}, "usage: vecnet avatar"},
+		{[]string{"avatar", "clear", "--unknown"}, "unknown flag --unknown"},
+		{[]string{"presence", "set"}, "usage: vecnet presence"},
+		{[]string{"presence", "subscribe", "all", "--note", "text"}, "usage: vecnet presence"},
+		{[]string{"presence", "set", "idle", "--note"}, "--note needs a value"},
+		{[]string{"presence", "set", "idle", "--unknown"}, "unknown flag --unknown"},
+	} {
+		before := calls
+		code, out, stderr := idRun(env, strings.NewReader(""), append([]string{"--as", idThread}, tc.args...)...)
+		if code != exitUsage || out != "" || !strings.Contains(stderr, tc.want) || strings.Contains(stderr, "expected peer_") || calls != before {
+			t.Fatalf("scoped syntax masked: args=%q exit=%d out=%q stderr=%q calls=%d", tc.args, code, out, stderr, calls-before)
+		}
+	}
+	for _, command := range []string{"presence", "avatar"} {
+		before := calls
+		code, out, stderr := idRun(env, strings.NewReader(""), command, "--as", idThread, "--help")
+		if code != exitOK || stderr != "" || !strings.Contains(out, command+" set") || calls != before {
+			t.Fatalf("help masked by --as: command=%s exit=%d out=%q stderr=%q calls=%d", command, code, out, stderr, calls-before)
+		}
+	}
+}
