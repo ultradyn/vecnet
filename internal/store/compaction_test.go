@@ -319,70 +319,116 @@ func TestCompactionRejectsUnboundedLimitsAndCancellation(t *testing.T) {
 }
 
 func TestCompactionPhysicalPageCapAcrossPointerMaps(t *testing.T) {
-	// This disposable disk fixture tests page geometry, not power-loss durability.
-	path := filepath.Join(t.TempDir(), "hub.db")
-	db, err := store.OpenWithSynchronous(path, "normal")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
-	freedPages(t, db)
-	pageSize := pragmaInt(t, db, "page_size")
-	pages := pragmaInt(t, db, "page_count")
-	// This newly created SQLite fixture has no reserved bytes. Pointer maps
-	// occupy page 2 and every pageSize/5+1 pages thereafter.
-	stride := pageSize/5 + 1
-	boundary := 2 + (pages-3)/stride*stride
-	if boundary <= 2 || pages < boundary+2 || pragmaInt(t, db, "freelist_count") <= pages-boundary {
-		t.Fatalf("fixture does not cross a pointer map: size=%d pages=%d map=%d", pageSize, pages, boundary)
-	}
-	maintain := func(limit int) store.MaintenanceResult {
-		t.Helper()
-		before := pragmaInt(t, db, "page_count")
-		r, err := db.Maintain(context.Background(), store.MaintenanceOptions{ReclaimPages: limit, Target: time.Second})
-		if err != nil {
-			t.Fatal(err)
+	for _, expireSnapshot := range []bool{false, true} {
+		name := "complete_snapshot"
+		if expireSnapshot {
+			name = "expired_snapshot"
 		}
-		after := pragmaInt(t, db, "page_count")
-		if r.ReclaimedPages < 0 || r.ReclaimedPages > int64(limit) || before-after != r.ReclaimedPages || r.Before.PageCount != before || r.After.PageCount != after {
-			t.Fatalf("%d-page physical cap/accounting: before=%d after=%d result=%+v", limit, before, after, r)
-		}
-		info, err := os.Stat(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if info.Size() != after*pageSize || r.After.DBBytes != info.Size() || r.After.FreelistCount != pragmaInt(t, db, "freelist_count") {
-			t.Fatalf("committed disk geometry: bytes=%d result=%+v", info.Size(), r)
-		}
-		return r
-	}
-	// Position immediately above the real structural edge using bounded slices.
-	for i := 0; i < 20 && pragmaInt(t, db, "page_count") > boundary+2; i++ {
-		remaining := pragmaInt(t, db, "page_count") - (boundary + 2)
-		r := maintain(int(min(int64(128), remaining)))
-		if r.ReclaimedPages == 0 {
-			t.Fatalf("could not approach pointer map %d: %+v", boundary, r)
-		}
-	}
-	if got := pragmaInt(t, db, "page_count"); got != boundary+2 {
-		t.Fatalf("pointer-map approach not encountered: pages=%d map=%d", got, boundary)
-	}
-	r := maintain(1)
-	if r.ReclaimedPages != 1 || r.After.PageCount != boundary+1 || r.After.FreelistCount == 0 {
-		t.Fatalf("one-page approach to pointer map %d not encountered: %+v", boundary, r)
-	}
-	r = maintain(1)
-	if r.ReclaimedPages != 0 || r.After.PageCount != boundary+1 || r.After.FreelistCount == 0 || r.After.FreelistCount != r.Before.FreelistCount {
-		t.Fatalf("one-page budget did not stop at pointer map %d: %+v", boundary, r)
-	}
-	r = maintain(128)
-	if r.ReclaimedPages < 2 || r.After.PageCount >= boundary {
-		t.Fatalf("128-page slice did not cross pointer map %d: %+v", boundary, r)
-	}
-	for i := 0; i < 20 && r.After.FreelistCount != 0; i++ {
-		r = maintain(128)
-	}
-	if r.After.FreelistCount != 0 {
-		t.Fatal("bounded slices did not finish reclaim")
+		t.Run(name, func(t *testing.T) {
+			// This disposable disk fixture tests page geometry, not power-loss durability.
+			path := filepath.Join(t.TempDir(), "hub.db")
+			db, err := store.OpenWithSynchronous(path, "normal")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { db.Close() })
+			freedPages(t, db)
+			pageSize := pragmaInt(t, db, "page_size")
+			pages := pragmaInt(t, db, "page_count")
+			// This newly created SQLite fixture has no reserved bytes. Pointer maps
+			// occupy page 2 and every pageSize/5+1 pages thereafter.
+			stride := pageSize/5 + 1
+			boundary := 2 + (pages-3)/stride*stride
+			if boundary <= 2 || pages < boundary+2 || pragmaInt(t, db, "freelist_count") <= pages-boundary {
+				t.Fatalf("fixture does not cross a pointer map: size=%d pages=%d map=%d", pageSize, pages, boundary)
+			}
+			expired := false
+			maintain := func(limit int) (store.MaintenanceResult, int64, int64) {
+				t.Helper()
+				before := pragmaInt(t, db, "page_count")
+				freeBefore := pragmaInt(t, db, "freelist_count")
+				expiredThisSlice := false
+				opts := store.MaintenanceOptions{ReclaimPages: limit, Target: time.Second}
+				if expireSnapshot && !expired {
+					opts.AvailableBytes = func(ctx context.Context) (int64, error) {
+						// Another connection observes the old page count until reclaim
+						// commits. Expire only the final committed statistics probe;
+						// every vacuum statement and checkpoint still runs for real.
+						if pragmaInt(t, db, "page_count") < before {
+							expired = true
+							expiredThisSlice = true
+							<-ctx.Done()
+							return 0, ctx.Err()
+						}
+						return 1 << 40, nil
+					}
+				}
+				r, err := db.Maintain(context.Background(), opts)
+				if err != nil {
+					t.Fatal(err)
+				}
+				// Observe committed geometry independently, even when the slice
+				// expired before it could publish a complete After snapshot.
+				after := pragmaInt(t, db, "page_count")
+				freeAfter := pragmaInt(t, db, "freelist_count")
+				if r.ReclaimedPages < 0 || r.ReclaimedPages > int64(limit) || before-after != r.ReclaimedPages || r.Before.PageCount != before || r.Before.PageSize != pageSize || r.Before.FreelistCount != freeBefore {
+					t.Fatalf("%d-page physical cap/accounting: before=%d after=%d result=%+v", limit, before, after, r)
+				}
+				info, err := os.Stat(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				freeReclaimed := freeBefore - freeAfter
+				if pragmaInt(t, db, "page_size") != pageSize || info.Size() != after*pageSize || freeAfter < 0 || freeAfter > after || freeReclaimed < 0 || freeReclaimed > r.ReclaimedPages || r.ReclaimedPages > 0 && freeReclaimed == 0 {
+					t.Fatalf("committed disk geometry: pages=%d->%d free=%d->%d bytes=%d result=%+v", before, after, freeBefore, freeAfter, info.Size(), r)
+				}
+				if r.After == (store.StorageStats{}) {
+					if r.PausedReason != "time_budget" || r.ElapsedNanos < opts.Target.Nanoseconds() {
+						t.Fatalf("missing committed snapshot without expired slice: %+v", r)
+					}
+				} else if r.After.PageSize != pageSize || r.After.PageCount != after || r.After.DBBytes != info.Size() || r.After.FreelistCount != freeAfter {
+					t.Fatalf("committed snapshot disagrees with disk geometry: pages=%d free=%d bytes=%d result=%+v", after, freeAfter, info.Size(), r)
+				}
+				if expiredThisSlice {
+					t.Logf("expired committed snapshot: pages=%d->%d free=%d->%d bytes=%d result=%+v", before, after, freeBefore, freeAfter, info.Size(), r)
+					if r.ReclaimedPages != int64(limit) || r.After != (store.StorageStats{}) || r.PausedReason != "time_budget" {
+						t.Fatalf("final statistics probe did not expire after bounded commit: %+v", r)
+					}
+				}
+				return r, after, freeAfter
+			}
+			// Position immediately above the real structural edge using bounded slices.
+			for i := 0; i < 20 && pragmaInt(t, db, "page_count") > boundary+2; i++ {
+				remaining := pragmaInt(t, db, "page_count") - (boundary + 2)
+				r, _, _ := maintain(int(min(int64(128), remaining)))
+				if r.ReclaimedPages == 0 {
+					t.Fatalf("could not approach pointer map %d: %+v", boundary, r)
+				}
+			}
+			if got := pragmaInt(t, db, "page_count"); got != boundary+2 {
+				t.Fatalf("pointer-map approach not encountered: pages=%d map=%d", got, boundary)
+			}
+			r, after, free := maintain(1)
+			if r.ReclaimedPages != 1 || after != boundary+1 || free == 0 {
+				t.Fatalf("one-page approach to pointer map %d not encountered: %+v", boundary, r)
+			}
+			r, after, free = maintain(1)
+			if r.ReclaimedPages != 0 || after != boundary+1 || free == 0 || free != r.Before.FreelistCount {
+				t.Fatalf("one-page budget did not stop at pointer map %d: %+v", boundary, r)
+			}
+			r, after, free = maintain(128)
+			if r.ReclaimedPages < 2 || after >= boundary {
+				t.Fatalf("128-page slice did not cross pointer map %d: %+v", boundary, r)
+			}
+			for i := 0; i < 20 && free != 0; i++ {
+				r, after, free = maintain(128)
+			}
+			if free != 0 {
+				t.Fatal("bounded slices did not finish reclaim")
+			}
+			if expireSnapshot && !expired {
+				t.Fatal("committed snapshot deadline was not exercised")
+			}
+		})
 	}
 }
