@@ -44,6 +44,8 @@ const exclusiveGoRoots = new Map([
   ['github.com/XertroV/vecnet/internal/httpapi',['TestSlowSSEConsumerDoesNotBlockSend']],
   ['github.com/XertroV/vecnet/internal/cli',[
     'TestCodexHookWindowsInstalledCommandPreservesArgv',
+    // Real Git queries have a 2s budget; admit them before the ordinary pool.
+    'TestHookInstallWarnsLinkedWorktree',
     // These three real Node admissions overlapped and timed out on ARM64.
     'TestLauncherWindowsInstallPreviewAndExplicitIntent',
     'TestLauncherWindowsInstallRejectsUnsafeDACLAndHardlinks',

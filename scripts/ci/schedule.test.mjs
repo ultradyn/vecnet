@@ -516,3 +516,47 @@ test('Windows headroom placement conserves finite mixed discovery, identities an
  assert.deepEqual(placement(planGo(input.map(row=>({...row,names:[...row.names].reverse()})),profile,{platform:'win32'})),placement(bins));
  assert.deepEqual(input,untouched);assert.deepEqual(profile,hints);
 });
+
+
+test('Windows linked-worktree real-Git root finishes before ordinary admission in its existing group',async()=>{
+ const pkg='github.com/XertroV/vecnet/internal/cli',root='TestHookInstallWarnsLinkedWorktree';
+ const input=[{pkg,names:[root,root+'Extended','Example','FuzzSeed'],binary:'real-cli',directory:'original'},
+  {pkg:'other',names:[root],binary:'other'}, {pkg:'empty',names:[],binary:null},
+  ...Array.from({length:144},(_,i)=>({pkg:`ordinary${i}`,names:['TestWork'],binary:`bin${i}`}))];
+ const profile={packages:Object.fromEntries(input.slice(3).map(row=>[row.pkg,1]))};
+ const bins=planGo(input,profile,{platform:'win32'});
+ const group=bins.find(tasks=>tasks.some(t=>t.pkg===pkg&&t.selected.includes(root)));
+ const isolated=group.find(t=>t.pkg===pkg&&t.selected.includes(root));
+ const ordinary=group.filter(t=>t!==isolated);
+ assert.ok(ordinary.length>0,'use the ordinary tail in an existing group, not a reserved whole group');
+ const starts=[];let rootActive=false,overlap=0,finishRoot;
+ // Deliberately put ordinary work first; runGoGroup must enforce admission.
+ const run=runGoGroup([ordinary[0],isolated,...ordinary.slice(1)],async task=>{
+  if(task===isolated){
+   rootActive=true;starts.push(root);
+   await new Promise(resolve=>{finishRoot=resolve;});rootActive=false;
+  }else{
+   if(rootActive)overlap++;
+   starts.push(task.pkg);
+  }
+ },nativeGoWorkers('win32'));
+ await turn();const duringRoot=[...starts];
+ finishRoot?.();await run;
+ assert.equal(overlap,0,'no ordinary packet may start while the real-Git root is active');
+ assert.deepEqual(duringRoot,[root]);
+ assert.equal(starts.length,ordinary.length+1,'every queued ordinary packet still runs');
+ assert.deepEqual(isolated.selected,[root]);assert.equal(isolated.exclusive,true);assert.equal(isolated.split,true);
+ assert.equal(isolated.binary,'real-cli');assert.equal(isolated.directory,'original');
+ assert.equal(bins.flat().filter(t=>t.exclusive&&t.selected.includes(root)).length,1);
+ assert.ok(bins.flat().filter(t=>t.pkg==='other').every(t=>!t.exclusive));
+ assert.ok(bins.flat().filter(t=>t.selected.includes(root+'Extended')).every(t=>!t.exclusive));
+ const keys=(pkg,names)=>(names.length?names:['']).map(name=>`${pkg}/${name}`);
+ const expected=input.flatMap(row=>keys(row.pkg,row.names)).sort();
+ assert.deepEqual(bins.flat().flatMap(t=>keys(t.pkg,t.selected)).sort(),expected);
+ assert.equal(bins.length,24);assert.equal(releaseJobCount(),33);
+ for(const platform of ['linux','darwin']){
+  const packets=planGo(input,profile,{platform,lanes:nativeGoLanes(platform)}).flat();
+  assert.ok(packets.every(t=>!t.exclusive));
+  assert.deepEqual(packets.flatMap(t=>keys(t.pkg,t.selected)).sort(),expected);
+ }
+});
