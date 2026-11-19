@@ -102,8 +102,9 @@ export function planGo(inventory, profile = {}, {lanes=goLanes,platform=process.
         const sharesReserved=candidate.tasks.length>1&&candidate.tasks.some(t=>t.exclusive&&reservedWindowsRoots.has(t.selected[0]));
         // Give each observed long matrix one existing group with no competitors
         // or queued remainder. Discovery still places every other root.
-        // The 37s soft target leaves residual/noise headroom, never omits work.
-        const score=[Number(sharesReserved),Math.max(0,elapsed-37),laneLoad(i%lanes)+elapsed-bin.load,elapsed,pressure];
+        // Balance group elapsed before lane totals so ordinary work cannot pile
+        // up beside an expensive lane prefix while other groups remain empty.
+        const score=[Number(sharesReserved),elapsed,laneLoad(i%lanes)+elapsed-bin.load,pressure];
         // Compare lexicographically; the first equal slot wins deterministically.
         const diff=best?.score.findIndex((v,j)=>v!==score[j]);
         if(!best||(diff>=0&&score[diff]<best.score[diff]))best={bin,tasks:candidate.tasks,elapsed,score};
