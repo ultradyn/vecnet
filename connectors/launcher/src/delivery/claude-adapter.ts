@@ -157,8 +157,12 @@ export function claudeScopeEnv(base: Record<string, string>, coordinates: Claude
  * delivery adapter at all; anything else allows it. It is never an enable:
  * the durable per-profile record (`vecnet --net P claude canary enable`,
  * surfaced as `admission.canary`) is the gate, and `claude enable` alone can
- * never turn native delivery on. */
-export function claudeDeliveryCanaryAllowed(env: NodeJS.ProcessEnv, log?: Log): boolean {
+ * never turn native delivery on. Native delivery is Linux-only (the helper
+ * refuses before any connect elsewhere), so no other platform constructs the
+ * adapter: it would only spawn snapshot children and open a second ledger for
+ * a transport that can never succeed. */
+export function claudeDeliveryCanaryAllowed(env: NodeJS.ProcessEnv, log?: Log, platform: NodeJS.Platform = process.platform): boolean {
+  if (platform !== 'linux') return false;
   const value = env.VECNET_CLAUDE_DELIVERY_CANARY;
   // Only the exact '0' is the kill switch (plan-mandated). Any other set
   // value is surfaced once per process, so a mistyped "off" or "false" is

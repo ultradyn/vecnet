@@ -439,7 +439,7 @@ function claudeCanaryStub(t: TestContext, home: string, admitted: boolean, canar
 }
 
 test('claude native delivery reaches only the durable canary record and VECNET_CLAUDE_DELIVERY_CANARY=0 constructs no adapter',
-  { skip: process.platform === 'win32' && 'Unix flock and CLI stub fixture', timeout: 30_000 }, async t => {
+  { skip: process.platform !== 'linux' && 'native delivery is Linux-only (Unix flock and CLI stub fixture)', timeout: 30_000 }, async t => {
     // The kill switch: no delivery adapter at all, so no watch, inbox or
     // deliver child, and the status adapter receives empty admissions.
     const off = fixture(t);

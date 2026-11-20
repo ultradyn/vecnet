@@ -150,7 +150,8 @@ record is local and neither verb contacts the hub. It fails closed:
 environment is the host kill switch: no delivery adapter is constructed at
 all. It is never an enable. Empty or `1` changes nothing; any other value is
 logged once as a warning (`claude_delivery_canary_env_unrecognized`) and does
-not disable anything.
+not disable anything. Off Linux the daemon never constructs the delivery
+adapter, whatever the environment says: native delivery is Linux-only.
 
 What an admitted scope does:
 

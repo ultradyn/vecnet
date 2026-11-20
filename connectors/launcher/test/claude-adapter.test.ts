@@ -546,18 +546,24 @@ test('child argument builders carry no ack, no display proof and no raw endpoint
 });
 
 test('the canary env var is a kill switch only: =0 refuses, nothing else enables beyond the durable record', () => {
-  assert.equal(claudeDeliveryCanaryAllowed({ VECNET_CLAUDE_DELIVERY_CANARY: '0' }), false);
+  assert.equal(claudeDeliveryCanaryAllowed({ VECNET_CLAUDE_DELIVERY_CANARY: '0' }, undefined, 'linux'), false);
   for (const value of [undefined, '', '1', 'pointer', 'off', 'false']) {
-    assert.equal(claudeDeliveryCanaryAllowed(value === undefined ? {} : { VECNET_CLAUDE_DELIVERY_CANARY: value }), true,
+    assert.equal(claudeDeliveryCanaryAllowed(value === undefined ? {} : { VECNET_CLAUDE_DELIVERY_CANARY: value }, undefined, 'linux'), true,
       `${String(value)} is not the kill switch; the durable canary record stays the gate`);
+  }
+});
+
+test('native delivery is Linux-only: no other platform constructs the adapter', () => {
+  for (const platform of ['win32', 'darwin', 'freebsd'] as NodeJS.Platform[]) {
+    assert.equal(claudeDeliveryCanaryAllowed({}, undefined, platform), false, `${platform} never constructs the delivery adapter`);
   }
 });
 
 test('an unrecognized canary env value warns once and is not a kill switch', () => {
   const log = memoryLog();
-  for (const value of ['off', 'false', 'off']) assert.equal(claudeDeliveryCanaryAllowed({ VECNET_CLAUDE_DELIVERY_CANARY: value }, log), true);
-  for (const value of ['', '0', '1']) claudeDeliveryCanaryAllowed({ VECNET_CLAUDE_DELIVERY_CANARY: value }, log);
-  claudeDeliveryCanaryAllowed({}, log);
+  for (const value of ['off', 'false', 'off']) assert.equal(claudeDeliveryCanaryAllowed({ VECNET_CLAUDE_DELIVERY_CANARY: value }, log, 'linux'), true);
+  for (const value of ['', '0', '1']) claudeDeliveryCanaryAllowed({ VECNET_CLAUDE_DELIVERY_CANARY: value }, log, 'linux');
+  claudeDeliveryCanaryAllowed({}, log, 'linux');
   assert.equal(log.entries.filter(e => e.msg === 'claude_delivery_canary_env_unrecognized').length, 1, 'warned exactly once per process');
   assert.doesNotMatch(JSON.stringify(log.entries), /off|false/, 'the raw value is never logged');
 });
