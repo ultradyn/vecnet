@@ -1261,3 +1261,23 @@ func TestClaudeDeliverExitMapping(t *testing.T) {
 		}
 	}
 }
+
+// TestClaudeDeliverRefusalMessageForm pins that every pre-write refusal names
+// the helper exactly once on stderr, whatever form the underlying error had.
+func TestClaudeDeliverRefusalMessageForm(t *testing.T) {
+	for name, err := range map[string]error{
+		"prefixed usage":   usageErr("claude deliver: the binding generation changed before the attempt"),
+		"unprefixed usage": usageErr("claude session registry has no row for this process under its config root"),
+		"plain":            errors.New("binding document unreadable"),
+		"direct refusal":   claudeDeliverRefusal("peer mismatch"),
+	} {
+		var errs bytes.Buffer
+		a := &app{stderr: &errs, claudeDeliverCmd: true, claudeDeliverParsed: true}
+		if code := a.exit(claudeDeliverRefusalOf(err)); code != 5 {
+			t.Fatalf("%s: exit %d, want 5", name, code)
+		}
+		if got := errs.String(); !strings.HasPrefix(got, "vecnet: claude deliver: ") || strings.Count(got, "claude deliver: ") != 1 {
+			t.Fatalf("%s: stderr %q, want the helper named exactly once", name, got)
+		}
+	}
+}

@@ -177,20 +177,25 @@ function bounded<T>(p: Promise<T>, ms: number, clock: Clock): Promise<T | undefi
 
 /** The default transport: one bounded `claude deliver` child per attempt.
  * Child output is never logged. Exit 2, a signal, an unmapped code or a
- * timeout is uncertain (4: bytes may have left); a spawn failure is a
- * definite pre-write refusal (5: the child never ran). */
-export function spawnClaudeDeliver(env: NodeJS.ProcessEnv, clock: Clock): (frame: ClaudeDeliveryFrame) => Promise<DeliverExit> {
+ * timeout is uncertain (4: bytes may have left). An `error` event is a
+ * definite pre-write refusal (5) only when the child never spawned; Node
+ * also emits `error` for a running child (a failed kill on the timeout), and
+ * that child may be mid-write, so it is uncertain (4). `spawnChild` is the
+ * process port (node's spawn unless a test injects one). */
+export function spawnClaudeDeliver(env: NodeJS.ProcessEnv, clock: Clock, spawnChild: typeof spawn = spawn): (frame: ClaudeDeliveryFrame) => Promise<DeliverExit> {
   const childEnv = cliEnvironment(Object.fromEntries(Object.entries(env).filter((e): e is [string, string] => typeof e[1] === 'string')));
   const bin = childEnv.VECNET_BIN || 'vecnet';
   return frame => new Promise(resolve => {
     let command;
     try { command = commandInvocation([bin, ...claudeDeliverArgs(frame)], childEnv); }
     catch { resolve(5); return; }
-    const child = spawn(command.file, command.args, { ...command, windowsHide: true, env: childEnv, stdio: ['ignore', 'ignore', 'ignore'] });
+    const child = spawnChild(command.file, command.args, { ...command, windowsHide: true, env: childEnv, stdio: ['ignore', 'ignore', 'ignore'] });
     let settled = false;
     const finish = (exit: DeliverExit) => { if (!settled) { settled = true; timer.cancel(); resolve(exit); } };
     const timer = clock.timer(CHILD_TIMEOUT, () => terminateProcess(child));
-    child.once('error', () => finish(5)); // The child never ran: no byte could leave.
+    // No pid: the child never ran and no byte could leave. A pid: it ran and
+    // may still be writing, so the outcome is unknown.
+    child.once('error', () => finish(child.pid === undefined ? 5 : 4));
     child.once('close', code => {
       if (code === 0 || code === 3 || code === 4 || code === 5) finish(code);
       else finish(4); // Exit 2 (fatal panic), a signal or an unmapped death: uncertain.

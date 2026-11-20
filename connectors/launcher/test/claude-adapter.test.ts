@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -679,6 +681,21 @@ test('helper exit 2, signals and unmapped codes are uncertain, never refused', u
 test('exit 5 is a definite pre-write refusal', unixChild, async t => {
   assert.equal(await spawnExit(t, 'exit 5'), 5, 'the helper refusal passes through');
   assert.equal(await spawnExit(t, undefined), 5, 'a child that never spawned wrote nothing');
+  // An error event on a child that DID spawn (a failed kill on the timeout
+  // emits one) is never a refusal: that child may be mid-write.
+  let child: ChildProcess | undefined;
+  const capture = ((file: string, args: readonly string[], options: object) => {
+    child = spawn(file, args, options);
+    return child;
+  }) as typeof spawn;
+  const bin = deliverStub(t, 'exec sleep 30');
+  const pending = spawnClaudeDeliver({ HOME: tmpdir(), PATH: process.env.PATH, VECNET_BIN: bin }, fakeClock(1000), capture)(frame);
+  t.after(() => { child?.kill('SIGKILL'); });
+  await new Promise<void>((resolve, reject) => { child!.once('spawn', resolve); child!.once('error', reject); });
+  assert.ok(child!.pid, 'the stub child is running');
+  child!.emit('error', Object.assign(new Error('kill EPERM'), { code: 'EPERM', syscall: 'kill' }));
+  assert.equal(await pending, 4, 'an error after spawn is uncertain, never refused_before_write');
+
   const f = fixture(t);
   f.setPages([{ events: [deliveryEvent('e1.1', 1)] }]);
   f.setExit(5);

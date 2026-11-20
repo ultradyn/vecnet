@@ -80,7 +80,9 @@ func claudeDeliverRefusal(msg string) error {
 }
 
 // claudeDeliverRefusalOf marks any error raised before the first byte as a
-// pre-write refusal, keeping a message that already names the helper.
+// pre-write refusal (5); an already-coded error keeps its code. The message
+// is normalised to claudeDeliverRefusal's form, named once: a message that
+// already starts with "claude deliver: " is not prefixed twice.
 func claudeDeliverRefusalOf(err error) error {
 	var de *claudeDeliverError
 	if errors.As(err, &de) {
@@ -91,7 +93,7 @@ func claudeDeliverRefusalOf(err error) error {
 	if errors.As(err, &ue) {
 		msg = ue.msg
 	}
-	return &claudeDeliverError{msg: strings.TrimPrefix(msg, "claude deliver: "), code: 5}
+	return claudeDeliverRefusal(strings.TrimPrefix(msg, "claude deliver: "))
 }
 
 // claudeDeliverBody is the tested adapter's message wrapper: role user and
