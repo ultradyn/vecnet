@@ -64,22 +64,10 @@ type hookProc struct {
 
 // currentProc is the Claude Code process that ran this command, or the
 // zero value when CLAUDE_PID is absent (older Claude Code, a terminal).
+// The agy equivalent, agyHookProc, is platform-split: it reads /proc.
 func currentProc(getenv func(string) string) hookProc {
 	pid, err := strconv.Atoi(strings.TrimSpace(getenv("CLAUDE_PID")))
 	if err != nil || pid <= 1 {
-		return hookProc{}
-	}
-	host, _ := os.Hostname()
-	return hookProc{PID: pid, Start: procStart(pid), Host: host}
-}
-
-// agyHookProc is the Antigravity process that ran this hook. agy exports no
-// PID variable to hooks (evidence H3) but launches hooks through sh -c, so
-// the agy process is the hook's grandparent. Unknown stays the zero value,
-// which never matches.
-func agyHookProc() hookProc {
-	pid := procGrandparent()
-	if pid <= 1 {
 		return hookProc{}
 	}
 	host, _ := os.Hostname()

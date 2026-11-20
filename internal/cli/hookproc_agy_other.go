@@ -2,6 +2,8 @@
 
 package cli
 
-// procGrandparent is unknown outside Linux: an agy binding never matches a
-// process there.
-func procGrandparent() int { return 0 }
+// agyHookProc is unknown outside Linux: there is no /proc walk, so an agy
+// binding never matches a process there. A binding is released only by
+// `vecnet hook rebind` or keeps serving later root prompts in the same
+// conversation.
+func agyHookProc() hookProc { return hookProc{} }

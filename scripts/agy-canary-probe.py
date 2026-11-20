@@ -185,12 +185,26 @@ def _ppid(pid):
         return int(open("/proc/%d/stat" % pid).read().rsplit(")", 1)[1].split()[1])
     except (OSError, ValueError, IndexError):
         return 0
+def _ident(pid):
+    """comm and exe basename of one ancestor; never reads environ."""
+    comm, exe = "", ""
+    try:
+        comm = open("/proc/%d/comm" % pid).read().strip()
+    except OSError:
+        pass
+    try:
+        exe = os.path.basename(os.readlink("/proc/%d/exe" % pid))
+    except OSError:
+        pass
+    return {{"pid": pid, "comm": comm, "exe": exe}}
 parent = os.getppid()
+grandparent = _ppid(parent)
+ancestors = [_ident(pid) for pid in (parent, grandparent, _ppid(grandparent)) if pid > 0]
 with open({log!r}, "a") as f:
     f.write(json.dumps({{"kind": "hook", "event": ev, "payload": p, "env_names": env_names,
                         "conv_env": os.environ.get("ANTIGRAVITY_CONVERSATION_ID", ""), "pid": os.getpid(),
                         "cwd_rel": os.path.relpath(os.getcwd(), p.get("cwd", os.getcwd())),
-                        "parent": parent, "grandparent": _ppid(parent)}}) + "\n")
+                        "parent": parent, "grandparent": grandparent, "ancestors": ancestors}}) + "\n")
 inject = {inject}
 key = ev + ":" + str(p.get("invocationNum", "*"))
 out = inject.get(key, inject.get(ev + ":*", {{}}))
@@ -278,6 +292,9 @@ def probe_hooks():
             "conv_env_matches_payload": all(e["conv_env"] == e["payload"].get("conversationId") for e in hooks),
             "single_conversation_id": len(conv_ids) == 1,
             "hook_process_cwd_rel_to_payload_cwd": sorted({e["cwd_rel"] for e in hooks}),
+            # comm and exe basename of each ancestor (never environ): how a
+            # hook can identify the agy process by name rather than by depth.
+            "ancestor_identity": sorted({(a.get("comm"), a.get("exe")) for e in hooks for a in e.get("ancestors", [])}),
             "requests": reqs,
             "transcript_injected": transcript_summary(hooks, markers),
         }

@@ -37,6 +37,8 @@ When several sessions share a directory, give each its own profile and launch it
 
 **Subagents never receive deliveries.** Every subagent runs the workspace hooks with its own `conversationId`, and its first `PreInvocation` carries an empty `lastUserInput`, so it takes mid-turn semantics and never binds or claims: a bound profile's subagent hook runs stay silent and touch nothing.
 
+**Process identity.** On Linux the hook identifies the `agy` process by walking up the `/proc` ancestors — at most three, matching `agy` by `comm` or `exe` name (`/proc/<pid>/environ` is never read) — which is how a `/clear` inside one `agy` process moves the binding to the new conversation. When `/bin/sh` is bash, bash execs the hook in place, so `agy` is the hook's parent; under dash the hook keeps its `sh` parent and `agy` is the grandparent. On non-Linux systems the process identity is unknown, so a binding is released only by `vecnet hook rebind` or by a later root prompt in the same conversation.
+
 ## `vecnet_wait` and the approval prompt
 
 `.agents/mcp_config.json` declares the relay's tools eager, plus the waiter:
