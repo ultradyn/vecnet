@@ -108,6 +108,13 @@ dispositions and reasons for the addressed scope — never message bodies,
 credentials or scope coordinates. At most 256 rows are shown; only the oldest
 settled rows are hidden and the truncation is noted.
 
+The ledger is a live SQLite database the delivery daemon writes to. Opening
+`delivery.sqlite` read-write while the daemon runs — for example a plain
+`sqlite3 delivery.sqlite`, whose default journal handling can checkpoint or
+recreate the WAL — can orphan the daemon's WAL and lose or corrupt recent
+claims. Inspect a running daemon's ledger with `sqlite3 -readonly
+delivery.sqlite` (and read-only queries), or stop the daemon first.
+
 `claude resolve` settles exactly one claim by delivery id. `--keep-inbox`
 quarantines it inbox-only (native promotion stops, the delivery stays
 readable, nothing is acknowledged). `--retry` re-arms one fresh native
