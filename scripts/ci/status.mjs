@@ -31,7 +31,8 @@ if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.ur
  const repo=process.env.GITHUB_REPOSITORY;
  const api=async(method,route,body)=>JSON.parse(execFileSync('gh',['api','--method',method,route,...(body?['--input','-']:[])],{input:body?JSON.stringify(body):undefined,encoding:'utf8',timeout:10000,maxBuffer:16*1024*1024}));
  const result=await publishAcceptance({repo,event,api,evaluate:async run=>{
-  const command=spawnSync(process.execPath,[fileURLToPath(new URL('./audit.mjs',import.meta.url)),String(run.id),run.head_sha,'completed'],{encoding:'utf8',timeout:35000});
+  // Audit the exact triggering attempt, never whichever attempt is latest.
+  const command=spawnSync(process.execPath,[fileURLToPath(new URL('./audit.mjs',import.meta.url)),String(run.id),run.head_sha,'completed',String(run.run_attempt)],{encoding:'utf8',timeout:35000});
   if(command.error||command.signal)throw command.error||new Error('audit terminated');
   console.log(command.stdout);if(command.stderr)console.error(command.stderr);
   if(command.status!==0&&command.status!==1)throw new Error('audit command failed');

@@ -1,10 +1,16 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { audit, acceptanceReserve } from './audit.mjs';
+import { audit, acceptanceReserve, attemptStart, parseAttempt, runDeadline } from './audit.mjs';
 const at = seconds => new Date(Date.UTC(2026,0,1)+seconds*1000).toISOString();
-const run={head_sha:'abc',created_at:at(0),status:'completed',conclusion:'success'};
-const job={id:1,name:'tests',status:'completed',conclusion:'success',completed_at:at(100),steps:[{name:'setup',conclusion:'success',started_at:at(40),completed_at:at(50)}]};
+// A first attempt: GitHub reports run_started_at equal to created_at.
+const run={head_sha:'abc',run_attempt:1,created_at:at(0),run_started_at:at(0),status:'completed',conclusion:'success'};
+const job={id:1,name:'tests',run_attempt:1,status:'completed',conclusion:'success',completed_at:at(100),steps:[{name:'setup',conclusion:'success',started_at:at(40),completed_at:at(50)}]};
+// "Re-run failed jobs" keeps created_at; attempt 2 starts 600s later. The
+// passing job is carried with its original times; the rerun job is new.
+const rerun={...run,run_attempt:2,run_started_at:at(600)};
+const carried={...job,id:11,name:'carried',run_attempt:2};
+const retried={...job,id:12,name:'retried',run_attempt:2,completed_at:at(700),steps:[{name:'setup',conclusion:'success',started_at:at(640),completed_at:at(650)}]};
 test('accepts completed exact-source compliant run including queue and post steps',()=>{
  assert.deepEqual(audit(run,[job],{sha:'abc',now:at(101)}).violations,[]);
 });
@@ -50,4 +56,62 @@ test('actual publication command caps fit the tag reserve and remain below60s',(
  assert.equal(Number(github[1]),14000);
  assert.equal(acceptanceReserve('push','refs/tags/v1.2.3'),(Number(npm[1])+Number(github[1]))/1000+7);
  for(const [,ms] of workflow.matchAll(/scripts\/ci\/budget\.mjs (\d+)/g)) assert.ok(Number(ms)>0&&Number(ms)<60000,`command cap ${ms} must be <60s`);
+});
+
+test('a re-run-failed-jobs attempt is measured from its own start, not run creation',()=>{
+ // Measured from created_at this would be 700s and could never pass.
+ const result=audit(rerun,[carried,retried],{sha:'abc',attempt:2});
+ assert.deepEqual(result.violations,[]);
+ assert.equal(result.elapsed,100);
+ assert.equal(attemptStart(rerun),Date.parse(at(600)));
+ assert.equal(runDeadline(rerun),Date.parse(at(600))+299000);
+});
+
+test('rerun preflight keeps the same <300s attempt budget and publication reserve',()=>{
+ const options={sha:'abc',attempt:2,preflight:true,reserve:acceptanceReserve('push','refs/tags/v1.2.3')};
+ const live={...rerun,status:'in_progress',conclusion:null};
+ assert.deepEqual(audit(live,[carried,retried],{...options,now:at(838)}).violations,[]);
+ assert.deepEqual(audit(live,[carried,retried],{...options,now:at(839)}).violations,['insufficient remaining reserve 61s at 239s']);
+ assert.ok(audit(live,[carried,retried],{...options,now:at(900)}).violations.some(x=>x.includes('must be <300s')));
+});
+
+test('an attempt exceeding 300s after its own start still fails',()=>{
+ const slow={...retried,completed_at:at(900)};
+ assert.ok(audit(rerun,[carried,slow],{sha:'abc',attempt:2}).violations.some(x=>x.includes('300')));
+});
+
+test('first-attempt semantics are unchanged: run_started_at equals created_at',()=>{
+ assert.equal(attemptStart(run),Date.parse(run.created_at));
+ assert.equal(audit(run,[job],{sha:'abc',attempt:1}).elapsed,100);
+});
+
+test('fails closed on missing or mixed attempt evidence',()=>{
+ assert.ok(audit({...rerun,run_started_at:undefined},[carried,retried],{sha:'abc'}).violations.includes('missing attempt start timestamp'));
+ assert.ok(audit({...rerun,run_attempt:undefined},[carried,retried],{sha:'abc'}).violations.includes('missing run attempt'));
+ // The audited attempt must be the one the API returned.
+ assert.ok(audit(rerun,[carried,retried],{sha:'abc',attempt:3}).violations.some(x=>x.includes('not audited attempt 3')));
+ // A job record from another attempt (a failed original) must not count.
+ const stale={...retried,id:13,name:'stale',run_attempt:1,conclusion:'failure'};
+ const violations=audit(rerun,[carried,stale],{sha:'abc',attempt:2}).violations;
+ assert.ok(violations.includes('job stale belongs to attempt 1'));
+ assert.ok(violations.includes('job stale incomplete/failed'));
+ // Every other check still applies to carried jobs.
+ assert.ok(audit(rerun,[{...carried,steps:[]},retried],{sha:'abc',attempt:2}).violations.includes('job carried missing steps'));
+ assert.ok(audit({...rerun,head_sha:'other'},[carried,retried],{sha:'abc',attempt:2}).violations.includes('source SHA mismatch'));
+});
+
+test('attempt selection accepts only positive integers',()=>{
+ assert.equal(parseAttempt('2'),2);
+ assert.equal(parseAttempt(3),3);
+ for(const bad of [undefined,'','0','1.5','x',0,-1])assert.throws(()=>parseAttempt(bad),/invalid run attempt/);
+});
+
+test('audit reads only the audited attempt and binds the overall deadline to it',()=>{
+ const source=readFileSync(new URL('./audit.mjs',import.meta.url),'utf8');
+ assert.match(source,/actions\/runs\/\$\{id\}\/attempts\/\$\{attempt\}`\)/);
+ assert.match(source,/actions\/runs\/\$\{id\}\/attempts\/\$\{attempt\}\/jobs\?/);
+ assert.doesNotMatch(source,/filter=latest/);
+ assert.match(source,/CI_RUN_DEADLINE=\$\{runDeadline\(run\)\}/);
+ const status=readFileSync(new URL('./status.mjs',import.meta.url),'utf8');
+ assert.match(status,/'completed',String\(run\.run_attempt\)\]/,'completed-run audit must name its triggering attempt');
 });
