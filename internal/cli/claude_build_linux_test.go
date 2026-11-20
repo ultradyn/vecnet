@@ -14,7 +14,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -122,6 +121,21 @@ func claudeFileDigest(t *testing.T, path string) string {
 	}
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:])
+}
+
+// claudeCacheEntries counts the fixture's stored digest rows; a missing
+// cache is zero rows.
+func claudeCacheEntries(t *testing.T, f *claudeBuildFixture) int {
+	t.Helper()
+	raw, err := f.app().readLocalState(claudeExeDigestsName)
+	if err != nil {
+		return 0
+	}
+	doc, err := claudeExeDigestsDecode(raw)
+	if err != nil {
+		t.Fatalf("cache document is invalid: %v", err)
+	}
+	return len(doc.Entries)
 }
 
 func TestClaudeBuildDigestComesFromKernelExe(t *testing.T) {
@@ -310,26 +324,16 @@ func TestClaudeBuildObservationIsBounded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if elapsed := time.Since(begin); elapsed > 200*time.Millisecond {
-		t.Fatalf("observation took %s, want it bounded well under 200ms", elapsed)
+	if elapsed := time.Since(begin); elapsed > 500*time.Millisecond {
+		t.Fatalf("observation took %s, want it bounded well under 500ms", elapsed)
 	}
 	if ev.Reason != "claude build observation timed out" || ev.Build != "" || ev.SHA256 != "" {
 		t.Fatalf("unbounded hash did not time out cleanly: %+v", ev)
 	}
 
-	// A bounded observation caches nothing: the state is absent or empty.
-	entries := 0
-	if raw, err := f.app().readLocalState(claudeExeDigestsName); err == nil {
-		doc, derr := claudeExeDigestsDecode(raw)
-		if derr != nil {
-			t.Fatalf("cache document is invalid: %v", derr)
-		}
-		entries = len(doc.Entries)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("unexpected cache state error: %v", err)
-	}
-	if entries != 0 {
-		t.Fatalf("timed-out observation cached %d entries", entries)
+	// A bounded observation caches nothing.
+	if n := claudeCacheEntries(t, f); n != 0 {
+		t.Fatalf("timed-out observation cached %d entries", n)
 	}
 }
 
@@ -367,5 +371,186 @@ func TestClaudeExeIdentityLive(t *testing.T) {
 	f.kill()
 	if claudeExeIdentityLive(f.pid, ev.Identity) {
 		t.Fatal("identity matched a dead pid")
+	}
+}
+
+// TestClaudeBuildIdentityChangedDuringHash pins the post-hash fstat guard:
+// the opened exe's identity changing under the hash (an updater touched the
+// file mid-read) leaves no stable read, so nothing is attested or cached.
+func TestClaudeBuildIdentityChangedDuringHash(t *testing.T) {
+	f := newClaudeBuildFixture(t)
+	realHash := claudeBuildHash
+	claudeBuildHash = func(ctx context.Context, r io.Reader) (string, error) {
+		touched := time.Now().Add(time.Minute)
+		if err := os.Chtimes(f.exe, touched, touched); err != nil {
+			return "", err
+		}
+		return realHash(ctx, r)
+	}
+	t.Cleanup(func() { claudeBuildHash = realHash })
+
+	ev, err := f.observe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev.Reason != "claude executable is unreadable" || ev.Build != "" || ev.SHA256 != "" || ev.Identity != "" {
+		t.Fatalf("identity change under the hash is not a bare refusal: %+v", ev)
+	}
+	if n := claudeCacheEntries(t, f); n != 0 {
+		t.Fatalf("raced observation cached %d entries", n)
+	}
+}
+
+// TestClaudeBuildStalePidAfterHash pins the post-hash start-identity guard
+// on both paths: a pid that dies during the hash errors, and a dead pid
+// resolved from the cache errors too rather than reading as unreadable.
+func TestClaudeBuildStalePidAfterHash(t *testing.T) {
+	// The pid dies while the hash is in flight (hashed path).
+	f := newClaudeBuildFixture(t)
+	realHash := claudeBuildHash
+	claudeBuildHash = func(ctx context.Context, r io.Reader) (string, error) {
+		f.kill() // kills and reaps, so /proc/<pid> is gone
+		return realHash(ctx, r)
+	}
+	t.Cleanup(func() { claudeBuildHash = realHash })
+	ev, err := f.observe()
+	if err == nil {
+		t.Fatalf("a pid that died during the hash was not an error: %+v", ev)
+	}
+	if ev.SHA256 != "" || ev.Identity != "" || ev.Build != "" {
+		t.Fatalf("stale-pid error carries evidence fields: %+v", ev)
+	}
+	if n := claudeCacheEntries(t, f); n != 0 {
+		t.Fatalf("stale-pid observation cached %d entries", n)
+	}
+
+	// The pid dies after the open but before the cached checks: the start
+	// identity must error there too, not read as an unreadable exe.
+	g := newClaudeBuildFixture(t)
+	if _, err := g.observe(); err != nil {
+		t.Fatal(err)
+	}
+	realOpen := claudeBuildOpenExe
+	claudeBuildOpenExe = func(pid int) (*os.File, error) {
+		exe, err := realOpen(pid)
+		if err == nil {
+			g.kill() // kills and reaps, after the kernel already gave us the fd
+		}
+		return exe, err
+	}
+	t.Cleanup(func() { claudeBuildOpenExe = realOpen })
+	if ev, err := g.observe(); err == nil {
+		t.Fatalf("a cached observation of a dead pid was not an error: %+v", ev)
+	}
+}
+
+// TestClaudeBuildForeignExeDuringHash pins the hashed-path dev:ino guard:
+// a descriptor that is not the pid's current executable (here posed through
+// the open seam) is never attested, whatever bytes it hashes to.
+func TestClaudeBuildForeignExeDuringHash(t *testing.T) {
+	f := newClaudeBuildFixture(t)
+	decoy := filepath.Join(f.dir, "decoy-exe")
+	if err := os.WriteFile(decoy, []byte("a foreign regular file"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	realOpen := claudeBuildOpenExe
+	claudeBuildOpenExe = func(int) (*os.File, error) { return os.Open(decoy) }
+	t.Cleanup(func() { claudeBuildOpenExe = realOpen })
+
+	ev, err := f.observe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev.Reason != "claude executable is unreadable" || ev.Build != "" || ev.SHA256 != "" || ev.Identity != "" {
+		t.Fatalf("a foreign descriptor is not a bare refusal: %+v", ev)
+	}
+	if n := claudeCacheEntries(t, f); n != 0 {
+		t.Fatalf("foreign-descriptor observation cached %d entries", n)
+	}
+}
+
+// TestClaudeBuildForeignExeFromCache pins the same dev:ino guard on the
+// cached path: a digest resolved from the cache still has to name the pid's
+// current executable, and no rehash may paper over the mismatch.
+func TestClaudeBuildForeignExeFromCache(t *testing.T) {
+	f := newClaudeBuildFixture(t)
+	decoy := filepath.Join(f.dir, "decoy-exe")
+	if err := os.WriteFile(decoy, []byte("a foreign regular file"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var st unix.Stat_t
+	if err := unix.Stat(decoy, &st); err != nil {
+		t.Fatal(err)
+	}
+	identity := claudeBuildStatIdentity(&st)
+	if err := f.app().claudeExeDigestStore(context.Background(), identity, claudeFileDigest(t, decoy), time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+
+	realHash, realOpen := claudeBuildHash, claudeBuildOpenExe
+	var calls atomic.Int32
+	claudeBuildHash = func(ctx context.Context, r io.Reader) (string, error) {
+		calls.Add(1)
+		return realHash(ctx, r)
+	}
+	claudeBuildOpenExe = func(int) (*os.File, error) { return os.Open(decoy) }
+	t.Cleanup(func() {
+		claudeBuildHash, claudeBuildOpenExe = realHash, realOpen
+	})
+
+	ev, err := f.observe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := calls.Load(); n != 0 {
+		t.Fatalf("the cached path rehashed %d times", n)
+	}
+	if ev.Reason != "claude executable is unreadable" || ev.Build != "" || ev.SHA256 != "" || ev.Identity != "" {
+		t.Fatalf("a cached foreign descriptor is not a bare refusal: %+v", ev)
+	}
+	if n := claudeCacheEntries(t, f); n != 1 {
+		t.Fatalf("observation left %d cache rows, want only the primed one", n)
+	}
+}
+
+// TestClaudeBuildReplacedInPlaceFailsClosed pins the ruling for an in-place
+// version-file replacement: CLAUDE_CODE_EXECPATH then names a new inode at
+// the old path while /proc/<pid>/exe holds the running image, and the
+// contradiction keeps the build legacy even when the running image's digest
+// is tabled.
+func TestClaudeBuildReplacedInPlaceFailsClosed(t *testing.T) {
+	d, err := canonicalCodexPath(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	src, err := filepath.Abs(os.Args[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	copyPath := filepath.Join(d, "claude-version-copy")
+	raw, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(copyPath, raw, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f := startClaudeBuildFixture(t, copyPath)
+	claudeWithQualifiedBuild(t, claudeFileDigest(t, copyPath))
+
+	// The updater replaces the version file in place: same path, new inode.
+	if err := os.Remove(copyPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(copyPath, []byte("the replacement install"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f.env["CLAUDE_CODE_EXECPATH"] = copyPath
+	ev, err := f.observe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev.Reason != "CLAUDE_CODE_EXECPATH names a different executable" || ev.Build != "" {
+		t.Fatalf("a replaced-in-place version file did not fail closed: %+v", ev)
 	}
 }

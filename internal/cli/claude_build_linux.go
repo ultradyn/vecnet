@@ -118,7 +118,7 @@ func (a *app) observeClaudeBuild(ctx context.Context, pid int, start string) (cl
 			if timedOut {
 				reason = claudeBuildReasonTimeout
 			}
-			return claudeBuildEvidence{Identity: identity, Reason: reason}, nil
+			return claudeBuildEvidence{Reason: reason}, nil
 		}
 		sha = hashed
 		// A hash is only evidence when the descriptor still names the same
@@ -130,7 +130,7 @@ func (a *app) observeClaudeBuild(ctx context.Context, pid int, start string) (cl
 			return claudeBuildEvidence{Reason: claudeBuildReasonUnreadable}, nil
 		}
 		if now := procStart(pid); now == "" || now != start {
-			return claudeBuildEvidence{Identity: identity, SHA256: sha}, usageErr("claude build observation pid no longer matches its start identity (pid reuse?)")
+			return claudeBuildEvidence{}, usageErr("claude build observation pid no longer matches its start identity (pid reuse?)")
 		}
 		if !claudeBuildExeStillHeld(pid, &st) {
 			return claudeBuildEvidence{Reason: claudeBuildReasonUnreadable}, nil
@@ -139,26 +139,28 @@ func (a *app) observeClaudeBuild(ctx context.Context, pid int, start string) (cl
 		// fails the observation itself.
 		_ = a.claudeExeDigestStore(ctx, identity, sha, time.Now().UTC())
 	} else {
+		if now := procStart(pid); now == "" || now != start {
+			return claudeBuildEvidence{}, usageErr("claude build observation pid no longer matches its start identity (pid reuse?)")
+		}
 		if !claudeBuildExeStillHeld(pid, &st) {
 			return claudeBuildEvidence{Reason: claudeBuildReasonUnreadable}, nil
-		}
-		if now := procStart(pid); now == "" || now != start {
-			return claudeBuildEvidence{Identity: identity, SHA256: sha}, usageErr("claude build observation pid no longer matches its start identity (pid reuse?)")
 		}
 	}
 
 	// CLAUDE_CODE_EXECPATH is a hint that never qualifies a build: it may
 	// only contradict the kernel-attested executable. A hint naming a
 	// missing file (an auto-update unlinked it) is stale and ignored; any
-	// other unstatable hint fails closed.
+	// other unstatable hint fails closed. A hint naming a file replaced in
+	// place at the same path names a different inode than the running image,
+	// which also fails closed.
 	if hint := strings.TrimSpace(a.getenv("CLAUDE_CODE_EXECPATH")); hint != "" {
 		var hst unix.Stat_t
 		if err := unix.Stat(hint, &hst); err == nil {
 			if hst.Dev != st.Dev || hst.Ino != st.Ino {
-				return claudeBuildEvidence{SHA256: sha, Identity: identity, Reason: claudeBuildReasonExecPath}, nil
+				return claudeBuildEvidence{Reason: claudeBuildReasonExecPath}, nil
 			}
 		} else if !errors.Is(err, os.ErrNotExist) {
-			return claudeBuildEvidence{SHA256: sha, Identity: identity, Reason: claudeBuildReasonExecPath}, nil
+			return claudeBuildEvidence{Reason: claudeBuildReasonExecPath}, nil
 		}
 	}
 	build, qualified := claudeQualifiedBuildFor(sha)

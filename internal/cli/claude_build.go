@@ -59,6 +59,10 @@ func claudeQualifiedBuildFor(sha string) (claudeQualifiedBuild, bool) {
 // the decimal "<dev>:<ino>:<size>:<mtime_ns>:<ctime_ns>" of the opened
 // executable; Build is the table label, or "" when the build is unknown;
 // Reason is one of the fixed strings below, "" when the build qualified.
+// Every failure return (a non-empty Reason, or an error) carries only the
+// reason: SHA256, Identity and Build are empty. The unqualified outcome is
+// not a failure — it carries the attested digest and identity with an empty
+// Build.
 type claudeBuildEvidence struct {
 	SHA256   string
 	Identity string
@@ -103,12 +107,16 @@ const (
 	claudeExeDigestsName = "claude-exe-digests.json"
 	claudeExeDigestsLock = "claude-exe-digests"
 	claudeExeDigestsMax  = 16
+	claudeExeDigestsLim  = 64 << 10
+	// claudeExeDigestsStoreBudget bounds the store's lock wait: an
+	// contention-bound or slow lock skips the cache write and keeps the
+	// observation evidence.
+	claudeExeDigestsStoreBudget = 250 * time.Millisecond
 )
 
 var (
 	claudeExeIdentityRE = regexp.MustCompile(`^[0-9]{1,20}(:[0-9]{1,20}){4}$`)
 	claudeExeDigestRE   = regexp.MustCompile(`^[0-9a-f]{64}$`)
-	claudeExeDigestsLim = 64 << 10
 )
 
 // claudeExeDigest maps one executable identity to its observed digest.
@@ -300,7 +308,11 @@ func (a *app) claudeExeDigestStore(ctx context.Context, identity, sha string, no
 	if !claudeExeIdentityRE.MatchString(identity) || !claudeExeDigestRE.MatchString(sha) {
 		return usageErr("claude exe digest row is not storable")
 	}
-	unlock, err := a.lockLocalState(ctx, claudeExeDigestsLock)
+	// The lock wait is bounded: a timeout skips the cache write and keeps
+	// the observation evidence.
+	lockCtx, cancel := context.WithTimeout(ctx, claudeExeDigestsStoreBudget)
+	defer cancel()
+	unlock, err := a.lockLocalState(lockCtx, claudeExeDigestsLock)
 	if err != nil {
 		return err
 	}
