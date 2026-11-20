@@ -12,6 +12,7 @@ const REASONS = {
   npm_prefix_mismatch: 'npm would install somewhere other than this hub.',
   not_writable: 'The hub cannot write its npm install directory.',
   detect_failed: 'The hub could not inspect its installation.',
+  ephemeral_port: 'This hub listens on a random port (:0), which a restart would change.',
 };
 const STATES = {
   checking: 'Checking npm…', installing: 'Installing ', verifying: 'Verifying ',
@@ -46,6 +47,7 @@ export function updateView(st) {
       v.note = 'Installed ' + ver + '. Restart the hub to run it.';
     } else {
       v.busy = true;
+      v.progressVersion = ver;
       v.progress = state === 'checking' ? STATES.checking : STATES[state] + ver + '…';
     }
   } else if (state === 'failed') {
@@ -57,9 +59,37 @@ export function updateView(st) {
 // buttonLabel: the one-click button's text.
 export const buttonLabel = v => v.restart ? 'Update & restart' : 'Install update';
 
-// pollDelay: how soon to re-read the status. A running job polls quickly so
-// progress shows; otherwise the sidebar re-reads every 10 minutes (the hub
-// checks npm itself, hours apart; reading is free).
-export function pollDelay(v) {
-  return v && v.busy ? 1500 : 600000;
+// WATCH_MS: after the sidebar sees a running job it keeps watching (fast
+// polls) this long for the hub to come back on the new version.
+export const WATCH_MS = 120000;
+
+// trackUpdate follows a job across the restart, when the status endpoint
+// first fails (the hub is draining) and then answers from the new process,
+// which knows nothing of the job. pending is { version, until } or null;
+// st the status reply, or null when the read failed. It returns the view
+// to show and the next pending.
+export function trackUpdate(pending, st, now) {
+  const view = st ? updateView(st) : null;
+  if (view && view.busy) return { view, pending: { version: view.progressVersion, until: now + WATCH_MS } };
+  if (!pending) return { view, pending: null };
+  const card = (title, extra) => ({
+    latest: pending.version, current: '', title, sub: '', release: '', oneClick: false, restart: false,
+    manual: '', reason: '', busy: false, progress: '', error: '', note: '', ...extra,
+  });
+  if (st && str(st.current) === pending.version) {
+    return { view: card('Updated to ' + pending.version, { note: 'The hub restarted on the new version.' }), pending: null };
+  }
+  if (view && (view.error || view.note)) return { view, pending: null }; // failed, or installed without restart
+  if (now > pending.until) {
+    return { view: card('Update not confirmed', { error: 'The hub did not come back on ' + pending.version + ' within 2 minutes. Check the hub log.' }), pending: null };
+  }
+  // Draining, or the new process before its first answer.
+  return { view: card('Restarting into ' + pending.version + '…', { busy: true, progress: 'Waiting for the hub to come back…' }), pending };
+}
+
+// pollDelay: how soon to re-read the status. A running job (or a restart
+// being watched) polls quickly so progress shows; otherwise the sidebar
+// re-reads every 10 minutes (the hub checks npm itself, hours apart).
+export function pollDelay(v, watching = false) {
+  return watching || (v && v.busy) ? 1500 : 600000;
 }

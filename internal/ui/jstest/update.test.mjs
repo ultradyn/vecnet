@@ -166,3 +166,64 @@ test('createUpdate keeps one poll timer when loads overlap', async () => {
     assert.equal(live.size, 0);
   } finally { globalThis.document = prev; }
 });
+
+test('trackUpdate follows a job through the restart to the new version', async () => {
+  const { trackUpdate, WATCH_MS } = await import('../static/update-model.js');
+  const busy = { ...base, job: { state: 'installing', version: '0.2.7', started_at: 'x' } };
+  let r = trackUpdate(null, busy, 1000);
+  assert.deepEqual(r.pending, { version: '0.2.7', until: 1000 + WATCH_MS });
+  assert.equal(pollDelay(r.view, !!r.pending), 1500);
+  // The hub drains: reads fail. The card says it is restarting.
+  r = trackUpdate(r.pending, null, 5000);
+  assert.equal(r.view.title, 'Restarting into 0.2.7…');
+  assert.equal(r.view.busy, true);
+  assert.ok(r.pending);
+  // The new process answers before it knows anything: still restarting.
+  r = trackUpdate(r.pending, { enabled: true, current: '0.2.6', update_available: false }, 6000);
+  assert.equal(r.view.title, 'Restarting into 0.2.7…');
+  // The new process runs 0.2.7.
+  r = trackUpdate(r.pending, { enabled: true, current: '0.2.7', latest: '0.2.7', update_available: false }, 7000);
+  assert.equal(r.view.title, 'Updated to 0.2.7');
+  assert.equal(r.pending, null);
+  assert.equal(pollDelay(r.view, false), 600000);
+  // Next poll: nothing to show.
+  r = trackUpdate(r.pending, { enabled: true, current: '0.2.7', latest: '0.2.7', update_available: false }, 8000);
+  assert.equal(r.view, null);
+});
+
+test('trackUpdate reports a failed job and a restart that never comes back', async () => {
+  const { trackUpdate, WATCH_MS } = await import('../static/update-model.js');
+  const pending = { version: '0.2.7', until: 1000 + WATCH_MS };
+  const failed = { ...base, job: { state: 'failed', version: '0.2.7', error: 'installed vecnet-hub binary did not run; not restarting' } };
+  let r = trackUpdate(pending, failed, 2000);
+  assert.match(r.view.error, /did not run/);
+  assert.equal(r.pending, null);
+  r = trackUpdate(pending, null, 1001 + WATCH_MS);
+  assert.equal(r.view.title, 'Update not confirmed');
+  assert.match(r.view.error, /within 2 minutes/);
+  assert.equal(r.pending, null);
+});
+
+test('createUpdate shows restarting while the hub is away, then the new version', async t => {
+  const prev = globalThis.document;
+  globalThis.document = { createElement: tag => new El(tag) };
+  t.after(() => { globalThis.document = prev; });
+  const root = new El('div');
+  const replies = [
+    { ...base, job: { state: 'restarting', version: '0.2.7' } },
+    new Error('hub unreachable'),
+    { enabled: true, current: '0.2.7', latest: '0.2.7', update_available: false },
+  ];
+  const delays = [];
+  const api = { updateStatus: async () => { const r = replies.shift(); if (r instanceof Error) throw r; return r; }, startUpdate: async () => ({}) };
+  const u = createUpdate({ api, root, setTimer: (fn, ms) => { delays.push(ms); return delays.length; }, clearTimer: () => {}, now: () => 0 });
+  await new Promise(r => setImmediate(r));
+  assert.match(root.textContent, /Restarting into 0\.2\.7/);
+  await u.reload();
+  assert.match(root.textContent, /Restarting into 0\.2\.7/);
+  assert.equal(root.hidden, false);
+  await u.reload();
+  assert.match(root.textContent, /Updated to 0\.2\.7/);
+  assert.deepEqual(delays, [1500, 1500, 600000]);
+  u.close();
+});

@@ -3,7 +3,7 @@
 // confirmed one-click update, otherwise how to update by hand. Text goes in
 // through dom.h only, so as textContent.
 import { confirmButton, copyButton, h } from './dom.js';
-import { buttonLabel, pollDelay, updateView } from './update-model.js';
+import { buttonLabel, pollDelay, trackUpdate } from './update-model.js';
 
 // renderUpdate draws v (updateView's result) into root; null hides it.
 // The button is kept across redraws of the same state so a first (arming)
@@ -16,8 +16,8 @@ export function renderUpdate(root, v, { onUpdate = () => {} } = {}) {
   st.sig = sig;
   const kids = [
     h('div', { class: 'uh' }, h('i', { 'aria-hidden': 'true' }), h('b', { text: v.title })),
-    h('div', { class: 'us', text: v.sub }),
-  ];
+    v.sub ? h('div', { class: 'us', text: v.sub }) : null,
+  ].filter(Boolean);
   if (v.release) kids.push(h('a', { class: 'ul', href: v.release, target: '_blank', rel: 'noopener noreferrer', text: 'Release notes' }));
   if (v.progress) kids.push(h('div', { class: 'up', role: 'status', text: v.progress }));
   if (v.note) kids.push(h('div', { class: 'up', text: v.note }));
@@ -41,20 +41,22 @@ export function renderUpdate(root, v, { onUpdate = () => {} } = {}) {
 
 // createUpdate polls GET /v1/admin/update and draws the indicator. Errors
 // (a hub without the route, a network blip) hide it silently.
-export function createUpdate({ api, root, toast = () => {}, setTimer = setTimeout, clearTimer = clearTimeout }) {
-  let timer = 0, closed = false, view = null, loading = null;
+export function createUpdate({ api, root, toast = () => {}, setTimer = setTimeout, clearTimer = clearTimeout, now = Date.now }) {
+  let timer = 0, closed = false, view = null, loading = null, pending = null;
   const draw = () => renderUpdate(root, view, { onUpdate: start });
   // One read at a time, so overlapping callers never leave two poll timers.
   function load() {
     clearTimer(timer);
     if (closed) return Promise.resolve();
     return loading ??= (async () => {
-      try { view = updateView(await api.updateStatus()); } catch { view = null; }
+      let st = null;
+      try { st = await api.updateStatus(); } catch { /* draining, restarting, or no route */ }
       loading = null;
       if (closed) return;
+      ({ view, pending } = trackUpdate(pending, st, now()));
       draw();
       clearTimer(timer);
-      timer = setTimer(load, pollDelay(view));
+      timer = setTimer(load, pollDelay(view, !!pending));
     })();
   }
   async function start() {
