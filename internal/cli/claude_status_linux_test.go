@@ -31,6 +31,9 @@ type claudeStatusHost struct {
 	fd    int
 	pid   int
 	start string
+	// version is the sidecar document version written (1 unless a test
+	// publishes the v2 native canary marker).
+	version int
 }
 
 func holdClaudeStatusHost(t *testing.T, home string) *claudeStatusHost {
@@ -66,8 +69,12 @@ func (h *claudeStatusHost) sidecarPath() string {
 // write publishes the sidecar as the host would: atomic, private, fresh.
 func (h *claudeStatusHost) write(bindings []claudeStatusBinding, at time.Time, pid int, start, boot string) {
 	h.t.Helper()
+	version := h.version
+	if version == 0 {
+		version = 1
+	}
 	doc := claudeStatusFile{
-		Version:   1,
+		Version:   version,
 		UpdatedAt: at.UTC(),
 		HostPID:   pid,
 		HostStart: start,
@@ -107,8 +114,8 @@ func TestClaudeStatusNeverClaimsNativeReady(t *testing.T) {
 	f := newClaudeRegFixture(t)
 	a := f.startTree("a")
 	a.sessionRecord(a.pid, "S1", a.socket)
-	binding := mustReg(t, a.reg(f.scope("p"), a.root("S1"), nil))
-	key := claudeBindingKey(f.scope("p"))
+	binding := mustReg(t, a.reg(f.scope("c"), a.root("S1"), nil))
+	key := claudeBindingKey(f.scope("c"))
 
 	host := holdClaudeStatusHost(t, f.dir)
 	host.writeLive([]claudeStatusBinding{{BindingKey: key, Generation: binding.Generation, State: "registered"}})
@@ -117,7 +124,7 @@ func TestClaudeStatusNeverClaimsNativeReady(t *testing.T) {
 	for k, v := range f.env {
 		env[k] = v
 	}
-	result := claudeStatusJSON(t, env, "--net", "p", "claude", "status", "--json")
+	result := claudeStatusJSON(t, env, "--net", "c", "claude", "status", "--json")
 	if result.Owner != "registered" || result.Mode != "legacy" {
 		t.Fatalf("fresh exact owner is not registered/legacy: %+v", result)
 	}
@@ -128,7 +135,7 @@ func TestClaudeStatusNeverClaimsNativeReady(t *testing.T) {
 		t.Fatalf("passive status reported pending work: %+v", result)
 	}
 	// Human output states the same passive facts.
-	code, out, errs := claudeStatusRun(t, env, "--net", "p", "claude", "status")
+	code, out, errs := claudeStatusRun(t, env, "--net", "c", "claude", "status")
 	if code != 0 {
 		t.Fatalf("claude status exit %d: %s", code, errs)
 	}
@@ -150,7 +157,7 @@ func TestClaudeStatusNeverClaimsNativeReady(t *testing.T) {
 	if err := os.WriteFile(codexStatus, codexBefore, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if result := claudeStatusJSON(t, env, "--net", "p", "claude", "status", "--json"); result.Owner != "registered" {
+	if result := claudeStatusJSON(t, env, "--net", "c", "claude", "status", "--json"); result.Owner != "registered" {
 		t.Fatalf("second status read diverged: %+v", result)
 	}
 	if after, err := os.ReadFile(codexStatus); err != nil || !bytes.Equal(after, codexBefore) {
@@ -166,11 +173,53 @@ func TestClaudeStatusNeverClaimsNativeReady(t *testing.T) {
 		t.Fatalf("missing registration is not legacy: %+v", result)
 	}
 	host.writeLive([]claudeStatusBinding{{BindingKey: key, Generation: binding.Generation, State: "unsupported", Reason: "unqualified platform"}})
-	unsupported := claudeStatusJSON(t, env, "--net", "p", "claude", "status", "--json")
+	unsupported := claudeStatusJSON(t, env, "--net", "c", "claude", "status", "--json")
 	if unsupported.Owner != "none" || unsupported.Mode != "legacy" {
 		t.Fatalf("unsupported build claimed a live owner: %+v", unsupported)
 	}
+
+	// No sidecar shape ever yields a native mode: a v2 row carrying the
+	// host's canary marker without this recipient's opt-in stays legacy, a
+	// v1 row carrying it (or any other native value) is not a live owner,
+	// and the only non-legacy live mode is "canary", never "native".
+	host.version = 2
+	host.writeLive([]claudeStatusBinding{{BindingKey: key, Generation: binding.Generation, State: "registered", Native: "canary"}})
+	unopted := claudeStatusJSON(t, env, "--net", "c", "claude", "status", "--json")
+	if unopted.Owner != "registered" || unopted.Mode != "legacy" || unopted.CanaryOptIn {
+		t.Fatalf("a host canary marker without an opt-in left legacy: %+v", unopted)
+	}
+	for name, row := range map[string]struct {
+		version int
+		native  string
+	}{"v1 native": {1, "canary"}, "native value": {2, "native"}, "ready value": {2, "ready"}} {
+		host.version = row.version
+		host.writeLive([]claudeStatusBinding{{BindingKey: key, Generation: binding.Generation, State: "registered", Native: row.native}})
+		got := claudeStatusJSON(t, env, "--net", "c", "claude", "status", "--json")
+		if got.Owner != "none" || got.Mode != "legacy" {
+			t.Fatalf("%s: a malformed native marker was accepted: %+v", name, got)
+		}
+	}
+	host.version = 2
+	mustCanary(t, f, "c")
+	host.writeLive([]claudeStatusBinding{{BindingKey: key, Generation: binding.Generation, State: "registered", Native: "canary"}})
+	for _, args := range [][]string{{"--json"}, {}} {
+		code, out, errs := claudeStatusRun(t, env, append([]string{"--net", "c", "claude", "status"}, args...)...)
+		if code != 0 {
+			t.Fatalf("claude status exit %d: %s", code, errs)
+		}
+		if strings.Contains(out, `"mode":"native"`) || strings.Contains(out, "mode: native") || strings.Contains(strings.ToLower(out), "ready") {
+			t.Fatalf("status claimed a native-ready mode: %q", out)
+		}
+	}
 	f.assertPassive()
+}
+
+// mustCanary records the canary opt-in for profile through the real verb.
+func mustCanary(t *testing.T, f *claudeRegFixture, profile string) {
+	t.Helper()
+	if code, out, errs := claudeStatusRun(t, f.env, "--net", profile, "claude", "canary", "enable"); code != 0 {
+		t.Fatalf("claude canary enable exit %d: %s %s", code, out, errs)
+	}
 }
 
 func TestClaudeStatusRejectsDeadOrMismatchedHost(t *testing.T) {
@@ -287,23 +336,23 @@ func TestClaudeAdmissionIgnoresBuild(t *testing.T) {
 	untabled := unknown
 	untabled.Build, untabled.ExeSHA256, untabled.ExeIdentity = "9.9.9", strings.Repeat("0", 64), "1:2:3:4:5"
 	for label, b := range map[string]claudeBinding{"no build evidence": unknown, "untabled build": untabled} {
-		adm := claudeAdmissionEvidence(b, nil, false)
+		adm := claudeAdmissionEvidence(b, nil, nil, false)
 		if !adm.Live || !adm.Policy || !adm.VersionQualified || adm.BuildCheck != "disabled" {
 			t.Fatalf("%s was not admitted with build_check disabled: %+v", label, adm)
 		}
 	}
-	raw, err := json.Marshal(claudeAdmissionEvidence(unknown, nil, false))
-	if err != nil || string(raw) != `{"live":true,"policy":true,"version_qualified":true,"build_check":"disabled"}` {
+	raw, err := json.Marshal(claudeAdmissionEvidence(unknown, nil, nil, false))
+	if err != nil || string(raw) != `{"live":true,"policy":true,"version_qualified":true,"build_check":"disabled","canary":false}` {
 		t.Fatalf("admission JSON = %s, %v", raw, err)
 	}
-	if adm := claudeAdmissionEvidence(unknown, []claudeScope{f.scope("q")}, false); adm.Policy {
+	if adm := claudeAdmissionEvidence(unknown, []claudeScope{f.scope("q")}, nil, false); adm.Policy {
 		t.Fatalf("an alias opt-out did not withdraw policy: %+v", adm)
 	}
-	if adm := claudeAdmissionEvidence(unknown, nil, true); adm.Policy {
+	if adm := claudeAdmissionEvidence(unknown, nil, nil, true); adm.Policy {
 		t.Fatalf("the global disable did not withdraw policy: %+v", adm)
 	}
 	a.kill()
-	if adm := claudeAdmissionEvidence(unknown, nil, false); adm.Live {
+	if adm := claudeAdmissionEvidence(unknown, nil, nil, false); adm.Live {
 		t.Fatalf("a dead root stayed live: %+v", adm)
 	}
 }

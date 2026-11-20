@@ -4,7 +4,7 @@ import type { TestContext } from 'node:test';
 import type { KeyValue } from '../src/backend.ts';
 import { fakeClock, memoryLog } from '../../hub-client/testing/fixtures.ts';
 import type { Log } from '../../hub-client/src/ports.ts';
-import { createClaudeDeliveryAdapter, claudeDeliveryCanaryEnabled, claudeInboxArgs, claudeDeliverArgs } from '../src/delivery/claude-adapter.ts';
+import { createClaudeDeliveryAdapter, claudeDeliveryCanaryAllowed, claudeInboxArgs, claudeDeliverArgs } from '../src/delivery/claude-adapter.ts';
 import type { ClaudeCandidatePage, ClaudeClaimRecord, ClaudeDeliveryAdapterDeps, ClaudeDeliveryFrame, DeliverExit } from '../src/delivery/claude-adapter.ts';
 import type { WatchPool, WatchRequest, WakeEvent, WatchEnd } from '../src/delivery/watch-pool.ts';
 
@@ -68,7 +68,7 @@ function fakePool() {
 function admittedRow(over: Record<string, unknown> = {}) {
   return {
     binding_key: KEY, generation: GEN, state: 'registered',
-    admission: { live: true, policy: true, version_qualified: true },
+    admission: { live: true, policy: true, version_qualified: true, canary: true },
     scope: { profile: 'p', hub_endpoint: 'https://hub.example', caller: 'peer_A', recipient: 'peer_A' },
     ...over,
   };
@@ -93,6 +93,7 @@ interface Fixture {
   clock: ReturnType<typeof fakeClock>;
   transportCalls: ClaudeDeliveryFrame[];
   setSnapshot(bindings: unknown[]): void;
+  setSnapshotUnavailable(): void;
   setPages(pages: ClaudeCandidatePage[]): void;
   setExit(exit: DeliverExit): void;
 }
@@ -116,6 +117,7 @@ function fixture(t: TestContext, deps: Partial<ClaudeDeliveryAdapterDeps> = {}):
   return {
     adapter, kv: store, pool: { pool, recording }, log, clock, transportCalls,
     setSnapshot: bindings => { snapshot = { version: 1, bindings }; },
+    setSnapshotUnavailable: () => { snapshot = undefined; },
     setPages: next => { pages = next; },
     setExit: value => { exit = value; },
   };
@@ -126,9 +128,9 @@ async function settle(ms = 20): Promise<void> { await new Promise(resolve => set
 test('admission gating: non-live and non-qualified bindings never reach the transport', async t => {
   const f = fixture(t);
   f.setSnapshot([
-    admittedRow({ binding_key: 'cd'.repeat(32), admission: { live: false, policy: true, version_qualified: true } }),
-    admittedRow({ binding_key: 'ce'.repeat(32), admission: { live: true, policy: false, version_qualified: true } }),
-    admittedRow({ binding_key: 'cf'.repeat(32), admission: { live: true, policy: true, version_qualified: false } }),
+    admittedRow({ binding_key: 'cd'.repeat(32), admission: { live: false, policy: true, version_qualified: true, canary: true } }),
+    admittedRow({ binding_key: 'ce'.repeat(32), admission: { live: true, policy: false, version_qualified: true, canary: true } }),
+    admittedRow({ binding_key: 'cf'.repeat(32), admission: { live: true, policy: true, version_qualified: false, canary: true } }),
     admittedRow({ binding_key: 'aa'.repeat(32), state: 'opted_out' }),
   ]);
   f.adapter.start();
@@ -466,12 +468,65 @@ test('child argument builders carry no ack, no display proof and no raw endpoint
     '--msg-id', 'n'.repeat(26), '--thread-id', THREAD, '--message-id', 'msg_01E8YQZ5N8W3C4R6T7A9A2B4CD']);
 });
 
-test('the canary gate defaults to off and requires the explicit experimental opt-in', () => {
-  assert.equal(claudeDeliveryCanaryEnabled({}), false);
-  assert.equal(claudeDeliveryCanaryEnabled({ VECNET_CLAUDE_DELIVERY_CANARY: '' }), false);
-  assert.equal(claudeDeliveryCanaryEnabled({ VECNET_CLAUDE_DELIVERY_CANARY: '0' }), false);
-  assert.equal(claudeDeliveryCanaryEnabled({ VECNET_CLAUDE_DELIVERY_CANARY: 'pointer' }), false);
-  assert.equal(claudeDeliveryCanaryEnabled({ VECNET_CLAUDE_DELIVERY_CANARY: '1' }), true);
+test('the canary env var is a kill switch only: =0 refuses, nothing else enables beyond the durable record', () => {
+  assert.equal(claudeDeliveryCanaryAllowed({ VECNET_CLAUDE_DELIVERY_CANARY: '0' }), false);
+  for (const value of [undefined, '', '1', 'pointer', 'off', 'false']) {
+    assert.equal(claudeDeliveryCanaryAllowed(value === undefined ? {} : { VECNET_CLAUDE_DELIVERY_CANARY: value }), true,
+      `${String(value)} is not the kill switch; the durable canary record stays the gate`);
+  }
+});
+
+test('only the single canary-opted peer scope is admitted', async t => {
+  const unopted = admittedRow({ admission: { live: true, policy: true, version_qualified: true, canary: false } });
+  const missing = admittedRow({ admission: { live: true, policy: true, version_qualified: true } });
+  const delegated = admittedRow({ scope: { profile: 'p', as: 'peer_B', hub_endpoint: 'https://hub.example', caller: 'peer_A', recipient: 'peer_B' } });
+  // `as` naming the caller itself is still a delegated scope: refused on `as` alone.
+  const selfDelegated = admittedRow({ scope: { profile: 'p', as: 'peer_A', hub_endpoint: 'https://hub.example', caller: 'peer_A', recipient: 'peer_A' } });
+  const notOwnInbox = admittedRow({ scope: { profile: 'p', hub_endpoint: 'https://hub.example', caller: 'peer_A', recipient: 'peer_B' } });
+  const twoCanaries = [admittedRow(), admittedRow({ binding_key: 'cd'.repeat(32), generation: OTHER_GEN })];
+  for (const [name, rows] of [['canary false', [unopted]], ['canary absent', [missing]], ['delegated as', [delegated]], ['self-delegated as', [selfDelegated]],
+    ['recipient is not the caller', [notOwnInbox]], ['two canary rows', twoCanaries]] as const) {
+    const f = fixture(t);
+    f.setSnapshot([...rows]);
+    f.setPages([{ events: [deliveryEvent('e1.1', 1)] }]);
+    f.adapter.start();
+    await settle();
+    f.pool.recording.notify('exclusive:claude:' + KEY, { priority: 'wake' });
+    f.clock.advance(15_000);
+    await settle();
+    assert.equal(f.pool.recording.requests.length, 0, `${name}: no watch subscription`);
+    assert.equal(f.transportCalls.length, 0, `${name}: no transport call`);
+    assert.equal(f.kv.claims().length, 0, `${name}: no claim staged`);
+    assert.equal(f.adapter.admitted().size, 0, `${name}: nothing reported admitted`);
+    const ambiguous = f.log.entries.filter(e => e.msg === 'claude_delivery_canary_ambiguous');
+    assert.equal(ambiguous.length, name === 'two canary rows' ? 1 : 0, `${name}: ambiguity logged exactly when two rows qualify (once)`);
+    await f.adapter.stop();
+  }
+
+  // The single opted scope is admitted and reported with its generation;
+  // stop clears the report.
+  const f = fixture(t);
+  f.setPages([{ events: [deliveryEvent('e1.1', 1)] }]);
+  f.adapter.start();
+  await settle();
+  assert.deepEqual([...f.adapter.admitted()], [[KEY, GEN]]);
+  assert.equal(f.transportCalls.length, 1);
+  // A later snapshot without the opt-in withdraws admission and the watch.
+  f.setSnapshot([unopted]);
+  f.clock.advance(10_000);
+  await settle();
+  assert.equal(f.adapter.admitted().size, 0, 'a withdrawn opt-in is no longer reported admitted');
+  f.setSnapshot([admittedRow()]);
+  f.clock.advance(10_000);
+  await settle();
+  assert.equal(f.adapter.admitted().size, 1);
+  // An unreadable snapshot reports nothing admitted.
+  f.setSnapshotUnavailable();
+  f.clock.advance(10_000);
+  await settle();
+  assert.equal(f.adapter.admitted().size, 0, 'an unproven pass reports nothing admitted');
+  await f.adapter.stop();
+  assert.equal(f.adapter.admitted().size, 0);
 });
 
 test('claim records carry no body and no credentials', async t => {

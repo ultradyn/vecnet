@@ -8,7 +8,7 @@ import type { Clock, EventStream, HubApi, Log } from '../../hub-client/src/ports
 import { createEventStream } from '../../hub-client/src/stream.ts';
 import type { SendRequest } from '../../hub-client/src/wire.ts';
 import type { Backend, BackendCapabilities, BackendHealth, PermissionMode, SessionHandle, SettleResult } from './backend.ts';
-import { claudeDeliveryCanaryEnabled } from './delivery/claude-adapter.ts';
+import { claudeDeliveryCanaryAllowed } from './delivery/claude-adapter.ts';
 import { createClaudeStatus, spawnClaudeSnapshot } from './delivery/claude-status.ts';
 import { startDeliveryHost } from './delivery/host.ts';
 import { ConfigError, parseDuration } from './config.ts';
@@ -521,10 +521,11 @@ export async function startDaemon(o: { cfg: LauncherConfig; hub?: HubApi; stream
     const deliveryEnv = o.env ?? process.env;
     const delivery = startDeliveryHost({
       kv: ledger.kv('codex'), clock, log, env: deliveryEnv,
-      // Native Claude delivery stays off unless the explicit experimental
-      // canary opt-in is present; passive status is the default auxiliary.
-      claudeDeliveryCanary: claudeDeliveryCanaryEnabled(deliveryEnv),
-      auxiliary: () => createClaudeStatus({ env: deliveryEnv, clock, log, fetchSnapshot: spawnClaudeSnapshot(deliveryEnv) }),
+      // Native Claude delivery reaches only the single scope holding the
+      // durable per-profile canary record; VECNET_CLAUDE_DELIVERY_CANARY=0 is
+      // the kill switch. Passive status marks the adapter's admissions.
+      claudeDeliveryCanary: claudeDeliveryCanaryAllowed(deliveryEnv),
+      auxiliary: nativeAdmissions => createClaudeStatus({ env: deliveryEnv, clock, log, fetchSnapshot: spawnClaudeSnapshot(deliveryEnv), nativeAdmissions }),
     });
     // A dead delivery host must fail the embedded service as well, not leave a
     // healthy-looking launcher process that can never publish readiness again.

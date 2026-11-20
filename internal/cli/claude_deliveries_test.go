@@ -28,11 +28,11 @@ const (
 )
 
 // claudeDeliveryScopeKey is the addressed binding key of the witnessed
-// profile in claudeStatusFixture (pinned hub claudeTestHubPin, peer_A).
+// profile in claudeStatusFixture (pinned hub claudeTestHubPin, claudeTestPeerID).
 func claudeDeliveryScopeKey() string {
 	return claudeBindingKey(claudeScope{
 		HubIdentity: claudeTestHubPin,
-		Recipient:   "peer_A",
+		Recipient:   claudeTestPeerID,
 	})
 }
 
@@ -41,7 +41,7 @@ func claudeDeliveryScopeKey() string {
 func claudeDeliveryLegacyScopeKey() string {
 	return claudeLegacyBindingKey(claudeScope{
 		HubEndpoint: "https://hub.example.com",
-		Recipient:   "peer_A",
+		Recipient:   claudeTestPeerID,
 	})
 }
 
@@ -187,7 +187,7 @@ func TestClaudeDeliveriesListIsBoundedAndRedacted(t *testing.T) {
 		t.Fatalf("claude deliveries exit %d: %s", code, errs)
 	}
 	// Redaction: no coordinates, no home paths, no inbox cursors, no secrets.
-	for _, leak := range []string{"peer_A", "hub.example.com", home, "e1.1", "e1.2", "secret"} {
+	for _, leak := range []string{claudeTestPeerID, "hub.example.com", home, "e1.1", "e1.2", "secret"} {
 		if strings.Contains(out, leak) {
 			t.Fatalf("claude deliveries leaked %q: %s", leak, out)
 		}
@@ -250,7 +250,7 @@ func TestClaudeDeliveriesListIsBoundedAndRedacted(t *testing.T) {
 	if !strings.Contains(text, "disposition=attempted") || !strings.Contains(text, "state=uncertain") {
 		t.Fatalf("the operator list must read the disposition field: %s", text)
 	}
-	for _, leak := range []string{"peer_A", "hub.example.com", home} {
+	for _, leak := range []string{claudeTestPeerID, "hub.example.com", home} {
 		if strings.Contains(text, leak) {
 			t.Fatalf("claude deliveries text leaked %q: %s", leak, text)
 		}

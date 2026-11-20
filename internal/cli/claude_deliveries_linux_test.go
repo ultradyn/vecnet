@@ -39,17 +39,17 @@ func TestClaudeResolveRetryReArmsAfterAdmission(t *testing.T) {
 		Profile:     "p",
 		HubIdentity: claudeTestHubPin,
 		HubEndpoint: "https://hub.example.com",
-		Caller:      "peer_A",
-		Recipient:   "peer_A",
+		Caller:      claudeTestPeerID,
+		Recipient:   claudeTestPeerID,
 	}
 	doc := `{"version":2,"bindings":[{` +
 		`"config_path":` + jsonString(scope.ConfigPath) + `,"profile":"p",` +
 		`"hub_identity":` + jsonString(claudeTestHubPin) + `,"hub_endpoint":"https://hub.example.com",` +
-		`"caller":"peer_A","recipient":"peer_A",` +
+		`"caller":` + jsonString(claudeTestPeerID) + `,"recipient":` + jsonString(claudeTestPeerID) + `,` +
 		`"config_root":` + jsonString(configRoot) + `,"session_id":` + jsonString(session) + `,` +
 		`"process_start":` + jsonString(procStart(os.Getpid())) + `,"boot_id":` + jsonString(claudeBootID()) + `,` +
 		`"pid":` + strconv.Itoa(os.Getpid()) + `,"uid":` + strconv.Itoa(os.Geteuid()) + `,` +
-		`"generation":` + jsonString(claudeDeliveryTestGen) + `,"updated_at":"2026-11-19T00:00:00Z"}],"opt_outs":[],"canary":[]}`
+		`"generation":` + jsonString(claudeDeliveryTestGen) + `,"updated_at":"2026-11-19T00:00:00Z"}],"opt_outs":[],"canary":[` + claudeCanaryRecordJSON(t, scope) + `]}`
 	stateDir := filepath.Join(home, ".local", "state", "vecnet", "projects")
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		t.Fatal(err)

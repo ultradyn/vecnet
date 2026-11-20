@@ -489,7 +489,11 @@ func (a *app) claudeResolveAdmission(key, generation string) error {
 		if b.Generation != generation {
 			return usageErr("claude resolve: the binding generation changed before the retry; the claim stays fenced and unchanged")
 		}
-		if evidence := claudeAdmissionEvidence(b, rows.OptOuts, settings.Disabled); !evidence.Live {
+		// The canary opt-in is checked first: with build gating parked it
+		// is the only production gate on a native write.
+		if evidence := claudeAdmissionEvidence(b, rows.OptOuts, rows.Canary, settings.Disabled); !evidence.Canary {
+			return usageErr("claude resolve: " + errClaudeCanaryNotOptIn.Error())
+		} else if !evidence.Live {
 			return usageErr("claude resolve: the registered claude root is not live")
 		} else if !evidence.Policy {
 			return usageErr("claude resolve: the recipient opted out of native delivery")

@@ -87,6 +87,8 @@ messaging:
        read-only: ready requires fresh (30s), matching-owner, ready/live connector status; unresolved legacy bindings block readiness
        enrollment automatically stages/activates supported standalone delivery; retry pending setup with vecnet repair
        requires Node >=22.18, Linux user systemd or Windows Task Scheduler, and a supported app-server host; docs/connectors/codex-appserver.md
+  claude canary enable|disable                    needs --net P; per-profile native canary opt-in (local record, no hub request)
+       one peer recipient per user, never --as or a principal; never clears an opt-out
   projects list [--json] | projects forget PATH
        private local installation inventory; forgetting leaves hooks and ownership intact
   repair [--status] [--json]

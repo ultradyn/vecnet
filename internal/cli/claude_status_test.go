@@ -24,7 +24,7 @@ func claudeStatusFixture(t *testing.T) (home string, env map[string]string) {
 	d := t.TempDir()
 	config := filepath.Join(d, "v.toml")
 	if err := saveConfig(config, Config{Profiles: map[string]Profile{
-		"p": {Hub: "https://hub.example.com", HubPubkey: claudeTestHubPin, Secret: "vn_peer_test", PeerID: "peer_A"},
+		"p": {Hub: "https://hub.example.com", HubPubkey: claudeTestHubPin, Secret: "vn_peer_test", PeerID: claudeTestPeerID},
 	}}); err != nil {
 		t.Fatal(err)
 	}
@@ -83,8 +83,8 @@ func TestClaudeStatusDisableEnableLeavesLegacy(t *testing.T) {
 		Profile:     "p",
 		HubIdentity: claudeTestHubPin,
 		HubEndpoint: "https://hub.example.com",
-		Caller:      "peer_A",
-		Recipient:   "peer_A",
+		Caller:      claudeTestPeerID,
+		Recipient:   claudeTestPeerID,
 	}
 	stored := claudeBinding{claudeScope: scope, claudeRoot: claudeRoot{
 		ConfigRoot: filepath.Join(home, "root"), SessionID: "S1", ProcessStart: "12",
@@ -165,7 +165,7 @@ func TestClaudeStatusDisableEnableLeavesLegacy(t *testing.T) {
 		t.Fatalf("passive status reported pending work: %+v", result)
 	}
 	if code, out, _ := claudeStatusRun(t, env, "--net", "p", "claude", "deliveries", "--json"); code != 0 ||
-		!strings.Contains(out, `"deliveries":[]`) || strings.Contains(out, "peer_A") {
+		!strings.Contains(out, `"deliveries":[]`) || strings.Contains(out, claudeTestPeerID) {
 		t.Fatalf("deliveries without a ledger must stay empty and redacted: %d %s", code, out)
 	}
 	if code, _, _ := claudeStatusRun(t, env, "--net", "p", "claude", "resolve"); code == 0 {
@@ -186,4 +186,15 @@ func TestClaudeStatusDisableEnableLeavesLegacy(t *testing.T) {
 	if result := claudeStatusJSON(t, env, "--net", "p", "claude", "status", "--json"); result.Mode != "legacy" {
 		t.Fatalf("addressed enable did not restore legacy mode: %+v", result)
 	}
+}
+
+// claudeCanaryRecordJSON is one stored canary record for scope, encoded
+// exactly as the binding document stores it.
+func claudeCanaryRecordJSON(t *testing.T, scope claudeScope) string {
+	t.Helper()
+	raw, err := json.Marshal(scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
 }

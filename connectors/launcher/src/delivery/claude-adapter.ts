@@ -108,10 +108,20 @@ export interface ClaudeDeliveryAdapterDeps {
   fetchCandidates?: (coordinates: ClaudeDeliveryScopeCoordinates, cursor: string | undefined) => Promise<ClaudeCandidatePage | undefined>;
 }
 
-/** The explicit experimental opt-in for the pointer-only canary. `claude
- * enable` alone can never turn the gated adapter on. */
-export function claudeDeliveryCanaryEnabled(env: NodeJS.ProcessEnv): boolean {
-  return env.VECNET_CLAUDE_DELIVERY_CANARY === '1';
+/** The host kill switch for the pointer-only canary: `=0` constructs no
+ * delivery adapter at all; anything else allows it. It is never an enable:
+ * the durable per-profile record (`vecnet --net P claude canary enable`,
+ * surfaced as `admission.canary`) is the gate, and `claude enable` alone can
+ * never turn native delivery on. */
+export function claudeDeliveryCanaryAllowed(env: NodeJS.ProcessEnv): boolean {
+  return env.VECNET_CLAUDE_DELIVERY_CANARY !== '0';
+}
+
+/** The hosted delivery adapter plus its current native admissions (binding
+ * key -> generation): at most one entry, empty whenever the last pass could
+ * not prove a single canary scope. The status sidecar marks rows from it. */
+export interface ClaudeDeliveryAdapter extends HostedAdapter {
+  admitted(): ReadonlyMap<string, string>;
 }
 
 /** The host's inbox read: bounded, strictly `--since` the durable staging
@@ -214,7 +224,7 @@ export function spawnClaudeInbox(env: NodeJS.ProcessEnv, clock: Clock): (coordin
   });
 }
 
-export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): HostedAdapter {
+export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): ClaudeDeliveryAdapter {
   const { clock, log, kv } = deps;
   const env = { ...deps.env };
   const fetchSnapshot = deps.fetchSnapshot ?? spawnClaudeSnapshot(env);
@@ -231,6 +241,11 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Ho
   const watchStopped = new Map<string, string>(); // Terminal watch end, by generation.
   const inFlight = new Set<string>(); // Delivery ids attempted by this run.
   const blockedLogged = new Set<string>();
+  // The last pass's admission (at most one key). Replaced by every pass that
+  // reads a snapshot, cleared by a pass that cannot and on stop: unknown
+  // state never marks native.
+  let admissions: ReadonlyMap<string, string> = new Map();
+  let ambiguousLogged = false;
 
   const save = (claim: ClaudeClaimRecord) => kv.set(CLAIM_PREFIX + claim.deliveryId, JSON.stringify(claim));
   /** True when the durable row moved past the exact bytes the adapter last
@@ -278,8 +293,18 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Ho
     try {
       const snapshot = await bounded(fetchSnapshot(), CHILD_TIMEOUT, clock);
       if (!running) return;
-      if (!snapshot) throw new Error('snapshot_unavailable');
-      const admitted = snapshot.bindings.filter(admittedRow);
+      if (!snapshot || !Array.isArray(snapshot.bindings)) throw new Error('snapshot_unavailable');
+      let admitted = snapshot.bindings.filter(admittedRow);
+      if (admitted.length > 1) {
+        // The first canary is a single scope. More than one qualifying row
+        // means the record cannot be trusted: admit none (fail closed).
+        if (!ambiguousLogged) {
+          ambiguousLogged = true;
+          log.warn('claude_delivery_canary_ambiguous', { count: admitted.length });
+        }
+        admitted = [];
+      } else ambiguousLogged = false;
+      admissions = new Map(admitted.map(row => [row.binding_key, row.generation]));
       subscribeWatches(admitted);
       if (admitted.length) {
         const keys = new Set(admitted.map(row => row.binding_key));
@@ -288,6 +313,7 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Ho
       }
     } catch {
       failed = true;
+      admissions = new Map(); // An unproven pass marks nothing native.
     } finally {
       passRunning = false;
       if (failed || scopeFailures > 0) {
@@ -307,14 +333,19 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Ho
     });
   }
 
-  /** Admission: a live, policy-enabled, version-qualified binding carrying
-   * the child-spawn coordinates. Anything else stays legacy/inbox-only. */
+  /** Admission: a live, policy-enabled, version-qualified (build check
+   * parked), canary-opted binding of a credential's own inbox (no `as`)
+   * carrying the child-spawn coordinates. Every flag must be exactly `true`:
+   * a snapshot from an older CLI without `canary` admits nothing. Anything
+   * else stays legacy/inbox-only. */
   function admittedRow(row: ClaudeSnapshotBinding): boolean {
-    return row.state === 'registered' && row.admission !== undefined && row.admission.live &&
-      row.admission.policy && row.admission.version_qualified && row.scope !== undefined &&
-      HUB_ID.test(row.scope.profile) && HUB_ID.test(row.scope.hub_endpoint) &&
-      HUB_ID.test(row.scope.caller) && HUB_ID.test(row.scope.recipient) &&
-      (row.scope.as === undefined || HUB_ID.test(row.scope.as));
+    const admission = obj(row?.admission), scope = obj(row?.scope);
+    return row.state === 'registered' && typeof row.binding_key === 'string' && KEY.test(row.binding_key) &&
+      typeof row.generation === 'string' && GENERATION.test(row.generation) &&
+      admission.live === true && admission.policy === true && admission.version_qualified === true &&
+      admission.canary === true && row.scope !== undefined && scope.as === undefined &&
+      HUB_ID.test(scope.profile ?? '') && HUB_ID.test(scope.hub_endpoint ?? '') &&
+      HUB_ID.test(scope.caller ?? '') && scope.recipient === scope.caller;
   }
 
   function subscribeWatches(admitted: ClaudeSnapshotBinding[]): void {
@@ -513,8 +544,8 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Ho
     log.info('claude_delivery_claim_attempting', { deliveryId: claim.deliveryId, scope: claim.scope, attemptId: claim.attemptId });
     // Canary test seam: SIGKILL this process after `attempting` is durable
     // but before any byte can leave, so a harness can replay the crash
-    // window deterministically. The adapter exists only behind the explicit
-    // experimental canary opt-in, and this var is never set in production.
+    // window deterministically. Only a canary-opted scope ever reaches here,
+    // and this var is never set in production.
     if (env.VECNET_CLAUDE_DELIVERY_CRASH_BEFORE_WRITE === '1') process.kill(process.pid, 'SIGKILL');
     inFlight.add(claim.deliveryId);
     try {
@@ -547,6 +578,7 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Ho
   }
 
   return {
+    admitted: () => admissions,
     start() {
       if (running) return;
       running = true;
@@ -561,6 +593,7 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Ho
       if (!running) return chain;
       // Fence new work synchronously: no pass, watch or attempt may start.
       running = false;
+      admissions = new Map();
       backoff?.cancel(); backoff = undefined;
       reload?.cancel(); reload = undefined;
       passQueued = false;

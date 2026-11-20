@@ -45,7 +45,7 @@ test('claude status never elects a lease and publishes only while the singleton 
   s.clock.advance(10_000);
   await until(() => existsSync(s.sidecar), 'sidecar under the held lease');
   const doc = JSON.parse(readFileSync(s.sidecar, 'utf8'));
-  assert.equal(doc.version, 1);
+  assert.equal(doc.version, 2, 'the sidecar is v2 (native canary marker capable)');
   assert.equal(doc.host_pid, process.pid);
   assert.equal(typeof doc.host_start, 'string');
   assert.match(doc.host_start, /^[0-9]{1,32}$/);
@@ -106,7 +106,7 @@ test('claude status sidecar never republishes the adapter admission or scope coo
   // child-spawn coordinates; the strict sidecar must project both away.
   const admitted = (async () => ({ version: 1 as const, bindings: [{
     binding_key: 'ab'.repeat(32), generation: '01'.repeat(16), state: 'registered' as const,
-    admission: { live: true, policy: true, version_qualified: true },
+    admission: { live: true, policy: true, version_qualified: true, canary: true },
     scope: { profile: 'p', hub_endpoint: 'https://hub.example', caller: 'peer_A', recipient: 'peer_A' },
   }] })) as unknown as () => Promise<ClaudeSnapshot>;
   const status = createClaudeStatus({ ...s, fetchSnapshot: admitted });
@@ -117,5 +117,33 @@ test('claude status sidecar never republishes the adapter admission or scope coo
     assert.ok(!raw.includes(marker), `sidecar leaked ${marker}`);
   }
   assert.deepEqual(Object.keys(JSON.parse(raw).bindings[0]).sort(), ['binding_key', 'generation', 'state']);
+  await status.stop();
+});
+
+test('an old snapshot without admission.canary is rejected and publishes nothing', unix, async t => {
+  const s = fixture(t);
+  const lease = await openDeliveryLease(s.authority, euid, { env: s.env });
+  assert.ok(lease);
+  t.after(() => lease!.close());
+  // A pre-canary CLI's snapshot: the admission has no canary flag. It is
+  // refused outright (fail closed), never read as canary:false or published.
+  const old = (async () => ({ version: 1, bindings: [{
+    binding_key: 'ab'.repeat(32), generation: '01'.repeat(16), state: 'registered',
+    admission: { live: true, policy: true, version_qualified: true },
+  }] })) as unknown as () => Promise<ClaudeSnapshot>;
+  const status = createClaudeStatus({ ...s, fetchSnapshot: old, nativeAdmissions: () => new Map([['ab'.repeat(32), '01'.repeat(16)]]) });
+  status.start();
+  await until(() => s.log.entries.some(e => e.msg === 'claude_snapshot_unavailable'), 'the old snapshot is refused');
+  assert.equal(existsSync(s.sidecar), false, 'a refused snapshot publishes no sidecar');
+  for (const bad of [null, 'true', 1]) {
+    const row = { binding_key: 'ab'.repeat(32), generation: '01'.repeat(16), state: 'registered',
+      admission: { live: true, policy: true, version_qualified: true, canary: bad } };
+    const log = s.log.entries.length;
+    const other = createClaudeStatus({ ...s, fetchSnapshot: (async () => ({ version: 1, bindings: [row] })) as unknown as () => Promise<ClaudeSnapshot> });
+    other.start();
+    await until(() => s.log.entries.slice(log).some(e => e.msg === 'claude_snapshot_unavailable'), `canary ${String(bad)} is refused`);
+    await other.stop();
+    assert.equal(existsSync(s.sidecar), false, `canary ${String(bad)} published a sidecar`);
+  }
   await status.stop();
 });

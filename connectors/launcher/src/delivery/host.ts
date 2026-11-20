@@ -30,16 +30,24 @@ export interface DeliveryHostOptions {
   kv?: KeyValue;
   openLease?: typeof openDeliveryLease;
   startCodex?: typeof startCodexConnector;
-  auxiliary?: () => HostedAdapter;
+  /** The caller's adapter (passive Claude status). It receives the native
+   * delivery adapter's current admissions (binding key -> generation),
+   * which are always empty when the delivery adapter is not constructed. */
+  auxiliary?: (native: () => ReadonlyMap<string, string>) => HostedAdapter;
   /** Notification-watch pool owned by this host; defaults to a fresh pool. */
   watchPool?: WatchPool;
-  /** Experimental pointer-only Claude native-delivery canary (task 7).
-   * Default off: the delivery adapter is constructed only when this explicit
-   * opt-in is set — `claude enable` alone can never turn it on. Its durable
-   * claim ledger lives in the canonical per-user state domain (the shared
-   * delivery database beside the elected bindings), in both host modes. */
+  /** Pointer-only Claude native-delivery canary (task 7; Phase 2 task 3).
+   * This is the host kill switch (`claudeDeliveryCanaryAllowed`): false
+   * constructs no delivery adapter. True constructs it, but it delivers only
+   * to the single scope holding the durable per-profile canary record
+   * (`admission.canary`) — the env var is never an enable, and `claude
+   * enable` alone can never turn native delivery on. Its claim ledger lives
+   * in the canonical per-user state domain (the shared delivery database
+   * beside the elected bindings), in both host modes. */
   claudeDeliveryCanary?: boolean;
 }
+
+const NO_ADMISSIONS: ReadonlyMap<string, string> = new Map();
 
 /** Both service entrypoints elect here, and only the host releases the lease. */
 export function startDeliveryHost(o: DeliveryHostOptions): DeliveryHost {
@@ -105,25 +113,29 @@ export function startDeliveryHost(o: DeliveryHostOptions): DeliveryHost {
     if (stopping) return;
     for (const apply of pending.splice(0)) apply(codex);
     // The caller's adapter (passive Claude status) always rides the lease;
-    // the experimental native-delivery canary composes beside it only when
-    // the explicit opt-in flag is set. `auxiliary` names whatever already
-    // exists, so a failure partway through still drains the started part.
+    // the native-delivery canary adapter composes beside it unless the kill
+    // switch is thrown, and reports its admissions to the status adapter.
+    // The delivery adapter is built first so status can read it, but status
+    // starts first. `auxiliary` names whatever already exists, so a failure
+    // partway through still drains the built part.
     const adapters: HostedAdapter[] = [];
     try {
-      const base = o.auxiliary?.();
-      if (base) { adapters.push(base); auxiliary = base; }
+      let canary: HostedAdapter | undefined, native = () => NO_ADMISSIONS;
       if (o.claudeDeliveryCanary) {
         const ledger = openLedger(codexRecoveryPath(env, location), clock);
-        const delivery = createClaudeDeliveryAdapter({ pool: watchPool, clock, log, kv: ledger.kv('claude'), env });
-        const canary: HostedAdapter = {
-          start: () => delivery.start(),
-          stop: async () => { try { await delivery.stop(); } finally { ledger.close(); } },
-        };
-        adapters.push(canary);
-        auxiliary = adapters.length === 1 ? canary : composeHosted(adapters);
-      } else if (adapters.length === 0) {
-        auxiliary = undefined;
+        try {
+          const delivery = createClaudeDeliveryAdapter({ pool: watchPool, clock, log, kv: ledger.kv('claude'), env });
+          native = () => delivery.admitted();
+          canary = {
+            start: () => delivery.start(),
+            stop: async () => { try { await delivery.stop(); } finally { ledger.close(); } },
+          };
+        } catch (error) { ledger.close(); throw error; }
       }
+      const base = o.auxiliary?.(native);
+      if (base) adapters.push(base);
+      if (canary) adapters.push(canary);
+      auxiliary = adapters.length === 0 ? undefined : adapters.length === 1 ? adapters[0] : composeHosted(adapters);
       if (!stopping) auxiliary?.start();
     } catch {
       log.warn('delivery_auxiliary_start_failed');

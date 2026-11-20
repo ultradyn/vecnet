@@ -116,6 +116,9 @@ func newClaudeRegFixture(t *testing.T) *claudeRegFixture {
 		"p": {Hub: f.hub, HubPubkey: claudeTestHubPin, Secret: "vn_peer_test", PeerID: "peer_A"},
 		"q": {Hub: f.hub, HubPubkey: claudeTestHubPin, Secret: "vn_peer_test_q", PeerID: "peer_A"},
 		"r": {Hub: f.hub, HubPubkey: claudeTestHubPin, Secret: "vn_peer_test_r", PeerID: "peer_B"},
+		// c is a well-formed peer credential, the only shape the native
+		// canary accepts (claude_canary_linux_test.go).
+		"c": {Hub: f.hub, HubPubkey: claudeTestHubPin, Secret: "vn_peer_test_c", PeerID: claudeTestPeerID},
 	}
 	if err := saveConfig(f.config, Config{Profiles: profiles}); err != nil {
 		t.Fatal(err)
@@ -129,11 +132,14 @@ func newClaudeRegFixture(t *testing.T) *claudeRegFixture {
 	return f
 }
 
-// scope builds a scope for profile p (or q/r); caller may mutate the result.
+// scope builds a scope for profile p (or q/r/c); caller may mutate the result.
 func (f *claudeRegFixture) scope(profile string) claudeScope {
 	caller := "peer_A"
-	if profile == "r" {
+	switch profile {
+	case "r":
 		caller = "peer_B"
+	case "c":
+		caller = claudeTestPeerID
 	}
 	return claudeScope{
 		ConfigPath:  f.config,
@@ -1068,7 +1074,7 @@ func TestClaudeRegistrationIgnoresVersionEnv(t *testing.T) {
 			if row.Build != "" || row.ExeSHA256 != "" || row.ExeIdentity != "" {
 				t.Fatalf("registration wrote build evidence: %+v", row.claudeRoot)
 			}
-			adm := claudeAdmissionEvidence(row, nil, false)
+			adm := claudeAdmissionEvidence(row, nil, nil, false)
 			if !adm.Live || !adm.Policy || !adm.VersionQualified || adm.BuildCheck != claudeBuildCheckDisabled {
 				t.Fatalf("admission depends on the version export: %+v", adm)
 			}

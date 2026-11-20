@@ -183,7 +183,11 @@ func (a *app) claudeDeliverResolveBinding(key, expectGeneration string) (claudeD
 		if b.Generation != expectGeneration {
 			return claudeDeliverInput{}, usageErr("claude deliver: the binding generation changed before the attempt")
 		}
-		if evidence := claudeAdmissionEvidence(b, rows.OptOuts, settings.Disabled); !evidence.Live {
+		// The canary opt-in is checked first: with build gating parked it
+		// is the only production gate on a native write.
+		if evidence := claudeAdmissionEvidence(b, rows.OptOuts, rows.Canary, settings.Disabled); !evidence.Canary {
+			return claudeDeliverInput{}, usageErr("claude deliver: " + errClaudeCanaryNotOptIn.Error())
+		} else if !evidence.Live {
 			return claudeDeliverInput{}, usageErr("claude deliver: the registered claude root is not live")
 		} else if !evidence.Policy {
 			return claudeDeliverInput{}, usageErr("claude deliver: the recipient opted out of native delivery")

@@ -433,9 +433,15 @@ func claudeDocumentValidate(doc claudeBindingsFile) error {
 		}
 		opted[key] = true
 	}
+	// The canary record (at most one, checked above) must name a pinned
+	// peer credential's own inbox: a delegated or principal scope is never
+	// stored, so no reader can be talked into admitting one.
 	for _, s := range doc.Canary {
 		if err := claudeScopeValid(s); err != nil {
 			return err
+		}
+		if !claudeCanaryEligible(s) {
+			return usageErr("claude canary record must be a peer credential's own recipient scope")
 		}
 	}
 	return nil

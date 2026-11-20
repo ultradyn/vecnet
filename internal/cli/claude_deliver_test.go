@@ -282,8 +282,17 @@ func TestClaudeDeliverSocketShapeRefused(t *testing.T) {
 // with the sink as its messaging endpoint, exactly as the hook path would.
 func deliverBindingFixture(t *testing.T) (env map[string]string, dir, socket, key, generation string) {
 	t.Helper()
+	env, dir, socket, key, generation, _ = deliverBindingFixtureSink(t)
+	return env, dir, socket, key, generation
+}
+
+// deliverBindingFixtureSink is deliverBindingFixture plus the sink, so a
+// test can prove a refusal never connected. The stored row holds the canary
+// opt-in for its peer scope.
+func deliverBindingFixtureSink(t *testing.T) (env map[string]string, dir, socket, key, generation string, sink *deliverSink) {
+	t.Helper()
 	env, dir = claudeDeliverFixture(t)
-	newDeliverSink(t, dir, "owned.sock")
+	sink = newDeliverSink(t, dir, "owned.sock")
 	socket = filepath.Join(dir, "owned.sock")
 	configRoot := filepath.Join(dir, "claude-config")
 	if err := os.MkdirAll(filepath.Join(configRoot, "sessions"), 0o700); err != nil {
@@ -298,19 +307,19 @@ func deliverBindingFixture(t *testing.T) (env map[string]string, dir, socket, ke
 		Profile:     "p",
 		HubIdentity: claudeTestHubPin,
 		HubEndpoint: "https://hub.example.com",
-		Caller:      "peer_A",
-		Recipient:   "peer_A",
+		Caller:      claudeTestPeerID,
+		Recipient:   claudeTestPeerID,
 	}
 	generation = "0123456789abcdef0123456789abcdef"
 	doc := `{"version":2,"bindings":[{` +
 		`"config_path":` + jsonString(scope.ConfigPath) + `,"profile":"p",` +
 		`"hub_identity":` + jsonString(claudeTestHubPin) + `,"hub_endpoint":"https://hub.example.com",` +
-		`"caller":"peer_A","recipient":"peer_A",` +
+		`"caller":` + jsonString(claudeTestPeerID) + `,"recipient":` + jsonString(claudeTestPeerID) + `,` +
 		`"config_root":` + jsonString(configRoot) + `,"session_id":` + jsonString(deliverTestSession) + `,` +
 		`"socket_path":` + jsonString(socket) + `,` +
 		`"process_start":` + jsonString(procStart(os.Getpid())) + `,"boot_id":` + jsonString(claudeBootID()) + `,` +
 		`"pid":` + strconv.Itoa(os.Getpid()) + `,"uid":` + strconv.Itoa(os.Geteuid()) + `,` +
-		`"generation":` + jsonString(generation) + `,"updated_at":"2026-11-19T00:00:00Z"}],"opt_outs":[],"canary":[]}`
+		`"generation":` + jsonString(generation) + `,"updated_at":"2026-11-19T00:00:00Z"}],"opt_outs":[],"canary":[` + claudeCanaryRecordJSON(t, scope) + `]}`
 	stateDir := filepath.Join(dir, ".local", "state", "vecnet", "projects")
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -318,7 +327,7 @@ func deliverBindingFixture(t *testing.T) (env map[string]string, dir, socket, ke
 	if err := os.WriteFile(filepath.Join(stateDir, claudeBindingsName), []byte(doc), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return env, dir, socket, claudeBindingKey(scope), generation
+	return env, dir, socket, claudeBindingKey(scope), generation, sink
 }
 
 func deliverBindingArgs(key, generation string) []string {

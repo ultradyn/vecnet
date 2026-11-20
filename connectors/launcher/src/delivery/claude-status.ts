@@ -11,8 +11,10 @@ import type { HostedAdapter } from './host.ts';
  * a fixed reason. Never a socket path, config content or credential. */
 export type ClaudeBindingState = 'registered' | 'unsupported' | 'opted_out' | 'blocked';
 /** Native-delivery admission gate (task 7): process liveness, durable policy
- * consent, and the qualified compatibility range. Booleans only. */
-export interface ClaudeSnapshotAdmission { live: boolean; policy: boolean; version_qualified: boolean }
+ * consent, the build check (parked: version_qualified holds) and the
+ * per-profile canary opt-in (Phase 2 task 3) — the sole durable gate on a
+ * native write. Booleans only; a snapshot row without `canary` is refused. */
+export interface ClaudeSnapshotAdmission { live: boolean; policy: boolean; version_qualified: boolean; canary: boolean }
 /** The coordinates the shared host needs to open its own scoped CLI children
  * for this recipient. Hub coordinates and profile name only: no config paths,
  * no socket paths, no session ids. */
@@ -23,16 +25,23 @@ export interface ClaudeSnapshotBinding {
 }
 export interface ClaudeSnapshot { version: 1; bindings: ClaudeSnapshotBinding[] }
 
+/** One sidecar row: the passive fields plus, in v2 only, `native: 'canary'`
+ * when this host's delivery adapter admitted that exact key at that
+ * generation. No other native value exists. */
+export interface ClaudeStatusRow {
+  binding_key: string; generation: string; state: ClaudeBindingState; reason?: string; native?: 'canary';
+}
+
 /** The host status sidecar (bindings.json.claude-status.json next to the
  * existing Codex status). host_start/boot_id use the same Linux identity
  * format as the CLI's /proc checks, so a reused pid never validates. */
 export interface ClaudeStatusFile {
-  version: 1;
+  version: 2;
   updated_at: string;
   host_pid: number;
   host_start: string;
   boot_id: string;
-  bindings: ClaudeSnapshotBinding[];
+  bindings: ClaudeStatusRow[];
 }
 
 /** Passive Claude status hosted by the elected delivery host. It never elects
@@ -67,8 +76,9 @@ function hostIdentity(): { pid: number; start: string; boot: string } | undefine
 function validAdmission(input: unknown): ClaudeSnapshotAdmission | undefined {
   if (input === null || typeof input !== 'object') return;
   const a = input as Record<string, unknown>;
-  if (typeof a.live !== 'boolean' || typeof a.policy !== 'boolean' || typeof a.version_qualified !== 'boolean') return;
-  return { live: a.live, policy: a.policy, version_qualified: a.version_qualified };
+  if (typeof a.live !== 'boolean' || typeof a.policy !== 'boolean' || typeof a.version_qualified !== 'boolean' ||
+    typeof a.canary !== 'boolean') return; // An older CLI without the canary flag is refused: fail closed.
+  return { live: a.live, policy: a.policy, version_qualified: a.version_qualified, canary: a.canary };
 }
 
 function validScope(input: unknown): ClaudeSnapshotScope | undefined {
@@ -145,6 +155,9 @@ export function createClaudeStatus(o: {
   clock: Clock;
   log: Log;
   fetchSnapshot: () => Promise<ClaudeSnapshot | undefined>;
+  /** The delivery adapter's current admissions (binding key -> generation).
+   * Absent when no adapter runs (kill switch), so no row is ever marked. */
+  nativeAdmissions?: () => ReadonlyMap<string, string>;
 }): ClaudeStatus {
   const { clock, log } = o;
   // Keep the configuration used by the elected host for this adapter's lifetime.
@@ -164,12 +177,17 @@ export function createClaudeStatus(o: {
       return;
     }
     warnedLease = false;
+    let native: ReadonlyMap<string, string>;
+    try { native = o.nativeAdmissions?.() ?? new Map(); }
+    catch { native = new Map(); } // Unknown admission state marks nothing.
     const data = JSON.stringify({
-      version: 1, updated_at: new Date(clock.now()).toISOString(),
+      version: 2, updated_at: new Date(clock.now()).toISOString(),
       host_pid: identity.pid, host_start: identity.start, boot_id: identity.boot,
       // The sidecar is a strict status document read by a strict decoder:
-      // admission and scope coordinates never leak into it.
-      bindings: snapshot.bindings.map(({ admission: _admission, scope: _scope, ...binding }) => binding),
+      // admission and scope coordinates never leak into it. A row is marked
+      // native only for the exact key and generation the adapter admitted.
+      bindings: snapshot.bindings.map(({ admission: _admission, scope: _scope, ...binding }): ClaudeStatusRow =>
+        native.get(binding.binding_key) === binding.generation ? { ...binding, native: 'canary' } : binding),
     } satisfies ClaudeStatusFile);
     if (Buffer.byteLength(data) > MAX_BYTES) { log.warn('claude_status_too_large'); return; }
     const temp = sidecar + '.' + randomUUID() + '.tmp';
