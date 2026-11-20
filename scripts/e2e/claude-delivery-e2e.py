@@ -1,29 +1,33 @@
 #!/usr/bin/env python3
-"""End-to-end canary proof of Vecnet's native Claude delivery chain (task 9).
+"""End-to-end canary proof of Vecnet's native Claude delivery chain (Phase 2).
 
 One disposable run, entirely inside a loopback-only network namespace
 (bubblewrap), proves every link of the pointer-only native delivery chain
-against a real Claude Code 2.1.322 interactive session:
+against a real Claude Code interactive session, with no test-env provision:
 
-  hub send receipt -> daemon admission/reserved/attempting/disposition log
-  lines -> the native pointer arriving in the live session (tmux pane frames)
-  -> the model's fetch of the message through the packaged CLI -> transcript
-  rows -> the hub showing NO ack for the delivered cursor.
+  per-profile `claude canary enable` -> daemon admission and a real
+  `inbox --since head` baseline -> hub send receipt -> reserved/attempting/
+  disposition log lines -> the native pointer arriving in the live session
+  (tmux pane frames) -> the model's fetch of the message through the packaged
+  CLI -> transcript rows -> the hub showing NO ack for the delivered cursor.
 
-Negative controls in the same run: a hold-priority message stays inbox-only,
-a SIGKILL of the daemon between `attempting` and the write (canary crash
-seam) restarts to `uncertain` with no resend, and the 129th staged pending
-message latches `blocked_pending_limit` with no send.
+Controls in the same run: no CLAUDE_CODE_VERSION in the disposable Claude
+process and status `build_check: "disabled"` (no provision); a wake sent
+before the baseline is never pointered; a hold-priority message stays
+inbox-only; a stored cursor from a foreign epoch rebaselines once at the
+head; a SIGKILL of the daemon between `attempting` and the write (canary
+crash seam) restarts to `uncertain` with no resend; the 129th staged pending
+message latches `blocked_pending_limit` with no send; canary disable drains
+reserved rows to `fenced_scope_not_admitted` with no new claim; and the
+`VECNET_CLAUDE_DELIVERY_CANARY=0` kill switch constructs no adapter.
 
 Nothing here touches a user hub identity, a user session or a paid provider:
 the hub is a fresh loopback child, credentials are freshly enrolled, the
 model backend is a scripted loopback stub reached through a lab CA proxy,
-and the whole chain has no route off the loopback interface. The only
-test-env provision beyond the repo's own code is CLAUDE_CODE_VERSION, which
-this harness observes from `claude --version` itself and exports for the
-disposable session and its enrol child (the baseline check never guesses
-a version). Real in-session enrollment stages the runtime via a private
-scheduler fixture, not the host systemd manager.
+and the whole chain has no route off the loopback interface. The only gate
+is the durable per-profile canary record; the daemon env never enables it.
+Real in-session enrollment stages the runtime via a private scheduler
+fixture, not the host systemd manager.
 
 Teardown is verified: the vecnet-test-<nonce> tmux session is killed on its
 private server, the server is asserted gone, hub/daemon/stub stop, and the
@@ -228,6 +232,123 @@ def _ulid(n: int) -> str:
         s = digits[n % 32] + s
         n //= 32
     return s
+
+
+PEER_ID = re.compile(r"^peer_[0-9A-HJKMNP-TV-Z]{26}$")
+CANARY_ENV = "VECNET_CLAUDE_DELIVERY_CANARY"
+CANARY_ENABLE = "vecnet --net claude-rx claude canary enable"
+SCOPE_KEY = "claude-claims:scope:"
+CLAIM_KEY = "claude-claims:claim:"
+FOREIGN_CURSOR = "e999999.0"  # another epoch: what a rebuilt hub log leaves behind
+
+
+def run_meta(nonce, session, commit, observed, started):
+    """The run's provenance: no test-env provision, the canary record is the gate."""
+    return {"nonce": nonce, "tmux_session": session, "commit": commit,
+            "claude_version_observed": observed,
+            "provisions": [],
+            "canary_opt_in": CANARY_ENABLE,
+            "build_check": "disabled (build gating parked: any Claude Code build is admitted; "
+                           "the observed version is recorded, never exported or checked)",
+            "started": started}
+
+
+def claude_launch_env(home, cconfig, sockdir, run, cfg):
+    """The disposable Claude session env. Never CLAUDE_CODE_VERSION."""
+    return [f"HOME={home}", f"CLAUDE_CONFIG_DIR={cconfig}",
+            f"CLAUDE_CODE_MESSAGING_SOCKET={sockdir}/claude.sock",
+            f"ANTHROPIC_BASE_URL=http://127.0.0.1:{STUB_PORT}", "ANTHROPIC_API_KEY=dummy-e2e-key",
+            f"HTTPS_PROXY=http://127.0.0.1:{PROXY_PORT}", f"HTTP_PROXY=http://127.0.0.1:{PROXY_PORT}",
+            "NO_PROXY=127.0.0.1,localhost", f"NODE_EXTRA_CA_CERTS={run}/ca.pem",
+            "DISABLE_TELEMETRY=1", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
+            "DISABLE_AUTOUPDATER=1", "TERM=xterm-256color", f"VECNET_CONFIG={cfg}"]
+
+
+def daemon_env(home, cfg, vecnet_bin, seam=False, kill_switch=False):
+    """The disposable daemon env. The canary env var is never an enable: it is
+    absent, or exactly `0` for the kill-switch control."""
+    env = [f"HOME={home}", f"VECNET_CONFIG={cfg}", f"VECNET_BIN={vecnet_bin}", "VECNET_LOCAL_MAINTENANCE=0"]
+    if kill_switch:
+        env.append(f"{CANARY_ENV}=0")
+    if seam:
+        env.append("VECNET_CLAUDE_DELIVERY_CRASH_BEFORE_WRITE=1")
+    return env
+
+
+def check_no_provision(environ: bytes, status: dict) -> dict:
+    """No provision: the disposable Claude process carries no
+    CLAUDE_CODE_VERSION, and status honestly reports the parked build check
+    with the per-profile record as the only gate."""
+    keys = [entry.split(b"=", 1)[0] for entry in environ.split(b"\0") if entry]
+    if b"CLAUDE_CODE_VERSION" in keys:
+        raise Fail("CLAUDE_CODE_VERSION is present in the disposable Claude process environment")
+    if (status.get("mode"), status.get("canary_opt_in"), status.get("build_check")) != ("canary", True, "disabled"):
+        raise Fail(f"status is not canary/opted-in/build_check disabled: {status}")
+    return {"claude_code_version_present": False, "mode": status["mode"],
+            "canary_opt_in": True, "build_check": status["build_check"]}
+
+
+def check_canary_off(deliveries: dict, status: dict, off_delivery: str, fenced: str) -> dict:
+    """Canary off: the wake made no claim, status is legacy and not opted in,
+    and the seeded reserved row drained to fenced_scope_not_admitted."""
+    rows = {c.get("delivery_id"): c for c in deliveries.get("deliveries", [])}
+    if off_delivery in rows:
+        raise Fail(f"canary-off wake {off_delivery} was claimed: {rows[off_delivery]}")
+    row = rows.get(fenced)
+    if not row or (row.get("state"), row.get("reason")) != ("released", "fenced_scope_not_admitted"):
+        raise Fail(f"reserved row {fenced} was not drained to fenced_scope_not_admitted: {row}")
+    if any(c.get("state") in ("reserved", "attempting") for c in rows.values()):
+        raise Fail("a reserved or attempting claim survived the disable drain")
+    if (status.get("mode"), status.get("canary_opt_in"), status.get("build_check")) != ("legacy", False, "disabled"):
+        raise Fail(f"canary-off status is not legacy/not opted in: {status}")
+    return {"mode": "legacy", "canary_opt_in": False, "fenced": fenced, "claims_for_wake": 0}
+
+
+def check_rebaseline(events, scope, generation):
+    """A hub-rejected stored cursor rebaselines exactly once at the head: one
+    `cursor_rejected` followed by one `scope_baselined`, then no retry loop."""
+    picked = [e.get("msg") for e in events if e.get("scope") == scope and e.get("msg") in
+              ("claude_delivery_cursor_rejected", "claude_delivery_scope_baselined")]
+    if picked != ["claude_delivery_cursor_rejected", "claude_delivery_scope_baselined"]:
+        raise Fail(f"expected one rejected cursor then one baseline, got {picked}")
+    base = next(e for e in events if e.get("msg") == "claude_delivery_scope_baselined" and e.get("scope") == scope)
+    if base.get("generation") != generation:
+        raise Fail("rebaseline under the wrong generation")
+    if any(e.get("msg") == "claude_delivery_reconcile_failed" for e in events):
+        raise Fail("rebaseline pass reported a reconcile failure (retry loop)")
+    return picked
+
+
+def check_backlog(frames, rows, events, message_id, delivery_id):
+    """A wake that arrived before the baseline is never pointered: no pointer
+    for it in any frame or transcript row and no claim for it in the daemon
+    log. (Its body may appear in the positive inbox fetch, which reads the
+    whole unacked inbox; that is the legacy inbox path, not a pointer.)"""
+    for path in frames:
+        if has_pointer(path.read_text(), message_id):
+            raise Fail(f"backlog {message_id} was pointered in {path.name}")
+    for row in rows:
+        if has_pointer(row.get("content"), message_id) or has_pointer((row.get("origin") or {}).get("body"), message_id):
+            raise Fail(f"backlog {message_id} was pointered in the transcript")
+        content = (row.get("message") or {}).get("content")
+        if isinstance(content, str) and has_pointer(content, message_id):
+            raise Fail(f"backlog {message_id} was pointered in the transcript")
+    if any(delivery_id in json.dumps(e) for e in events):
+        raise Fail(f"backlog {delivery_id} entered the claim lifecycle")
+
+
+def deliver_window_ms(attempting_at: str, disposition_at: str) -> int:
+    """Upper bound on the deliver helper's bindings-lock hold: attempting to disposition."""
+    import datetime
+    a, b = (datetime.datetime.fromisoformat(t.replace("Z", "+00:00")) for t in (attempting_at, disposition_at))
+    return round((b - a).total_seconds() * 1000)
+
+
+def cursor_seq(cursor: str):
+    m = re.fullmatch(r"e(\d+)\.(\d+)", cursor or "")
+    if not m:
+        raise Fail(f"not a hub cursor: {cursor!r}")
+    return int(m[1]), int(m[2])
 
 
 # ------------------------------------------------------ embedded lab scripts ---
@@ -504,6 +625,7 @@ class Harness:
         self.generation = None
         self.daemon_window = None
         self.frame_index = []
+        self.log_marks = {}
         self.frame_stop = threading.Event()
         self.results = {}
         self.cmd_seq = 0
@@ -559,8 +681,10 @@ class Harness:
         log("phase 0: preflight + build")
         ver = must(f"{self.claude_bin} --version", "claude --version")
         m = re.search(r"(\d+\.\d+\.\d+)", ver)
+        # Build gating is parked, so no build is qualified or hashed here. The
+        # dialog automation and stub are scripted against this lab build.
         if not m or m.group(1) != "2.1.322":
-            raise Fail(f"qualified lab baseline is Claude Code 2.1.322, found: {ver!r}")
+            raise Fail(f"the scripted lab session targets Claude Code 2.1.322, found: {ver!r}")
         self.claude_version = m.group(1)
         for tool, label in ((shutil.which("bwrap"), "bwrap"), (shutil.which("tmux"), "tmux"),
                             (shutil.which("sqlite3"), "sqlite3"), (shutil.which("openssl"), "openssl"),
@@ -582,16 +706,9 @@ class Harness:
         (self.bin / "vecnet").chmod(0o755)
         self.record("build", {"commit": commit, "claude": self.claude_version,
                               "node": noderun.stdout.strip()})
-        self.evidence_write("00-run-meta.json", json.dumps({
-            "nonce": self.nonce, "tmux_session": self.session, "commit": commit,
-            "claude_version_observed": self.claude_version,
-            "claude_code_version_provision":
-                "CLAUDE_CODE_VERSION for the disposable session and its enrol child is exported by this "
-                "harness from its own `claude --version` observation (disclosed "
-                "test-env provision; production activation stays gated)",
-            "canary_opt_in":
-                "VECNET_CLAUDE_DELIVERY_CANARY=1 on the disposable daemon only",
-            "started": time.strftime("%Y-%m-%dT%H:%M:%S%z")}, indent=2))
+        self.evidence_write("00-run-meta.json", json.dumps(run_meta(
+            self.nonce, self.session, commit, self.claude_version,
+            time.strftime("%Y-%m-%dT%H:%M:%S%z")), indent=2))
 
     def lab_stack(self) -> None:
         log("phase 1: loopback netns, tmux server, certs, stub + proxy")
@@ -715,7 +832,7 @@ output={self.logs / 'enrol-claude-rx.out'}
 exec >"$output" 2>&1
 trap 'printf "%s" "$?" > {self.logs / 'enrol-claude-rx.rc'}' EXIT
 : "${{CLAUDE_PID:?missing live Claude PID}}"
-: "${{CLAUDE_CODE_VERSION:?missing observed Claude version}}"
+printf '%s' "$CLAUDE_PID" > {self.logs / 'claude.pid'}
 if [ -z "${{CLAUDE_CODE_SESSION_ID:-}}" ]; then
   CLAUDE_CODE_SESSION_ID=$(/usr/bin/python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["sessionId"])' "$CLAUDE_CONFIG_DIR/sessions/$CLAUDE_PID.json")
   printf '%s\n' 'Session ID source: live Claude session registry'
@@ -724,7 +841,6 @@ else
 fi
 export CLAUDE_CODE_SESSION_ID
 export PATH={self.bin}:/usr/bin:/bin VECNET_NODE={self.node_bin}
-printf 'Observed version in enrol child: %s\n' "$CLAUDE_CODE_VERSION"
 {self.bin / 'vecnet'} enrol --hub {self.hub_url} --token - --profile claude-rx --allow-insecure-http < {token_file}
 """)
         enrol.chmod(0o700)
@@ -758,11 +874,13 @@ printf 'Observed version in enrol child: %s\n' "$CLAUDE_CODE_VERSION"
         self.record("enrollment", {"phase": phase[1], "scheduler": "private systemctl fixture",
                                    "runtime": "CLI-staged embedded release"})
         # This fixture activation is passive. Stop it before reusing the exact
-        # staged runtime with plan-authorized canary/crash flags under tmux.
+        # staged runtime under tmux (the crash seam needs its own launch).
         self.stop_managed_runtime()
         profiles = tomllib.loads(self.cfg.read_text())["profiles"]
         self.sender_peer = profiles["sender"]["peer_id"]
         self.claude_peer = profiles["claude-rx"]["peer_id"]
+        if not (PEER_ID.match(self.sender_peer) and PEER_ID.match(self.claude_peer)):
+            raise Fail(f"hub-issued identities are not peer_<ULID>: {self.sender_peer!r} {self.claude_peer!r}")
         public = ["[profiles]"]
         for name in ("claude-rx", "sender"):
             public.append(f"  [profiles.{name}]")
@@ -775,13 +893,123 @@ printf 'Observed version in enrol child: %s\n' "$CLAUDE_CODE_VERSION"
                             "systemctl acceptance fixture, not the host manager. The passive fixture "
                             "process was stopped before the staged release was relaunched in canary mode.\n"
                             f"release digest: {self.runtime.name}\n")
+        self.provision_check()
+        self.backlog_send()
+        rc, out = self.cli(["--net", "claude-rx", "claude", "canary", "enable"], name="canary-enable")
+        if rc != 0:
+            raise Fail(f"claude canary enable failed: {out}")
+        self.evidence_write("25-canary-enable.txt", f"$ {CANARY_ENABLE}\n{out}")
         self.start_daemon()
-        (self.evidence / "30-daemon-env.txt").write_text(
-            f"HOME={self.home}\nVECNET_CONFIG={self.cfg}\nVECNET_BIN={self.runtime / 'vecnet'}\n"
-            "VECNET_CLAUDE_DELIVERY_CANARY=1\nnode_flags=--experimental-strip-types\n")
+        env = daemon_env(self.home, self.cfg, self.runtime / "vecnet")
+        if any(e.startswith(CANARY_ENV + "=") for e in env):
+            raise Fail("the daemon env must not carry the canary variable")
+        self.evidence_write("30-daemon-env.txt", "\n".join(env) + "\nnode_flags=--experimental-strip-types\n"
+                            f"# {CANARY_ENV} is absent: the per-profile canary record is the only gate\n")
         wait_until(lambda: "Disposable receiver enrollment finished." in self.pane_text(),
                    "stub enrollment reply", timeout=45)
         self.drive_first_prompt()
+        self.baseline_check()
+
+    def provision_check(self) -> None:
+        log("phase 4b: no provision in the disposable Claude process")
+        pid = int((self.logs / "claude.pid").read_text().strip())
+        environ = Path(f"/proc/{pid}/environ").read_bytes()
+        names = sorted({e.split(b"=", 1)[0].decode() for e in environ.split(b"\0") if e})
+        config = [e.split(b"=", 1)[1].decode() for e in environ.split(b"\0") if e.startswith(b"CLAUDE_CONFIG_DIR=")]
+        if config != [str(self.cconfig)]:
+            raise Fail(f"pid {pid} is not the disposable Claude process")
+        if "CLAUDE_CODE_VERSION" in names:
+            raise Fail("CLAUDE_CODE_VERSION is present in the disposable Claude process environment")
+        self.claude_environ = environ
+        # Names only: values carry lab paths and the dummy key.
+        self.evidence_write("24-claude-environ-names.txt",
+                            f"/proc/<disposable claude pid>/environ variable names (values withheld)\n"
+                            f"CLAUDE_CONFIG_DIR is the disposable config root: true\n"
+                            f"CLAUDE_CODE_VERSION present: false\n" + "".join(n + "\n" for n in names))
+
+    def backlog_send(self) -> None:
+        log("phase 4c: pre-admission backlog wake (must never be pointered)")
+        self.backlog_marker = "BACKLOG-E2E-" + secrets.token_hex(8)
+        rc, out = self.cli(["--net", "sender", "send", self.claude_peer,
+                            f"{self.backlog_marker}: sent before the canary baseline.", "--wake", "--json"],
+                           name="send-backlog")
+        if rc != 0:
+            raise Fail(f"backlog send failed: {out}")
+        self.evidence_write("26-backlog-send.json", out)
+        receipt = parse_json_output(out)
+        self.backlog_delivery = receipt["deliveries"][0]["delivery_id"]
+        self.backlog_message = receipt["message_id"]
+
+    @property
+    def ledger(self) -> Path:
+        return self.home / ".local/state/vecnet/codex/delivery.sqlite"
+
+    def ledger_sql(self, sql: str, tag: str, readonly: bool = False) -> str:
+        """Run SQL against the disposable delivery ledger. Writes only with the
+        daemon stopped. A read-write sqlite3 CLI close unlinks a live host's
+        -wal/-shm (the host then writes to an orphaned WAL no reader sees), so
+        a read while a daemon may be live must be -readonly."""
+        if not readonly and self.daemon_window:
+            raise Fail(f"ledger write {tag} while a daemon is live")
+        script = self.run / f"{tag}.sql"
+        script.write_text(sql + "\n")
+        rc, out = self.in_netns(f"sqlite3 {'-readonly ' if readonly else ''}{self.ledger} < {script}", name=tag)
+        if rc != 0:
+            raise Fail(f"ledger {tag} failed: {out[:400]}")
+        if not readonly:
+            os.chmod(self.ledger, 0o600)
+        return out
+
+    def kv_get(self, key: str):
+        out = self.ledger_sql(f"SELECT value FROM kv WHERE ns='claude' AND key='{key}';", "kvget", readonly=True)
+        return json.loads(out) if out.strip() else None
+
+    def daemon_events(self, since: int = 0):
+        text = (self.logs / "daemon.log").read_text()[since:]
+        return [json.loads(line) for line in text.splitlines() if line.startswith("{")]
+
+    def baseline_check(self) -> None:
+        log("phase 5b: baseline at a real head read before any send")
+        wait_until(lambda: any(e.get("msg") == "claude_delivery_scope_baselined" and e.get("scope") == self.binding_key
+                               and e.get("generation") == self.generation for e in self.daemon_events()),
+                   "claude_delivery_scope_baselined", timeout=60)
+        stored = self.kv_get(SCOPE_KEY + self.binding_key)
+        if not stored or stored.get("generation") != self.generation:
+            raise Fail(f"no stored baseline for the admitted scope: {stored}")
+        # The same real CLI read the adapter runs, against the real hub.
+        rc, out = self.cli(["--net", "claude-rx", "inbox", "--json", "--no-display-proof", "--since", "head"],
+                           name="head-read")
+        if rc != 0:
+            raise Fail(f"real inbox --since head failed: {out}")
+        head = parse_json_output(out)
+        rc, out2 = self.cli(["--net", "claude-rx", "inbox", "--json", "--no-display-proof", "--limit", "8"],
+                            name="backlog-read")
+        if rc != 0:
+            raise Fail(f"backlog inbox read failed: {out2}")
+        backlog = [e for e in parse_json_output(out2)["events"]
+                   if e.get("data", {}).get("delivery_id") == self.backlog_delivery]
+        if len(backlog) != 1:
+            raise Fail("the pre-admission backlog is not readable in the inbox")
+        b, s_, h = (cursor_seq(c) for c in (backlog[0]["cursor"], stored["cursor"], head["next_cursor"]))
+        if head.get("events") != [] or not (b[0] == s_[0] == h[0] and b[1] <= s_[1] <= h[1]):
+            raise Fail(f"baseline cursor {stored['cursor']} is not a real head past the backlog "
+                       f"{backlog[0]['cursor']} (head now {head['next_cursor']})")
+        if any(self.backlog_delivery in json.dumps(e) for e in self.daemon_events()):
+            raise Fail("the pre-admission backlog delivery reached the daemon")
+        self.evidence_write("33-baseline.json", json.dumps({
+            "baselined": next(e for e in self.daemon_events() if e.get("msg") == "claude_delivery_scope_baselined"),
+            "stored_cursor": stored["cursor"], "cli_head_next_cursor": head["next_cursor"],
+            "cli_head_events": head["events"], "backlog_cursor": backlog[0]["cursor"],
+            "backlog_delivery_id": self.backlog_delivery}, indent=2))
+        status = wait_until(lambda: (lambda d: d if d.get("mode") == "canary" else None)(
+            parse_json_output(self.cli(["--net", "claude-rx", "claude", "status", "--json"], timeout=30)[1])),
+            "claude status mode canary", timeout=40, interval=2.0)
+        self.record("no_provision", check_no_provision(self.claude_environ, status))
+        rc, out = self.cli(["--net", "claude-rx", "claude", "status", "--json"], name="status-canary")
+        self.evidence_write("34-status-canary.json", out)
+        self.record("baseline", {"stored_cursor": stored["cursor"], "head_cursor": head["next_cursor"],
+                                 "backlog_cursor": backlog[0]["cursor"]})
+        log(f"baselined at {stored['cursor']} (backlog {backlog[0]['cursor']}); status canary")
 
     def stop_managed_runtime(self) -> None:
         if (self.run / "runtime-pid.json").exists():
@@ -789,12 +1017,10 @@ printf 'Observed version in enrol child: %s\n' "$CLAUDE_CODE_VERSION"
             if rc or (self.run / "runtime-pid.json").exists():
                 raise Fail(f"private scheduler runtime did not stop: {out}")
 
-    def start_daemon(self, seam: bool = False, tag: str = "daemon") -> None:
+    def start_daemon(self, seam: bool = False, tag: str = "daemon", kill_switch: bool = False) -> None:
         if self.daemon_window:
             self.stop_daemon()
-        env = (f"HOME={self.home} VECNET_CONFIG={self.cfg} VECNET_BIN={self.runtime / 'vecnet'} VECNET_LOCAL_MAINTENANCE=0 "
-               f"VECNET_CLAUDE_DELIVERY_CANARY=1"
-               + (" VECNET_CLAUDE_DELIVERY_CRASH_BEFORE_WRITE=1" if seam else ""))
+        env = " ".join(daemon_env(self.home, self.cfg, self.runtime / "vecnet", seam=seam, kill_switch=kill_switch))
         script = self.run / f"{tag}.sh"
         script.write_text(f"cd {self.runtime}/connectors/launcher\n"
                           f"echo $$ > {self.logs / (tag + '.pid')}\n"
@@ -803,6 +1029,8 @@ printf 'Observed version in enrol child: %s\n' "$CLAUDE_CODE_VERSION"
         script.chmod(0o755)
         rcfile = self.logs / f"{tag}.rc"
         rcfile.unlink(missing_ok=True)
+        log_path = self.logs / "daemon.log"
+        self.log_marks[tag] = len(log_path.read_text()) if log_path.exists() else 0
         self.tmux("new-window", "-d", "-n", tag,
                   f"sh -c 'sh {script} >> {self.logs}/daemon.log 2>&1; echo $? > {rcfile}'")
         self.daemon_window = tag
@@ -842,17 +1070,7 @@ printf 'Observed version in enrol child: %s\n' "$CLAUDE_CODE_VERSION"
         time.sleep(1.0)
 
     def launch_claude(self) -> None:
-        env = " ".join([
-            f"HOME={self.home}", f"CLAUDE_CONFIG_DIR={self.cconfig}",
-            f"CLAUDE_CODE_MESSAGING_SOCKET={self.sockdir}/claude.sock",
-            f"ANTHROPIC_BASE_URL=http://127.0.0.1:{STUB_PORT}", "ANTHROPIC_API_KEY=dummy-e2e-key",
-            f"HTTPS_PROXY=http://127.0.0.1:{PROXY_PORT}", f"HTTP_PROXY=http://127.0.0.1:{PROXY_PORT}",
-            "NO_PROXY=127.0.0.1,localhost", f"NODE_EXTRA_CA_CERTS={self.run}/ca.pem",
-            f"CLAUDE_CODE_VERSION={self.claude_version}",
-            "DISABLE_TELEMETRY=1", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
-            "DISABLE_AUTOUPDATER=1", "TERM=xterm-256color",
-            f"VECNET_CONFIG={self.cfg}",
-        ])
+        env = " ".join(claude_launch_env(self.home, self.cconfig, self.sockdir, self.run, self.cfg))
         cmd = (f"sh -c 'env {env} {self.claude_bin} --messaging-socket-path "
                f"{self.sockdir}/claude.sock; echo EXIT=$?; sleep 100000'")
         self.tmux("new-session", "-d", "-s", self.session, "-x", "200", "-y", "50",
@@ -860,16 +1078,25 @@ printf 'Observed version in enrol child: %s\n' "$CLAUDE_CODE_VERSION"
         self.start_frame_capture()
         wait_until(lambda: "Yes, I trust this folder" in self.pane_text(),
                    "folder trust dialog", timeout=120)
-        self.tmux("send-keys", "-t", self.session, "Down")
-        time.sleep(0.4)
-        self.tmux("send-keys", "-t", self.session, "Enter")
+        self.select_option("Down", r"❯\s*Yes, I trust this folder", "folder trust selection")
         wait_until(lambda: "Do you want to use this API key" in self.pane_text(),
                    "api key dialog", timeout=40)
-        self.tmux("send-keys", "-t", self.session, "Up")
-        time.sleep(0.4)
-        self.tmux("send-keys", "-t", self.session, "Enter")
+        self.select_option("Up", r"❯\s*Yes\b", "api key selection")
         wait_until(self._prompt_ready, "idle prompt box", timeout=60)
         log(f"claude session {self.session} up (cwd {self.workdir})")
+
+    def select_option(self, key: str, selected: str, what: str) -> None:
+        """Move a dialog cursor, and confirm only once the selection is drawn:
+        a keypress sent before the dialog is interactive is otherwise lost."""
+        pattern = re.compile(selected)
+        def moved():
+            if pattern.search(self.pane_text()):
+                return True
+            self.tmux("send-keys", "-t", self.session, key)
+            time.sleep(0.6)
+            return bool(pattern.search(self.pane_text()))
+        wait_until(moved, what, timeout=20, interval=0.4)
+        self.tmux("send-keys", "-t", self.session, "Enter")
 
     def _prompt_ready(self) -> bool:
         text = self.pane_text()
@@ -924,7 +1151,8 @@ printf 'Observed version in enrol child: %s\n' "$CLAUDE_CODE_VERSION"
         for b in snap.get("bindings", []):
             a = b.get("admission") or {}
             if b.get("state") == "registered" and a.get("live") and a.get("policy") \
-                    and a.get("version_qualified") and b.get("scope", {}).get("caller") == self.claude_peer:
+                    and a.get("version_qualified") and a.get("canary") and a.get("witness") \
+                    and a.get("build_check") == "disabled" and b.get("scope", {}).get("caller") == self.claude_peer:
                 return b
         return None
 
@@ -1032,10 +1260,20 @@ printf 'Observed version in enrol child: %s\n' "$CLAUDE_CODE_VERSION"
         preview_counts = [p.read_text().count(PREVIEW) for p in frames]
         if max(preview_counts, default=0) != 1:
             raise Fail("expected one collapsed pointer preview and no additional previews in any frame")
-        for name in ("hold", "crash", "cap"):
+        backlog = self.results["backlog"] = {"delivery_id": self.backlog_delivery,
+                                             "message_id": self.backlog_message}
+        check_backlog(frames, rows, events, self.backlog_message, self.backlog_delivery)
+        backlog["pointer_frames"] = 0
+        attempt_at, done_at = (lifecycle[i]["at"] for i in (2, 3))
+        # Observed only (not a gate): the helper holds claude-bindings for at
+        # most its 1 s connect/write window; this is the host-side bound.
+        window = deliver_window_ms(attempt_at, done_at)
+        self.results["positive"]["deliver_window_ms"] = window
+        self.results["positive"]["deliver_window_within_hook_budget"] = window < 1500
+        for name in ("hold", "crash", "cap", "canary_off", "kill_switch"):
             control = self.results[name]
             message_id = control["message_id"]
-            marker = getattr(self, f"{name}_marker")
+            marker = getattr(self, {"canary_off": "off_marker", "kill_switch": "kill_marker"}.get(name, f"{name}_marker"))
             verify_control_frames(frames, message_id, marker)
             if any(marker in json.dumps(row) or has_pointer(row.get("content"), message_id)
                    or has_pointer((row.get("origin") or {}).get("body"), message_id)
@@ -1217,21 +1455,138 @@ printf 'Observed version in enrol child: %s\n' "$CLAUDE_CODE_VERSION"
         log(f"cap control complete: pending={doc.get('pending_count')} blocked, "
             f"{self.cap_delivery} unstaged")
 
+    def rebaseline_control(self) -> None:
+        log("phase 7b: a hub-rejected stored cursor rebaselines at the head")
+        self.stop_daemon()
+        before = self.kv_get(SCOPE_KEY + self.binding_key)
+        if not before:
+            raise Fail("no stored scope cursor to corrupt")
+        rc, probe = self.cli(["--net", "claude-rx", "inbox", "--json", "--no-display-proof", "--since", FOREIGN_CURSOR],
+                             name="foreign-cursor-read")
+        if rc != 2 or "cursor_purged: " not in probe:
+            raise Fail(f"the real hub did not refuse a foreign-epoch cursor: rc={rc} {probe[:200]!r}")
+        corrupted = dict(before, cursor=FOREIGN_CURSOR)
+        value = json.dumps(corrupted).replace("'", "''")
+        self.ledger_sql(f"UPDATE kv SET value='{value}' WHERE ns='claude' AND key='{SCOPE_KEY}{self.binding_key}';",
+                        "corrupt-cursor")
+        if self.kv_get(SCOPE_KEY + self.binding_key).get("cursor") != FOREIGN_CURSOR:
+            raise Fail("cursor corruption did not land")
+        self.start_daemon(tag="daemon-rb")
+        mark = self.log_marks["daemon-rb"]
+        wait_until(lambda: any(e.get("msg") == "claude_delivery_scope_baselined" for e in self.daemon_events(mark)),
+                   "rebaseline after a rejected cursor", timeout=60)
+        time.sleep(13)  # one more reload tick: a retry loop would log again
+        events = self.daemon_events(mark)
+        picked = check_rebaseline(events, self.binding_key, self.generation)
+        after = self.kv_get(SCOPE_KEY + self.binding_key)
+        if after.get("cursor") == FOREIGN_CURSOR or cursor_seq(after["cursor"])[0] != cursor_seq(before["cursor"])[0]:
+            raise Fail(f"rebaseline did not store a real head cursor: {after}")
+        self.evidence_write("75-rebaseline.json", json.dumps({
+            "stored_before": before["cursor"], "corrupted_to": FOREIGN_CURSOR,
+            "real_cli_refusal": probe.strip().splitlines()[-1], "stored_after": after["cursor"],
+            "events": [e for e in events if e.get("msg") in
+                       ("claude_delivery_cursor_rejected", "claude_delivery_scope_baselined")]}, indent=2))
+        self.record("rebaseline", {"events": picked, "stored_after": after["cursor"]})
+        log(f"rebaseline control complete: {FOREIGN_CURSOR} -> {after['cursor']}")
+
+    def canary_off_control(self) -> None:
+        log("phase 9b: canary disable -> legacy, no claim, reserved rows drained")
+        self.stop_daemon()
+        # Drop the harness's own cap seeds so the drain and no-claim checks are
+        # not vacuous behind the pending latch, then stage one reserved row.
+        self.ledger_sql(f"DELETE FROM kv WHERE ns='claude' AND key LIKE '{CLAIM_KEY}seed-%';", "unseed-cap")
+        now = int(time.time() * 1000)
+        self.fence_delivery = "fence-0000"
+        row = {"v": 1, "deliveryId": self.fence_delivery, "messageId": "msg_" + _ulid(5000),
+               "threadId": "thr_" + _ulid(5001), "msgId": secrets.token_hex(16),
+               "scope": self.binding_key, "generation": self.generation, "cursor": "e1.1",
+               "predecessor": "e1.0", "priority": "wake", "state": "reserved",
+               "attemptId": secrets.token_hex(16), "hubAckObserved": False, "createdAt": now, "updatedAt": now}
+        value = json.dumps(row).replace("'", "''")
+        rc, out = self.cli(["--net", "claude-rx", "claude", "canary", "disable"], name="canary-disable")
+        if rc != 0:
+            raise Fail(f"claude canary disable failed: {out}")
+        self.ledger_sql(f"INSERT INTO kv(ns,key,value) VALUES ('claude','{CLAIM_KEY}{self.fence_delivery}','{value}');",
+                        "seed-reserved")
+        self.start_daemon(tag="daemon4")
+        mark = self.log_marks["daemon4"]
+        wait_until(lambda: any(e.get("msg") == "claude_delivery_claim_fenced" and e.get("deliveryId") == self.fence_delivery
+                               for e in self.daemon_events(mark)), "reserved row fenced", timeout=60)
+        self.off_marker = "OFF-E2E-" + secrets.token_hex(8)
+        rc, out = self.cli(["--net", "sender", "send", self.claude_peer,
+                            f"{self.off_marker}: canary is off.", "--wake", "--json"], name="send-off")
+        if rc != 0:
+            raise Fail(f"canary-off send failed: {out}")
+        self.evidence_write("94-off-send.json", out)
+        receipt = parse_json_output(out)
+        self.off_delivery = receipt["deliveries"][0]["delivery_id"]
+        time.sleep(13)  # a full reload tick after the wake
+        events = self.daemon_events(mark)
+        if any(self.off_delivery in json.dumps(e) for e in events):
+            raise Fail("the canary-off wake reached the daemon's claim lifecycle")
+        if any(e.get("msg") == ADMISSION for e in events):
+            raise Fail("a scope was admitted with the canary disabled")
+        rc, dout = self.cli(["--net", "claude-rx", "claude", "deliveries", "--json"], name="deliveries-off")
+        rc2, sout = self.cli(["--net", "claude-rx", "claude", "status", "--json"], name="status-off")
+        self.evidence_write("95-off-deliveries.json", dout)
+        self.evidence_write("96-off-status.json", sout)
+        result = check_canary_off(parse_json_output(dout), parse_json_output(sout), self.off_delivery, self.fence_delivery)
+        self.evidence_write("97-off-fence.txt", "".join(json.dumps(e) + "\n" for e in events
+                                                         if e.get("msg") == "claude_delivery_claim_fenced"))
+        self.record("canary_off", result | {"delivery_id": self.off_delivery, "message_id": receipt["message_id"]})
+        log(f"canary-off control complete: {self.off_delivery} unclaimed, {self.fence_delivery} fenced")
+
+    def kill_switch_control(self) -> None:
+        log("phase 9c: VECNET_CLAUDE_DELIVERY_CANARY=0 constructs no adapter")
+        self.stop_daemon()
+        rc, out = self.cli(["--net", "claude-rx", "claude", "canary", "enable"], name="canary-reenable")
+        if rc != 0:
+            raise Fail(f"canary re-enable failed: {out}")
+        self.start_daemon(tag="daemon5", kill_switch=True)
+        mark = self.log_marks["daemon5"]
+        self.kill_marker = "KILL-E2E-" + secrets.token_hex(8)
+        rc, out = self.cli(["--net", "sender", "send", self.claude_peer,
+                            f"{self.kill_marker}: kill switch on.", "--wake", "--json"], name="send-kill")
+        if rc != 0:
+            raise Fail(f"kill-switch send failed: {out}")
+        self.evidence_write("100-kill-send.json", out)
+        receipt = parse_json_output(out)
+        self.kill_delivery = receipt["deliveries"][0]["delivery_id"]
+        status = wait_until(lambda: (lambda d: d if d.get("owner") == "registered" else None)(
+            parse_json_output(self.cli(["--net", "claude-rx", "claude", "status", "--json"], timeout=30)[1])),
+            "kill-switch host owns the status", timeout=40, interval=2.0)
+        time.sleep(13)
+        events = self.daemon_events(mark)
+        native = [e for e in events if str(e.get("msg", "")).startswith("claude_delivery_")]
+        if native:
+            raise Fail(f"the kill-switch daemon ran a delivery adapter: {native[:3]}")
+        rc, sout = self.cli(["--net", "claude-rx", "claude", "status", "--json"], name="status-kill")
+        status = parse_json_output(sout)
+        if (status.get("mode"), status.get("canary_opt_in"), status.get("build_check")) != ("legacy", True, "disabled") \
+                or "has not admitted" not in status.get("reason", ""):
+            raise Fail(f"kill-switch status is not legacy with an unadmitted opt-in: {status}")
+        self.evidence_write("101-kill-status.json", sout)
+        self.evidence_write("102-kill-env.txt", "\n".join(daemon_env(self.home, self.cfg, self.runtime / "vecnet",
+                                                                      kill_switch=True)) + "\n")
+        self.record("kill_switch", {"delivery_id": self.kill_delivery, "message_id": receipt["message_id"],
+                                    "adapter_events": 0, "mode": status["mode"], "canary_opt_in": True})
+        log(f"kill-switch control complete: {self.kill_delivery} untouched, mode legacy")
+
     def no_ack_evidence(self) -> None:
         log("phase 10: hub shows no ack for any delivered cursor")
         self.hub_query("73-hub-acks.json", "SELECT * FROM acks")
         acks = (self.evidence / "73-hub-acks.json").read_text().strip()
         if acks not in ("", "[]"):
             raise Fail(f"unexpected ack rows in hub: {acks}")
+        expected = {self.backlog_delivery, self.delivery_id, self.hold_delivery, self.crash_delivery,
+                    self.cap_delivery, self.off_delivery, self.kill_delivery}
         self.hub_query("74-hub-delivery-states.json",
-                       "SELECT dly_id, recipient, state FROM deliveries WHERE dly_id IN "
-                       f"('{self.delivery_id}','{self.hold_delivery}',"
-                       f"'{self.crash_delivery}','{self.cap_delivery}')")
+                       "SELECT dly_id, recipient, state FROM deliveries WHERE dly_id IN ("
+                       + ",".join(f"'{d}'" for d in sorted(expected)) + ")")
         states = json.loads((self.evidence / "74-hub-delivery-states.json").read_text())
-        expected = {self.delivery_id, self.hold_delivery, self.crash_delivery, self.cap_delivery}
         if (len(states) != len(expected) or {row.get("dly_id") for row in states} != expected
                 or any(row.get("state") != "queued" for row in states)):
-            raise Fail(f"expected all four hub deliveries to remain queued: {states}")
+            raise Fail(f"expected all {len(expected)} hub deliveries to remain queued: {states}")
         self.record("no_ack", {"acks": 0, "deliveries": states})
 
     # ------------------------------------------------------------ teardown --
@@ -1270,7 +1625,8 @@ printf 'Observed version in enrol child: %s\n' "$CLAUDE_CODE_VERSION"
                          ("logs/hub.log", "11-hub-serve.log"),
                          ("logs/stub-observed.jsonl", "31-stub-observed.jsonl"),
                          ("logs/proxy-observed.jsonl", "12-proxy-observed.jsonl"),
-                         ("logs/send-wake.out", "40b-send-wake-cli.txt")):
+                         ("logs/send-wake.out", "40b-send-wake-cli.txt"),
+                         ("logs/head-read.out", "33b-head-read-cli.txt")):
             s = self.run / src
             if s.exists():
                 shutil.copyfile(s, self.evidence / dst)
@@ -1317,14 +1673,19 @@ def main() -> int:
         h.claude_session_up()
         h.positive_delivery()
         h.hold_control()
+        h.rebaseline_control()
         h.crash_control()
         h.cap_control()
+        h.canary_off_control()
+        h.kill_switch_control()
         h.no_ack_evidence()
         h.stop_daemon()
         h.stop_frame_capture()
         h.finalize_proof()
     except Exception as e:  # noqa: BLE001
-        log(f"FAIL: {e}")
+        import traceback
+        log(f"FAIL: {type(e).__name__}: {e}")
+        traceback.print_exc()
         exit_code = 1
     finally:
         try:
