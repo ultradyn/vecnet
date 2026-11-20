@@ -140,7 +140,8 @@ func TestCompactionBoundedReclaimAndDiskPressure(t *testing.T) {
 	db := openTemp(t)
 	free := freedPages(t, db)
 	pages := pragmaInt(t, db, "page_count")
-	opts := store.MaintenanceOptions{ReclaimPages: 7, Target: time.Second, AvailableBytes: func(context.Context) (int64, error) { return 1 << 40, nil }}
+	// Disk pressure, not the slice timer, must be what pauses these slices.
+	opts := store.MaintenanceOptions{ReclaimPages: 7, Target: maintenanceUntimed, AvailableBytes: func(context.Context) (int64, error) { return 1 << 40, nil }}
 	r, err := db.Maintain(context.Background(), opts)
 	if err != nil {
 		t.Fatal(err)
@@ -348,8 +349,12 @@ func TestCompactionPhysicalPageCapAcrossPointerMaps(t *testing.T) {
 				before := pragmaInt(t, db, "page_count")
 				freeBefore := pragmaInt(t, db, "freelist_count")
 				expiredThisSlice := false
-				opts := store.MaintenanceOptions{ReclaimPages: limit, Target: time.Second}
+				// Only the slice that injects snapshot expiry needs a real deadline.
+				// Every other slice tests page accounting; a one-second budget let
+				// a slow runner pause those before their bounded page work.
+				opts := store.MaintenanceOptions{ReclaimPages: limit, Target: maintenanceUntimed}
 				if expireSnapshot && !expired {
+					opts.Target = time.Second
 					opts.AvailableBytes = func(ctx context.Context) (int64, error) {
 						// Another connection observes the old page count until reclaim
 						// commits. Expire only the final committed statistics probe;

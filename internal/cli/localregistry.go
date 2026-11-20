@@ -96,6 +96,12 @@ func (a *app) localRegistryDirectory(create bool) (*os.File, error) {
 	}
 	return localRegistryOpen(home, create)
 }
+
+// localGitProbeBudget bounds one Git project-identity subprocess. A variable
+// only so in-package tests whose subject is not this deadline can wait for a
+// cold fixture process on a slow runner; product code never changes it.
+var localGitProbeBudget = 2 * time.Second
+
 func (a *app) localRegistryContext() context.Context {
 	if a.ctx != nil {
 		return a.ctx
@@ -354,7 +360,7 @@ func (a *app) localProjectIdentity() (localProject, error) {
 		return localProject{}, usageErr("inventory project must be an existing directory")
 	}
 	p := localProject{Root: dir, Directory: dir, Artifacts: []localArtifact{}}
-	ctx, cancel := context.WithTimeout(a.localRegistryContext(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(a.localRegistryContext(), localGitProbeBudget)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir", "--absolute-git-dir")
 	cmd.WaitDelay = 100 * time.Millisecond

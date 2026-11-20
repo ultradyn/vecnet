@@ -58,6 +58,12 @@ func (c *maintenanceConn) ExecContext(ctx context.Context, query string, args []
 	return result, err
 }
 
+// maintenanceUntimed is a cooperative slice budget for tests whose subject is
+// page accounting or fault handling, not the time budget. Each slice still
+// ends after its bounded page work; this only stops wall-clock pressure on a
+// slow runner from pausing the slice before the behaviour under test.
+const maintenanceUntimed = time.Minute
+
 func TestCompactionRollbackDoesNotPublishUncommittedStats(t *testing.T) {
 	for _, failure := range []string{"capacity_probe", "commit"} {
 		t.Run(failure, func(t *testing.T) {
@@ -91,8 +97,12 @@ func TestCompactionRollbackDoesNotPublishUncommittedStats(t *testing.T) {
 			defer pool.Close()
 			pool.SetMaxOpenConns(1)
 			db := &store.DB{DB: pool}
+			// The injection points are counted statements, not elapsed time. A
+			// one-second cooperative slice expired first on a loaded single-core
+			// runner (PausedReason=time_budget, no COMMIT reached), so give the
+			// slice a budget it cannot exhaust and let only the injection fail it.
 			result, err := db.Maintain(context.Background(), store.MaintenanceOptions{
-				ReclaimPages: 3, Target: time.Second,
+				ReclaimPages: 3, Target: maintenanceUntimed,
 				AvailableBytes: func(context.Context) (int64, error) {
 					probes++
 					if failure == "capacity_probe" && probes == 4 {
@@ -102,6 +112,9 @@ func TestCompactionRollbackDoesNotPublishUncommittedStats(t *testing.T) {
 					return 1 << 40, nil
 				},
 			})
+			if result.PausedReason == "time_budget" {
+				t.Fatalf("slice expired before the injected failure: %+v", result)
+			}
 			if !injected || vacuumSteps < 2 || err == nil {
 				t.Fatalf("failure missed in-flight reclaim: injected=%v vacuumSteps=%d result=%+v err=%v", injected, vacuumSteps, result, err)
 			}
@@ -158,7 +171,8 @@ func TestCompactionCancellationAtBeginCompletionReleasesWriter(t *testing.T) {
 			defer pool.Close()
 			pool.SetMaxOpenConns(1)
 			db := &store.DB{DB: pool}
-			result, err := db.Maintain(ctx, store.MaintenanceOptions{ReclaimPages: 2, Target: time.Second})
+			// The injection is BEGIN itself; the slice timer must not win first.
+			result, err := db.Maintain(ctx, store.MaintenanceOptions{ReclaimPages: 2, Target: maintenanceUntimed})
 			if !began || ctx.Err() == nil || err == nil || result.ReclaimedPages != 0 {
 				t.Fatalf("cancellation missed BEGIN completion: began=%v result=%+v err=%v", began, result, err)
 			}
