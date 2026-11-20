@@ -37,19 +37,22 @@ const (
 const (
 	DefaultInterval = 6 * time.Hour
 	MinInterval     = 15 * time.Minute
+	// MaxInterval keeps the jitter arithmetic far from overflow.
+	MaxInterval = 30 * 24 * time.Hour
 )
 
 // ParseInterval reads --update-check-interval / VECNET_UPDATE_CHECK_INTERVAL:
 // a Go duration ("6h", "90m") or a bare whole number of hours ("6"). "0" (or
 // any zero duration) disables the check. A value above zero but under
 // MinInterval is raised to MinInterval; clamped reports that. Negative,
-// fractional-hour or unparseable values are errors that never echo the input.
+// fractional-hour, unparseable or above-MaxInterval (30 days) values are
+// errors that never echo the input.
 func ParseInterval(raw string) (d time.Duration, clamped bool, err error) {
 	s := strings.TrimSpace(raw)
 	if s == "" {
 		return DefaultInterval, false, nil
 	}
-	bad := errors.New("update check interval must be 0 (disabled), a whole number of hours, or a Go duration such as 6h or 90m")
+	bad := errors.New("update check interval must be 0 (disabled), a whole number of hours, or a Go duration such as 6h or 90m, at most 720h (30 days)")
 	if n, perr := strconv.ParseUint(s, 10, 32); perr == nil {
 		d = time.Duration(n) * time.Hour
 		if n > 0 && d/time.Hour != time.Duration(n) {
@@ -60,6 +63,9 @@ func ParseInterval(raw string) (d time.Duration, clamped bool, err error) {
 		if perr != nil || d < 0 {
 			return 0, false, bad
 		}
+	}
+	if d > MaxInterval {
+		return 0, false, bad
 	}
 	if d > 0 && d < MinInterval {
 		return MinInterval, true, nil
@@ -225,9 +231,12 @@ func (c *Checker) Run(ctx context.Context, onResult func(latest string, err erro
 	}
 }
 
-// next is Interval scaled by a factor in [0.9, 1.1).
+// next is Interval (capped at MaxInterval) scaled by a factor in
+// [0.9, 1.1), never below MinInterval, so no Interval set in code can make
+// Run hammer the registry.
 func (c *Checker) next() time.Duration {
-	return time.Duration(float64(c.Interval) * (0.9 + 0.2*c.rand()))
+	d := time.Duration(float64(min(c.Interval, MaxInterval)) * (0.9 + 0.2*c.rand()))
+	return max(d, MinInterval)
 }
 
 func (c *Checker) now() time.Time {

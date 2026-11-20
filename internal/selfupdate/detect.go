@@ -3,6 +3,7 @@ package selfupdate
 import (
 	"bytes"
 	"context"
+	"debug/elf"
 	"encoding/json"
 	"errors"
 	"io"
@@ -42,6 +43,7 @@ const (
 	ReasonPrefix        = "npm_prefix_mismatch" // npm would install somewhere else
 	ReasonNotWritable   = "not_writable"        // the npm prefix is not ours to write
 	ReasonDetectFailed  = "detect_failed"       // something else went wrong
+	ReasonEphemeralPort = "ephemeral_port"      // listening on port 0: a restart would move it
 )
 
 // System is everything Detect reads from the host. DefaultSystem is the
@@ -69,14 +71,36 @@ type System struct {
 // ever runs npm.
 type Runner func(ctx context.Context, name string, args, env []string) ([]byte, error)
 
-// ExecRunner runs a real command, without a shell.
+// MaxCommandOutput caps what a Runner keeps of a command's output.
+const MaxCommandOutput = 64 << 10
+
+// ExecRunner runs a real command, without a shell, from the filesystem
+// root (outside any project, so no project .npmrc applies). On Unix the
+// command gets its own process group, and ctx ending kills the whole group,
+// so npm's children die with it. Output past MaxCommandOutput is dropped.
 func ExecRunner(ctx context.Context, name string, args, env []string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Env = env
-	// Outside any project, so no project .npmrc can redirect npm.
 	cmd.Dir = string(filepath.Separator)
 	cmd.WaitDelay = 5 * time.Second
-	return cmd.CombinedOutput()
+	ownProcessGroup(cmd)
+	out := &cappedBuffer{max: MaxCommandOutput}
+	cmd.Stdout, cmd.Stderr = out, out
+	err := cmd.Run()
+	return out.Bytes(), err
+}
+
+// cappedBuffer keeps the first max bytes written and discards the rest.
+type cappedBuffer struct {
+	bytes.Buffer
+	max int
+}
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	if room := b.max - b.Len(); room > 0 {
+		b.Buffer.Write(p[:min(len(p), room)])
+	}
+	return len(p), nil
 }
 
 // DefaultSystem is the running host.
@@ -92,8 +116,59 @@ func DefaultSystem() System {
 // containerEnv are variables only container platforms set.
 var containerEnv = []string{"FLY_APP_NAME", "FLY_MACHINE_ID", "KUBERNETES_SERVICE_HOST", "container"}
 
-// containerFiles are markers Docker and Podman leave in a container.
-var containerFiles = []string{"/.dockerenv", "/run/.containerenv"}
+// containerFiles are markers Docker, Podman and systemd-nspawn leave in a
+// container.
+var containerFiles = []string{"/.dockerenv", "/run/.containerenv", "/run/systemd/container"}
+
+// inContainer reports any container sign: platform variables, marker files,
+// a container runtime in PID 1's cgroup, container= in PID 1's environment
+// (when readable), or an overlay filesystem mounted at /.
+func inContainer(sys System) bool {
+	for _, k := range containerEnv {
+		if sys.Getenv(k) != "" {
+			return true
+		}
+	}
+	for _, f := range containerFiles {
+		if _, err := sys.Stat(f); err == nil {
+			return true
+		}
+	}
+	if cg, err := sys.ReadFile("/proc/1/cgroup"); err == nil {
+		for _, marker := range []string{"docker", "kubepods", "containerd", "libpod", "lxc"} {
+			if bytes.Contains(cg, []byte(marker)) {
+				return true
+			}
+		}
+	}
+	if env, err := sys.ReadFile("/proc/1/environ"); err == nil {
+		for _, kv := range bytes.Split(env, []byte{0}) {
+			if bytes.HasPrefix(kv, []byte("container=")) {
+				return true
+			}
+		}
+	}
+	if mi, err := sys.ReadFile("/proc/self/mountinfo"); err == nil && overlayRoot(mi) {
+		return true
+	}
+	return false
+}
+
+// overlayRoot reports whether mountinfo mounts an overlay filesystem at /.
+// Fields: id parent major:minor root mountpoint options [optional...] - fstype ...
+func overlayRoot(mountinfo []byte) bool {
+	for _, line := range strings.Split(string(mountinfo), "\n") {
+		pre, post, ok := strings.Cut(line, " - ")
+		if !ok {
+			continue
+		}
+		f, g := strings.Fields(pre), strings.Fields(post)
+		if len(f) >= 5 && f[4] == "/" && len(g) >= 1 && (g[0] == "overlay" || g[0] == "fuse-overlayfs") {
+			return true
+		}
+	}
+	return false
+}
 
 // npmPlatform maps Go's GOARCH to the npm package's native/ directory names.
 var npmPlatform = map[string]string{"amd64": "x64", "arm64": "arm64"}
@@ -114,25 +189,24 @@ var npmPlatform = map[string]string{"amd64": "x64", "arm64": "arm64"}
 //     this very package and not another copy.
 //  6. The current user can write <prefix>/lib/node_modules and <prefix>/bin.
 func Detect(ctx context.Context, sys System, current string) (*Install, string) {
+	return detect(ctx, sys, current, false)
+}
+
+// Redetect is Detect at the start of an update job: the same checks, read
+// fresh from disk, except that a missing package.json is allowed (an earlier
+// install may have stopped half way). A present one must still name exactly
+// the running version, so a version installed by hand since the hub started
+// is never replaced, and never downgraded.
+func Redetect(ctx context.Context, sys System, current string) (*Install, string) {
+	return detect(ctx, sys, current, true)
+}
+
+func detect(ctx context.Context, sys System, current string, allowMissing bool) (*Install, string) {
 	if sys.GOOS != "linux" {
 		return nil, ReasonUnsupportedOS
 	}
-	for _, k := range containerEnv {
-		if sys.Getenv(k) != "" {
-			return nil, ReasonContainer
-		}
-	}
-	for _, f := range containerFiles {
-		if _, err := sys.Stat(f); err == nil {
-			return nil, ReasonContainer
-		}
-	}
-	if cg, err := sys.ReadFile("/proc/1/cgroup"); err == nil {
-		for _, marker := range []string{"docker", "kubepods", "containerd", "libpod", "lxc"} {
-			if bytes.Contains(cg, []byte(marker)) {
-				return nil, ReasonContainer
-			}
-		}
+	if inContainer(sys) {
+		return nil, ReasonContainer
 	}
 	arch, ok := npmPlatform[sys.GOARCH]
 	if !ok {
@@ -158,7 +232,9 @@ func Detect(ctx context.Context, sys System, current string) (*Install, string) 
 		path.Base(modules) != "node_modules" || path.Base(lib) != "lib" || prefix == lib {
 		return nil, ReasonNotNPMGlobal
 	}
-	if v, err := packageVersion(sys.ReadFile, root); err != nil {
+	if v, err := packageVersion(sys.ReadFile, root); errors.Is(err, fs.ErrNotExist) && allowMissing {
+		// A half-finished install; the job reinstalls the package.
+	} else if err != nil {
 		return nil, ReasonNotNPMGlobal
 	} else if v != current {
 		return nil, ReasonVersion
@@ -255,9 +331,48 @@ func VerifyInstalled(sys System, inst *Install, version string) error {
 	if err != nil || !fi.Mode().IsRegular() || fi.Mode().Perm()&0o111 == 0 {
 		return errors.New("installed vecnet-hub binary is missing or not executable")
 	}
-	head, err := sys.ReadHead(inst.Exe, 4)
+	head, err := sys.ReadHead(inst.Exe, 64)
 	if err != nil || !bytes.HasPrefix(head, []byte("\x7fELF")) {
 		return errors.New("installed vecnet-hub binary is not a Linux executable")
+	}
+	if m, ok := elfMachine(head); !ok || m != wantMachine[sys.GOARCH] {
+		return errors.New("installed vecnet-hub binary is for another CPU architecture")
+	}
+	return nil
+}
+
+// wantMachine is the ELF e_machine for each GOARCH one-click supports.
+var wantMachine = map[string]elf.Machine{"amd64": elf.EM_X86_64, "arm64": elf.EM_AARCH64}
+
+// elfMachine reads e_machine from an ELF header (at least 20 bytes).
+func elfMachine(head []byte) (elf.Machine, bool) {
+	if len(head) < 20 {
+		return 0, false
+	}
+	switch elf.Data(head[elf.EI_DATA]) {
+	case elf.ELFDATA2LSB:
+		return elf.Machine(uint16(head[18]) | uint16(head[19])<<8), true
+	case elf.ELFDATA2MSB:
+		return elf.Machine(uint16(head[18])<<8 | uint16(head[19])), true
+	}
+	return 0, false
+}
+
+// SelfCheckTimeout bounds the new binary's --version run.
+const SelfCheckTimeout = 15 * time.Second
+
+// SelfCheck runs the installed binary's `vecnet-hub --version` with an empty
+// environment and requires it to print exactly "vecnet-hub <version>". It
+// proves the new binary loads and runs on this host before the hub drains.
+func SelfCheck(ctx context.Context, sys System, inst *Install, version string) error {
+	ctx, cancel := context.WithTimeout(ctx, SelfCheckTimeout)
+	defer cancel()
+	out, err := sys.Run(ctx, inst.Exe, []string{"--version"}, []string{"PATH=/usr/bin:/bin"})
+	if err != nil {
+		return errors.New("installed vecnet-hub binary did not run")
+	}
+	if strings.TrimSpace(string(out)) != "vecnet-hub "+version {
+		return errors.New("installed vecnet-hub binary reported an unexpected version")
 	}
 	return nil
 }

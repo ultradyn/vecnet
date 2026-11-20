@@ -34,6 +34,7 @@ var (
 	ErrNoUpdate    = errors.New("no newer version is known")
 	ErrBusy        = errors.New("an update is already running")
 	ErrCooldown    = errors.New("an update started recently")
+	ErrAudit       = errors.New("could not record the update in the audit log; nothing was started")
 )
 
 // Job is the state of the last update job.
@@ -77,10 +78,19 @@ type Service struct {
 	// Restart asks the hub to drain and re-execute itself; nil means the
 	// operator restarts it (the job ends installed).
 	Restart func()
-	// Audit, when non-nil, records the confirmed install target once the
-	// job's registry re-check has chosen it, before npm runs.
-	Audit func(from, to string)
-	Log   *slog.Logger
+	// Audit, when non-nil, records an update as Start accepts it; an error
+	// refuses the start (ErrAudit).
+	Audit func(from, to string) error
+	// Context, when non-nil, bounds every job: the hub passes its
+	// background context, so shutdown cancels a running npm install.
+	Context context.Context
+	// Go, when non-nil, runs a job (the hub's background WaitGroup), so
+	// shutdown waits for it; nil means a plain goroutine.
+	Go func(func())
+	// EphemeralListen: the hub listens on port 0, so a restart would come up
+	// on another port. One-click update is refused (ReasonEphemeralPort).
+	EphemeralListen bool
+	Log             *slog.Logger
 
 	mu        sync.Mutex
 	detected  bool
@@ -156,6 +166,8 @@ func (s *Service) Status() Status {
 	}
 	st.ReleaseURL = "https://www.npmjs.com/package/" + PackageName + "/v/" + latest
 	switch {
+	case inst != nil && s.EphemeralListen:
+		st.ManualReason = ReasonEphemeralPort
 	case inst != nil:
 		st.OneClick, st.Restart = true, s.Restart != nil
 	case !detected:
@@ -170,9 +182,10 @@ func (s *Service) Status() Status {
 }
 
 // Start begins an update to the version the checker last read from the
-// registry. It takes no version argument by design. It returns the new job,
-// or one of ErrUnavailable, ErrNoUpdate, ErrBusy and ErrCooldown (with how
-// long until a start is allowed).
+// registry. It takes no version argument by design. It audits the update
+// before anything runs and returns the new job, or one of ErrUnavailable,
+// ErrNoUpdate, ErrBusy, ErrCooldown (with how long until a start is
+// allowed) and ErrAudit.
 func (s *Service) Start() (Job, time.Duration, error) {
 	if s == nil || s.Checker == nil || !s.Checker.Enabled() {
 		return Job{}, 0, ErrUnavailable
@@ -180,7 +193,7 @@ func (s *Service) Start() (Job, time.Duration, error) {
 	latest, _ := s.Checker.Latest()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.inst == nil {
+	if s.inst == nil || s.EphemeralListen {
 		return Job{}, 0, ErrUnavailable
 	}
 	// A running job, or one that has handed over to the restart, is busy.
@@ -196,52 +209,91 @@ func (s *Service) Start() (Job, time.Duration, error) {
 			return Job{}, wait, ErrCooldown
 		}
 	}
+	if s.Audit != nil {
+		if err := s.Audit(s.Checker.Current, latest); err != nil {
+			s.Log.Warn("vecnet-hub: audit hub_update failed; update not started", "err", err.Error())
+			return Job{}, 0, ErrAudit
+		}
+	}
 	s.lastStart = now
 	s.job = &Job{State: StateChecking, Version: latest, StartedAt: now.UTC().Format(time.RFC3339)}
 	j := *s.job
-	inst := *s.inst
-	go s.run(inst)
+	ctx := s.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if s.Go != nil {
+		s.Go(func() { s.run(ctx, latest) })
+	} else {
+		go s.run(ctx, latest)
+	}
 	return j, 0, nil
 }
 
-// run is the update job. Any failure before Restart leaves the running hub
-// as it was: npm replaces files on disk, never this process's image.
-func (s *Service) run(inst Install) {
-	ctx, cancel := context.WithTimeout(context.Background(), InstallTimeout)
-	defer cancel()
+// reinstall is the manual recovery command for version.
+func reinstall(version string) string {
+	return "npm install -g " + PackageName + "@" + version
+}
 
-	// Re-read the registry now: the cached answer may be hours old. Install
-	// only a version it confirms is newer, never one from the request.
-	version, err := s.Checker.Check(ctx)
-	if err != nil || !Newer(version, s.Checker.Current) {
-		s.fail("could not confirm the latest version on npm; nothing was installed")
+// run is the update job for exactly the version Start accepted and audited.
+// Any failure before Restart leaves the running hub as it was: npm replaces
+// files on disk, never this process's image.
+func (s *Service) run(parent context.Context, version string) {
+	ctx, cancel := context.WithTimeout(parent, InstallTimeout)
+	defer cancel()
+	current := s.Checker.Current
+	keeps := "; the hub keeps running " + current
+
+	// Re-read the registry: npm must still name this version as latest. A
+	// tag that moved since the click (or was pulled) installs nothing.
+	latest, err := s.Checker.Check(ctx)
+	if err != nil || latest != version {
+		s.fail("could not confirm " + version + " as the latest version on npm; nothing was installed" + keeps)
+		return
+	}
+	// Re-detect from disk now, not at boot: npm, the prefix and the package
+	// may have changed. A package.json naming any version but the running
+	// one (say a pre-release installed by hand) is never replaced.
+	inst, reason := Redetect(ctx, s.Sys, current)
+	if inst == nil {
+		s.Log.Warn("vecnet-hub: update refused; installation changed since start", "reason", reason)
+		s.fail("this installation no longer qualifies for one-click update (" + reason + "); nothing was installed" + keeps)
 		return
 	}
 	s.set(StateInstalling, version)
-	if s.Audit != nil {
-		s.Audit(s.Checker.Current, version)
-	}
 	install := s.Install
 	if install == nil {
 		install = s.Sys.Run
 	}
-	args := []string{"install", "--global", "--prefix", inst.Prefix, "--registry=" + Registry, "--ignore-scripts", "--no-audit", "--no-fund", "--loglevel=error", PackageName + "@" + version}
-	out, err := install(ctx, inst.NPM, args, NPMEnv(s.Sys.Getenv, &inst))
+	args := []string{"install", "--global", "--prefix", inst.Prefix, "--registry=" + Registry, "--strict-ssl=true",
+		"--ignore-scripts", "--no-audit", "--no-fund", "--loglevel=error", PackageName + "@" + version}
+	out, err := install(ctx, inst.NPM, args, NPMEnv(s.Sys.Getenv, inst))
 	if err != nil {
-		s.Log.Warn("vecnet-hub: npm install failed", "version", version, "err", err.Error(), "output", tail(out, 2048))
-		msg := "npm install failed; the hub keeps running " + s.Checker.Current
-		if ctx.Err() != nil {
-			msg = "npm install timed out; the hub keeps running " + s.Checker.Current
+		s.Log.Warn("vecnet-hub: npm install failed", "version", version, "err", err.Error(), "output", tail(out, 4096))
+		what := "npm install failed"
+		switch {
+		case parent.Err() != nil:
+			what = "npm install was stopped by the hub shutting down"
+		case ctx.Err() != nil:
+			what = "npm install timed out"
 		}
-		s.fail(msg)
+		s.fail(what + keeps + ". If vecnet-hub no longer starts, reinstall with: " + reinstall(version))
 		return
 	}
 	s.set(StateVerifying, version)
-	if err := VerifyInstalled(s.Sys, &inst, version); err != nil {
+	if err := VerifyInstalled(s.Sys, inst, version); err != nil {
 		s.Log.Warn("vecnet-hub: installed update did not verify", "version", version, "err", err.Error())
-		s.fail(err.Error() + "; the hub keeps running " + s.Checker.Current + ". Reinstall with: npm install -g " + PackageName + "@" + version)
+		s.fail(err.Error() + keeps + ", but the next start may fail. Reinstall with: " + reinstall(version))
 		return
 	}
+	if err := SelfCheck(ctx, s.Sys, inst, version); err != nil {
+		s.Log.Warn("vecnet-hub: installed update failed its self-check", "version", version, "err", err.Error())
+		s.fail(err.Error() + "; not restarting" + keeps + ", but the next start may fail. Reinstall with: " + reinstall(version))
+		return
+	}
+	s.mu.Lock()
+	s.inst = inst
+	s.mu.Unlock()
 	if s.Restart == nil {
 		s.finish(StateInstalled, "")
 		s.Log.Info("vecnet-hub: update installed; restart the hub to run it", "version", version)

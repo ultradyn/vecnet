@@ -202,6 +202,25 @@ func TestDisabledMakesNoRequests(t *testing.T) {
 	}
 }
 
+func TestNextClampsToBounds(t *testing.T) {
+	c := &Checker{Current: "0.2.6"}
+	c.Rand = func() float64 { return 0 }
+	for _, iv := range []time.Duration{time.Nanosecond, time.Minute, MinInterval} {
+		c.Interval = iv
+		if got := c.next(); got < MinInterval {
+			t.Fatalf("next(%v) = %v, below the minimum", iv, got)
+		}
+	}
+	c.Rand = func() float64 { return 0.999999 }
+	for _, iv := range []time.Duration{MaxInterval, 1 << 62, time.Duration(1<<63 - 1)} {
+		c.Interval = iv
+		got := c.next()
+		if got <= 0 || got > MaxInterval*11/10 {
+			t.Fatalf("next(%v) = %v", iv, got)
+		}
+	}
+}
+
 func TestRunJittersAndRepeats(t *testing.T) {
 	reg := newFakeRegistry(t, `{"latest":"0.2.7"}`)
 	c := reg.checker("0.2.6", time.Hour)
@@ -240,7 +259,14 @@ func TestParseInterval(t *testing.T) {
 			t.Errorf("ParseInterval(%q) = %v, %v, %v", tc.in, got, clamped, err)
 		}
 	}
-	for _, in := range []string{"-1", "-1h", "abc", "6 hours", "1.5", "h", "99999999999999999999", "4294967295"} {
+	if got, _, err := ParseInterval("720h"); err != nil || got != MaxInterval {
+		t.Fatalf("720h = %v, %v", got, err)
+	}
+	if got, _, err := ParseInterval("720"); err != nil || got != MaxInterval {
+		t.Fatalf("720 hours = %v, %v", got, err)
+	}
+	for _, in := range []string{"-1", "-1h", "abc", "6 hours", "1.5", "h", "99999999999999999999", "4294967295",
+		"721", "720h1s", "2562047h", "9223372036854775807ns"} {
 		if _, _, err := ParseInterval(in); err == nil {
 			t.Errorf("ParseInterval(%q) accepted", in)
 		} else if strings.Contains(err.Error(), in) && in != "h" {

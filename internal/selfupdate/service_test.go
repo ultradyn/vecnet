@@ -41,7 +41,7 @@ func newServiceFixture(t *testing.T, latest string, withRestart bool) *serviceFi
 			return []byte("npm output"), hook()
 		}
 		// A good install: the package now carries the new version.
-		f.host.files[pkgRoot+"/package.json"] = `{"name":"vecnet","version":"` + latest + `"}`
+		f.host.setFile(pkgRoot+"/package.json", `{"name":"vecnet","version":"`+latest+`"}`)
 		return nil, nil
 	}
 	if withRestart {
@@ -140,12 +140,19 @@ func TestStartInstallsVerifiedVersionAndRestarts(t *testing.T) {
 	if f.restarts != 1 || len(f.installs) != 1 {
 		t.Fatalf("restarts %d installs %v", f.restarts, f.installs)
 	}
-	want := prefix + "/bin/npm install --global --prefix " + prefix + " --registry=https://registry.npmjs.org/ --ignore-scripts --no-audit --no-fund --loglevel=error vecnet@0.2.7"
+	want := prefix + "/bin/npm install --global --prefix " + prefix + " --registry=https://registry.npmjs.org/ --strict-ssl=true --ignore-scripts --no-audit --no-fund --loglevel=error vecnet@0.2.7"
 	if got := strings.Join(f.installs[0], " "); got != want {
 		t.Fatalf("install = %s", got)
 	}
 	if strings.Contains(strings.Join(f.envs[0], "\n"), "VECNET_") {
 		t.Fatal("hub environment reached npm")
+	}
+	// The new binary ran its --version self-check before the restart.
+	f.host.mu.Lock()
+	last := strings.Join(f.host.runs[len(f.host.runs)-1], " ")
+	f.host.mu.Unlock()
+	if last != nativeExe+" --version" {
+		t.Fatalf("last command = %q", last)
 	}
 	// Registry: the initial check plus the job's re-check.
 	if n := f.reg.hits.Load(); n != 2 {
@@ -166,8 +173,8 @@ func TestStartWithoutRestartEndsInstalled(t *testing.T) {
 	}
 }
 
-// The job installs what the registry says at click time; if that is no
-// longer newer (latest was pulled or the tag moved back), nothing installs.
+// The job installs exactly the version Start accepted, and only while npm
+// still names it latest: a pulled tag, or one that moved, installs nothing.
 func TestStartRechecksRegistry(t *testing.T) {
 	f := newServiceFixture(t, "0.2.7", true)
 	f.reg.set(200, `{"latest":"0.2.6"}`)
@@ -265,5 +272,182 @@ func TestRestartingJobBlocksAnotherStart(t *testing.T) {
 	f.advance(time.Hour)
 	if _, _, err := f.svc.Start(); !errors.Is(err, ErrBusy) {
 		t.Fatalf("Start while restarting = %v", err)
+	}
+}
+
+func TestStartRefusesWhenTagMovedOn(t *testing.T) {
+	f := newServiceFixture(t, "0.2.7", true)
+	f.reg.set(200, `{"latest":"0.2.8"}`)
+	if _, _, err := f.svc.Start(); err != nil {
+		t.Fatal(err)
+	}
+	j := waitJob(t, f.svc, StateFailed, StateRestarting)
+	if j.State != StateFailed || !strings.Contains(j.Error, "could not confirm 0.2.7") {
+		t.Fatalf("job = %+v", j)
+	}
+	if len(f.installs) != 0 {
+		t.Fatal("installed a version Start did not audit")
+	}
+}
+
+// M4: detection is redone at job start. A package installed by hand since
+// boot (any version but the running one) is never replaced or downgraded.
+func TestStartRedetectsAndNeverReplacesManualInstall(t *testing.T) {
+	for name, pkg := range map[string]string{
+		"pre-release": `{"name":"vecnet","version":"0.3.0-rc.1"}`,
+		"newer":       `{"name":"vecnet","version":"0.2.9"}`,
+		"older":       `{"name":"vecnet","version":"0.2.5"}`,
+		"other name":  `{"name":"evil","version":"0.2.6"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newServiceFixture(t, "0.2.7", true)
+			f.host.setFile(pkgRoot+"/package.json", pkg)
+			if _, _, err := f.svc.Start(); err != nil {
+				t.Fatal(err)
+			}
+			j := waitJob(t, f.svc, StateFailed, StateRestarting)
+			if j.State != StateFailed || !strings.Contains(j.Error, "no longer qualifies") {
+				t.Fatalf("job = %+v", j)
+			}
+			if len(f.installs) != 0 || f.restarts != 0 {
+				t.Fatal("installed or restarted")
+			}
+		})
+	}
+}
+
+func TestStartRedetectsContainerAndPrefix(t *testing.T) {
+	for name, mutate := range map[string]func(h *fakeHost){
+		"npm gone":       func(h *fakeHost) { h.mu.Lock(); delete(h.files, prefix+"/bin/npm"); h.mu.Unlock() },
+		"prefix moved":   func(h *fakeHost) { h.mu.Lock(); h.prefix = "/usr/local"; h.mu.Unlock() },
+		"now read-only":  func(h *fakeHost) { h.mu.Lock(); h.readonly[prefix+"/bin"] = true; h.mu.Unlock() },
+		"systemd-nspawn": func(h *fakeHost) { h.setFile("/run/systemd/container", "systemd-nspawn") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newServiceFixture(t, "0.2.7", true)
+			mutate(f.host)
+			if _, _, err := f.svc.Start(); err != nil {
+				t.Fatal(err)
+			}
+			if j := waitJob(t, f.svc, StateFailed, StateRestarting); j.State != StateFailed {
+				t.Fatalf("job = %+v", j)
+			}
+			if len(f.installs) != 0 {
+				t.Fatal("installed")
+			}
+		})
+	}
+}
+
+// A missing package (an earlier install stopped half way) may be retried.
+func TestStartAllowsMissingPackage(t *testing.T) {
+	f := newServiceFixture(t, "0.2.7", true)
+	f.host.mu.Lock()
+	delete(f.host.files, pkgRoot+"/package.json")
+	f.host.mu.Unlock()
+	if _, _, err := f.svc.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if j := waitJob(t, f.svc, StateRestarting, StateFailed); j.State != StateRestarting {
+		t.Fatalf("job = %+v", j)
+	}
+}
+
+// M2: a binary that fails its self-check never drains or restarts.
+func TestSelfCheckFailureDoesNotRestart(t *testing.T) {
+	for name, setup := range map[string]func(h *fakeHost){
+		"does not run":  func(h *fakeHost) { h.mu.Lock(); h.selfErr = errors.New("exec format error"); h.mu.Unlock() },
+		"wrong version": func(h *fakeHost) { h.mu.Lock(); h.selfOut = "vecnet-hub 0.2.6\n"; h.mu.Unlock() },
+		"garbage":       func(h *fakeHost) { h.mu.Lock(); h.selfOut = "Segmentation fault"; h.mu.Unlock() },
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newServiceFixture(t, "0.2.7", true)
+			setup(f.host)
+			if _, _, err := f.svc.Start(); err != nil {
+				t.Fatal(err)
+			}
+			j := waitJob(t, f.svc, StateFailed, StateRestarting)
+			if j.State != StateFailed || !strings.Contains(j.Error, "not restarting") || !strings.Contains(j.Error, "npm install -g vecnet@0.2.7") {
+				t.Fatalf("job = %+v", j)
+			}
+			if f.restarts != 0 {
+				t.Fatal("restarted after a failed self-check")
+			}
+		})
+	}
+}
+
+func TestWrongArchitectureDoesNotRestart(t *testing.T) {
+	f := newServiceFixture(t, "0.2.7", true)
+	f.onInstall = func() error {
+		f.host.setFile(pkgRoot+"/package.json", `{"name":"vecnet","version":"0.2.7"}`)
+		f.host.setFile(nativeExe, elfHeader(183)) // aarch64 on an amd64 hub
+		return nil
+	}
+	if _, _, err := f.svc.Start(); err != nil {
+		t.Fatal(err)
+	}
+	j := waitJob(t, f.svc, StateFailed, StateRestarting)
+	if j.State != StateFailed || !strings.Contains(j.Error, "another CPU architecture") {
+		t.Fatalf("job = %+v", j)
+	}
+	if f.restarts != 0 {
+		t.Fatal("restarted a wrong-architecture binary")
+	}
+}
+
+// L3: the audit is written at Start; a failed write starts nothing.
+func TestStartAuditsFirstAndRefusesOnAuditFailure(t *testing.T) {
+	f := newServiceFixture(t, "0.2.7", true)
+	var audited []string
+	f.svc.Audit = func(from, to string) error { audited = append(audited, from+">"+to); return errors.New("disk full") }
+	if _, _, err := f.svc.Start(); !errors.Is(err, ErrAudit) {
+		t.Fatalf("Start = %v", err)
+	}
+	if st := f.svc.Status(); st.Job != nil {
+		t.Fatalf("job started: %+v", st.Job)
+	}
+	f.svc.Audit = func(from, to string) error { audited = append(audited, from+">"+to); return nil }
+	if _, _, err := f.svc.Start(); err != nil {
+		t.Fatalf("Start after audit recovers = %v", err)
+	}
+	waitJob(t, f.svc, StateRestarting)
+	if strings.Join(audited, ",") != "0.2.6>0.2.7,0.2.6>0.2.7" {
+		t.Fatalf("audited = %v", audited)
+	}
+}
+
+// L2: the job runs under the hub's context; shutdown stops npm.
+func TestShutdownCancelsInstall(t *testing.T) {
+	f := newServiceFixture(t, "0.2.7", true)
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	f.svc.Context, f.svc.Go = ctx, wg.Go
+	f.svc.Install = func(ctx context.Context, _ string, _, _ []string) ([]byte, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	if _, _, err := f.svc.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waitJob(t, f.svc, StateInstalling)
+	cancel()
+	wg.Wait() // the job ended with the hub
+	j := waitJob(t, f.svc, StateFailed)
+	if !strings.Contains(j.Error, "shutting down") || f.restarts != 0 {
+		t.Fatalf("job = %+v restarts %d", j, f.restarts)
+	}
+}
+
+// L8: a hub on an ephemeral port is never offered one-click.
+func TestEphemeralListenRefusesOneClick(t *testing.T) {
+	f := newServiceFixture(t, "0.2.7", true)
+	f.svc.EphemeralListen = true
+	st := f.svc.Status()
+	if st.OneClick || st.ManualReason != ReasonEphemeralPort || st.ManualCommand == "" {
+		t.Fatalf("Status = %+v", st)
+	}
+	if _, _, err := f.svc.Start(); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("Start = %v", err)
 	}
 }

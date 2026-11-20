@@ -7,6 +7,7 @@ import (
 	"os"
 	"path"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -14,6 +15,7 @@ import (
 // fakeHost is an in-memory host: files, env, PATH lookups and commands.
 // Detection and installs run against it, never the machine running tests.
 type fakeHost struct {
+	mu       sync.Mutex
 	files    map[string]string
 	modes    map[string]fs.FileMode
 	env      map[string]string
@@ -24,6 +26,8 @@ type fakeHost struct {
 	prefix   string // `npm prefix -g` output
 	runs     [][]string
 	runErr   error
+	selfOut  string // --version output override
+	selfErr  error  // --version failure
 }
 
 type fakeInfo struct {
@@ -42,11 +46,33 @@ const prefix = "/home/u/.npm-global"
 const pkgRoot = prefix + "/lib/node_modules/vecnet"
 const nativeExe = pkgRoot + "/native/linux-x64/vecnet-hub"
 
+// elfHeader is the first 20 bytes of a little-endian ELF64 executable for
+// machine (62 = x86-64, 183 = aarch64).
+func elfHeader(machine byte) string {
+	h := []byte{0x7f, 'E', 'L', 'F', 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, machine, 0}
+	return string(h)
+}
+
+var amd64ELF = elfHeader(62)
+
+func (h *fakeHost) setFile(p, s string) {
+	h.mu.Lock()
+	h.files[p] = s
+	h.mu.Unlock()
+}
+
+func (h *fakeHost) file(p string) (string, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	s, ok := h.files[p]
+	return s, ok
+}
+
 func newFakeHost(version string) *fakeHost {
 	return &fakeHost{
 		files: map[string]string{
 			pkgRoot + "/package.json": `{"name":"vecnet","version":"` + version + `"}`,
-			nativeExe:                 "\x7fELF....",
+			nativeExe:                 amd64ELF,
 			prefix + "/bin/npm":       "#!/usr/bin/env node",
 			"/proc/1/cgroup":          "0::/init.scope\n",
 		},
@@ -72,23 +98,25 @@ func (h *fakeHost) system() System {
 		},
 		Getenv: func(k string) string { return h.env[k] },
 		Stat: func(p string) (fs.FileInfo, error) {
-			if _, ok := h.files[p]; !ok {
+			if _, ok := h.file(p); !ok {
 				return nil, os.ErrNotExist
 			}
+			h.mu.Lock()
 			m := h.modes[p]
+			h.mu.Unlock()
 			if m == 0 {
 				m = 0o644
 			}
 			return fakeInfo{path.Base(p), m}, nil
 		},
 		ReadFile: func(p string) ([]byte, error) {
-			if s, ok := h.files[p]; ok {
+			if s, ok := h.file(p); ok {
 				return []byte(s), nil
 			}
 			return nil, os.ErrNotExist
 		},
 		ReadHead: func(p string, n int) ([]byte, error) {
-			s, ok := h.files[p]
+			s, ok := h.file(p)
 			if !ok {
 				return nil, os.ErrNotExist
 			}
@@ -105,11 +133,31 @@ func (h *fakeHost) system() System {
 		},
 		Writable: func(dir string) bool { return !h.readonly[dir] },
 		Run: func(_ context.Context, name string, args, env []string) ([]byte, error) {
+			h.mu.Lock()
 			h.runs = append(h.runs, append([]string{name}, args...))
-			if h.runErr != nil {
-				return nil, h.runErr
+			runErr, pfx, selfOut, selfErr := h.runErr, h.prefix, h.selfOut, h.selfErr
+			h.mu.Unlock()
+			if len(args) == 1 && args[0] == "--version" {
+				// The new binary's self-check: it reports the installed version.
+				if selfErr != nil {
+					return nil, selfErr
+				}
+				if selfOut != "" {
+					return []byte(selfOut), nil
+				}
+				v, _ := packageVersion(func(p string) ([]byte, error) {
+					s, ok := h.file(p)
+					if !ok {
+						return nil, os.ErrNotExist
+					}
+					return []byte(s), nil
+				}, pkgRoot)
+				return []byte("vecnet-hub " + v + "\n"), nil
 			}
-			return []byte(h.prefix + "\n"), nil
+			if runErr != nil {
+				return nil, runErr
+			}
+			return []byte(pfx + "\n"), nil
 		},
 	}
 }
@@ -164,6 +212,14 @@ func TestDetectRefusals(t *testing.T) {
 		{"containerenv", ReasonContainer, func(h *fakeHost, _ *System) { h.files["/run/.containerenv"] = "" }, ""},
 		{"cgroup docker", ReasonContainer, func(h *fakeHost, _ *System) { h.files["/proc/1/cgroup"] = "0::/docker/abc\n" }, ""},
 		{"cgroup kubepods", ReasonContainer, func(h *fakeHost, _ *System) { h.files["/proc/1/cgroup"] = "0::/kubepods/x\n" }, ""},
+		{"systemd container", ReasonContainer, func(h *fakeHost, _ *System) { h.files["/run/systemd/container"] = "systemd-nspawn" }, ""},
+		{"pid1 environ", ReasonContainer, func(h *fakeHost, _ *System) {
+			h.files["/proc/1/environ"] = "PATH=/bin\x00container=lxc\x00HOME=/"
+		}, ""},
+		{"overlay root", ReasonContainer, func(h *fakeHost, _ *System) {
+			h.files["/proc/self/mountinfo"] = "22 1 0:21 / /proc rw - proc proc rw\n" +
+				"500 400 0:52 / / rw,relatime master:1 - overlay overlay rw,lowerdir=/a,upperdir=/b\n"
+		}, ""},
 		{"source build", ReasonNotNPMGlobal, func(h *fakeHost, _ *System) { h.exe = "/home/u/src/vecnet/bin/vecnet-hub" }, ""},
 		{"scratch image", ReasonNotNPMGlobal, func(h *fakeHost, _ *System) { h.exe = "/vecnet-hub" }, ""},
 		{"local node_modules", ReasonNotNPMGlobal, func(h *fakeHost, _ *System) {
@@ -257,5 +313,59 @@ func TestDefaultSystemRefusesTestBinary(t *testing.T) {
 	}
 	if ran {
 		t.Fatal("Detect ran a command for a non-npm binary")
+	}
+}
+
+func TestNoContainerFalsePositives(t *testing.T) {
+	h := newFakeHost("0.2.6")
+	// A normal host: ext4 root, an overlay elsewhere, PID 1 env without container=.
+	h.files["/proc/self/mountinfo"] = "29 1 259:2 / / rw,relatime shared:1 - ext4 /dev/nvme0n1p2 rw\n" +
+		"600 29 0:60 / /var/lib/docker/overlay2/x/merged rw - overlay overlay rw\n"
+	h.files["/proc/1/environ"] = "HOME=/\x00TERM=linux\x00notcontainer=1"
+	if inst, reason := Detect(context.Background(), h.system(), "0.2.6"); inst == nil {
+		t.Fatalf("Detect refused a normal host: %s", reason)
+	}
+}
+
+func TestElfMachine(t *testing.T) {
+	if m, ok := elfMachine([]byte(elfHeader(62))); !ok || m != wantMachine["amd64"] {
+		t.Fatalf("x86-64 = %v %v", m, ok)
+	}
+	if m, ok := elfMachine([]byte(elfHeader(183))); !ok || m != wantMachine["arm64"] {
+		t.Fatalf("aarch64 = %v %v", m, ok)
+	}
+	if _, ok := elfMachine([]byte("\x7fELF")); ok {
+		t.Fatal("short header accepted")
+	}
+}
+
+func TestRedetectAllowsOnlyMissingPackage(t *testing.T) {
+	h := newFakeHost("0.2.6")
+	delete(h.files, pkgRoot+"/package.json")
+	if inst, _ := Detect(context.Background(), h.system(), "0.2.6"); inst != nil {
+		t.Fatal("Detect accepted a missing package")
+	}
+	if inst, reason := Redetect(context.Background(), h.system(), "0.2.6"); inst == nil {
+		t.Fatalf("Redetect refused a missing package: %s", reason)
+	}
+	h.files[pkgRoot+"/package.json"] = `{"name":"vecnet","version":"0.3.0-rc.1"}`
+	if inst, reason := Redetect(context.Background(), h.system(), "0.2.6"); inst != nil || reason != ReasonVersion {
+		t.Fatalf("Redetect = %+v %s", inst, reason)
+	}
+	h.files[pkgRoot+"/package.json"] = `{not json`
+	if inst, _ := Redetect(context.Background(), h.system(), "0.2.6"); inst != nil {
+		t.Fatal("Redetect accepted a corrupt package.json")
+	}
+}
+
+func TestCappedBuffer(t *testing.T) {
+	b := &cappedBuffer{max: 10}
+	for i := 0; i < 5; i++ {
+		if n, err := b.Write([]byte("abcdef")); n != 6 || err != nil {
+			t.Fatal(n, err)
+		}
+	}
+	if b.String() != "abcdefabcd" {
+		t.Fatalf("buffer = %q", b.String())
 	}
 }
