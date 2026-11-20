@@ -25,7 +25,9 @@ import (
 // cancellation closes the watch cleanly before its test hub is shut down.
 func startWatch(t *testing.T, u *user, args ...string) (*syncBuffer, func()) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	// A safety bound only; tests stop the watch themselves. It must outlast
+	// every positive waitLine, which can follow other setup in the same test.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*watchLineDeadline)
 	var out, errb syncBuffer
 	done := make(chan int, 1)
 	go func() {
@@ -97,7 +99,7 @@ func monitorOutput(t *testing.T, name, text string) string {
 	t.Cleanup(srv.Close)
 	u := profileUser(t, srv.URL, "vn_peer_test")
 	out, stop := startWatch(t, u, "watch", "--for-monitor")
-	line := waitLine(t, out, regexp.MustCompile(`^e1\.1 delivery `), 5*time.Second)
+	line := waitLine(t, out, regexp.MustCompile(`^e1\.1 delivery `), watchLineDeadline)
 	stop()
 	if got := nonEmptyLines(out.String()); len(got) != 1 {
 		t.Fatalf("monitor lines = %q, want one event and no header", got)
@@ -147,7 +149,7 @@ func TestInboxHeaderAndFrom(t *testing.T) {
 	b := profileUser(t, env.URL, bSec)
 	sent := a.send(bID, "hello", "--hold")
 	out, stop := startWatch(t, b, "watch")
-	line := waitLine(t, out, regexp.MustCompile(` delivery .* hello$`), 5*time.Second)
+	line := waitLine(t, out, regexp.MustCompile(` delivery .* hello$`), watchLineDeadline)
 	stop()
 	const header = "CURSOR TYPE THREAD FROM MSG DELIVERY TEXT"
 	if lines := nonEmptyLines(out.String()); len(lines) < 2 || lines[0] != header || strings.Count(out.String(), header) != 1 {
@@ -206,14 +208,14 @@ func TestWatchRefreshesNamesOnDirectoryUpdated(t *testing.T) {
 			}
 			out, stop := startWatch(t, a, args...)
 			b.send(aID, "ready", "--hold")
-			waitLine(t, out, regexp.MustCompile(` Before: ready$`), 5*time.Second)
+			waitLine(t, out, regexp.MustCompile(` Before: ready$`), watchLineDeadline)
 
 			// Enrolment emits directory_updated to the already running watch.
 			// The next sender did not exist in its initial directory fetch.
 			cID, cSec := env.NewPeer("session", "New Name")
 			c := profileUser(t, env.URL, cSec)
 			sent := c.send(aID, "after refresh", "--hold")
-			line := waitLine(t, out, regexp.MustCompile(` delivery `+regexp.QuoteMeta(sent.ThreadID)+` `), 5*time.Second)
+			line := waitLine(t, out, regexp.MustCompile(` delivery `+regexp.QuoteMeta(sent.ThreadID)+` `), watchLineDeadline)
 			if want := " " + cID + " New_Name: after refresh"; !strings.HasSuffix(line, want) {
 				t.Fatalf("directory update did not refresh name: %q, want suffix %q", line, want)
 			}
@@ -262,7 +264,7 @@ func TestPeerNameFetchFailureKeepsWatching(t *testing.T) {
 			b := profileUser(t, env.URL, bSec)
 			out, stop := startWatch(t, a, "watch", "--for-monitor", "--deliveries-only")
 			b.send(aID, "ready", "--hold")
-			waitLine(t, out, regexp.MustCompile(` ready$`), 5*time.Second)
+			waitLine(t, out, regexp.MustCompile(` ready$`), watchLineDeadline)
 			initialFetches := fetches.Load()
 			if initialFetches == 0 {
 				t.Fatal("watch did not fetch the initial directory")
@@ -273,7 +275,7 @@ func TestPeerNameFetchFailureKeepsWatching(t *testing.T) {
 			}
 			env.NewPeer("session", "Trigger directory update")
 			sent := b.send(aID, "still watching", "--hold")
-			line := waitLine(t, out, regexp.MustCompile(` delivery `+regexp.QuoteMeta(sent.ThreadID)+` `), 5*time.Second)
+			line := waitLine(t, out, regexp.MustCompile(` delivery `+regexp.QuoteMeta(sent.ThreadID)+` `), watchLineDeadline)
 			if got := fetches.Load(); got <= initialFetches {
 				t.Fatalf("directory update did not retry fetch: before %d, after %d", initialFetches, got)
 			}
@@ -294,7 +296,7 @@ func TestPeerNameFetchFailureKeepsWatching(t *testing.T) {
 			if mode != "startup" {
 				// A new watch retains persisted names when its startup fetch fails.
 				restarted, stopAgain := startWatch(t, a, "watch", "--for-monitor")
-				waitLine(t, restarted, regexp.MustCompile(` Max: ready$`), 5*time.Second)
+				waitLine(t, restarted, regexp.MustCompile(` Max: ready$`), watchLineDeadline)
 				stopAgain()
 			}
 		})
@@ -320,7 +322,7 @@ func TestWatchJSONUnchanged(t *testing.T) {
 	sent := a.send(bID, text, "--hold")
 	// Global --json wins over --for-monitor and retains the original event.
 	out, stop := startWatch(t, b, "--json", "watch", "--for-monitor")
-	line := waitLine(t, out, regexp.MustCompile(`"type":"delivery"`), 5*time.Second)
+	line := waitLine(t, out, regexp.MustCompile(`"type":"delivery"`), watchLineDeadline)
 	stop()
 	var ev inboxEvent
 	if err := json.Unmarshal([]byte(line), &ev); err != nil {
@@ -355,7 +357,7 @@ func TestWatchPlainIgnoresShownState(t *testing.T) {
 				t.Fatal(err)
 			}
 			out, stop := startWatch(t, u, args...)
-			waitLine(t, out, regexp.MustCompile(regexp.QuoteMeta(sent.MessageID)), 5*time.Second)
+			waitLine(t, out, regexp.MustCompile(regexp.QuoteMeta(sent.MessageID)), watchLineDeadline)
 			stop()
 			got, err := os.ReadFile(path)
 			if err != nil || string(got) != string(raw) {
@@ -445,7 +447,7 @@ func TestWatchMismatchedStateDefersUntilRepair(t *testing.T) {
 	if err := os.Rename(state+".repair", state); err != nil {
 		t.Fatal(err)
 	}
-	waitLine(t, out, regexp.MustCompile(`live for the new identity$`), 5*time.Second)
+	waitLine(t, out, regexp.MustCompile(`live for the new identity$`), watchLineDeadline)
 	stop()
 	raw, err := os.ReadFile(state)
 	if err != nil {

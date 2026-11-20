@@ -459,7 +459,7 @@ func (a *app) warnNestedCheckouts(path string) {
 	if err != nil || list == "" {
 		return
 	}
-	ctx, cancel := context.WithTimeout(a.ctx, 2*time.Second)
+	ctx, cancel := context.WithTimeout(a.ctx, localGitProbeBudget)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", "-C", root, "worktree", "list", "--porcelain")
 	cmd.WaitDelay = 100 * time.Millisecond
@@ -488,7 +488,7 @@ func (a *app) warnNestedCheckouts(path string) {
 // hookGit runs one bounded `git -C dir rev-parse <arg>` and returns its
 // trimmed output.
 func (a *app) hookGit(dir, arg string) (string, error) {
-	ctx, cancel := context.WithTimeout(a.ctx, 2*time.Second)
+	ctx, cancel := context.WithTimeout(a.ctx, localGitProbeBudget)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", arg)
 	// Untranslated messages, so hookNotGitRepo can recognise git's answer.
@@ -528,7 +528,7 @@ func hookGitReason(err error) string {
 // checkCodexUntracked allows only git's explicit untracked result. Discovery
 // succeeded, so a failed status probe must not share a personal profile.
 func (a *app) checkCodexUntracked(root, path string) error {
-	ctx, cancel := context.WithTimeout(a.ctx, 2*time.Second)
+	ctx, cancel := context.WithTimeout(a.ctx, localGitProbeBudget)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", "-C", root, "ls-files", "--error-unmatch", "--", ".codex/hooks.json")
 	cmd.WaitDelay = 100 * time.Millisecond

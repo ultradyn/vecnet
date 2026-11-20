@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/XertroV/vecnet/internal/platform"
 	"github.com/XertroV/vecnet/internal/testfixture/cliprogram"
@@ -86,6 +87,16 @@ type cliFixtureProgramSpec = CLIFixtureProgramSpec
 func cliFixtureProgram(t *testing.T, dir, name, script string, spec cliFixtureProgramSpec) {
 	t.Helper()
 	CLIFixtureProgram(t, dir, name, script, spec)
+}
+
+// ExtendLocalGitProbeBudget raises the per-subprocess Git probe budget for
+// one test whose subject is not that deadline. No internal/cli test runs in
+// parallel, and the cleanup restores the product value.
+func ExtendLocalGitProbeBudget(t *testing.T, budget time.Duration) {
+	t.Helper()
+	previous := localGitProbeBudget
+	localGitProbeBudget = budget
+	t.Cleanup(func() { localGitProbeBudget = previous })
 }
 
 // CLIFixtureProgram installs a synthetic subprocess, never a real clipboard

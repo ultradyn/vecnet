@@ -6,6 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/XertroV/vecnet/internal/cli"
 )
 
 // Installing a second profile into one settings file warns that every
@@ -54,6 +57,10 @@ func TestHookInstallWarnsLinkedWorktree(t *testing.T) {
 }
 func testLinkedWorktree(t *testing.T, nested bool) {
 	isolateGitEnv(t)
+	// Real Git answers four probes here; a cold git.exe on the single-core
+	// Windows runner exceeded the 2s per-probe budget and dropped the
+	// warning. This test checks the warning, not the Git deadline.
+	cli.ExtendLocalGitProbeBudget(t, 20*time.Second)
 	u := installUser(t)
 	base := t.TempDir()
 	main, wt := filepath.Join(base, "main"), filepath.Join(base, "wt")

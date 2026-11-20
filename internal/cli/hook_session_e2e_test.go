@@ -9,7 +9,6 @@ import (
 	"regexp"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/XertroV/vecnet/internal/cli"
 	"github.com/XertroV/vecnet/internal/testhub"
@@ -164,7 +163,7 @@ func TestWatchKeepsHookBinding(t *testing.T) {
 	hook("S1") // binds (declared by VECNET_PROFILE=p) and takes the log head
 	out, stop := startWatch(t, a, "watch", "--for-monitor")
 	sent := b.send(aID, "seen by watch", "--hold")
-	waitLine(t, out, regexp.MustCompile(`seen by watch$`), 5*time.Second)
+	waitLine(t, out, regexp.MustCompile(`seen by watch$`), watchLineDeadline)
 	stop()
 	statePath := filepath.Join(filepath.Dir(a.conf), "state", "p.json")
 	raw, err := os.ReadFile(statePath)

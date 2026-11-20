@@ -16,6 +16,12 @@ const tarball = path.join(root, 'dist', `vecnet-${manifest.version}.tgz`);
 const windows = process.platform === 'win32';
 const commands = ['vecnet', 'vecnet-hub'];
 
+// Disposable fixture removal. On Windows an exited child's image can stay
+// mapped briefly, so unlinking it raises EBUSY after the test itself passed.
+// rm's own bounded retry (EBUSY/EPERM/ENOTEMPTY, delays growing by 50ms per
+// attempt, 1.8s in total) covers that release; a persistent lock still fails.
+const removeFixture = target => rm(target, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 });
+
 function deadline(promise, ms, label) {
   let timer;
   return Promise.race([
@@ -35,7 +41,7 @@ test('release contains only runtime files and complete native binaries', async t
   for (const file of runtime) assert.match(file, /^package\/connectors\/(launcher|hub-client)\/(package\.json|src\/[A-Za-z0-9_./-]+\.ts|schema\/launch-(input|permission|question|answers|approval-closed)\.v1\.schema\.json|systemd\/vecnet-launcher-profile\.service\.in)$/);
   assert.deepEqual(packed.filter(file => !file.startsWith('package/connectors/')), expected);
   const extracted = await mkdtemp(path.join(os.tmpdir(), 'vecnet-npm-inspect-'));
-  t.after(() => rm(extracted, { recursive: true, force: true }));
+  t.after(() => removeFixture(extracted));
   execFileSync('tar', ['-xzf', tarball, '-C', extracted]);
   const contents = path.join(extracted, 'package');
   const packedManifest = JSON.parse(await readFile(path.join(contents, 'package.json'), 'utf8'));
@@ -77,7 +83,7 @@ test('packed npm installation runs both commands and exchanges messages through 
     finally {
       try { if (cleanupTask) cleanupTask(); }
       finally {
-        if (completed) await rm(temporary, { recursive: true, force: true });
+        if (completed) await removeFixture(temporary);
         else t.diagnostic('Preserved failed npm fixture (disposable credentials): ' + temporary);
       }
     }
@@ -380,7 +386,7 @@ test('packed npm installation runs both commands and exchanges messages through 
 
 test('real native wrapper preserves arguments and arbitrary nonzero exit codes', async t => {
   const fixture = await mkdtemp(path.join(os.tmpdir(), 'vecnet npm native child & '));
-  t.after(() => rm(fixture, { recursive: true, force: true }));
+  t.after(() => removeFixture(fixture));
   execFileSync('tar', ['-xzf', tarball, '-C', fixture]);
   const binary = path.join(fixture, 'package', 'native', process.platform + '-' + process.arch, 'vecnet' + (windows ? '.exe' : ''));
   await copyFile(process.execPath, binary);
@@ -396,7 +402,7 @@ test('real native wrapper preserves arguments and arbitrary nonzero exit codes',
 
 test('wrapper preserves failure when a native process is killed by SIGPIPE', { skip: windows ? 'POSIX signals; Windows process-tree shutdown is tested in the live installation test' : false }, async t => {
   const fixture = await mkdtemp(path.join(os.tmpdir(), 'vecnet-npm-signal-'));
-  t.after(() => rm(fixture, { recursive: true, force: true }));
+  t.after(() => removeFixture(fixture));
   execFileSync('tar', ['-xzf', tarball, '-C', fixture]);
   const binary = path.join(fixture, 'package', 'native', `${process.platform}-${process.arch}`, 'vecnet');
   await writeFile(binary, '#!/bin/sh\nkill -PIPE "$$"\n', { mode: 0o755 });
@@ -409,7 +415,7 @@ test('wrapper preserves failure when a native process is killed by SIGPIPE', { s
 
 test('npm package includes complete launcher runtime and dynamic builtins', async t => {
   const extracted = await mkdtemp(path.join(os.tmpdir(),'vecnet-npm-launcher-assets-'));
-  t.after(()=>rm(extracted,{recursive:true,force:true}));
+  t.after(() => removeFixture(extracted));
   execFileSync('tar',['-xzf',tarball,'-C',extracted]);
   const contents = path.join(extracted,'package');
   const metadata = JSON.parse(await readFile(path.join(contents,'BUILD_INFO.json'),'utf8'));

@@ -134,7 +134,11 @@ if (kind === 'prepare-go') {
           child.once('error',reject);
           child.once('close',(code,signal)=>code===0?resolve():reject(new Error(`${pkg} failed: exit=${code} signal=${signal}`)));
         });
-      } finally { await rm(privateRoot,{recursive:true,force:true}); }
+      } finally {
+        // A passed packet's exited child (e.g. a staged node.exe) can stay
+        // mapped briefly on Windows; rm's bounded EBUSY retry covers that.
+        await rm(privateRoot,{recursive:true,force:true,maxRetries:8,retryDelay:50});
+      }
     }
     console.log(`ci-package pkg=${pkg} roots=${selected.length} elapsed_ms=${Math.round(performance.now()-started)} estimated_s=${cost.toFixed(3)}`);
   },process.env.GITHUB_ACTIONS==='true'?nativeGoWorkers(process.platform):2);

@@ -19,6 +19,13 @@ import (
 
 func TestLocalMaintenanceConcurrentSchedulingAndChildEnvironment(t *testing.T) {
 	a, _, home := localRegistryFixture(t)
+	// This proves exactly one of 20 racing schedulers starts a worker. With
+	// the 10ms foreground lock budget, a loaded runner let every goroutine
+	// (the first included) time out: "started 0". A generous budget lets the
+	// lock serialize them; the 30s requested marker must still dedupe.
+	previous := localScheduleBudgetOverride
+	localScheduleBudgetOverride = 10 * time.Second
+	t.Cleanup(func() { localScheduleBudgetOverride = previous })
 	var started atomic.Int32
 	a.localRepairStart = func(cmd *exec.Cmd) error {
 		if len(cmd.Args) != 3 || cmd.Args[1] != "repair" || cmd.Args[2] != "--background" {

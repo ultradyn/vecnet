@@ -180,7 +180,7 @@ func oneClickHub(t *testing.T, ctx context.Context, wrapRestart func(func()) fun
 	go func() {
 		done <- run(ctx, []string{"--listen", freeListen(t), "--data-dir", dataDir}, out, noEnv)
 	}()
-	waitUntil(t, 5*time.Second, "listening", func() bool {
+	waitUntil(t, bootHubReadiness, "listening", func() bool {
 		if m := listenLine.FindStringSubmatch(out.String()); m != nil {
 			base = m[1]
 			return true

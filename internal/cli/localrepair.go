@@ -665,8 +665,15 @@ func (a *app) finishLocalProjectRepair(root string, completed map[string]localAr
 // NTFS handle-based ACL validation is more expensive than flock: allow one
 // bounded local attempt without making contention queue foreground commands.
 func localScheduleBudget() time.Duration {
+	if localScheduleBudgetOverride > 0 {
+		return localScheduleBudgetOverride
+	}
 	if runtime.GOOS == "windows" {
 		return 200 * time.Millisecond
 	}
 	return 10 * time.Millisecond
 }
+
+// localScheduleBudgetOverride is zero in product code. Only in-package tests
+// whose subject is scheduling dedupe, not this foreground budget, set it.
+var localScheduleBudgetOverride time.Duration

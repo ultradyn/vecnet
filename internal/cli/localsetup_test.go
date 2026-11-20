@@ -472,6 +472,12 @@ func localSetupPlainDirectoryGit(t *testing.T) {
 	t.Setenv("PATH", bin)
 	t.Setenv("NoDefaultCurrentDirectoryInExePath", "1")
 	t.Setenv("PATHEXT", ".EXE")
+	// This fixture answers "not a repository" at once; these tests prove what
+	// setup does with that answer, not Git's deadline. On a single-core
+	// Windows runner the first launch of a fresh fixture image took over the
+	// real 2s budget and failed discovery. Deadline behaviour stays covered by
+	// the git-timeout and context-label tests, which keep the product budget.
+	ExtendLocalGitProbeBudget(t, 20*time.Second)
 }
 
 func localSetupHome(t *testing.T) string {
