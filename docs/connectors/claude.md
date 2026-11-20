@@ -156,15 +156,20 @@ What an admitted scope does:
   read, the watch and the ack-window read) runs with `VECNET_CONFIG` set to
   the binding's own config, never the daemon's default. A binding whose
   config path is missing or not absolute is never admitted.
-- **New arrivals only.** On a scope's first admission, after a generation
-  change, or with an empty cursor, the host reads `inbox --since head`,
-  stores that cursor and stages nothing: deliveries already waiting before
-  admission stay on the legacy hook and inbox path. A page that arrives with
-  events on that head read is retried, never baselined past. If the hub
-  refuses the stored cursor itself (purged below retention, from another
-  epoch after a log rebuild, or malformed), the scope rebaselines at the head
-  the same way; any other read failure keeps the cursor and retries with
-  backoff.
+- **New arrivals only.** Every admission baselines at head. A scope's first
+  admission, every re-admission after the canary or policy was withdrawn and
+  returned (including a config-witness lapse), and the first admitted pass
+  after every daemon start, restart or kill-switch recovery reads
+  `inbox --since head`, stores that cursor and stages nothing; the same
+  happens after a generation change or with an empty cursor. Deliveries
+  already waiting before admission stay on the legacy hook and inbox path:
+  wakes that arrive while the scope is not admitted, or while the daemon is
+  down, get no native pointer — they stay in the inbox on the legacy path. A
+  page that arrives with events on that head read is retried, never
+  baselined past. If the hub refuses the stored cursor itself (purged below
+  retention, from another epoch after a log rebuild, or malformed), the
+  scope rebaselines at the head the same way; any other read failure keeps
+  the cursor and retries with backoff.
 - **Staging.** Bounded wake candidates, in cursor order, become durable
   claims (`reserved`, then `attempting` before any byte can leave). `hold`
   and `wake_idle` never enter a native batch. At most 128 unresolved claims

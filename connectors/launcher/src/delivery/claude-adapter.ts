@@ -375,6 +375,18 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Cl
   // state never marks native.
   let admissions: ReadonlyMap<string, string> = new Map();
   let ambiguousLogged = false;
+  /** Binding keys this adapter process has admitted AND established at a
+   * head baseline on an earlier pass (in-memory only). Native pointers are
+   * for arrivals while the scope is admitted and this process is running, so
+   * every admission that was not admitted-and-baselined on the previous pass
+   * — the first pass after construction (daemon start, restart, kill-switch
+   * recovery), a canary or policy flap, a witness lapse — re-baselines at
+   * the head before any transport instead of resuming a stored cursor that
+   * predates the gap. A key enters only once its baseline read has persisted
+   * (a failed read leaves it out, so the next pass retries the head rather
+   * than replaying the gap from a stale cursor); a pass with a proven
+   * snapshot removes every key it did not admit; stop clears the set. */
+  const established = new Set<string>();
 
   /** One pass's claim view: built by a single claimRows() scan, then kept
    * current in memory by every save and delete this adapter makes, so no
@@ -464,6 +476,9 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Cl
         admitted = [];
       } else ambiguousLogged = false;
       admissions = new Map(admitted.map(row => [row.binding_key, row.generation]));
+      // A proven snapshot ends any previous admission this pass does not
+      // repeat: the next pass that admits the key again re-baselines.
+      for (const key of [...established]) if (!admissions.has(key)) established.delete(key);
       subscribeWatches(admitted);
       // The snapshot is proven, so the admitted set is known (possibly
       // empty): one scan builds this pass's index, then the fence sweep
@@ -474,7 +489,7 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Cl
       await enqueue(FENCE_LANE, async () => fenceSweep(keys));
       if (admitted.length) {
         await Promise.all(admitted.map(row => enqueue(row.binding_key, () =>
-          recoverScope(row).then(() => observeAcks(row)).then(() => stageScope(row)))));
+          recoverScope(row).then(() => observeAcks(row)).then(() => stageScope(row, !established.has(row.binding_key))))));
       }
     } catch {
       failed = true;
@@ -663,9 +678,12 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Cl
 
   /** New arrivals only, no tail: read the hub head, persist it as the
    * scope's cursor, and stage nothing this pass. Earlier unacked deliveries
-   * stay on the legacy hook/inbox path. Triggered by a first admission, a
-   * new generation, an empty cursor or a hub-rejected cursor. A failed read
-   * persists nothing and retries on backoff. */
+   * stay on the legacy hook/inbox path. Triggered by a first admission in
+   * this process (daemon start, restart, kill-switch recovery), every
+   * re-admission after a pass that did not admit the scope (canary or policy
+   * flap, witness lapse), a new generation, an empty cursor or a
+   * hub-rejected cursor. A failed read persists nothing and retries on
+   * backoff. */
   async function baseline(row: ClaudeSnapshotBinding, coordinates: ClaudeDeliveryScopeCoordinates, record: RecordValue): Promise<void> {
     const head = await bounded(fetchCandidates(coordinates, 'head'), FETCH_TIMEOUT, clock);
     // The hub resolves `head` and reads the page in separate snapshots: an
@@ -680,15 +698,20 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Cl
   }
 
   /** Stage one bounded ordered window, then attempt the staged wakes in
-   * cursor order. The durable checkpoint advances only past fully handled
-   * events; an unknown or corrupt event stalls the window for this pass. */
-  async function stageScope(row: ClaudeSnapshotBinding): Promise<void> {
+   * cursor order. `rebaseline` is set whenever this admission is the first
+   * this process established for the key (see `established`): the window
+   * then starts at a fresh head baseline, never at a stored cursor that
+   * predates a not-admitted gap. The durable checkpoint advances only past
+   * fully handled events; an unknown or corrupt event stalls the window for
+   * this pass. */
+  async function stageScope(row: ClaudeSnapshotBinding, rebaseline: boolean): Promise<void> {
     const coordinates = scopeCoordinates(row);
     const scopeKey = SCOPE_PREFIX + row.binding_key;
     const record = obj(JSON.parse(kv.get(scopeKey) ?? '{}'));
     const stored = typeof record.generation === 'string' && typeof record.cursor === 'string';
-    if (!stored || record.generation !== row.generation || record.cursor === '' || !CURSOR.test(record.cursor)) {
+    if (rebaseline || !stored || record.generation !== row.generation || record.cursor === '' || !CURSOR.test(record.cursor)) {
       await baseline(row, coordinates, record);
+      established.add(row.binding_key); // Only once the baseline persisted.
       return;
     }
     const progress = {
@@ -836,6 +859,7 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Cl
       // Fence new work synchronously: no pass, watch or attempt may start.
       running = false;
       admissions = new Map();
+      established.clear(); // A restart of this adapter re-baselines first.
       backoff?.cancel(); backoff = undefined;
       reload?.cancel(); reload = undefined;
       passQueued = false;

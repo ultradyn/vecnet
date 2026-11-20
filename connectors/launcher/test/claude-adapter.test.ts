@@ -11,7 +11,7 @@ import type { KeyValue } from '../src/backend.ts';
 import { fakeClock, memoryLog } from '../../hub-client/testing/fixtures.ts';
 import type { Log } from '../../hub-client/src/ports.ts';
 import { createClaudeDeliveryAdapter, claudeDeliveryCanaryAllowed, claudeInboxArgs, claudeDeliverArgs, spawnClaudeDeliver, spawnClaudeInbox, CLAUDE_PENDING_LIMIT } from '../src/delivery/claude-adapter.ts';
-import type { ClaudeCandidatePage, ClaudeClaimRecord, ClaudeDeliveryAdapterDeps, ClaudeDeliveryFrame, DeliverExit } from '../src/delivery/claude-adapter.ts';
+import type { ClaudeCandidatePage, ClaudeClaimRecord, ClaudeDeliveryAdapterDeps, ClaudeDeliveryFrame, ClaudeDeliveryScopeCoordinates, DeliverExit } from '../src/delivery/claude-adapter.ts';
 import type { WatchPool, WatchRequest, WakeEvent, WatchEnd } from '../src/delivery/watch-pool.ts';
 
 // Task 7 (claude delivery chain): the hosted native pointer-delivery adapter.
@@ -119,9 +119,14 @@ interface Fixture {
   setExit(exit: DeliverExit): void;
 }
 
-/** Most tests exercise staging after the first-admission baseline: the
- * fixture seeds a progress record already baselined at `e1.0` for the
- * admitted generation. `{ baselined: false }` starts from no record. */
+/** Most tests exercise staging on an already-running adapter: every
+ * admission (including the first pass of this process) baselines at head,
+ * so the fixture seeds a progress record at `e1.0`, its candidate source
+ * answers every `head` read with an empty page at `e1.0`, and the first
+ * (establishing) pass stages nothing. A test's pages are served to the
+ * reads after it: trigger one with a wake through the pool or the reload
+ * tick. `{ baselined: false }` starts from no record for tests that drive
+ * the baseline reads themselves. */
 function fixture(t: TestContext, deps: Partial<ClaudeDeliveryAdapterDeps> = {}, opts: { baselined?: boolean } = {}): Fixture {
   const clock = fakeClock(1000), log = memoryLog(), store = memoryKv();
   if (opts.baselined !== false) {
@@ -133,10 +138,12 @@ function fixture(t: TestContext, deps: Partial<ClaudeDeliveryAdapterDeps> = {}, 
   let snapshot: unknown = { version: 1, bindings: [admittedRow()] };
   // The adapter re-validates every row; the fixture's raw shape is the point.
   let pages: ClaudeCandidatePage[] = [];
+  const fixtureCandidates = async (_c: ClaudeDeliveryScopeCoordinates, cursor: string | undefined): Promise<ClaudeCandidatePage> =>
+    cursor === 'head' ? { events: [], nextCursor: 'e1.0' } : pages.shift() ?? { events: [] };
   const adapter = createClaudeDeliveryAdapter({
     pool, clock, log, kv: store.kv, env: { HOME: '/nonexistent', VECNET_BIN: '/nonexistent/vecnet' },
     fetchSnapshot: async () => snapshot as import('../src/delivery/claude-status.ts').ClaudeSnapshot,
-    fetchCandidates: async () => pages.shift() ?? { events: [] },
+    fetchCandidates: fixtureCandidates,
     transport: async frame => { transportCalls.push(frame); return exit; },
     fetchAckWindow: async () => undefined, // No observation unless a test supplies one.
     ...deps,
@@ -176,6 +183,8 @@ test('an admitted binding subscribes one exclusive watch and delivers a wake poi
   const f = fixture(t);
   f.setPages([{ events: [deliveryEvent('e1.1', 1)] }]);
   f.adapter.start();
+  await settle(); // The first pass of this process only establishes the baseline.
+  f.pool.recording.notify('exclusive:claude:' + KEY, { priority: 'wake' });
   await settle();
   assert.equal(f.pool.recording.requests.length, 1, 'exactly one exclusive watch per admitted scope');
   const request = f.pool.recording.requests[0];
@@ -205,6 +214,8 @@ test('the attempting state is durably persisted before the transport is invoked'
   });
   f.setPages([{ events: [deliveryEvent('e1.1', 1)] }]);
   f.adapter.start();
+  await settle(); // Baseline-only first pass.
+  f.pool.recording.notify('exclusive:claude:' + KEY, { priority: 'wake' });
   await settle();
   assert.deepEqual(observed, ['attempting'], 'the durable claim must say attempting before any byte can leave');
   assert.equal(f.kv.claim('dly_' + ulid(1))!.state, 'released', 'the attempt still settles its disposition');
@@ -218,6 +229,8 @@ test('the claim lifecycle is logged: admission, reserved, attempting, dispositio
   const f = fixture(t);
   f.setPages([{ events: [deliveryEvent('e1.1', 1, { priority: 'hold' }), deliveryEvent('e1.2', 2)] }]);
   f.adapter.start();
+  await settle(); // Baseline-only first pass.
+  f.pool.recording.notify('exclusive:claude:' + KEY, { priority: 'wake' });
   await settle();
   const msgs = f.log.entries.map(e => e.msg);
   const at = (needle: string) => msgs.indexOf(needle);
@@ -247,6 +260,8 @@ test('hold is never transported and never acked', async t => {
   const f = fixture(t);
   f.setPages([{ events: [deliveryEvent('e1.1', 1, { priority: 'hold' })] }]);
   f.adapter.start();
+  await settle(); // Baseline-only first pass.
+  f.pool.recording.notify('exclusive:claude:' + KEY, { priority: 'wake' });
   await settle();
   assert.equal(f.transportCalls.length, 0, 'hold is inbox-only for the native adapter');
   const claim = f.kv.claim('dly_' + ulid(1))!;
@@ -262,6 +277,8 @@ test('wake_idle stays on the legacy path: staged past, never transported', async
   const f = fixture(t);
   f.setPages([{ events: [deliveryEvent('e1.1', 1, { priority: 'wake_idle' })] }]);
   f.adapter.start();
+  await settle(); // Baseline-only first pass.
+  f.pool.recording.notify('exclusive:claude:' + KEY, { priority: 'wake' });
   await settle();
   assert.equal(f.transportCalls.length, 0, 'wake_idle is never silently degraded to a native wake');
   assert.equal(f.kv.claims().length, 0, 'wake_idle leaves no native reservation');
@@ -315,6 +332,8 @@ test('an attempting claim from a crashed run surfaces uncertain and is never res
   f.kv.kv.set('claude-claims:claim:dly_seeded', JSON.stringify(seededClaim({ state: 'attempting' })));
   f.setPages([{ events: [deliveryEvent('e1.9', 9)] }]);
   f.adapter.start();
+  await settle(); // Baseline-only first pass: the crashed claim turns uncertain.
+  f.pool.recording.notify('exclusive:claude:' + KEY, { priority: 'wake' });
   await settle();
   assert.equal(f.transportCalls.length, 1, 'only the new message is attempted, never the crashed one');
   assert.deepEqual(f.transportCalls.map(c => c.threadId), [THREAD]);
@@ -329,6 +348,8 @@ test('transport exit 3 records refused; exit 4 records uncertain', async t => {
   refused.setPages([{ events: [deliveryEvent('e1.1', 1)] }]);
   refused.setExit(3);
   refused.adapter.start();
+  await settle(); // Baseline-only first pass.
+  refused.pool.recording.notify('exclusive:claude:' + KEY, { priority: 'wake' });
   await settle();
   const refusedClaim = refused.kv.claim('dly_' + ulid(1))!;
   assert.equal(refusedClaim.state, 'refused');
@@ -339,6 +360,8 @@ test('transport exit 3 records refused; exit 4 records uncertain', async t => {
   uncertain.setPages([{ events: [deliveryEvent('e1.1', 1)] }]);
   uncertain.setExit(4);
   uncertain.adapter.start();
+  await settle(); // Baseline-only first pass.
+  uncertain.pool.recording.notify('exclusive:claude:' + KEY, { priority: 'wake' });
   await settle();
   const uncertainClaim = uncertain.kv.claim('dly_' + ulid(1))!;
   assert.equal(uncertainClaim.state, 'uncertain');
@@ -357,6 +380,8 @@ test('a transport rejection fails closed to uncertain', async t => {
   });
   f.setPages([{ events: [deliveryEvent('e1.1', 1)] }]);
   f.adapter.start();
+  await settle(); // Baseline-only first pass.
+  f.pool.recording.notify('exclusive:claude:' + KEY, { priority: 'wake' });
   await settle();
   const claim = f.kv.claim('dly_' + ulid(1))!;
   assert.equal(claim.state, 'uncertain');
@@ -367,6 +392,8 @@ test('a later wake after a quarantined hold delivers the new message and keeps t
   const f = fixture(t);
   f.setPages([{ events: [deliveryEvent('e1.1', 1, { priority: 'hold' })] }]);
   f.adapter.start();
+  await settle(); // Baseline-only first pass.
+  f.pool.recording.notify('exclusive:claude:' + KEY, { priority: 'wake' });
   await settle();
   assert.equal(f.kv.claim('dly_' + ulid(1))!.state, 'held');
 
@@ -392,6 +419,8 @@ test('the 129th unresolved reservation blocks with blocked_pending_limit and no 
   }
   f.setPages([{ events: [deliveryEvent('e1.1', 1)] }]);
   f.adapter.start();
+  await settle(); // Baseline-only first pass.
+  f.pool.recording.notify('exclusive:claude:' + KEY, { priority: 'wake' });
   await settle();
   assert.equal(f.transportCalls.length, 0, 'a reached cap blocks additional native sends');
   assert.equal(f.kv.claim('dly_' + ulid(1)), undefined, 'the blocked candidate leaves no reservation');
@@ -404,7 +433,9 @@ test('tombstones survive repeated reconcile until a confirmed hub ack', async t 
   const f = fixture(t);
   f.setPages([{ events: [deliveryEvent('e1.1', 1, { priority: 'hold' })] }]);
   f.adapter.start();
-  await settle();
+  await settle(); // Baseline-only first pass.
+  f.pool.recording.notify('exclusive:claude:' + KEY, { priority: 'wake' });
+  await settle(); // Stages the hold.
   f.setPages([{ events: [deliveryEvent('e1.2', 2)] }]);
   f.clock.advance(10_000); await settle();   // periodic refresh pass
   f.setExit(3);
@@ -445,6 +476,8 @@ test('stop fences new work and drains an in-flight transport', async t => {
   });
   f.setPages([{ events: [deliveryEvent('e1.1', 1)] }]);
   f.adapter.start();
+  await settle(); // Baseline-only first pass.
+  f.pool.recording.notify('exclusive:claude:' + KEY, { priority: 'wake' });
   await settle();
   assert.equal(seen, 1);
 
@@ -468,6 +501,8 @@ test('an unknown or corrupt inbox event stalls the window instead of being skipp
     deliveryEvent('e1.3', 3),
   ] }]);
   f.adapter.start();
+  await settle(); // Baseline-only first pass.
+  f.pool.recording.notify('exclusive:claude:' + KEY, { priority: 'wake' });
   await settle();
   assert.equal(f.transportCalls.length, 1, 'events before the unknown one are delivered in order');
   assert.equal(f.kv.claim('dly_' + ulid(3)), undefined, 'nothing past the unknown event is staged');
@@ -482,6 +517,8 @@ test('non-message kinds and non-delivery events never become native instructions
     deliveryEvent('e1.2', 2),
   ] }]);
   f.adapter.start();
+  await settle(); // Baseline-only first pass.
+  f.pool.recording.notify('exclusive:claude:' + KEY, { priority: 'wake' });
   await settle();
   assert.deepEqual(f.transportCalls.map(c => c.threadId), [THREAD], 'only the ordinary message is delivered');
   assert.equal(f.kv.claims().length, 1);
@@ -557,6 +594,8 @@ test('only the single canary-opted peer scope is admitted', async t => {
   const f = fixture(t);
   f.setPages([{ events: [deliveryEvent('e1.1', 1)] }]);
   f.adapter.start();
+  await settle(); // Baseline-only first pass.
+  f.pool.recording.notify('exclusive:claude:' + KEY, { priority: 'wake' });
   await settle();
   assert.deepEqual([...f.adapter.admitted()], [[KEY, GEN]]);
   assert.equal(f.transportCalls.length, 1);
@@ -583,6 +622,8 @@ test('claim records carry no body and no credentials', async t => {
   const secret = 'SENSITIVE-BODY-CONTENT';
   f.setPages([{ events: [deliveryEvent('e1.1', 1)] }]);
   f.adapter.start();
+  await settle(); // Baseline-only first pass.
+  f.pool.recording.notify('exclusive:claude:' + KEY, { priority: 'wake' });
   await settle();
   const raw = f.kv.kv.get('claude-claims:claim:dly_' + ulid(1))!;
   assert.ok(!raw.includes(secret));
@@ -597,6 +638,8 @@ test('an unknown stream event type stalls the window', async t => {
     { cursor: 'e1.0', type: 'mystery', deliveryId: '', messageId: '', threadId: '', priority: '', kind: '' },
   ] }]);
   f.adapter.start();
+  await settle(); // Baseline-only first pass.
+  f.pool.recording.notify('exclusive:claude:' + KEY, { priority: 'wake' });
   await settle();
   assert.equal(f.transportCalls.length, 0, 'an unknown event type is never skipped past');
   assert.equal(f.kv.scope(KEY)!.cursor, 'e1.0', 'the checkpoint does not advance past an unknown event type');
@@ -615,6 +658,8 @@ test('peer-visible non-delivery events (reaction, hub_notice, operator_view) adv
     deliveryEvent('e1.4', 1),
   ] }]);
   f.adapter.start();
+  await settle(); // Baseline-only first pass.
+  f.pool.recording.notify('exclusive:claude:' + KEY, { priority: 'wake' });
   await settle();
   assert.deepEqual(f.transportCalls.map(c => c.threadId), [THREAD], 'exactly the wake behind the non-delivery events is delivered');
   assert.equal(f.kv.scope(KEY)!.cursor, 'e1.4', 'the checkpoint advances past known non-delivery events');
@@ -632,6 +677,8 @@ test('an operator resolution landing mid-attempt is never overwritten by the ada
   });
   f.setPages([{ events: [deliveryEvent('e1.1', 1)] }]);
   f.adapter.start();
+  await settle(); // Baseline-only first pass.
+  f.pool.recording.notify('exclusive:claude:' + KEY, { priority: 'wake' });
   await settle();
   assert.equal(f.transportCalls.length, 1, 'the attempt is in flight');
   const id = 'dly_' + ulid(1);
@@ -693,6 +740,8 @@ test('helper exit 2, signals and unmapped codes are uncertain, never refused', u
     f.setPages([{ events: [deliveryEvent('e1.1', 1)] }]);
     f.setExit(exit as DeliverExit);
     f.adapter.start();
+    await settle(); // Baseline-only first pass.
+    f.pool.recording.notify('exclusive:claude:' + KEY, { priority: 'wake' });
     await settle();
     const claim = f.kv.claim('dly_' + ulid(1))!;
     assert.equal(claim.state, 'uncertain', `exit ${exit} is uncertain`);
@@ -723,6 +772,8 @@ test('exit 5 is a definite pre-write refusal', unixChild, async t => {
   f.setPages([{ events: [deliveryEvent('e1.1', 1)] }]);
   f.setExit(5);
   f.adapter.start();
+  await settle(); // Baseline-only first pass.
+  f.pool.recording.notify('exclusive:claude:' + KEY, { priority: 'wake' });
   await settle();
   const claim = f.kv.claim('dly_' + ulid(1))!;
   assert.equal(claim.state, 'refused');
@@ -845,6 +896,75 @@ test('generation change rebaselines instead of replaying the window', async t =>
   assert.deepEqual(calls, ['head'], 'an empty cursor reads the head');
   assert.equal(g.transportCalls.length, 0);
   assert.equal(g.kv.scope(KEY)!.cursor, 'e1.91');
+});
+
+test('re-admission at the same generation baselines at head and replays nothing', async t => {
+  // Final-review fix: a scope that goes not-admitted -> admitted at the same
+  // generation (canary disable/enable, a config-witness flap, a kill-switch
+  // recovery) must not replay every wake from the gap. Native pointers are
+  // for arrivals while the scope is admitted AND this adapter process runs.
+  const calls: Array<string | undefined> = [];
+  let pages: ClaudeCandidatePage[] = [];
+  const f = fixture(t, {
+    fetchCandidates: async (_c, cursor) => {
+      calls.push(cursor);
+      if (cursor === 'head') return { events: [], nextCursor: 'e1.43' };
+      return pages.shift() ?? { events: [] };
+    },
+  });
+  // A previous run of this scope left the cursor at e1.40; wakes 41-43 arrive
+  // while the canary is off, so they are only reachable on the legacy path.
+  f.kv.kv.set('claude-claims:scope:' + KEY, JSON.stringify({ v: 1, generation: GEN, cursor: 'e1.40', blockedPendingLimit: false, updatedAt: 1000 }));
+  f.setSnapshot([admittedRow({ admission: { live: true, policy: true, version_qualified: true, canary: false, witness: true } })]);
+  f.adapter.start();
+  await settle();
+  assert.equal(f.adapter.admitted().size, 0, 'the scope is not admitted');
+  pages = [{ events: [deliveryEvent('e1.41', 41), deliveryEvent('e1.42', 42), deliveryEvent('e1.43', 43)] }];
+  f.pool.recording.notify('exclusive:claude:' + KEY, { priority: 'wake' });
+  await settle();
+  assert.equal(f.transportCalls.length, 0, 'a not-admitted scope transports nothing');
+  calls.length = 0;
+
+  // The canary returns at the SAME generation: the re-admission baselines at
+  // head before any transport, so 41-43 are never replayed natively. (No
+  // watch exists to carry a wake yet, so the reload tick drives the pass.)
+  f.setSnapshot([admittedRow()]);
+  f.clock.advance(10_000);
+  await settle();
+  assert.deepEqual(calls, ['head'], 'the re-admitted pass reads only the head');
+  assert.equal(f.kv.claims().length, 0, 'no claim for a wake from the not-admitted gap');
+  assert.equal(f.transportCalls.length, 0, 'no transport for a wake from the not-admitted gap');
+  assert.equal(f.kv.scope(KEY)!.cursor, 'e1.43');
+
+  // A wake that arrives after the re-baseline is delivered exactly once.
+  pages = [{ events: [deliveryEvent('e1.44', 44)] }];
+  f.pool.recording.notify('exclusive:claude:' + KEY, { priority: 'wake' });
+  await settle();
+  assert.equal(f.transportCalls.length, 1, 'exactly the post-baseline wake is delivered');
+  assert.equal(f.transportCalls[0].messageId, 'msg_' + ulid(44));
+});
+
+test('first admitted pass after adapter start baselines at head even with a stored cursor', async t => {
+  // A daemon restart (or kill-switch recovery) begins with no in-memory
+  // admission, so the first admitted pass re-baselines: anything that arrived
+  // while this process was not running stays on the legacy path, and the
+  // crash window (claim saved, progress not saved) is not re-staged.
+  const calls: Array<string | undefined> = [];
+  const f = fixture(t, {
+    fetchCandidates: async (_c, cursor) => {
+      calls.push(cursor);
+      if (cursor === 'head') return { events: [], nextCursor: 'e1.7' };
+      return { events: [deliveryEvent('e1.1', 1)] };
+    },
+  });
+  // The fixture seeded a stored cursor at e1.0 for the current generation; a
+  // resume from it would deliver e1.1 immediately.
+  f.adapter.start();
+  await settle();
+  assert.deepEqual(calls, ['head'], 'the first admitted pass of this process reads only the head');
+  assert.equal(f.kv.scope(KEY)!.cursor, 'e1.7');
+  assert.equal(f.kv.claims().length, 0, 'nothing from before this start is staged');
+  assert.equal(f.transportCalls.length, 0, 'nothing from before this start is transported');
 });
 
 test('failed baseline read stages nothing and retries', async t => {
@@ -1094,29 +1214,42 @@ test('a pass is linear in claims', async t => {
   let served = false;
   const f = fixture(t, {
     kv: counted,
-    fetchCandidates: async () => { if (served) return { events: [] }; served = true; return { events }; },
+    fetchCandidates: async (_c, cursor) => {
+      if (cursor === 'head') return { events: [], nextCursor: 'e1.0' };
+      if (served) return { events: [] };
+      served = true;
+      return { events };
+    },
   }, { baselined: false });
   f.adapter.start();
-  await settle(150);
+  await settle(); // Pass 1: the establishing baseline (one claim scan).
+  f.pool.recording.notify('exclusive:claude:' + KEY, { priority: 'wake' });
+  await settle(150); // Pass 2: one page, one ack window, 32 staged wakes.
   const delivered = [...map.values()].filter(v => v.includes('"write_completed_no_presentation_proof"')).length;
   assert.equal(delivered, 232, 'all 32 staged wakes were delivered beside the 200 tombstones');
   assert.ok(served, 'the one page was staged');
-  assert.ok(gets <= 200 + 4 * 32, `a pass made ${gets} kv.get calls, want <= ${200 + 4 * 32}`);
+  // Two passes, each linear: one claim scan (200 gets) per pass plus a
+  // bounded handful of gets per staged attempt.
+  assert.ok(gets <= 2 * 200 + 4 * 32, `two passes made ${gets} kv.get calls, want <= ${2 * 200 + 4 * 32}`);
 });
 
 test('a rejected stored cursor rebaselines; a transient failure keeps the cursor', async t => {
   const calls: Array<string | undefined> = [];
+  const headCursors = ['e1.0', 'e2.0']; // The establishing baseline, then the rebaseline.
   let mode: 'rejected' | 'transient' = 'rejected';
   const f = fixture(t, {
     fetchCandidates: async (_c, cursor) => {
       calls.push(cursor);
-      if (cursor === 'head') return { events: [], nextCursor: 'e2.0' };
+      if (cursor === 'head') return { events: [], nextCursor: headCursors.shift() };
       return mode === 'rejected' ? { events: [], cursorRejected: true } : undefined;
     },
   });
   f.adapter.start();
+  await settle(); // The first pass of this process establishes the baseline.
+  assert.deepEqual(calls, ['head']);
+  f.pool.recording.notify('exclusive:claude:' + KEY, { priority: 'wake' });
   await settle();
-  assert.deepEqual(calls, ['e1.0', 'head'], 'a rejected cursor reads the head in the same pass');
+  assert.deepEqual(calls, ['head', 'e1.0', 'head'], 'a rejected cursor reads the head in the same pass');
   assert.equal(f.kv.scope(KEY)!.cursor, 'e2.0', 'the scope rebaselined');
   assert.equal(f.kv.claims().length, 0, 'the rebaseline stages nothing');
   assert.ok(f.log.entries.some(e => e.msg === 'claude_delivery_scope_baselined'));
@@ -1274,6 +1407,8 @@ test('a superseded write refreshes the index within the pass (pending cap follow
   }
   f.setPages([{ events: [deliveryEvent('e1.1', 1)] }]);
   f.adapter.start();
+  await settle(); // Baseline-only first pass (the ack read resolves one claim).
+  f.pool.recording.notify('exclusive:claude:' + KEY, { priority: 'wake' });
   await settle(60);
   assert.equal(f.kv.claim('dly_' + ulid(2000))!.state, 'held', 'the operator resolution stands');
   assert.equal(f.transportCalls.length, 1, 'the freed slot staged the new wake in the same pass');
