@@ -10,7 +10,7 @@ import type { TestContext } from 'node:test';
 import type { KeyValue } from '../src/backend.ts';
 import { fakeClock, memoryLog } from '../../hub-client/testing/fixtures.ts';
 import type { Log } from '../../hub-client/src/ports.ts';
-import { createClaudeDeliveryAdapter, claudeDeliveryCanaryAllowed, claudeInboxArgs, claudeDeliverArgs, spawnClaudeDeliver, spawnClaudeInbox } from '../src/delivery/claude-adapter.ts';
+import { createClaudeDeliveryAdapter, claudeDeliveryCanaryAllowed, claudeInboxArgs, claudeDeliverArgs, spawnClaudeDeliver, spawnClaudeInbox, CLAUDE_PENDING_LIMIT } from '../src/delivery/claude-adapter.ts';
 import type { ClaudeCandidatePage, ClaudeClaimRecord, ClaudeDeliveryAdapterDeps, ClaudeDeliveryFrame, DeliverExit } from '../src/delivery/claude-adapter.ts';
 import type { WatchPool, WatchRequest, WakeEvent, WatchEnd } from '../src/delivery/watch-pool.ts';
 
@@ -1126,19 +1126,166 @@ test('a rejected stored cursor rebaselines; a transient failure keeps the cursor
   assert.ok(f.log.entries.some(e => e.msg === 'claude_delivery_reconcile_failed'), 'a transient failure backs off');
 });
 
+/** The real CLI's stderr and exit code for a hub cursor refusal, pinned
+ * against a loopback hub by internal/cli TestInboxCursorRefusalStderr. */
+const CURSOR_ERRORS = JSON.parse(readFileSync(new URL('./fixtures/cli-cursor-errors.json', import.meta.url), 'utf8')) as
+  { exit: number; purged: string; malformed: string };
+
 test('the inbox child reports a purged or malformed cursor as rejected, anything else as a failure', unixChild, async t => {
   const dir = mkdtempSync(join(tmpdir(), 'vn-claude-purge-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const coordinates = { profile: 'p', config: BIND_CONFIG, hubEndpoint: 'https://hub.example', caller: 'peer_A', recipient: 'peer_A' };
-  const run = async (body: string) => {
-    const bin = join(dir, 'vecnet-' + randomUUID());
-    writeFileSync(bin, '#!/bin/sh\n' + body + '\n', { mode: 0o700 });
-    return spawnClaudeInbox({ HOME: dir, PATH: process.env.PATH, VECNET_BIN: bin }, fakeClock(1000))(coordinates, 'e1.5');
+  /** A stub CLI that writes exactly `stderr` and exits `code`. */
+  const run = async (stderr: string, code: number, cursor: string | undefined = 'e1.5') => {
+    const id = randomUUID(), bin = join(dir, 'vecnet-' + id), text = join(dir, 'stderr-' + id);
+    writeFileSync(text, stderr);
+    writeFileSync(bin, `#!/bin/sh\ncat ${JSON.stringify(text)} >&2\nexit ${code}\n`, { mode: 0o700 });
+    return spawnClaudeInbox({ HOME: dir, PATH: process.env.PATH, VECNET_BIN: bin }, fakeClock(1000))(coordinates, cursor);
   };
-  assert.deepEqual(await run(`echo 'vecnet: cursor_purged: cursor is below the retention floor' >&2; exit 2`), { events: [], cursorRejected: true });
-  assert.deepEqual(await run(`echo 'vecnet: invalid_value: cursor must look like e<epoch>.<seq>' >&2; exit 2`), { events: [], cursorRejected: true });
-  assert.equal(await run(`echo 'vecnet: cursor_purged: x' >&2; exit 3`), undefined, 'a network exit is transient');
-  assert.equal(await run(`echo 'vecnet: rate_limited: slow down' >&2; exit 2`), undefined, 'another hub error is transient');
-  assert.equal(await run(`echo 'vecnet: invalid_value: limit must be positive' >&2; exit 2`), undefined, 'a non-cursor validation error is transient');
-  assert.equal(await run(`echo 'note: vecnet: cursor_purged: x' >&2; exit 2`), undefined, 'the marker must start the line');
+  const rejected = { events: [], cursorRejected: true };
+  assert.deepEqual(await run(CURSOR_ERRORS.purged, CURSOR_ERRORS.exit), rejected, 'the real purged/foreign-epoch refusal');
+  assert.deepEqual(await run(CURSOR_ERRORS.malformed, CURSOR_ERRORS.exit), rejected, 'the real malformed-cursor refusal');
+  assert.equal(await run(CURSOR_ERRORS.purged, 3), undefined, 'a network exit is transient');
+  assert.equal(await run('rate_limited: slow down\n', 2), undefined, 'another hub error is transient');
+  assert.equal(await run('invalid_value: limit must be positive\n', 2), undefined, 'a non-cursor validation error is transient');
+  assert.equal(await run('note: ' + CURSOR_ERRORS.purged, 2), undefined, 'the code must start the line');
+  assert.equal(await run(CURSOR_ERRORS.purged, 2, 'head'), undefined, 'a head read is never a cursor refusal');
+  assert.equal(await run(CURSOR_ERRORS.purged, 2, ''), undefined, 'nor is a read from the acked cursor (no --since)');
+});
+
+// Task 6 fix round: an operator resolution racing the ack read must never be
+// lost. The ack observation marks a copy, never the index row; a refused
+// (superseded) write refreshes the index from the kv; retirement re-reads
+// and deletes only the exact bytes it last saw.
+
+for (const [name, resolution] of [
+  ['--retry', (c: ClaudeClaimRecord): ClaudeClaimRecord => ({ ...c, state: 'reserved', disposition: undefined, dispositionReason: undefined,
+    attemptId: 'b'.repeat(32), updatedAt: 777_777 })],
+  ['--keep-inbox', (c: ClaudeClaimRecord): ClaudeClaimRecord => ({ ...c, state: 'held', disposition: 'held',
+    dispositionReason: 'operator_keep_inbox', updatedAt: 777_777 })],
+] as const) {
+  test(`an operator resolve ${name} racing the ack read survives byte-identical`, async t => {
+    let operatorRaw: string | undefined;
+    let f!: Fixture;
+    f = fixture(t, {
+      fetchAckWindow: async () => {
+        // The operator's `claude resolve` lands while the ack read is out.
+        const current = f.kv.claim('dly_u7')!;
+        const next = JSON.parse(JSON.stringify(resolution(current))) as Record<string, unknown>;
+        for (const k of Object.keys(next)) if (next[k] === undefined) delete next[k];
+        operatorRaw = JSON.stringify(next);
+        f.kv.kv.set('claude-claims:claim:dly_u7', operatorRaw);
+        return { deliveryIds: new Set<string>(), complete: true };
+      },
+    });
+    // A settled, retirable tombstone the hub has acked: before the fix the
+    // stale in-memory copy kept the mark after its save was refused, and
+    // retirement then deleted the operator's freshly resolved row.
+    f.kv.kv.set('claude-claims:claim:dly_u7', JSON.stringify(settledClaim('dly_u7', {
+      state: 'refused', disposition: 'refused', dispositionReason: 'connect_refused_or_timeout' })));
+    f.adapter.start();
+    await settle();
+    assert.ok(operatorRaw, 'the race was staged');
+    assert.equal(f.kv.raw.get('claude-claims:claim:dly_u7'), operatorRaw, 'the operator row survives the pass byte-identical');
+    assert.ok(f.log.entries.some(e => e.msg === 'claude_delivery_claim_superseded'), 'the refused write is surfaced');
+    assert.ok(!f.log.entries.some(e => e.msg === 'claude_delivery_claim_retired'), 'nothing was retired');
+  });
+}
+
+test('a superseded write refreshes the index from the kv', async t => {
+  let f!: Fixture;
+  let reads = 0;
+  f = fixture(t, {
+    fetchAckWindow: async () => {
+      reads++;
+      if (reads === 1) {
+        // Operator re-resolves to held during the first ack read.
+        const c = f.kv.claim('dly_x1')!;
+        f.kv.kv.set('claude-claims:claim:dly_x1', JSON.stringify({ ...c, state: 'held', disposition: 'held', dispositionReason: 'operator_keep_inbox', updatedAt: 888 }));
+      }
+      return { deliveryIds: new Set<string>(), complete: true };
+    },
+  });
+  f.kv.kv.set('claude-claims:claim:dly_x1', JSON.stringify(settledClaim('dly_x1', {
+    state: 'refused', disposition: 'refused', dispositionReason: 'connect_refused_or_timeout' })));
+  f.adapter.start();
+  await settle();
+  // Pass 1: the mark was refused; the refreshed index holds the operator's
+  // held row (unmarked), so nothing is retired.
+  assert.equal(f.kv.claim('dly_x1')!.state, 'held');
+  assert.notEqual(f.kv.claim('dly_x1')!.hubAckObserved, true);
+  // Pass 2, a minute later: the refreshed row is marked and, being settled,
+  // retired — proof the index followed the kv rather than the stale copy.
+  f.clock.advance(60_000);
+  await settle();
+  assert.equal(reads, 2);
+  assert.equal(f.kv.claim('dly_x1'), undefined, 'the refreshed held row is observed and retired next time');
+});
+
+test('retirement re-reads: an already-flagged tombstone resolved mid-read survives', async t => {
+  // The row is flagged and retirable before the pass, so marking skips it
+  // and nothing else writes it: only retirement's own re-read protects it.
+  let operatorRaw: string | undefined;
+  let f!: Fixture;
+  f = fixture(t, {
+    fetchAckWindow: async () => {
+      const c = f.kv.claim('dly_f1')!;
+      operatorRaw = JSON.stringify({ ...c, state: 'reserved', attemptId: 'c'.repeat(32), hubAckObserved: false, updatedAt: 999_999 });
+      f.kv.kv.set('claude-claims:claim:dly_f1', operatorRaw);
+      return { deliveryIds: new Set<string>(), complete: true };
+    },
+    transport: async () => 4,
+  });
+  f.kv.kv.set('claude-claims:claim:dly_f1', JSON.stringify(settledClaim('dly_f1', {
+    state: 'refused', disposition: 'refused', dispositionReason: 'connect_refused_or_timeout', hubAckObserved: true })));
+  f.adapter.start();
+  await settle();
+  assert.ok(operatorRaw);
+  assert.ok(f.kv.claim('dly_f1'), 'the re-armed operator row is never deleted');
+  assert.ok(!f.log.entries.some(e => e.msg === 'claude_delivery_claim_retired'), 'nothing was retired');
+});
+
+test('a superseded write refreshes the index within the pass (pending cap follows the kv)', async t => {
+  // 128 uncertain claims fill the cap. During the ack read the operator
+  // resolves one to held; that row's mark is refused as superseded and the
+  // refreshed index frees one slot, so this same pass stages the new wake.
+  let f!: Fixture;
+  f = fixture(t, {
+    fetchAckWindow: async () => {
+      const c = f.kv.claim('dly_' + ulid(2000))!;
+      f.kv.kv.set('claude-claims:claim:dly_' + ulid(2000), JSON.stringify({ ...c, state: 'held', disposition: 'held',
+        dispositionReason: 'operator_keep_inbox', updatedAt: 999_999 }));
+      // Every claim stays in the unacked window except the resolved one, so
+      // no other uncertain claim is marked (marking does not free a slot).
+      const ids = new Set<string>();
+      for (let i = 1; i < CLAUDE_PENDING_LIMIT; i++) ids.add('dly_' + ulid(2000 + i));
+      return { deliveryIds: ids, complete: true };
+    },
+  });
+  for (let i = 0; i < CLAUDE_PENDING_LIMIT; i++) {
+    const id = 'dly_' + ulid(2000 + i);
+    f.kv.kv.set('claude-claims:claim:' + id, JSON.stringify(settledClaim(id, { messageId: 'msg_' + ulid(2000 + i),
+      state: 'uncertain', disposition: 'uncertain', dispositionReason: 'write_failed_or_outcome_unknown' })));
+  }
+  f.setPages([{ events: [deliveryEvent('e1.1', 1)] }]);
+  f.adapter.start();
+  await settle(60);
+  assert.equal(f.kv.claim('dly_' + ulid(2000))!.state, 'held', 'the operator resolution stands');
+  assert.equal(f.transportCalls.length, 1, 'the freed slot staged the new wake in the same pass');
+  assert.equal(f.kv.scope(KEY)!.blockedPendingLimit, false);
+});
+
+test('a pass with an unreadable snapshot drains nothing', async t => {
+  // Unknown admission is not "not admitted": no fence sweep may run.
+  const f = fixture(t);
+  f.setSnapshotUnavailable();
+  f.kv.kv.set('claude-claims:claim:dly_r1', JSON.stringify(seededClaim({ deliveryId: 'dly_r1' })));
+  f.kv.kv.set('claude-claims:claim:dly_t1', JSON.stringify(seededClaim({ deliveryId: 'dly_t1', state: 'attempting' })));
+  const before = [...f.kv.raw.entries()].filter(([k]) => k.startsWith('claude-claims:claim:'));
+  f.adapter.start();
+  await settle();
+  const after = [...f.kv.raw.entries()].filter(([k]) => k.startsWith('claude-claims:claim:'));
+  assert.deepEqual(after, before, 'no claim byte changes on an unproven pass');
+  assert.equal(f.transportCalls.length, 0);
+  assert.ok(f.log.entries.some(e => e.msg === 'claude_delivery_reconcile_failed'), 'the unproven pass backs off');
 });

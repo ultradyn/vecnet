@@ -183,9 +183,13 @@ export function claudeInboxArgs(coordinates: ClaudeDeliveryScopeCoordinates, cur
 }
 
 /** The CLI's stderr for a hub refusal of the `--since` cursor itself: a
- * purged/foreign-epoch cursor (409 cursor_purged) or a malformed one (422
- * invalid_value on the cursor). Hub errors exit 2 as `vecnet: <code>: …`. */
-const CURSOR_REJECTED = /^vecnet: (?:cursor_purged: |invalid_value: cursor must look like )/m;
+ * purged/foreign-epoch cursor (409 `cursor_purged`, internal/httpapi
+ * errors.go) or a malformed one (422 `invalid_value`, "cursor must look like
+ * e<epoch>.<seq>", internal/httpapi events.go). The CLI prints a hub error
+ * bare as `<code>: <message>` (hubError.format, no `vecnet: ` prefix) and
+ * exits 2. The exact lines are pinned against a loopback hub by
+ * internal/cli TestInboxCursorRefusalStderr. */
+const CURSOR_REJECTED = /^(?:cursor_purged: |invalid_value: cursor must look like )/m;
 
 /** The single-shot transport child: binding-key mode, so the endpoint and the
  * expected kernel peer identity are resolved from the live registry inside
@@ -264,7 +268,7 @@ export function spawnClaudeInbox(env: NodeJS.ProcessEnv, clock: Clock, spawnChil
     child.stderr.setEncoding('utf8').on('data', (chunk: string) => { if (err.length < 4096) err += chunk; });
     child.once('close', code => {
       // A cursor refusal only means something for an explicit cursor read.
-      if (code === 2 && cursor !== undefined && cursor !== 'head' && CURSOR_REJECTED.test(err)) {
+      if (code === 2 && !!cursor && cursor !== 'head' && CURSOR_REJECTED.test(err)) {
         finish({ events: [], cursorRejected: true });
         return;
       }
@@ -374,8 +378,11 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Cl
 
   /** One pass's claim view: built by a single claimRows() scan, then kept
    * current in memory by every save and delete this adapter makes, so no
-   * pass rescans the kv. A foreign write (an operator resolution) is still
-   * caught: saveIfCurrent re-reads that one row before writing over it. */
+   * pass rescans the kv. Index rows are never mutated in place: a change is
+   * built on a copy and lands in the index only with its own durable write.
+   * A foreign write (an operator resolution) is still caught — every write
+   * and every retirement re-reads that one row against the exact bytes last
+   * seen — and the index is then refreshed from the kv. */
   let index: ClaimIndex = buildIndex([]);
   const save = (claim: ClaudeClaimRecord) => {
     const raw = JSON.stringify(claim);
@@ -383,18 +390,33 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Cl
     index.put(claim, raw);
     return raw;
   };
-  const retire = (claim: ClaudeClaimRecord) => {
-    kv.delete(CLAIM_PREFIX + claim.deliveryId);
-    index.remove(claim.deliveryId);
+  /** Reload one row into the index from the kv (or drop it when absent or
+   * unreadable): the durable row, never the stale in-memory copy, wins. */
+  const refresh = (deliveryId: string, current: string | undefined) => {
+    let claim: ClaudeClaimRecord | undefined;
+    try { claim = current === undefined ? undefined : claimValid(JSON.parse(current)); } catch { claim = undefined; }
+    if (claim && current !== undefined) index.put(claim, current); else index.remove(deliveryId);
   };
   const ackObserved = new Map<string, number>(); // Last ack observation per scope.
   /** True when the durable row moved past the exact bytes the adapter last
    * read or wrote. An operator resolution (`claude resolve --keep-inbox` /
-   * `--retry`) may land between the read and the write; that foreign row wins
-   * and the stale in-memory copy is dropped, never saved over it. */
+   * `--retry`) may land between the read and the write; that foreign row wins,
+   * the stale in-memory copy is dropped, never saved over it, and the index
+   * follows the durable row. */
   const superseded = (claim: ClaudeClaimRecord, baseline: string | undefined): boolean => {
-    if (baseline === undefined || kv.get(CLAIM_PREFIX + claim.deliveryId) === baseline) return false;
+    if (baseline === undefined) return false;
+    const current = kv.get(CLAIM_PREFIX + claim.deliveryId);
+    if (current === baseline) return false;
     log.warn('claude_delivery_claim_superseded', { deliveryId: claim.deliveryId, scope: claim.scope });
+    refresh(claim.deliveryId, current);
+    return true;
+  };
+  /** Delete a settled tombstone only if the durable row is still exactly the
+   * bytes this pass saw: a resolution that landed meanwhile is never lost. */
+  const retire = (row: ClaimRow): boolean => {
+    if (superseded(row.claim, row.raw)) return false;
+    kv.delete(CLAIM_PREFIX + row.claim.deliveryId);
+    index.remove(row.claim.deliveryId);
     return true;
   };
   const saveIfCurrent = (claim: ClaudeClaimRecord, baseline: string | undefined): boolean => {
@@ -414,7 +436,6 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Cl
     }
     return rows;
   };
-
 
   function schedulePass(): void {
     if (!running) return;
@@ -571,24 +592,26 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Cl
       if (admitted.has(scope)) continue;
       for (const { claim, raw } of [...rows]) {
         if (inFlight.has(claim.deliveryId)) continue;
+        let next: ClaudeClaimRecord;
         if (claim.state === 'reserved') {
-          claim.state = 'released'; claim.disposition = 'released'; claim.dispositionReason = 'fenced_scope_not_admitted';
+          next = { ...claim, state: 'released', disposition: 'released', dispositionReason: 'fenced_scope_not_admitted', updatedAt: clock.now() };
         } else if (claim.state === 'attempting') {
-          claim.state = 'uncertain'; claim.disposition = 'uncertain'; claim.dispositionReason = 'restart_may_have_written';
+          next = { ...claim, state: 'uncertain', disposition: 'uncertain', dispositionReason: 'restart_may_have_written', updatedAt: clock.now() };
         } else continue;
-        claim.updatedAt = clock.now();
-        if (saveIfCurrent(claim, raw)) log.info('claude_delivery_claim_fenced', { deliveryId: claim.deliveryId, scope, state: claim.state });
+        if (saveIfCurrent(next, raw)) log.info('claude_delivery_claim_fenced', { deliveryId: next.deliveryId, scope, state: next.state });
       }
     }
   }
 
   /** Read-only hub ack observation for one admitted scope, at most every
    * ACK_OBSERVE_MS and only while the scope has unretired claims: the only
-   * writer of `hubAckObserved`. A complete window (not truncated) from the
-   * hub's acked cursor proves every delivery absent from it was acked (or
-   * expired) by the hub; an incomplete or failed read changes nothing. Never
-   * posts an ack or a receipt. Then retires, in this scope only, settled
-   * claims carrying the observation; `uncertain` ones wait for an operator. */
+   * writer of `hubAckObserved`. The flag records that the delivery was
+   * absent from a complete (not truncated) window read from the hub's acked
+   * cursor — acked, or expired or purged unacked; it is an inference from
+   * absence, not a confirmation the hub sent. An incomplete or failed read
+   * changes nothing. Never posts an ack or a receipt. Then retires, in this
+   * scope only, settled claims carrying the flag; `uncertain` ones wait for
+   * an operator. */
   async function observeAcks(row: ClaudeSnapshotBinding): Promise<void> {
     const scope = row.binding_key;
     if (!index.byScope.get(scope)?.length) return;
@@ -600,16 +623,18 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Cl
         for (const { claim, raw } of [...(index.byScope.get(scope) ?? [])]) {
           if (claim.hubAckObserved === true || window.deliveryIds.has(claim.deliveryId) || inFlight.has(claim.deliveryId)) continue;
           if (claim.state === 'reserved' || claim.state === 'attempting') continue; // Live work is never marked.
-          claim.hubAckObserved = true;
-          claim.updatedAt = clock.now();
-          if (saveIfCurrent(claim, raw)) log.info('claude_delivery_hub_ack_observed', { deliveryId: claim.deliveryId, scope });
+          // Mark a copy: a refused (superseded) write leaves no flag behind.
+          const marked: ClaudeClaimRecord = { ...claim, hubAckObserved: true, updatedAt: clock.now() };
+          if (saveIfCurrent(marked, raw)) log.info('claude_delivery_absent_from_acked_window', { deliveryId: claim.deliveryId, scope });
         }
       }
     }
-    for (const { claim } of [...(index.byScope.get(scope) ?? [])]) {
+    for (const entry of [...(index.byScope.get(scope) ?? [])]) {
+      const { claim } = entry;
       if (claim.hubAckObserved !== true || !RETIRABLE.has(claim.state) || inFlight.has(claim.deliveryId)) continue;
-      retire(claim); // A confirmed hub ack retires the settled tombstone.
-      log.info('claude_delivery_claim_retired', { deliveryId: claim.deliveryId, scope });
+      // A settled tombstone absent from the acked window retires, but only
+      // if its durable bytes are still exactly the ones this pass saw.
+      if (retire(entry)) log.info('claude_delivery_claim_retired', { deliveryId: claim.deliveryId, scope });
     }
   }
 
@@ -622,18 +647,16 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Cl
     for (const { claim, raw } of [...(index.byScope.get(row.binding_key) ?? [])]) {
       if (inFlight.has(claim.deliveryId)) continue;
       if (claim.state === 'attempting') {
-        claim.state = 'uncertain'; claim.disposition = 'uncertain'; claim.dispositionReason = 'restart_may_have_written';
-        claim.updatedAt = clock.now();
-        if (saveIfCurrent(claim, raw)) log.warn('claude_delivery_uncertain_restart', { scope: claim.scope });
+        const next: ClaudeClaimRecord = { ...claim, state: 'uncertain', disposition: 'uncertain', dispositionReason: 'restart_may_have_written', updatedAt: clock.now() };
+        if (saveIfCurrent(next, raw)) log.warn('claude_delivery_uncertain_restart', { scope: claim.scope });
         continue;
       }
       if (claim.state === 'reserved') {
         if (claim.generation !== row.generation) {
-          claim.state = 'released'; claim.disposition = 'released'; claim.dispositionReason = 'fenced_generation_changed';
-          claim.updatedAt = clock.now(); saveIfCurrent(claim, raw);
+          saveIfCurrent({ ...claim, state: 'released', disposition: 'released', dispositionReason: 'fenced_generation_changed', updatedAt: clock.now() }, raw);
           continue;
         }
-        await attempt(row, claim, raw); // Reschedule with the current owner.
+        await attempt(row, { ...claim }, raw); // Reschedule with the current owner, on a copy.
       }
     }
   }

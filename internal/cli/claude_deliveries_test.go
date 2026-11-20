@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -669,7 +670,7 @@ func TestClaudeDeliveriesRendersHubAckObserved(t *testing.T) {
 	if plainLine == "" || strings.Contains(plainLine, "hub_ack_observed") {
 		t.Fatalf("the text view marks an unobserved claim: %q", plainLine)
 	}
-	if after := claudeDeliveryKV(t, home); len(after) != len(before) {
+	if after := claudeDeliveryKV(t, home); !maps.Equal(after, before) {
 		t.Fatalf("listing changed the ledger: %v -> %v", before, after)
 	}
 }
