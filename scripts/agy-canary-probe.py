@@ -1088,6 +1088,7 @@ def probe_e2e():
     hub_proc = None
     tui = None
     stub = stub2 = None
+    proc = None  # the stream-json agy process; terminated in finally
     RX, SEND = "agyrx", "sender"
     try:
         # ---- build this checkout's CLI into the disposable lab (never bin/)
@@ -1253,6 +1254,7 @@ def probe_e2e():
             time.sleep(3)  # the root's close-out request carries the subagent reply
         proc.stdin.close()
         proc.communicate(timeout=60)
+        proc = None  # communicated: nothing left to terminate
         stub.close()
         stub = None
 
@@ -1329,6 +1331,21 @@ def probe_e2e():
     finally:
         if tui:
             tui.kill()
+        if proc:
+            # A failure between spawn and communicate must not leak the
+            # stream-json agy process out of the probe.
+            try:
+                proc.stdin.close()
+            except OSError:
+                pass
+            try:
+                proc.terminate()
+                proc.wait(10)
+            except (OSError, subprocess.TimeoutExpired):
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
         if stub:
             stub.close()
         if stub2:

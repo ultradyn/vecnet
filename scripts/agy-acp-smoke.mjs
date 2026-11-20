@@ -247,9 +247,11 @@ async function stopChild(child) {
 }
 
 /** Direct minimal ACP handshake through the wrapper to record initialize and
- * the session's advertised modes (facts the backend keeps internal). */
+ * the session's advertised modes (facts the backend keeps internal). The
+ * child gets only {PATH, HOME} — the wrapper restores the loopback stub env
+ * the ACP backend filters out — never the full ambient environment. */
 export async function probeAcpHandshake({ command, cwd, home }) {
-  const child = spawn(command, [], { cwd, env: { ...process.env, HOME: home }, stdio: ['pipe', 'pipe', 'pipe'] });
+  const child = spawn(command, [], { cwd, env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: home }, stdio: ['pipe', 'pipe', 'pipe'] });
   child.stderr.resume();
   const pending = new Map();
   let nextId = 0, buffer = '';
