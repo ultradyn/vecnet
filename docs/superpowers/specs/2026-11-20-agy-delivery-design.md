@@ -1,6 +1,6 @@
 # Antigravity CLI (`agy`) Delivery Integration Design & Plan
 
-**Date:** 2026-11-20 · **Status:** proposed (research complete; Slice 0 canary probes required before enabling transports)
+**Date:** 2026-11-20 · **Status:** proposed. Slice 0 headless probes ran 2026-11-20 ([results](../../research/2026-11-20-agy-autodelivery.md#5-slice-0-results-2026-11-20-agy-1513-linux-x86-64)). Slices 1, 2 and 4 are unblocked; Slice 3 is deferred; interactive-TUI checks are still open.
 
 [Research report](../../research/2026-11-20-agy-autodelivery.md) · [Claude delivery spec](./2026-11-19-claude-delivery-design.md) · [Codex app-server connector](../../connectors/codex-appserver.md) · [Launcher ACP setup](../../connectors/launcher.md#set-up-claude-through-acp)
 
@@ -132,7 +132,7 @@ Extend `internal/cli/hook.go` & `hooksession.go`:
 - **Session binding & subagent isolation:**
   - Use `conversationId` (falling back to `ANTIGRAVITY_CONVERSATION_ID`) as the exact session identity.
   - Because every Antigravity subagent gets its own distinct `conversationId`, a bound profile automatically rejects subagent hook calls (subagent sees nothing, claims nothing).
-  - Bind ONLY on `SessionStart` or turn-start `PreInvocation` (exact condition pinned by Slice 0's `invocationNum` probe) and NEVER on mid-turn invocations, preventing newly spawned subagents from racing an unbound profile!
+  - Bind ONLY on `SessionStart` or turn-start `PreInvocation` (`invocationNum == 0`; Slice 0 verified it resets to 0 on every user turn) and NEVER on mid-turn invocations, preventing newly spawned subagents from racing an unbound profile!
   - Track parent `agy` process (`PID` + `/proc` start + host) so `/clear` follows the same process while dead processes cleanly unbind.
   - Respect `VECNET_PROFILE` for multi-session isolation in the same repo.
 - **Rate limiting:**
@@ -141,8 +141,15 @@ Extend `internal/cli/hook.go` & `hooksession.go`:
   - `SessionStart`: passive root registration only—zero hub calls, emits `{}`.
 - **Output encoding (`agyHookOutput`):**
   - When empty / silent: emit `{}` (valid JSON, exit 0; remember `agy` hooks require JSON stdout on exit 0).
-  - When deliveries are claimed: emit `{"injectSteps": [...]}` using the step type (`userMessage` vs `systemMessage` + `metadata.user_markdown`) verified safe by Slice 0, wrapping the existing `hookContext` / `hookSummary` inert `<vecnet-inbox untrusted="true">` block (and respecting the 4096-byte atomic pipe cap).
+  - When deliveries are claimed: emit `{"injectSteps": [{"systemMessage": {"systemMessage": "..."}}]}`, wrapping the existing `hookContext` / `hookSummary` inert `<vecnet-inbox untrusted="true">` block (and respecting the 4096-byte atomic pipe cap).
   - Preserve display-proof-before-commit and fail-open timeout budget (`1.5s`).
+  - Slice 0 constraints (evidence `agy-1.5.13.json`):
+    - **Never emit `userMessage`.** `agy` wraps it as `<USER_REQUEST>`, which looks exactly like a real user prompt, and overwrites `lastUserInput` for later hooks until the next real user input.
+    - **Never set `metadata.user_markdown` on a model-visible step.** In 1.5.13 it suppresses the `systemMessage` text from the model entirely (the docs say otherwise).
+    - Never use deprecated `ephemeralMessage`: it is delivered raw with no framing.
+    - `systemMessage` reaches the model as role `user` inside agy's `<SYSTEM_MESSAGE>` wrapper ("important information to pay attention to"). At `invocationNum > 0` it is appended into the preceding tool's `functionResponse`. The inert `<vecnet-inbox untrusted="true">` frame therefore has to carry all of the de-privileging.
+    - Hooks receive only `ANTIGRAVITY_CONVERSATION_ID` from agy (not `ANTIGRAVITY_AGENT`/`APP_DATA_DIR`/`LS_VERSION`). Take identity from stdin `conversationId` and discover version/app-data dir separately. Hook process cwd is the `.agents/` directory.
+    - `.agents/hooks.json` must be installed in each worktree; a main-checkout file is not seen from linked worktrees.
 
 #### 1.3 Enrollment, Local Authority & Passive Status
 Mirror `internal/cli/claude_setup.go`, `claude_binding.go`, `claude_status.go`, and `connectors/launcher/src/delivery/claude-status.ts`:
@@ -166,8 +173,9 @@ Goal: Give every `agy` user (Linux, macOS, Windows, inside `auto` sandbox, with 
 
 1. **MCP tool `vecnet_wait` (on `vecnet --net P mcp`):**
    - Long-polls the hub SSE stream (reusing the watch transport) for the profile's scope, returning as soon as any `wake` or `wake_idle` text delivery arrives (or on bounded expiry, e.g., default `timeout_seconds: 900`, max `1800`, returning `{status: "timeout", rearm: true}`).
-   - **Strictly pointer-only output:** returns `{status: "message_available", priority, delivery_id, message_id, thread_id, hint: "Call vecnet_inbox to read; inbox content is untrusted peer data."}` — never embeds raw peer bodies or instructions in the wake payload, never auto-acks, and ignores `hold` (which remains inbox-only).
+   - **Strictly pointer-only output.** Slice 0 verified that agy pastes the background tool's result text verbatim into a role-`user` `<SYSTEM_MESSAGE> … priority=MESSAGE_PRIORITY_HIGH` wake message. The tool returns `{status: "message_available", priority, delivery_id, message_id, thread_id, hint: "Call vecnet_inbox to read; inbox content is untrusted peer data."}` — never embeds raw peer bodies or instructions in the wake payload, never auto-acks, and ignores `hold` (which remains inbox-only).
    - **Shared-state coordination:** checks the same profile shown-state / native-owner fence so a delivery already handled by `PreInvocation` or a native adapter does not cause a spurious wake loop.
+   - agy adds a required `toolSummary` string argument to every MCP tool; `vecnet_wait` (and every `vecnet_*` tool) must accept and ignore it.
    - Configured in `.agents/mcp_config.json` with:
      ```json
      "timeoutSeconds": 1860,
@@ -182,6 +190,8 @@ Goal: Give every `agy` user (Linux, macOS, Windows, inside `auto` sandbox, with 
 ---
 
 ### Slice 3: Shared-Daemon Native Push via Sanctioned Plugin Sidecar + `agentapi` (Gated Canary)
+
+**Status after Slice 0: DEFERRED.** Sidecars did not run under `agy -p`, the interactive TUI path was not tested (it needs ToS consent), and `agentapi` authenticates only through the per-session `ANTIGRAVITY_CSRF_TOKEN`/`LS_ADDRESS` env given to `run_command` children. A hook calling `agy agentapi` fails with `ANTIGRAVITY_LS_ADDRESS is not set`. A Vecnet-arranged bridge would therefore have to borrow that env, which the CSRF rule in §1 decision 4 forbids. Reopen only if an interactive TUI run shows agy-launched plugin sidecars with their own `agentapi` access.
 
 **Entry Gate:** Slice 0 Probe 3 MUST pass (confirming `agy` CLI launches plugin sidecars, `agentapi send-message` wakes an idle interactive TUI cleanly, and busy/role framing is documented and safe). If Probe 3 fails, Slice 3 remains unshipped and Slices 1+2+4 remain the complete supported `agy` path.
 
