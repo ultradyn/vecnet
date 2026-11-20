@@ -174,10 +174,17 @@ ev = sys.argv[1]
 raw = sys.stdin.read()
 p = json.loads(raw) if raw.strip() else {{}}
 env_names = sorted(k for k in os.environ if k.startswith(("ANTIGRAVITY", "AGY", "GEMINI", "VECNET")))
+def _ppid(pid):
+    try:
+        return int(open("/proc/%d/stat" % pid).read().rsplit(")", 1)[1].split()[1])
+    except (OSError, ValueError, IndexError):
+        return 0
+parent = os.getppid()
 with open({log!r}, "a") as f:
     f.write(json.dumps({{"kind": "hook", "event": ev, "payload": p, "env_names": env_names,
                         "conv_env": os.environ.get("ANTIGRAVITY_CONVERSATION_ID", ""), "pid": os.getpid(),
-                        "cwd_rel": os.path.relpath(os.getcwd(), p.get("cwd", os.getcwd()))}}) + "\n")
+                        "cwd_rel": os.path.relpath(os.getcwd(), p.get("cwd", os.getcwd())),
+                        "parent": parent, "grandparent": _ppid(parent)}}) + "\n")
 inject = {inject}
 key = ev + ":" + str(p.get("invocationNum", "*"))
 out = inject.get(key, inject.get(ev + ":*", {{}}))
@@ -874,6 +881,72 @@ def probe_tui():
     return out
 
 
+def probe_session_identity():
+    """Subagent and /clear: which conversationId, process and turn-start fields does each hook run see?"""
+    def summarize(lab):
+        convs, rows = {}, []
+        for e in lab.events():
+            if e["kind"] != "hook":
+                continue
+            pl = e["payload"]
+            n = convs.setdefault(pl.get("conversationId"), len(convs))
+            rows.append({"conv": n, "event": e["event"], "invocationNum": pl.get("invocationNum"),
+                         "initialNumSteps": pl.get("initialNumSteps"),
+                         "lastUserInput_empty": not str(pl.get("lastUserInput") or "").strip(),
+                         "agy_process": e["grandparent"]})
+        procs = {r["agy_process"] for r in rows}
+        for r in rows:
+            r["agy_process"] = "same" if len(procs) == 1 else "differs"
+        return rows
+
+    out = {}
+    lab = Lab("sub")
+    hook = lab.write_hook()
+    lab.hooks_json(lab.ws, hook, events=("SessionStart", "PreInvocation"))
+
+    def script(b, i):
+        if "ROOT_PROMPT" in last_user_text(b) and not has_function_response(b):
+            return call("invoke_subagent", Prompt="SUB_PROMPT", TypeName="self", Role="Probe helper", Workspace=lab.ws, Model="inherit")
+        return text("ok")
+
+    stub = Stub(script)
+    try:
+        proc = subprocess.Popen([AGY, "--input-format", "stream-json", "--output-format", "stream-json", "--dangerously-skip-permissions",
+                                 "--settings", json.dumps({"modelProvider": "gemini"})],
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=lab.ws, env=lab.env(stub))
+        proc.stdin.write(json.dumps({"event": "user", "message": {"content": "ROOT_PROMPT"}}) + "\n")
+        proc.stdin.flush()
+        time.sleep(15)
+        proc.stdin.close()
+        proc.communicate(timeout=30)
+        out["subagent"] = summarize(lab)
+    finally:
+        stub.close()
+        lab.cleanup()
+
+    lab = Lab("clr")
+    hook = lab.write_hook()
+    lab.hooks_json(lab.ws, hook, events=("SessionStart", "PreInvocation"))
+    stub = Stub(lambda b, i: text("TURN_DONE_MARK"))
+    t = None
+    try:
+        t = Tui(lab, stub, {"toolPermission": "always-proceed"})
+        t.prompt("FIRST")
+        t.wait_for("TURN_DONE_MARK", 15)
+        time.sleep(1)
+        t.prompt("/clear")
+        time.sleep(3)
+        t.prompt("SECOND")
+        time.sleep(5)
+        out["tui_clear"] = summarize(lab)
+    finally:
+        if t:
+            t.kill()
+        stub.close()
+        lab.cleanup()
+    return out
+
+
 PROBES = {
     "hooks": probe_hooks,
     "inject_variants": probe_inject_variants,
@@ -882,6 +955,7 @@ PROBES = {
     "sidecar_agentapi": probe_sidecar_and_agentapi,
     "acp": probe_acp,
     "tui": probe_tui,
+    "session_identity": probe_session_identity,
 }
 
 
