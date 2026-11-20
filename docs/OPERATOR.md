@@ -339,6 +339,70 @@ Both List and Policy show the acknowledged-event pruning gate last reported by t
 
 **Appearance** (theme System, Dark or Light; density Comfortable or Compact) belongs to this browser alone: stored under `vecnet.ui.appearance.v1`, applied by its own **Apply to this browser** button, never sent to the hub, and followed by the browser's other tabs. Light inverts the dark palette until a dedicated light palette exists.
 
+## Hub updates
+
+A hub built from an npm release (`npm install -g vecnet`) asks npm, every 6 hours by default, which `vecnet` version is tagged `latest`. When that version is newer than the one running, the web UI shows a small card above the connection status in the sidebar: **Update available: 0.2.7**, **You're on 0.2.6**, and a link to the release on npm. The card stays hidden while the hub is up to date, when the check is off, and when npm cannot be reached.
+
+- **The request.** One `GET https://registry.npmjs.org/-/package/vecnet/dist-tags` through the hub's egress guard: https only, public addresses only, no redirects, a 10 s timeout and a 16 KiB response cap. The first check runs 30 s to 3 min after start; each later one waits the interval ±10%, and never less than 15 minutes. A failure is logged at debug level and keeps the last good answer. The request sends no hub data apart from a `vecnet-hub/<version>` User-Agent.
+- **No proxy for the check.** The version check connects directly and ignores `HTTPS_PROXY`/`HTTP_PROXY`, like every other outbound request the hub makes. Behind a proxy-only network it fails silently and the card never shows. npm itself, during a one-click update, does use the proxy variables.
+- **Builds that never check.** Development builds (`dev`) and Fly/`just build` builds (`2026.1106.2049+8877c73`) are not npm versions, so they make no request and show no card.
+- **Interval and opt-out.** `--update-check-interval` / `VECNET_UPDATE_CHECK_INTERVAL` takes a Go duration (`6h`, `90m`) or whole hours (`12`), at most 30 days (`720h`). **`0` turns the check off completely**: no request to npm, no card and no one-click update. Values above zero but under the **15-minute minimum** are raised to 15m, with a warning at startup. A negative, unparseable or over-30-day value stops the hub at startup.
+- **Status endpoint.** `GET /v1/admin/update` (operator only) returns the cached answer and never contacts npm: `{enabled, current, latest, checked_at, update_available, release_url, one_click, restart, manual_reason, manual_command, job}`.
+- **What you trust.** An update is whatever the `vecnet` package's npm account publishes as `latest`. The hub checks that the installed package names the expected version and that its binary runs and reports that version. It does not verify npm provenance or signatures. A compromised npm account or registry could ship a malicious release, exactly as it could to anyone running `npm install -g vecnet`. Leave one-click unused, or set the interval to `0`, if that is not acceptable for your hub.
+
+### One-click update (local npm installs)
+
+The card offers **Update & restart** only when the hub can show that it is a global npm install it can update itself. Every one of these must hold. They are checked at startup and again, read fresh from disk, when an update starts:
+
+1. It runs on Linux (x64 or arm64).
+2. It is not in a container. Any of these rules that out:
+   - `FLY_APP_NAME`, `FLY_MACHINE_ID`, `KUBERNETES_SERVICE_HOST` or `container` set;
+   - `/.dockerenv`, `/run/.containerenv` or `/run/systemd/container` present;
+   - a container runtime named in `/proc/1/cgroup`;
+   - `container=` in PID 1's environment (when readable);
+   - an overlay filesystem mounted at `/`.
+
+   **The hosted Fly hub never offers it.**
+3. The running binary, symlinks resolved, is `<prefix>/lib/node_modules/vecnet/native/linux-<arch>/vecnet-hub`. That is what the npm `vecnet-hub` command runs. Binaries from a source build, `npx`, or a project's local `node_modules` do not qualify.
+4. That package's `package.json` names `vecnet` at exactly the running version. When an update starts, a missing `package.json` is allowed so a half-finished install can be retried. A package at any other version, such as a pre-release you installed by hand since the hub started, is never replaced or downgraded.
+5. `npm` exists (`<prefix>/bin/npm`, else on `PATH`), and `npm prefix -g` prints that same `<prefix>`.
+6. The hub's user can write `<prefix>/lib/node_modules` and `<prefix>/bin`. A root-owned `/usr` install fails this check, and the hub never uses sudo.
+7. The hub listens on a fixed port. With `--listen …:0` a restart would come back on a different port.
+
+If any check fails, the card shows **How to update**, with the reason and the command to run by hand: `npm install -g vecnet@<version>`, then restart `vecnet-hub`.
+
+Clicking **Update & restart** and then **Confirm** sends `POST /v1/admin/update` with no body. The request names no version.
+
+- **Who can call it.** The endpoint is operator only. It refuses cross-origin browser requests (`Sec-Fetch-Site`/`Origin`, 403) and any request body other than an empty JSON object (400).
+- **Limits.** It allows one job at a time (409 `update_running`) and one start a minute (429 `update_cooldown`).
+- **Audit.** Before anything runs, the hub records `hub_update` in the audit log, naming the running version and the version npm reported. If that write fails, nothing starts (503 `update_not_audited`).
+- **What the job installs.** The job reads npm again and continues only while npm still names that same version `latest`. It redoes the checks above, then runs:
+
+```sh
+<prefix>/bin/npm install --global --prefix <prefix> --registry=https://registry.npmjs.org/ --strict-ssl=true --ignore-scripts --no-audit --no-fund --loglevel=error vecnet@<version>
+```
+
+npm runs:
+
+- from `/`, without a shell, in its own process group;
+- pinned to the registry the hub checked (`--registry` overrides any `.npmrc` registry setting) with TLS verification forced on;
+- with a minimal environment that excludes every `VECNET_*` variable;
+- with a 10-minute limit. On timeout, or if the hub is stopped meanwhile, the whole process group gets SIGTERM, then SIGKILL 5 s later if it is still running. An interrupted npm can leave the package half replaced: reinstall the version named in the log (`reinstall=`) before restarting.
+
+The hub logs at most the last 4 KiB of npm's output.
+
+Before restarting, the hub verifies the result:
+
+- `package.json` must hold the new version;
+- the native binary must be an executable ELF file for this CPU architecture;
+- the new binary must run: `vecnet-hub --version`, with only `PATH=/usr/bin:/bin` in its environment and a 15 s limit, must print exactly `vecnet-hub <version>` on standard output.
+
+Only after that does the hub restart. It drains the same way as for a signal: it announces `hub_restarting`, ends streams, waits for in-flight requests (up to 10 s) and closes the database. It then re-executes the new binary in place, with the same PID, arguments and environment, so the npm wrapper, a terminal or a systemd unit sees no exit. Clients reconnect after the restart hint. A stop signal (Ctrl-C, SIGTERM) that arrives during that drain wins: the hub exits and does not start the new binary.
+
+The card reports progress (checking, installing, verifying, restarting). It then watches for up to 2 minutes: **Restarting into 0.2.7…** while the hub is away, **Updated to 0.2.7** once the new process answers, or **Update not confirmed** if the new version has not answered by then. If npm fails or times out, or the result fails verification, the job ends **failed** and nothing restarts. The hub keeps running the old version, and the message says how to reinstall. Details are in the hub log.
+
+**No fallback copy.** npm replaces the package in place, and the hub keeps no copy of the previous binary. If verification fails after npm has already replaced the files, the running hub is unaffected, but its next start runs whatever npm left. Reinstall the version named in the message (`npm install -g vecnet@<version>`), or the previous one, before restarting.
+
 ## Hub notices
 
 Tell connected agents about maintenance, a restart or a move before it happens. A notice is signed with the hub's identity key, fanned out once to every enabled peer as a `hub_notice` Event, and listed by `GET /v1/hub/notices` ([PROTOCOL §21.2](PROTOCOL.md#212-notices)). It is not a message: nobody can reply to it, and push routes, Grok Bots and dots do not see it.

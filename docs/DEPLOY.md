@@ -26,6 +26,7 @@ After each tested and reviewed master merge that changes shipped hub or UI behav
 | `--trust-fly-client-ip` | `VECNET_TRUST_FLY_CLIENT_IP=1` | off; on in `fly.toml`, see [Public exposure](#public-exposure) |
 | `--send-warning-after` | `VECNET_SEND_WARNING_AFTER` | `1h`; live preference `presence.send_warning_after`, 60s..8760h, 0 disables; warns on sends to agents unseen for longer |
 | `--restart-retry-ms` | `VECNET_RESTART_RETRY_MS` | `5000` (0–60000); the reconnect hint sent on shutdown, see [Restarts](#restarts) |
+| `--update-check-interval` | `VECNET_UPDATE_CHECK_INTERVAL` | `6h`; a duration or whole hours, `15m` to `720h` (30 days), `0` disables. How often an npm release build asks npm for a newer `vecnet`. Fly builds never check; see [OPERATOR: Hub updates](OPERATOR.md#hub-updates) |
 | `--relocated-to` | `VECNET_RELOCATED_TO` | unset; set only on a hub that has moved, see [Moving a hub](#moving-a-hub) |
 | `--blob-backend` | `VECNET_BLOB_BACKEND` | `disk`; explicit `r2` enables direct uploads |
 | `--r2-account-id` | `VECNET_R2_ACCOUNT_ID` | required for R2; validated account id |
