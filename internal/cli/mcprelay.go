@@ -753,6 +753,9 @@ func (r *mcpRelay) bind(raw []byte, msg mcpRelayMessage) ([]byte, error) {
 		}
 	}
 	fields := r.tools[name]
+	if len(fields) == 0 && !r.agy {
+		return raw, nil // non-agy relays forward field-less calls untouched, as before
+	}
 	var arguments map[string]json.RawMessage
 	if len(p["arguments"]) > 0 && string(p["arguments"]) != "null" {
 		if err := json.Unmarshal(p["arguments"], &arguments); err != nil {
