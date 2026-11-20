@@ -122,21 +122,29 @@ test('claude status sidecar never republishes the adapter admission or scope coo
   await status.stop();
 });
 
-test('an old snapshot without admission.canary is rejected and publishes nothing', unix, async t => {
+test('an old snapshot without admission.canary stays valid as canary=false and never admits', unix, async t => {
   const s = fixture(t);
   const lease = await openDeliveryLease(s.authority, euid, { env: s.env });
   assert.ok(lease);
   t.after(() => lease!.close());
-  // A pre-canary CLI's snapshot: the admission has no canary flag. It is
-  // refused outright (fail closed), never read as canary:false or published.
+  // A master-era CLI's snapshot: the admission has no canary flag. A newer
+  // launcher keeps the row valid (passive status still publishes) and reads
+  // the missing flag as false, so native delivery stays fail-closed — the
+  // delivery adapter's own admission check independently refuses the row
+  // (see claude-adapter.test.ts, "canary absent").
   const old = (async () => ({ version: 1, bindings: [{
     binding_key: 'ab'.repeat(32), generation: '01'.repeat(16), state: 'registered',
     admission: { live: true, policy: true, version_qualified: true },
   }] })) as unknown as () => Promise<ClaudeSnapshot>;
-  const status = createClaudeStatus({ ...s, fetchSnapshot: old, nativeAdmissions: () => new Map([['ab'.repeat(32), '01'.repeat(16)]]) });
+  const status = createClaudeStatus({ ...s, fetchSnapshot: old });
   status.start();
-  await until(() => s.log.entries.some(e => e.msg === 'claude_snapshot_unavailable'), 'the old snapshot is refused');
-  assert.equal(existsSync(s.sidecar), false, 'a refused snapshot publishes no sidecar');
+  await until(() => existsSync(s.sidecar), 'the old snapshot still publishes passive status');
+  const doc = JSON.parse(readFileSync(s.sidecar, 'utf8'));
+  assert.deepEqual(doc.bindings, [{ binding_key: 'ab'.repeat(32), generation: '01'.repeat(16), state: 'registered' }],
+    'the row is republished passively with no native marker');
+  await status.stop();
+  // A canary that is present but not a boolean still invalidates the row:
+  // only a missing flag is read as false.
   for (const bad of [null, 'true', 1]) {
     const row = { binding_key: 'ab'.repeat(32), generation: '01'.repeat(16), state: 'registered',
       admission: { live: true, policy: true, version_qualified: true, canary: bad } };
@@ -147,5 +155,4 @@ test('an old snapshot without admission.canary is rejected and publishes nothing
     await other.stop();
     assert.equal(existsSync(s.sidecar), false, `canary ${String(bad)} published a sidecar`);
   }
-  await status.stop();
 });

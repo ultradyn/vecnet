@@ -14,7 +14,9 @@ export type ClaudeBindingState = 'registered' | 'unsupported' | 'opted_out' | 'b
 /** Native-delivery admission gate (task 7): process liveness, durable policy
  * consent, the build check (parked: version_qualified holds) and the
  * per-profile canary opt-in (Phase 2 task 3) — the sole durable gate on a
- * native write. Booleans only; a snapshot row without `canary` is refused. */
+ * native write. Booleans only; a snapshot row without `canary` (a master-era
+ * CLI) is still valid and reads as `false`, so native delivery stays
+ * fail-closed while passive status keeps publishing. */
 export interface ClaudeSnapshotAdmission { live: boolean; policy: boolean; version_qualified: boolean; canary: boolean; witness?: boolean }
 /** The coordinates the shared host needs to open its own scoped CLI children
  * for this recipient: the profile name, the binding's own absolute config
@@ -22,8 +24,9 @@ export interface ClaudeSnapshotAdmission { live: boolean; policy: boolean; versi
  * never the daemon default), the pinned hub identity and the hub/caller/
  * recipient identities. No socket paths, no session ids. Neither `config`
  * nor `hub_identity` ever reaches the status sidecar. `config`,
- * `hub_identity` and `admission.witness` are optional at parse time (an
- * older CLI still yields passive status) but required for admission. */
+ * `hub_identity`, `admission.witness` and `admission.canary` are optional at
+ * parse time (an older CLI still yields passive status; a missing `canary`
+ * reads as `false`) but required for admission. */
 export interface ClaudeSnapshotScope { profile: string; as?: string; config?: string; hub_identity?: string; hub_endpoint: string; caller: string; recipient: string }
 export interface ClaudeSnapshotBinding {
   binding_key: string; generation: string; state: ClaudeBindingState; reason?: string;
@@ -82,10 +85,14 @@ function hostIdentity(): { pid: number; start: string; boot: string } | undefine
 function validAdmission(input: unknown): ClaudeSnapshotAdmission | undefined {
   if (input === null || typeof input !== 'object') return;
   const a = input as Record<string, unknown>;
+  // A missing `canary` (a master-era CLI) reads as false: native stays
+  // fail-closed without invalidating the rest of the row, so a newer
+  // launcher keeps publishing passive status. A present but non-boolean
+  // canary is malformed and refuses the row.
   if (typeof a.live !== 'boolean' || typeof a.policy !== 'boolean' || typeof a.version_qualified !== 'boolean' ||
-    typeof a.canary !== 'boolean') return; // An older CLI without the canary flag is refused: fail closed.
+    (a.canary !== undefined && typeof a.canary !== 'boolean')) return;
   if (a.witness !== undefined && typeof a.witness !== 'boolean') return;
-  const out: ClaudeSnapshotAdmission = { live: a.live, policy: a.policy, version_qualified: a.version_qualified, canary: a.canary };
+  const out: ClaudeSnapshotAdmission = { live: a.live, policy: a.policy, version_qualified: a.version_qualified, canary: a.canary === true };
   if (a.witness !== undefined) out.witness = a.witness as boolean;
   return out;
 }
