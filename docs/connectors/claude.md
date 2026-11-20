@@ -168,7 +168,10 @@ What an admitted scope does:
   returned (including a config-witness lapse), and the first admitted pass
   after every daemon start, restart or kill-switch recovery reads
   `inbox --since head`, stores that cursor and stages nothing; the same
-  happens after a generation change or with an empty cursor. Deliveries
+  happens after a generation change or with an empty cursor. On that pass a
+  `reserved` claim left from before the gap (a stop, crash or outage
+  mid-batch) is released with `fenced_scope_not_admitted`, never sent; an
+  `attempting` one becomes `uncertain` as always. Deliveries
   already waiting before admission stay on the legacy hook and inbox path:
   wakes that arrive while the scope is not admitted, or while the daemon is
   down, get no native pointer — they stay in the inbox on the legacy path. A
@@ -237,7 +240,11 @@ means the same as `write_failed_or_outcome_unknown`. An `uncertain` or
   `reserved` claim becomes `released` with the reason
   `fenced_scope_not_admitted`, and an `attempting` one becomes `uncertain`
   (`restart_may_have_written`). A pass whose snapshot cannot be read changes
-  nothing.
+  nothing, and it does not end an admission: if the scope is admitted again
+  on the next readable pass, the host resumes its stored cursor rather than
+  rebaselining. A withdrawal hidden entirely behind unreadable passes can
+  therefore still be promoted when it ends; any pass that proves the scope
+  withdrawn drains it and forces a rebaseline.
 
 ## Disable and enable
 

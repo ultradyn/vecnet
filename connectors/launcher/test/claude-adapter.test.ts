@@ -293,17 +293,28 @@ function seededClaim(over: Partial<ClaudeClaimRecord>): ClaudeClaimRecord {
   } as ClaudeClaimRecord;
 }
 
-test('a reserved claim from a crashed run is fenced, then rescheduled with the current owner', async t => {
+test('a reserved claim from a crashed or stopped run is released fenced on the rebaseline pass, never sent', async t => {
   const f = fixture(t);
   f.kv.kv.set('claude-claims:claim:dly_seeded', JSON.stringify(seededClaim({})));
   f.adapter.start();
   await settle();
-  assert.equal(f.transportCalls.length, 1, 'a fenced reserved claim is rescheduled with the current owner');
-  assert.deepEqual(f.transportCalls[0].bindingKey, KEY);
+  assert.equal(f.transportCalls.length, 0, 'a reserved claim from before the gap never reaches the transport');
+  const claim = f.kv.claim('dly_seeded')!;
+  assert.deepEqual([claim.state, claim.disposition, claim.dispositionReason], ['released', 'released', 'fenced_scope_not_admitted']);
+});
+
+test('a reserved claim in a scope this process already established is rescheduled with the current owner', async t => {
+  const f = fixture(t);
+  f.adapter.start();
+  await settle(); // Baseline-only first pass establishes the scope.
+  f.kv.kv.set('claude-claims:claim:dly_seeded', JSON.stringify(seededClaim({})));
+  f.pool.recording.notify('exclusive:claude:' + KEY, { priority: 'wake' });
+  await settle();
+  const rescheduled = f.transportCalls.filter(call => call.msgId !== 'n'.repeat(26));
+  assert.ok(rescheduled.length >= 1, 'an established scope reschedules its reserved claim');
   const claim = f.kv.claim('dly_seeded')!;
   assert.equal(claim.state, 'released');
   assert.equal(claim.disposition, 'attempted');
-  assert.notEqual(f.transportCalls[0].msgId, 'n'.repeat(26), 'the rescheduled attempt uses a fresh correlation id');
 });
 
 test('a reserved claim from a rotated generation is released fenced without any write', async t => {

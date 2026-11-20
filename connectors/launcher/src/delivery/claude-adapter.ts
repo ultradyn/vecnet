@@ -504,7 +504,10 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Cl
       await enqueue(FENCE_LANE, async () => fenceSweep(keys));
       if (admitted.length) {
         await Promise.all(admitted.map(row => enqueue(row.binding_key, () =>
-          recoverScope(row).then(() => observeAcks(row)).then(() => stageScope(row, !established.has(row.binding_key))))));
+          {
+            const rebaseline = !established.has(row.binding_key);
+            return recoverScope(row, rebaseline).then(() => observeAcks(row)).then(() => stageScope(row, rebaseline));
+          })));
       }
     } catch {
       failed = true;
@@ -671,9 +674,13 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Cl
   /** Restart recovery for one admitted scope, from this pass's index. A
    * foreign `reserved` claim is proven unwritten by its exact predecessor:
    * fence it against the current generation, then either reschedule it with
-   * the current owner or release it fenced. A foreign `attempting` claim may
-   * have written bytes: retain and surface `uncertain`, never resend. */
-  async function recoverScope(row: ClaudeSnapshotBinding): Promise<void> {
+   * the current owner or release it fenced. On a rebaseline pass (the first
+   * admission this process established for the key) it is always released
+   * fenced: it was staged before a not-admitted gap — a stop, crash or
+   * kill-switch outage of any length — and its message has been on the
+   * legacy path since. A foreign `attempting` claim may have written bytes:
+   * retain and surface `uncertain`, never resend. */
+  async function recoverScope(row: ClaudeSnapshotBinding, rebaseline: boolean): Promise<void> {
     for (const { claim, raw } of [...(index.byScope.get(row.binding_key) ?? [])]) {
       if (inFlight.has(claim.deliveryId)) continue;
       if (claim.state === 'attempting') {
@@ -684,6 +691,12 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Cl
       if (claim.state === 'reserved') {
         if (claim.generation !== row.generation) {
           saveIfCurrent({ ...claim, state: 'released', disposition: 'released', dispositionReason: 'fenced_generation_changed', updatedAt: clock.now() }, raw);
+          continue;
+        }
+        if (rebaseline) {
+          if (saveIfCurrent({ ...claim, state: 'released', disposition: 'released', dispositionReason: 'fenced_scope_not_admitted', updatedAt: clock.now() }, raw)) {
+            log.info('claude_delivery_claim_fenced', { deliveryId: claim.deliveryId, scope: row.binding_key, state: 'released' });
+          }
           continue;
         }
         await attempt(row, { ...claim }, raw); // Reschedule with the current owner, on a copy.
@@ -726,7 +739,9 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Cl
     const stored = typeof record.generation === 'string' && typeof record.cursor === 'string';
     if (rebaseline || !stored || record.generation !== row.generation || record.cursor === '' || !CURSOR.test(record.cursor)) {
       await baseline(row, coordinates, record);
-      established.add(row.binding_key); // Only once the baseline persisted.
+      // Only once the baseline persisted, and never after stop(): a baseline
+      // still in flight at stop must not mark the key for a later start().
+      if (running) established.add(row.binding_key);
       return;
     }
     const progress = {
