@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -212,7 +213,12 @@ func TestClaudeSetupIntentSurvivesPostRedemptionFailure(t *testing.T) {
 	if len(records) != 1 || records[0].IntentID != r.IntentID || records[0].State != claudeEnrollmentPending {
 		t.Fatalf("repair disturbed the saved intent: %+v", records)
 	}
-	if !strings.Contains(out+errs, "not a child of the claimed claude process") && !strings.Contains(out+errs, "delivery runtime") {
+	// Off Linux, root evidence stops earlier and by design: the platform is
+	// not qualified for session ownership, so the intent stays pending on the
+	// legacy path with that reason instead.
+	pendingReason := strings.Contains(out+errs, "not a child of the claimed claude process") || strings.Contains(out+errs, "delivery runtime") ||
+		runtime.GOOS != "linux" && strings.Contains(out+errs, errClaudeUnsupported.Error())
+	if !pendingReason {
 		t.Fatalf("repair lost the pending reason: stdout=%q stderr=%q", out, errs)
 	}
 	if code == 0 {
@@ -289,10 +295,6 @@ func TestClaudeRuntimeSnapshotRedaction(t *testing.T) {
 		"XDG_CONFIG_HOME": filepath.Join(d, "xdg"),
 		"XDG_CACHE_HOME":  filepath.Join(d, "cache"),
 	}
-	stateDir := filepath.Join(d, ".local", "state", "vecnet", "projects")
-	if err := os.MkdirAll(stateDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
 	scope := claudeScope{
 		ConfigPath:  "/home/user/.config/vecnet/vecnet.toml",
 		Profile:     "p",
@@ -306,9 +308,7 @@ func TestClaudeRuntimeSnapshotRedaction(t *testing.T) {
 		`"config_root":"/home/user/SNAPSHOT-REDACT-CONFIG-ROOT","session_id":"S-SNAPSHOT-REDACT-SESSION","socket_path":"/tmp/vecnet-SNAPSHOT-REDACT-SOCKET.sock",` +
 		`"process_start":"12","boot_id":"01234567-89ab-cdef-0123-456789abcdef","version":"2.1.322","pid":4242,"uid":1000,` +
 		`"generation":"0123456789abcdef0123456789abcdef","updated_at":"2026-11-19T00:00:00Z"}],"opt_outs":[]}`
-	if err := os.WriteFile(filepath.Join(stateDir, claudeBindingsName), []byte(doc), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	claudeSeedLocalState(t, env, claudeBindingsName, []byte(doc))
 	var out, errs bytes.Buffer
 	code := Run([]string{"claude", "runtime-snapshot"}, strings.NewReader(""), &out, &errs, func(k string) string { return env[k] })
 	if code != 0 {

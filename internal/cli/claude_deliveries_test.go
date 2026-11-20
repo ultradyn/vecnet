@@ -11,11 +11,14 @@ package cli
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/XertroV/vecnet/internal/platform"
 )
 
 const (
@@ -43,10 +46,22 @@ func claudeDeliveryTestDSN(path string) string {
 func claudeDeliveryLedger(t *testing.T, home string, rows map[string]string) string {
 	t.Helper()
 	dir := filepath.Join(home, ".local", "state", "vecnet", "codex")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := platform.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(dir, "delivery.sqlite")
+	// Seed the inode privately before SQLite touches it, as the TS host does:
+	// on Windows SQLite's own creator would inherit the parent's ACL and
+	// owner, which the ledger's private-file check rightly refuses.
+	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+		seed, err := platform.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := seed.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
 	db, err := sql.Open("sqlite", "file:"+claudeDeliveryTestDSN(path)+"?_pragma=busy_timeout(5000)")
 	if err != nil {
 		t.Fatal(err)
@@ -63,7 +78,7 @@ func claudeDeliveryLedger(t *testing.T, home string, rows map[string]string) str
 			t.Fatal(err)
 		}
 	}
-	if err := os.Chmod(path, 0o600); err != nil {
+	if err := cliFixtureChmod(path, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return path
@@ -308,7 +323,8 @@ func TestClaudeDeliveriesRefuseUnsafeLedger(t *testing.T) {
 	path := claudeDeliveryLedger(t, home, map[string]string{
 		claudeDeliveryClaimKey("dly_00000000000000000000000001"): claudeDeliveryClaimJSON(t, nil),
 	})
-	if err := os.Chmod(path, 0o644); err != nil {
+	// os.Chmod on unix; on Windows the equivalent DACL with a world-read ACE.
+	if err := cliFixtureChmod(path, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	code, _, errs := claudeStatusRun(t, env, "--net", "p", "claude", "deliveries")
@@ -379,8 +395,8 @@ func TestClaudeResolveRetryRefusesHeldAndPending(t *testing.T) {
 		"state": "held", "disposition": "held", "dispositionReason": "inbox_only",
 	})
 	heldWake := claudeDeliveryClaimJSON(t, map[string]any{
-		"deliveryId": "dly_000000000000000000000000A2",
-		"state": "held", "disposition": "held", "dispositionReason": "operator_keep_inbox",
+		"deliveryId": "dly_000000000000000000000000A2", "state": "held",
+		"disposition": "held", "dispositionReason": "operator_keep_inbox",
 	})
 	reserved := claudeDeliveryClaimJSON(t, map[string]any{
 		"deliveryId": "dly_000000000000000000000000A3", "state": "reserved",
