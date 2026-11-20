@@ -338,24 +338,56 @@ func TestMCPRelayAgyStripsToolSummary(t *testing.T) {
 }
 
 func TestMCPRelayAgyToolSummaryNonStringForwarded(t *testing.T) {
-	h := agyFake(t, func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		<-r.Context().Done()
-	})
-	u := profileUser(t, h.URL, "relay-test-secret")
-	replies := relayOK(t, u, []string{
-		relayLine(1, "tools/list", map[string]any{}),
-		relayCall(2, "vecnet_inbox", map[string]any{"toolSummary": 5, "limit": 5}),
-	})
-	relayIDs(t, replies, 1, 2)
-	var echo struct {
-		Arguments map[string]any `json:"arguments"`
+	// Only a JSON string is stripped; every other value — including null,
+	// which json.Unmarshal decodes into a string without error — must reach
+	// the hub unchanged for it to reject.
+	values := map[string]any{
+		"null":   nil,
+		"bool":   true,
+		"number": 5,
+		"object": map[string]any{"k": "v"},
+		"array":  []any{1, 2},
 	}
-	if err := json.Unmarshal(replies[1].Result, &echo); err != nil {
-		t.Fatal(err)
-	}
-	if echo.Arguments["toolSummary"] != float64(5) {
-		t.Fatalf("non-string toolSummary must be forwarded unchanged: %+v", echo.Arguments)
+	for _, bound := range []bool{false, true} {
+		for name, value := range values {
+			t.Run(fmt.Sprintf("bound=%t/%s", bound, name), func(t *testing.T) {
+				h := agyFake(t, func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set("Content-Type", "text/event-stream")
+					<-r.Context().Done()
+				})
+				u := profileUser(t, h.URL, "relay-test-secret")
+				args := []string{}
+				if bound {
+					args = []string{"--as", "peer_A"}
+				}
+				replies := relayOK(t, u, []string{
+					relayLine(1, "tools/list", map[string]any{}),
+					relayCall(2, "vecnet_inbox", map[string]any{"toolSummary": value, "limit": 5}),
+				}, args...)
+				relayIDs(t, replies, 1, 2)
+				var echo struct {
+					Arguments map[string]any `json:"arguments"`
+				}
+				if err := json.Unmarshal(replies[1].Result, &echo); err != nil {
+					t.Fatal(err)
+				}
+				forwarded, ok := echo.Arguments["toolSummary"]
+				if !ok {
+					t.Fatalf("non-string toolSummary was dropped instead of forwarded: %+v", echo.Arguments)
+				}
+				gotJSON, _ := json.Marshal(forwarded)
+				wantJSON, _ := json.Marshal(value)
+				if string(gotJSON) != string(wantJSON) {
+					t.Fatalf("non-string toolSummary must be forwarded unchanged: got %s, want %s", gotJSON, wantJSON)
+				}
+				if echo.Arguments["limit"] != float64(5) {
+					t.Fatalf("other arguments changed: %+v", echo.Arguments)
+				}
+				if bound != (echo.Arguments["as"] == "peer_A") {
+					t.Fatalf("binding changed: %+v", echo.Arguments)
+				}
+			})
+		}
 	}
 }
 
@@ -586,30 +618,46 @@ func TestMCPRelayAgyWaitConcurrent(t *testing.T) {
 }
 
 func TestMCPRelayAgyWaitStdinEOF(t *testing.T) {
-	cancelled := make(chan struct{}, 4)
-	h := agyFake(t, func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		go func() {
-			<-r.Context().Done()
-			cancelled <- struct{}{}
-		}()
-		<-r.Context().Done()
-	})
-	u := profileUser(t, h.URL, "relay-test-secret")
-	s := startRelay(t, u)
-	s.send(relayCall(2, "vecnet_wait", map[string]any{"timeout_seconds": 60}))
-	h.waitRequest(regexp.MustCompile(`GET /v1/events`), 5*time.Second)
-	before := agySnapshotTree(t, u)
-	s.stop() // closes stdin: the relay must cancel the wait and exit
-	select {
-	case <-cancelled:
-	case <-time.After(3 * time.Second):
-		t.Fatal("the events connection was not cancelled at stdin EOF")
+	for _, tc := range []struct {
+		name    string
+		timeout int
+		closeAt time.Duration
+	}{
+		{"pending", 60, 0},
+		// EOF close to an imminent deadline: after EOF nothing is ever
+		// answered, whichever of the two the wait observes first.
+		{"deadline-race", 1, 600 * time.Millisecond},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cancelled := make(chan struct{}, 4)
+			h := agyFake(t, func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				go func() {
+					<-r.Context().Done()
+					cancelled <- struct{}{}
+				}()
+				<-r.Context().Done()
+			})
+			u := profileUser(t, h.URL, "relay-test-secret")
+			s := startRelay(t, u)
+			s.send(relayCall(2, "vecnet_wait", map[string]any{"timeout_seconds": tc.timeout}))
+			h.waitRequest(regexp.MustCompile(`GET /v1/events`), 5*time.Second)
+			before := agySnapshotTree(t, u)
+			if tc.closeAt > 0 {
+				time.Sleep(tc.closeAt)
+			}
+			s.stop() // closes stdin: the relay must cancel the wait and exit
+			select {
+			case <-cancelled:
+			case <-time.After(3 * time.Second):
+				t.Fatal("the events connection was not cancelled at stdin EOF")
+			}
+			if strings.Contains(s.out.String(), `"id":2`) {
+				t.Fatalf("vecnet_wait answered after stdin EOF: %s", s.out.String())
+			}
+			agyNoSideEffects(t, h, u, before)
+		})
 	}
-	if strings.Contains(s.out.String(), `"id":2`) {
-		t.Fatalf("vecnet_wait answered after stdin EOF: %s", s.out.String())
-	}
-	agyNoSideEffects(t, h, u, before)
 }
 
 func TestMCPRelayAgyWaitParams(t *testing.T) {

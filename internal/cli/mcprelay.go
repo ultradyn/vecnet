@@ -837,15 +837,15 @@ func mcpRelayEncodeFields(fields map[string]json.RawMessage) []byte {
 // locally, reading the event stream without ever acknowledging it.
 
 // mcpDropStringKey deletes key from arguments when its value is a JSON
-// string, reporting whether anything changed. Other keys and non-string
-// values stay byte for byte.
+// string, reporting whether anything changed. Only a string — the raw value
+// must open with a quote, because json.Unmarshal also decodes null into a
+// string without error. Other keys and non-string values stay byte for byte.
 func mcpDropStringKey(arguments map[string]json.RawMessage, key string) bool {
 	value, ok := arguments[key]
 	if !ok {
 		return false
 	}
-	var s string
-	if json.Unmarshal(value, &s) != nil {
+	if trimmed := bytes.TrimSpace(value); len(trimmed) == 0 || trimmed[0] != '"' {
 		return false
 	}
 	delete(arguments, key)
@@ -1001,12 +1001,16 @@ func (r *mcpRelay) waitReply(id json.RawMessage, timeout time.Duration) {
 		r.waitCursor = cursor // opaque cursors: the most recently received wins
 		r.waitMu.Unlock()
 	}
+	// After stdin EOF nothing is ever answered, whichever of EOF or the
+	// deadline the wait observed first — so check shutdown before the
+	// deadline, or a select over both could answer a gone client.
+	if r.waitCtx.Err() != nil {
+		return
+	}
 	select {
 	case <-expired:
 		// The deadline ended the wait: the notice is the answer, even when
 		// a terminal hub failure raced it.
-	case <-r.waitCtx.Done():
-		return // stdin closed or shutdown: the client is gone, answer nothing
 	default:
 		if err != nil {
 			_ = r.replyError(id, err)
