@@ -3,7 +3,11 @@ import { isAbsolute } from 'node:path';
 import { stderrLog, systemClock } from '../daemon.ts';
 import { userHome } from '../../../hub-client/src/platform.ts';
 import { localPlatform } from '../private-files.ts';
-import { codexBindingsPath, codexRecoveryPath, startCodexConnector } from './connector.ts';
+import { codexAuthority, codexRecoveryPath } from './connector.ts';
+import { claudeDeliveryCanaryEnabled } from '../delivery/claude-adapter.ts';
+import { createClaudeStatus, spawnClaudeSnapshot } from '../delivery/claude-status.ts';
+import { startDeliveryHost } from '../delivery/host.ts';
+import type { DeliveryHost } from '../delivery/host.ts';
 
 class DeliveryError extends Error {}
 const unsafe = () => new DeliveryError('unsafe state path');
@@ -28,26 +32,34 @@ async function main(): Promise<void> {
     ? 'VECNET_BIN must be an absolute native executable with a safe owner and DACL'
     : 'VECNET_BIN must be an absolute executable owned by this user or root and not writable by others'); }
   process.umask(0o077);
-  let home: string;
+  let env: NodeJS.ProcessEnv;
   try {
-    home = realpathSync(selectedHome);
-    codexRecoveryPath({ ...process.env, HOME: home });
+    env = { ...process.env, HOME: realpathSync(selectedHome), VECNET_BIN: bin };
+    const authority = codexAuthority(env);
+    if (!authority) throw unsafe();
+    codexRecoveryPath(env, authority);
   } catch { throw unsafe(); }
-  const env = { ...process.env, HOME: home, VECNET_BIN: bin };
-  if (!codexBindingsPath(env)) throw unsafe();
   let stop!: () => void;
   const interrupted = new Promise<void>(resolve => { stop = resolve; });
   process.once('SIGTERM', stop); process.once('SIGINT', stop);
-  let connector: ReturnType<typeof startCodexConnector> | undefined;
+  let host: DeliveryHost | undefined;
   try {
-    connector = startCodexConnector({ env, clock: systemClock, log: stderrLog() });
-    await Promise.race([interrupted, connector.stopped]);
+    const log = stderrLog();
+    host = startDeliveryHost({
+      env, clock: systemClock, log,
+      // Passive Claude status rides this host's lease; it never elects one.
+      // The native-delivery adapter exists only behind the explicit
+      // experimental canary opt-in (default off; `claude enable` cannot set it).
+      claudeDeliveryCanary: claudeDeliveryCanaryEnabled(env),
+      auxiliary: () => createClaudeStatus({ env, clock: systemClock, log, fetchSnapshot: spawnClaudeSnapshot(env) }),
+    });
+    await Promise.race([interrupted, host.stopped]);
   } finally {
-    try { await connector?.stop(); }
+    try { await host?.stop(); }
     finally { process.removeListener('SIGTERM', stop); process.removeListener('SIGINT', stop); }
   }
   // Recheck after stop so a signal racing lock loss cannot report success.
-  if ((await connector.stopped).reason === 'status_lock_lost') throw new DeliveryError('status lock lost');
+  if ((await host.stopped).reason === 'status_lock_lost') throw new DeliveryError('status lock lost');
 }
 
 main().then(() => { process.exitCode = 0; }, error => {

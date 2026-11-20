@@ -248,6 +248,7 @@ type app struct {
 	// explicit, so a verified hub follow redispatches the same submission.
 	retainedRequestID string
 	prefsCmd          bool                        // preferences exit codes and JSON errors
+	claudeDeliverCmd  bool                        // claude deliver's private 0/2/3/4 exit contract
 	localRuntime      func(context.Context) error // runtime port for disposable setup fixtures
 	// An explicit per-app inventory also enters the task check on other OSes
 	// for isolated repair fixtures. Nil retains native platform selection.
@@ -266,6 +267,9 @@ func (a *app) exit(err error) int {
 	}
 	if a.prefsCmd {
 		return a.exitPrefs(err)
+	}
+	if a.claudeDeliverCmd {
+		return a.exitClaudeDeliver(err)
 	}
 	var ue *usageError
 	var he *hubError
@@ -533,7 +537,7 @@ func (a *app) dispatch(cmd string, args []string) error {
 	// enrol has no profile yet (a 410 there must not follow another one);
 	// guide makes no hub request.
 	switch cmd {
-	case "watch", "hook", "mcp", "profile", "enrol", "enroll", "guide":
+	case "watch", "hook", "mcp", "profile", "enrol", "enroll", "guide", "claude":
 		return err
 	}
 	followed, followErr := a.followFailure(err)
@@ -610,6 +614,11 @@ func (a *app) dispatchOnce(cmd string, args []string) error {
 		return a.cmdHook(args)
 	case "codex":
 		return a.cmdCodex(args, time.Now)
+	case "claude":
+		// Passive local surface: the host's read-only snapshot child, the
+		// status reader and the addressed disable/enable flags. It never
+		// performs hub requests or generic maintenance.
+		return a.cmdClaude(args)
 	case "threads":
 		return a.cmdThreads(args)
 	case "thread":
@@ -738,6 +747,22 @@ func (a *app) cmdEnrol(args []string) error {
 			return fmt.Errorf("enrol: setup intent was not saved; invitation was not redeemed: %w", err)
 		}
 	}
+	// The Claude durable intent is a separate flow with its own private
+	// document; the two environments never coexist in one run.
+	claudeIntent, claudePrepareErr := a.prepareClaudeEnrollment(name)
+	if errors.Is(claudePrepareErr, errClaudeEnrollmentHost) {
+		if intent == nil {
+			setup = localSetupResult{State: "unsupported", Reason: claudePrepareErr.Error()}
+		}
+	} else if claudePrepareErr != nil {
+		return fmt.Errorf("enrol: claude setup intent was not saved; invitation was not redeemed: %w", claudePrepareErr)
+	}
+	if claudeIntent != nil {
+		claudeIntent.Hub = normalizeHub(hubURL)
+		if err := a.saveClaudeEnrollment(*claudeIntent); err != nil {
+			return fmt.Errorf("enrol: claude setup intent was not saved; invitation was not redeemed: %w", err)
+		}
+	}
 	var out struct {
 		PeerID    string `json:"peer_id"`
 		Secret    string `json:"secret"`
@@ -757,6 +782,14 @@ func (a *app) cmdEnrol(args []string) error {
 			intent.UpdatedAt = time.Now().UTC()
 			if e := a.saveLocalEnrollment(*intent); e != nil {
 				fmt.Fprintf(a.stderr, "vecnet: could not record canceled setup: %v\n", e)
+			}
+		}
+		if claudeIntent != nil {
+			claudeIntent.State = claudeEnrollmentCanceled
+			claudeIntent.Reason = "enrollment request did not commit credentials; use a fresh or still-valid invitation"
+			claudeIntent.UpdatedAt = time.Now().UTC()
+			if e := a.saveClaudeEnrollment(*claudeIntent); e != nil {
+				fmt.Fprintf(a.stderr, "vecnet: could not record canceled claude setup: %v\n", e)
 			}
 		}
 		// "unauthenticated" alone reads as a revoked invite; say what else
@@ -790,6 +823,16 @@ func (a *app) cmdEnrol(args []string) error {
 		enrolled.EnrollmentHub = intent.Hub
 		enrolled.EnrollmentCaller = out.PeerID
 	}
+	if claudeIntent != nil {
+		// Same single commit for the Claude flow: the redeemed caller is the
+		// witness every later registration checks.
+		claudeIntent.Caller = out.PeerID
+		claudeIntent.State = claudeEnrollmentPending
+		enrolled.EnrollmentIntent = claudeIntent.IntentID
+		enrolled.EnrollmentCredential = hookDigest([]byte(out.Secret))
+		enrolled.EnrollmentHub = claudeIntent.Hub
+		enrolled.EnrollmentCaller = out.PeerID
+	}
 	cfg.Profiles[name] = enrolled
 	if err := saveConfigDurable(path, cfg); err != nil {
 		// The secret was issued once and is never printed (PROTOCOL §12, §14
@@ -804,16 +847,23 @@ func (a *app) cmdEnrol(args []string) error {
 	if intent != nil {
 		setup = a.reconcileLocalEnrollment(*intent)
 	}
+	if claudeIntent != nil {
+		setup = a.reconcileClaudeEnrollment(a.ctx, *claudeIntent)
+	}
 	if a.json {
 		return a.emitValue(map[string]any{"profile": name, "peer_id": out.PeerID, "name": out.Name, "config": path, "setup": setup})
 	}
 	fmt.Fprintf(a.stdout, "enrolled %s as profile %s (%s)\n", out.PeerID, name, path)
 	if setup.State == "pending" {
 		fmt.Fprintf(a.stdout, "credentials saved; session setup pending: %s (retry: vecnet repair)\n", setup.Reason)
-	} else if setup.State == "superseded" || setup.State == "canceled" {
+	} else if setup.State == "superseded" || setup.State == "canceled" || setup.State == claudeEnrollmentDisabled {
 		fmt.Fprintf(a.stdout, "credentials saved; automatic setup %s: %s\n", setup.State, setup.Reason)
 	} else if setup.State == "unsupported" {
 		fmt.Fprintf(a.stdout, "credentials saved; automatic setup unsupported: %s\n", setup.Reason)
+	} else if setup.State == claudeEnrollmentArmed || setup.State == claudeEnrollmentRegistered {
+		// The phase is the status: a saved credential never means native
+		// Claude delivery is ready; the legacy hook path is unchanged.
+		fmt.Fprintf(a.stdout, "credentials saved; claude setup %s: %s\n", setup.State, setup.Reason)
 	} else if setup.State == "ready" {
 		fmt.Fprintln(a.stdout, "session delivery ready")
 	}
@@ -878,7 +928,7 @@ var idCommandFlags = map[string]map[string]flagKind{
 	"react":        mergeSpec(priorityFlags, map[string]flagKind{"remove": boolFlag}),
 	"thread":       {"after": strFlag, "limit": strFlag},
 	"threads":      {"limit": strFlag},
-	"inbox":        {"since": strFlag, "ack": boolFlag, "limit": strFlag, "include-sender-chain": boolFlag},
+	"inbox":        {"since": strFlag, "ack": boolFlag, "limit": strFlag, "include-sender-chain": boolFlag, "no-display-proof": boolFlag},
 	"watch":        {"for-monitor": boolFlag, "since": strFlag, "auto-ack": boolFlag, "deliveries-only": boolFlag},
 	"presence":     {"note": strFlag},
 	"avatar":       nil,
@@ -1525,7 +1575,7 @@ func (a *app) cmdInbox(args []string) error {
 		return err
 	}
 	if len(o.pos) != 0 {
-		return usageErr("usage: vecnet inbox [--since CURSOR] [--ack] [--limit N] [--include-sender-chain]")
+		return usageErr("usage: vecnet inbox [--since CURSOR] [--ack] [--limit N] [--include-sender-chain] [--no-display-proof]")
 	}
 	limit := 0
 	if o.has("limit") {
@@ -1596,7 +1646,14 @@ func (a *app) cmdInbox(args []string) error {
 			fmt.Fprintln(&output, line)
 		}
 	}
-	if err := a.displayInbox(c, name, evs, output.Bytes()); err != nil {
+	if o.has("no-display-proof") {
+		// The delivery host's machine read: the same bounded page, but no
+		// display proof is ever recorded, so the legacy hook state is
+		// untouched and a later UserPromptSubmit hook still shows the page.
+		if _, err := a.stdout.Write(output.Bytes()); err != nil {
+			return err
+		}
+	} else if err := a.displayInbox(c, name, evs, output.Bytes()); err != nil {
 		return err
 	}
 	if o.has("ack") && len(evs) > 0 {

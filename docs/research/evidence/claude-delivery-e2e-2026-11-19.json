@@ -1,0 +1,1233 @@
+{
+  "schema_version": 2,
+  "runs": [
+    {
+      "gallery_path": "vecnet/claude-delivery-e2e-2474d9bb/index.html",
+      "artifact_path_base": "vecnet/claude-delivery-e2e-2474d9bb/assets/",
+      "run": {
+        "nonce": "2474d9bb",
+        "commit": "65e5bdd3d1960c753e96056c648045203fb579d0",
+        "claude_code_version": "2.1.322",
+        "node_version": "v22.23.3",
+        "started": "2026-11-19T16:42:59+1100",
+        "finished": "2026-11-19T16:43:51+1100",
+        "tmux_session": "vecnet-test-2474d9bb",
+        "frame_count": 76,
+        "canary_opt_in": "VECNET_CLAUDE_DELIVERY_CANARY=1 on the disposable daemon only",
+        "version_provision": "CLAUDE_CODE_VERSION for the disposable session is exported by this harness from its own `claude --version` observation (disclosed test-env provision; production activation stays gated)",
+        "model_backend": "scripted Messages API stub on disposable loopback",
+        "results": {
+          "admission": {
+            "binding_key": "3fad508092681416c94f8b170061318069c75c31112018cf09f38e9b5a70b3e6",
+            "generation": "1592d927b33b63af5d8a0ee29359ddd0",
+            "state": "registered",
+            "admission": {
+              "live": true,
+              "policy": true,
+              "version_qualified": true
+            }
+          },
+          "positive": {
+            "delivery_id": "dly_01M7S590S2B0KRCG1EMEV2ZN4T",
+            "message_id": "msg_01M7S590S2B0KRCG1EMEG67EMN",
+            "state": "released",
+            "disposition": "attempted"
+          },
+          "hold": {
+            "delivery_id": "dly_01M7S597836SJRZ9KBA374HFC5",
+            "state": "held",
+            "disposition": "held"
+          },
+          "crash": {
+            "delivery_id": "dly_01M7S59MBG4607MRDCZJ0DN17R",
+            "final_state": "uncertain",
+            "reason": "restart_may_have_written"
+          },
+          "cap": {
+            "delivery_id": "dly_01M7S5A5FT4CBHJS7EEZ2AG0J2",
+            "pending": 129,
+            "blocked": true
+          },
+          "no_ack": {
+            "acks": 0,
+            "deliveries": [
+              {
+                "dly_id": "dly_01M7S590S2B0KRCG1EMEV2ZN4T",
+                "recipient": "peer_01M7S58VW8RZN6E1082E8KMMC3",
+                "state": "queued"
+              },
+              {
+                "dly_id": "dly_01M7S597836SJRZ9KBA374HFC5",
+                "recipient": "peer_01M7S58VW8RZN6E1082E8KMMC3",
+                "state": "queued"
+              },
+              {
+                "dly_id": "dly_01M7S59MBG4607MRDCZJ0DN17R",
+                "recipient": "peer_01M7S58VW8RZN6E1082E8KMMC3",
+                "state": "queued"
+              },
+              {
+                "dly_id": "dly_01M7S5A5FT4CBHJS7EEZ2AG0J2",
+                "recipient": "peer_01M7S58VW8RZN6E1082E8KMMC3",
+                "state": "queued"
+              }
+            ]
+          }
+        },
+        "teardown_verified": true,
+        "documented_limits": [
+          "idle-path injection only: the pointer lands while the session sits idle (queue-operation enqueue plus a peer-origin turn); busy-turn queued_command placement is a separately gated experiment, neither exercised nor claimed"
+        ]
+      },
+      "artifacts": [
+        {
+          "path": "00-run-meta.json",
+          "sha256": "374d78afbf44a121c7afd0ea007f0bf8f3d65de3cb11576727f567d231a605b2",
+          "meaning": "Run nonce, tested revision, Claude Code version observation, and opt-in provenance."
+        },
+        {
+          "path": "10-hub-init.txt",
+          "sha256": "1af68285126c4d1841bd2156347e12096a11d64fbf0299a1e2c080bb5b7f263a",
+          "meaning": "Fresh throwaway hub initialization; the operator secret is redacted."
+        },
+        {
+          "path": "11-hub-serve.log",
+          "sha256": "5b63aa792aafeaa84bcec5067e3f3c9d22dc68f7bf248e1163b8f78c44d2d2ee",
+          "meaning": "Disposable hub startup with a loopback-only listener."
+        },
+        {
+          "path": "20-enrol-sender.txt",
+          "sha256": "1c99b7908191c17b1282b6f63d678e5d8e0ea64d5d31c535b574c1d9b4f381de",
+          "meaning": "CLI enrollment result for the disposable sender profile."
+        },
+        {
+          "path": "21-enrol-claude-rx.txt",
+          "sha256": "9d01301caed182a84d40322cb8557709b2fb8cabedf2cafdbf2642c7d6fd9522",
+          "meaning": "CLI enrollment result for the disposable Claude receiver profile."
+        },
+        {
+          "path": "22-config.toml.redacted",
+          "sha256": "f597de417feb19af3de30f1fee7e066dff0df0050c73fdbe214a7706d63792d4",
+          "meaning": "Public fields from the two disposable profiles; both secrets replaced with redaction markers."
+        },
+        {
+          "path": "23-hook-install.txt",
+          "sha256": "926aa837ad1445c4f7b2e449d3044ab4d0f352af9fa6a97f21bfdb4af32ba73c",
+          "meaning": "CLI result from installing the Claude hooks into disposable settings."
+        },
+        {
+          "path": "30-daemon-env.txt",
+          "sha256": "464ba696a428de43c903ab9803c7b7b574195171dbc3add412263a8a9d010633",
+          "meaning": "Selected daemon setup fields showing disposable paths and explicit canary opt-in."
+        },
+        {
+          "path": "31-stub-observed.jsonl",
+          "sha256": "dfcf2855f7f9a9c073f3ea6cc537f6c8897fb0d05ac5e159cf1bee597b1cb383",
+          "meaning": "Filtered loopback model requests showing the peer pointer, Bash fetch command, and inbox tool result."
+        },
+        {
+          "path": "32-runtime-snapshot.json",
+          "sha256": "b6ad1dfa075af0bda0a77ba416f722144cc1b32eeb3418bd3479ad4919a92c67",
+          "meaning": "Registered binding with live, policy, and version-qualified admission."
+        },
+        {
+          "path": "40-send-wake.json",
+          "sha256": "7a33a361d5a04012439b5f779b234b7dc66a03847353f1cea6df81f3db21cfab",
+          "meaning": "Positive CLI send receipt linking the message, thread, and delivery IDs."
+        },
+        {
+          "path": "40b-send-wake-cli.txt",
+          "sha256": "7a33a361d5a04012439b5f779b234b7dc66a03847353f1cea6df81f3db21cfab",
+          "meaning": "Unmodified stdout of the positive CLI send command."
+        },
+        {
+          "path": "41-hub-delivery.json",
+          "sha256": "55c9811333cb91c0043280a6fe286746987186499849b5218e25bf4fa0396a97",
+          "meaning": "Hub database row for the positive delivery and its recipient."
+        },
+        {
+          "path": "50-daemon.log",
+          "sha256": "442840244d0b91c8a041fcef0711ad480484c59ebd0c19141313ccca5c904405",
+          "meaning": "Combined daemon log across the positive and three negative-control phases."
+        },
+        {
+          "path": "51-daemon-chain.txt",
+          "sha256": "77ddcca338197059c5d62888c623d444b0a5990f1303e422edaaf35e5b577050",
+          "meaning": "Positive chain excerpt: admitted, reserved, attempting, then helper exit 0 with released/attempted."
+        },
+        {
+          "path": "60-transcript-rows.json",
+          "sha256": "1de7fdf59214daddc947e363affaf48662d61154eef18073b6399f873111a978",
+          "meaning": "Claude transcript excerpt containing native queue enqueue/dequeue and the peer-origin conversation row."
+        },
+        {
+          "path": "62-claude-deliveries.json",
+          "sha256": "f47bb928d1cbe4a548599a9981a4365b2a9ab2922036f64590e7682412d0380e",
+          "meaning": "Operator CLI ledger snapshot after the positive write, showing released/attempted and no pending claims."
+        },
+        {
+          "path": "70-hold-send.json",
+          "sha256": "28689e5bbac7430aab8953bfede8f2a29b74fd01d457f6e41b44afeef15b5581",
+          "meaning": "CLI send receipt for the hold-priority negative control."
+        },
+        {
+          "path": "71-hold-inbox.json",
+          "sha256": "b00de21375f8a7c84ee5583170cb73480486ed8f1e6cf8d5dd236376ea784301",
+          "meaning": "Read-only CLI inbox output proving the held message is still retrievable."
+        },
+        {
+          "path": "73-hub-acks.json",
+          "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+          "meaning": "Hub database query returning zero acknowledgement rows."
+        },
+        {
+          "path": "74-hub-delivery-states.json",
+          "sha256": "0d766e6194417c3c765035fc881f1942d3db51337ca8a436decf98fce8267dcd",
+          "meaning": "Hub database query confirming all four canary deliveries remained queued."
+        },
+        {
+          "path": "80-crash-send.json",
+          "sha256": "9871ff84eba5e3551ff2461b69ce9e485a424ca186fb6f83934d741d4891ab2c",
+          "meaning": "CLI send receipt for the pre-write daemon crash control."
+        },
+        {
+          "path": "81-crash-attempting.txt",
+          "sha256": "d47e061f71ddae72c57cf3003933cdcb380b3c17193a392dd0144457213350ae",
+          "meaning": "Durable attempting event and exit 137 from the canary-only SIGKILL seam."
+        },
+        {
+          "path": "82-crash-claim.json",
+          "sha256": "93c9e5c013a87d958bc5fa047536726de82ef6294a533b17882a9b019d70b1b1",
+          "meaning": "Claim observed as attempting at crash and uncertain after restart/reconcile, with zero transcript hits."
+        },
+        {
+          "path": "90-cap-send.json",
+          "sha256": "6475b2d0eaef1d1a27c17addb73758cc455af5e2a8c391b8d9efcc48a1716f45",
+          "meaning": "CLI send receipt for the wake rejected by the local pending-claim cap."
+        },
+        {
+          "path": "91-cap-seed.json",
+          "sha256": "d191ca297a41ccff39b74ad64a233a21a82f11f96a1ee1534b2d19fabf0ade38",
+          "meaning": "Count and binding scope of the 128 synthetic unresolved claims."
+        },
+        {
+          "path": "92-cap-deliveries.json",
+          "sha256": "6aecc0dd0aadd456dc59c2d7989fdbd3e5fef13cd9076fdcc395884871a552a5",
+          "meaning": "Operator ledger snapshot showing 129 pending, blocked_pending_limit, and no claim for the new wake."
+        },
+        {
+          "path": "93-cap-status.json",
+          "sha256": "67a726e778ecca88ec76c6b75f6fb56a2128bd2fc08ec150ef0f0dcea9abf097",
+          "meaning": "Independent Claude status command confirming the pending-limit latch."
+        },
+        {
+          "path": "98-summary.json",
+          "sha256": "312e60990f5735183a11132792845de81e4f38bfbc9c1254167f031af627c514",
+          "meaning": "Machine-readable outcomes for the complete captured canary."
+        },
+        {
+          "path": "99-teardown.txt",
+          "sha256": "e84d4afdd9c7e4fc10d4493e8ee6e63a7cfd40ae8c182dc3629c2124ec665cec",
+          "meaning": "Private tmux server shutdown and negative check for stray test sessions on the default server."
+        },
+        {
+          "path": "frames/frame-0000.txt",
+          "sha256": "852f54b37124e2268d05fcc92c1136c49c258bb9e8df4692638b6061cccce815",
+          "meaning": "Claude tmux pane snapshot at t+5.7s."
+        },
+        {
+          "path": "frames/frame-0001.txt",
+          "sha256": "fa1bfc99b492aa79098815d66b948091cd04b7430adb50cc2366f88c0e27ba5a",
+          "meaning": "Claude tmux pane snapshot at t+6.3s."
+        },
+        {
+          "path": "frames/frame-0002.txt",
+          "sha256": "92d1836ad089d367d9c95673128fb3cdf3aea294d104f1fb27b020d10b3168fa",
+          "meaning": "Claude tmux pane snapshot at t+6.9s."
+        },
+        {
+          "path": "frames/frame-0003.txt",
+          "sha256": "291a08567e59091718860bfadeacf89c4c94b761c443977f59c9f738ef931c84",
+          "meaning": "Claude tmux pane snapshot at t+7.5s."
+        },
+        {
+          "path": "frames/frame-0004.txt",
+          "sha256": "6ae919564d33c6d7413e2cd46a31f636f0be02ce9e61b8fb80a8d37c6bdca5d6",
+          "meaning": "Claude tmux pane snapshot at t+8.1s."
+        },
+        {
+          "path": "frames/frame-0005.txt",
+          "sha256": "09ceb58e2f22aa2fd56846ae955d04e245762d589a5221660e148a3acdc21688",
+          "meaning": "Claude tmux pane snapshot at t+8.7s: session ready (stub model online)."
+        },
+        {
+          "path": "frames/frame-0006.txt",
+          "sha256": "09ceb58e2f22aa2fd56846ae955d04e245762d589a5221660e148a3acdc21688",
+          "meaning": "Claude tmux pane snapshot at t+9.3s."
+        },
+        {
+          "path": "frames/frame-0007.txt",
+          "sha256": "09ceb58e2f22aa2fd56846ae955d04e245762d589a5221660e148a3acdc21688",
+          "meaning": "Claude tmux pane snapshot at t+9.9s."
+        },
+        {
+          "path": "frames/frame-0008.txt",
+          "sha256": "09ceb58e2f22aa2fd56846ae955d04e245762d589a5221660e148a3acdc21688",
+          "meaning": "Claude tmux pane snapshot at t+10.5s."
+        },
+        {
+          "path": "frames/frame-0009.txt",
+          "sha256": "09ceb58e2f22aa2fd56846ae955d04e245762d589a5221660e148a3acdc21688",
+          "meaning": "Claude tmux pane snapshot at t+11.1s."
+        },
+        {
+          "path": "frames/frame-0010.txt",
+          "sha256": "09ceb58e2f22aa2fd56846ae955d04e245762d589a5221660e148a3acdc21688",
+          "meaning": "Claude tmux pane snapshot at t+11.7s."
+        },
+        {
+          "path": "frames/frame-0011.txt",
+          "sha256": "09ceb58e2f22aa2fd56846ae955d04e245762d589a5221660e148a3acdc21688",
+          "meaning": "Claude tmux pane snapshot at t+12.3s."
+        },
+        {
+          "path": "frames/frame-0012.txt",
+          "sha256": "09ceb58e2f22aa2fd56846ae955d04e245762d589a5221660e148a3acdc21688",
+          "meaning": "Claude tmux pane snapshot at t+12.9s."
+        },
+        {
+          "path": "frames/frame-0013.txt",
+          "sha256": "09ceb58e2f22aa2fd56846ae955d04e245762d589a5221660e148a3acdc21688",
+          "meaning": "Claude tmux pane snapshot at t+13.5s."
+        },
+        {
+          "path": "frames/frame-0014.txt",
+          "sha256": "09ceb58e2f22aa2fd56846ae955d04e245762d589a5221660e148a3acdc21688",
+          "meaning": "Claude tmux pane snapshot at t+14.1s."
+        },
+        {
+          "path": "frames/frame-0015.txt",
+          "sha256": "09ceb58e2f22aa2fd56846ae955d04e245762d589a5221660e148a3acdc21688",
+          "meaning": "Claude tmux pane snapshot at t+14.7s."
+        },
+        {
+          "path": "frames/frame-0016.txt",
+          "sha256": "09ceb58e2f22aa2fd56846ae955d04e245762d589a5221660e148a3acdc21688",
+          "meaning": "Claude tmux pane snapshot at t+15.3s."
+        },
+        {
+          "path": "frames/frame-0017.txt",
+          "sha256": "81445d84a6011492bbfa901796e30aeec22d196ad014ba7e3ddbd4de499a5906",
+          "meaning": "Claude tmux pane snapshot at t+15.9s: native pointer visible \u00b7 stub-issued inbox fetch complete."
+        },
+        {
+          "path": "frames/frame-0018.txt",
+          "sha256": "81445d84a6011492bbfa901796e30aeec22d196ad014ba7e3ddbd4de499a5906",
+          "meaning": "Claude tmux pane snapshot at t+16.5s."
+        },
+        {
+          "path": "frames/frame-0019.txt",
+          "sha256": "81445d84a6011492bbfa901796e30aeec22d196ad014ba7e3ddbd4de499a5906",
+          "meaning": "Claude tmux pane snapshot at t+17.1s."
+        },
+        {
+          "path": "frames/frame-0020.txt",
+          "sha256": "c6ef929d34e68111ceb08098a5f007979e3c65b1ecb261a45b77993834f260a2",
+          "meaning": "Claude tmux pane snapshot at t+17.7s."
+        },
+        {
+          "path": "frames/frame-0021.txt",
+          "sha256": "c6ef929d34e68111ceb08098a5f007979e3c65b1ecb261a45b77993834f260a2",
+          "meaning": "Claude tmux pane snapshot at t+18.3s."
+        },
+        {
+          "path": "frames/frame-0022.txt",
+          "sha256": "c6ef929d34e68111ceb08098a5f007979e3c65b1ecb261a45b77993834f260a2",
+          "meaning": "Claude tmux pane snapshot at t+18.9s."
+        },
+        {
+          "path": "frames/frame-0023.txt",
+          "sha256": "c6ef929d34e68111ceb08098a5f007979e3c65b1ecb261a45b77993834f260a2",
+          "meaning": "Claude tmux pane snapshot at t+19.5s."
+        },
+        {
+          "path": "frames/frame-0024.txt",
+          "sha256": "c6ef929d34e68111ceb08098a5f007979e3c65b1ecb261a45b77993834f260a2",
+          "meaning": "Claude tmux pane snapshot at t+20.1s."
+        },
+        {
+          "path": "frames/frame-0025.txt",
+          "sha256": "c6ef929d34e68111ceb08098a5f007979e3c65b1ecb261a45b77993834f260a2",
+          "meaning": "Claude tmux pane snapshot at t+20.7s."
+        },
+        {
+          "path": "frames/frame-0026.txt",
+          "sha256": "c6ef929d34e68111ceb08098a5f007979e3c65b1ecb261a45b77993834f260a2",
+          "meaning": "Claude tmux pane snapshot at t+21.4s."
+        },
+        {
+          "path": "frames/frame-0027.txt",
+          "sha256": "c6ef929d34e68111ceb08098a5f007979e3c65b1ecb261a45b77993834f260a2",
+          "meaning": "Claude tmux pane snapshot at t+22.0s."
+        },
+        {
+          "path": "frames/frame-0028.txt",
+          "sha256": "c6ef929d34e68111ceb08098a5f007979e3c65b1ecb261a45b77993834f260a2",
+          "meaning": "Claude tmux pane snapshot at t+22.6s."
+        },
+        {
+          "path": "frames/frame-0029.txt",
+          "sha256": "c6ef929d34e68111ceb08098a5f007979e3c65b1ecb261a45b77993834f260a2",
+          "meaning": "Claude tmux pane snapshot at t+23.2s."
+        },
+        {
+          "path": "frames/frame-0030.txt",
+          "sha256": "c6ef929d34e68111ceb08098a5f007979e3c65b1ecb261a45b77993834f260a2",
+          "meaning": "Claude tmux pane snapshot at t+23.8s."
+        },
+        {
+          "path": "frames/frame-0031.txt",
+          "sha256": "c6ef929d34e68111ceb08098a5f007979e3c65b1ecb261a45b77993834f260a2",
+          "meaning": "Claude tmux pane snapshot at t+24.4s."
+        },
+        {
+          "path": "frames/frame-0032.txt",
+          "sha256": "c6ef929d34e68111ceb08098a5f007979e3c65b1ecb261a45b77993834f260a2",
+          "meaning": "Claude tmux pane snapshot at t+25.0s."
+        },
+        {
+          "path": "frames/frame-0033.txt",
+          "sha256": "c6ef929d34e68111ceb08098a5f007979e3c65b1ecb261a45b77993834f260a2",
+          "meaning": "Claude tmux pane snapshot at t+25.6s."
+        },
+        {
+          "path": "frames/frame-0034.txt",
+          "sha256": "1d92b9179e8e9f1b78ce59349eb86f81f762e50b62ed75c879fdaf613529cc86",
+          "meaning": "Claude tmux pane snapshot at t+26.2s."
+        },
+        {
+          "path": "frames/frame-0035.txt",
+          "sha256": "1d92b9179e8e9f1b78ce59349eb86f81f762e50b62ed75c879fdaf613529cc86",
+          "meaning": "Claude tmux pane snapshot at t+26.8s."
+        },
+        {
+          "path": "frames/frame-0036.txt",
+          "sha256": "1d92b9179e8e9f1b78ce59349eb86f81f762e50b62ed75c879fdaf613529cc86",
+          "meaning": "Claude tmux pane snapshot at t+27.4s."
+        },
+        {
+          "path": "frames/frame-0037.txt",
+          "sha256": "1d92b9179e8e9f1b78ce59349eb86f81f762e50b62ed75c879fdaf613529cc86",
+          "meaning": "Claude tmux pane snapshot at t+28.0s."
+        },
+        {
+          "path": "frames/frame-0038.txt",
+          "sha256": "1d92b9179e8e9f1b78ce59349eb86f81f762e50b62ed75c879fdaf613529cc86",
+          "meaning": "Claude tmux pane snapshot at t+28.6s."
+        },
+        {
+          "path": "frames/frame-0039.txt",
+          "sha256": "1d92b9179e8e9f1b78ce59349eb86f81f762e50b62ed75c879fdaf613529cc86",
+          "meaning": "Claude tmux pane snapshot at t+29.2s."
+        },
+        {
+          "path": "frames/frame-0040.txt",
+          "sha256": "1d92b9179e8e9f1b78ce59349eb86f81f762e50b62ed75c879fdaf613529cc86",
+          "meaning": "Claude tmux pane snapshot at t+29.8s."
+        },
+        {
+          "path": "frames/frame-0041.txt",
+          "sha256": "1d92b9179e8e9f1b78ce59349eb86f81f762e50b62ed75c879fdaf613529cc86",
+          "meaning": "Claude tmux pane snapshot at t+30.4s."
+        },
+        {
+          "path": "frames/frame-0042.txt",
+          "sha256": "1d92b9179e8e9f1b78ce59349eb86f81f762e50b62ed75c879fdaf613529cc86",
+          "meaning": "Claude tmux pane snapshot at t+31.0s."
+        },
+        {
+          "path": "frames/frame-0043.txt",
+          "sha256": "1d92b9179e8e9f1b78ce59349eb86f81f762e50b62ed75c879fdaf613529cc86",
+          "meaning": "Claude tmux pane snapshot at t+31.6s."
+        },
+        {
+          "path": "frames/frame-0044.txt",
+          "sha256": "1d92b9179e8e9f1b78ce59349eb86f81f762e50b62ed75c879fdaf613529cc86",
+          "meaning": "Claude tmux pane snapshot at t+32.2s."
+        },
+        {
+          "path": "frames/frame-0045.txt",
+          "sha256": "1d92b9179e8e9f1b78ce59349eb86f81f762e50b62ed75c879fdaf613529cc86",
+          "meaning": "Claude tmux pane snapshot at t+32.8s."
+        },
+        {
+          "path": "frames/frame-0046.txt",
+          "sha256": "1d92b9179e8e9f1b78ce59349eb86f81f762e50b62ed75c879fdaf613529cc86",
+          "meaning": "Claude tmux pane snapshot at t+33.4s."
+        },
+        {
+          "path": "frames/frame-0047.txt",
+          "sha256": "242543a112949299a4ffa2dfaad089b6f6d38d6ad658871aef7ebd696f19bae2",
+          "meaning": "Claude tmux pane snapshot at t+34.0s."
+        },
+        {
+          "path": "frames/frame-0048.txt",
+          "sha256": "242543a112949299a4ffa2dfaad089b6f6d38d6ad658871aef7ebd696f19bae2",
+          "meaning": "Claude tmux pane snapshot at t+34.6s."
+        },
+        {
+          "path": "frames/frame-0049.txt",
+          "sha256": "242543a112949299a4ffa2dfaad089b6f6d38d6ad658871aef7ebd696f19bae2",
+          "meaning": "Claude tmux pane snapshot at t+35.2s."
+        },
+        {
+          "path": "frames/frame-0050.txt",
+          "sha256": "242543a112949299a4ffa2dfaad089b6f6d38d6ad658871aef7ebd696f19bae2",
+          "meaning": "Claude tmux pane snapshot at t+35.8s."
+        },
+        {
+          "path": "frames/frame-0051.txt",
+          "sha256": "242543a112949299a4ffa2dfaad089b6f6d38d6ad658871aef7ebd696f19bae2",
+          "meaning": "Claude tmux pane snapshot at t+36.4s."
+        },
+        {
+          "path": "frames/frame-0052.txt",
+          "sha256": "242543a112949299a4ffa2dfaad089b6f6d38d6ad658871aef7ebd696f19bae2",
+          "meaning": "Claude tmux pane snapshot at t+37.0s."
+        },
+        {
+          "path": "frames/frame-0053.txt",
+          "sha256": "242543a112949299a4ffa2dfaad089b6f6d38d6ad658871aef7ebd696f19bae2",
+          "meaning": "Claude tmux pane snapshot at t+37.6s."
+        },
+        {
+          "path": "frames/frame-0054.txt",
+          "sha256": "242543a112949299a4ffa2dfaad089b6f6d38d6ad658871aef7ebd696f19bae2",
+          "meaning": "Claude tmux pane snapshot at t+38.3s."
+        },
+        {
+          "path": "frames/frame-0055.txt",
+          "sha256": "242543a112949299a4ffa2dfaad089b6f6d38d6ad658871aef7ebd696f19bae2",
+          "meaning": "Claude tmux pane snapshot at t+38.9s."
+        },
+        {
+          "path": "frames/frame-0056.txt",
+          "sha256": "242543a112949299a4ffa2dfaad089b6f6d38d6ad658871aef7ebd696f19bae2",
+          "meaning": "Claude tmux pane snapshot at t+39.5s."
+        },
+        {
+          "path": "frames/frame-0057.txt",
+          "sha256": "242543a112949299a4ffa2dfaad089b6f6d38d6ad658871aef7ebd696f19bae2",
+          "meaning": "Claude tmux pane snapshot at t+40.1s."
+        },
+        {
+          "path": "frames/frame-0058.txt",
+          "sha256": "242543a112949299a4ffa2dfaad089b6f6d38d6ad658871aef7ebd696f19bae2",
+          "meaning": "Claude tmux pane snapshot at t+40.7s."
+        },
+        {
+          "path": "frames/frame-0059.txt",
+          "sha256": "242543a112949299a4ffa2dfaad089b6f6d38d6ad658871aef7ebd696f19bae2",
+          "meaning": "Claude tmux pane snapshot at t+41.3s."
+        },
+        {
+          "path": "frames/frame-0060.txt",
+          "sha256": "242543a112949299a4ffa2dfaad089b6f6d38d6ad658871aef7ebd696f19bae2",
+          "meaning": "Claude tmux pane snapshot at t+41.9s."
+        },
+        {
+          "path": "frames/frame-0061.txt",
+          "sha256": "242543a112949299a4ffa2dfaad089b6f6d38d6ad658871aef7ebd696f19bae2",
+          "meaning": "Claude tmux pane snapshot at t+42.5s."
+        },
+        {
+          "path": "frames/frame-0062.txt",
+          "sha256": "242543a112949299a4ffa2dfaad089b6f6d38d6ad658871aef7ebd696f19bae2",
+          "meaning": "Claude tmux pane snapshot at t+43.1s."
+        },
+        {
+          "path": "frames/frame-0063.txt",
+          "sha256": "242543a112949299a4ffa2dfaad089b6f6d38d6ad658871aef7ebd696f19bae2",
+          "meaning": "Claude tmux pane snapshot at t+43.7s."
+        },
+        {
+          "path": "frames/frame-0064.txt",
+          "sha256": "242543a112949299a4ffa2dfaad089b6f6d38d6ad658871aef7ebd696f19bae2",
+          "meaning": "Claude tmux pane snapshot at t+44.3s."
+        },
+        {
+          "path": "frames/frame-0065.txt",
+          "sha256": "242543a112949299a4ffa2dfaad089b6f6d38d6ad658871aef7ebd696f19bae2",
+          "meaning": "Claude tmux pane snapshot at t+44.9s."
+        },
+        {
+          "path": "frames/frame-0066.txt",
+          "sha256": "242543a112949299a4ffa2dfaad089b6f6d38d6ad658871aef7ebd696f19bae2",
+          "meaning": "Claude tmux pane snapshot at t+45.5s."
+        },
+        {
+          "path": "frames/frame-0067.txt",
+          "sha256": "242543a112949299a4ffa2dfaad089b6f6d38d6ad658871aef7ebd696f19bae2",
+          "meaning": "Claude tmux pane snapshot at t+46.1s."
+        },
+        {
+          "path": "frames/frame-0068.txt",
+          "sha256": "242543a112949299a4ffa2dfaad089b6f6d38d6ad658871aef7ebd696f19bae2",
+          "meaning": "Claude tmux pane snapshot at t+46.7s."
+        },
+        {
+          "path": "frames/frame-0069.txt",
+          "sha256": "242543a112949299a4ffa2dfaad089b6f6d38d6ad658871aef7ebd696f19bae2",
+          "meaning": "Claude tmux pane snapshot at t+47.3s."
+        },
+        {
+          "path": "frames/frame-0070.txt",
+          "sha256": "242543a112949299a4ffa2dfaad089b6f6d38d6ad658871aef7ebd696f19bae2",
+          "meaning": "Claude tmux pane snapshot at t+47.9s."
+        },
+        {
+          "path": "frames/frame-0071.txt",
+          "sha256": "242543a112949299a4ffa2dfaad089b6f6d38d6ad658871aef7ebd696f19bae2",
+          "meaning": "Claude tmux pane snapshot at t+48.5s."
+        },
+        {
+          "path": "frames/frame-0072.txt",
+          "sha256": "242543a112949299a4ffa2dfaad089b6f6d38d6ad658871aef7ebd696f19bae2",
+          "meaning": "Claude tmux pane snapshot at t+49.1s."
+        },
+        {
+          "path": "frames/frame-0073.txt",
+          "sha256": "242543a112949299a4ffa2dfaad089b6f6d38d6ad658871aef7ebd696f19bae2",
+          "meaning": "Claude tmux pane snapshot at t+49.7s."
+        },
+        {
+          "path": "frames/frame-0074.txt",
+          "sha256": "242543a112949299a4ffa2dfaad089b6f6d38d6ad658871aef7ebd696f19bae2",
+          "meaning": "Claude tmux pane snapshot at t+50.3s."
+        },
+        {
+          "path": "frames/frame-0075.txt",
+          "sha256": "242543a112949299a4ffa2dfaad089b6f6d38d6ad658871aef7ebd696f19bae2",
+          "meaning": "Claude tmux pane snapshot at t+50.9s."
+        },
+        {
+          "path": "player-data.json",
+          "sha256": "2ab74ba4f277cddd8967e29480d765309d09814c5d4788a1fada0235a7031b5e",
+          "meaning": "Timestamped frame index, annotations, and lifecycle events for the gallery player."
+        }
+      ]
+    },
+    {
+      "gallery_path": "vecnet/claude-delivery-e2e/index.html",
+      "artifact_path_base": "vecnet/claude-delivery-e2e/assets/",
+      "run": {
+        "nonce": "8e51b492",
+        "commit": "5cb1c33f6a1138c4876c9a684b06c7400bb298a0",
+        "harness_source": "working tree with strengthened harness before commit",
+        "claude_code_version": "2.1.322",
+        "node_version": "v22.23.3",
+        "started": "2026-11-19T17:41:34+1100",
+        "finished": "2026-11-19T17:42:22+1100",
+        "tmux_session": "vecnet-test-8e51b492",
+        "frame_count": 70,
+        "canary_opt_in": "VECNET_CLAUDE_DELIVERY_CANARY=1 on the disposable daemon only",
+        "version_provision": "CLAUDE_CODE_VERSION for the disposable session and its enrol child is exported by this harness from its own `claude --version` observation (disclosed test-env provision; production activation stays gated)",
+        "model_backend": "scripted Messages API stub on disposable loopback",
+        "results": {
+          "enrollment": {
+            "phase": "registered",
+            "scheduler": "private systemctl fixture",
+            "runtime": "CLI-staged embedded release"
+          },
+          "admission": {
+            "binding_key": "5a084242c1f33ecd21633efaf477424d0f083a4b4ca8cb67f17ffc11957952ac",
+            "generation": "60ab09dc1cecd941fb2dd89ae363a44d",
+            "state": "registered",
+            "admission": {
+              "live": true,
+              "policy": true,
+              "version_qualified": true
+            }
+          },
+          "positive": {
+            "delivery_id": "dly_01M7S8MART6NAR4N7AY1QK4DQF",
+            "message_id": "msg_01M7S8MART6NAR4N7AXYQPRN3R",
+            "state": "released",
+            "disposition": "attempted",
+            "enqueues": 1,
+            "fetch_pairs": 1,
+            "tool_use_id": "toolu_e2e_fetch_1",
+            "lifecycle": [
+              "claude_delivery_scope_admitted",
+              "claude_delivery_claim_reserved",
+              "claude_delivery_claim_attempting",
+              "claude_delivery_disposition"
+            ]
+          },
+          "hold": {
+            "delivery_id": "dly_01M7S8MBC3Y30751TCHTJW601N",
+            "message_id": "msg_01M7S8MBC2066YEQFT0NTHWYJX",
+            "state": "held",
+            "disposition": "held",
+            "pointer_frames": 0
+          },
+          "crash": {
+            "delivery_id": "dly_01M7S8MQ0KAZPD7GNEB0E7D9XH",
+            "message_id": "msg_01M7S8MQ0KAZPD7GNEB0CZYKDX",
+            "final_state": "uncertain",
+            "reason": "restart_may_have_written",
+            "pointer_frames": 0
+          },
+          "cap": {
+            "delivery_id": "dly_01M7S8N84SNPCQM81X3PWEC4TT",
+            "message_id": "msg_01M7S8N84SNPCQM81X3M01P19N",
+            "pending": 129,
+            "blocked": true,
+            "pointer_frames": 0
+          },
+          "no_ack": {
+            "acks": 0,
+            "deliveries": [
+              {
+                "dly_id": "dly_01M7S8MART6NAR4N7AY1QK4DQF",
+                "recipient": "peer_01M7S8M4PGR1RFW0DJSPDFMXEP",
+                "state": "queued"
+              },
+              {
+                "dly_id": "dly_01M7S8MBC3Y30751TCHTJW601N",
+                "recipient": "peer_01M7S8M4PGR1RFW0DJSPDFMXEP",
+                "state": "queued"
+              },
+              {
+                "dly_id": "dly_01M7S8MQ0KAZPD7GNEB0E7D9XH",
+                "recipient": "peer_01M7S8M4PGR1RFW0DJSPDFMXEP",
+                "state": "queued"
+              },
+              {
+                "dly_id": "dly_01M7S8N84SNPCQM81X3PWEC4TT",
+                "recipient": "peer_01M7S8M4PGR1RFW0DJSPDFMXEP",
+                "state": "queued"
+              }
+            ]
+          },
+          "teardown": {
+            "private_server_stopped": true,
+            "default_server_strays": 0,
+            "raw_disposition": "disposed"
+          }
+        },
+        "teardown_verified": true,
+        "documented_limits": [
+          "idle-path injection only: the pointer lands while the session sits idle (queue-operation enqueue plus a peer-origin turn); busy-turn queued_command placement is a separately gated experiment, neither exercised nor claimed"
+        ]
+      },
+      "artifacts": [
+        {
+          "path": "00-run-meta.json",
+          "sha256": "ed1123e6e875fbec9eaf3783f949517a853ee6acf99471d0392896c9bf881435",
+          "meaning": "Run nonce, tested revision, Claude Code version observation, and opt-in provenance."
+        },
+        {
+          "path": "10-hub-init.txt",
+          "sha256": "f1f165d9b55124876016cf7132155abff6d56ab639c6de1e5e4c8934ea55508f",
+          "meaning": "Fresh throwaway hub initialization; the operator secret is redacted."
+        },
+        {
+          "path": "11-hub-serve.log",
+          "sha256": "ca9ba49855cf53e5a8413ea2424eb7513f3607dc609ac27a471f556ff722ee3c",
+          "meaning": "Disposable hub startup with a loopback-only listener."
+        },
+        {
+          "path": "20-enrol-sender.txt",
+          "sha256": "5119f0bdba5c14f4715deb096e2957d93fc9c8d69ccf772b917287bf261b50ca",
+          "meaning": "CLI enrollment result for the disposable sender profile."
+        },
+        {
+          "path": "21-enrol-claude-rx.txt",
+          "sha256": "9eb15cfaf5675021652db4552db201fb97b5ab8a4d1fd721d0fcb89b0697ccc2",
+          "meaning": "Receiver enrollment inside the live Claude Bash tool reports registered and the observed version."
+        },
+        {
+          "path": "22-config.toml.redacted",
+          "sha256": "2f51feabc79ccae06123f1b54631fd6334bf3bf4148b0f3ac15270a8b5ccfce7",
+          "meaning": "Public fields from the two disposable profiles; both secrets replaced with redaction markers."
+        },
+        {
+          "path": "23-runtime-stage.txt",
+          "sha256": "19feed31128e33d31b203dc491522a419af8a159a8456f09f96e91374d3717a8",
+          "meaning": "Embedded runtime staging via the private scheduler fixture."
+        },
+        {
+          "path": "30-daemon-env.txt",
+          "sha256": "7b918e34fe2f73e7e07769b62755aaf96448f1cbf6f2bb9d590f4cfcb12c1fcb",
+          "meaning": "Selected daemon setup fields showing disposable paths and explicit canary opt-in."
+        },
+        {
+          "path": "31-stub-observed.jsonl",
+          "sha256": "9d37315ec6b29a6a0e798ea20a1e7d814ed9faaba4dfc5903f85b667cb2fa5c0",
+          "meaning": "Filtered loopback model requests showing the peer pointer, Bash fetch command, and inbox tool result."
+        },
+        {
+          "path": "32-runtime-snapshot.json",
+          "sha256": "dad297a8745bbdd18b042f98027de211ed6bc15c2e9cd34df8b189aad555ed71",
+          "meaning": "Registered binding with live, policy, and version-qualified admission."
+        },
+        {
+          "path": "40-send-wake.json",
+          "sha256": "1f5f3091b0a84c72027730c0116257f31f2e78463521dea4bbef67be70647487",
+          "meaning": "Positive CLI send receipt linking the message, thread, and delivery IDs."
+        },
+        {
+          "path": "40b-send-wake-cli.txt",
+          "sha256": "1f5f3091b0a84c72027730c0116257f31f2e78463521dea4bbef67be70647487",
+          "meaning": "Unmodified stdout of the positive CLI send command."
+        },
+        {
+          "path": "41-hub-delivery.json",
+          "sha256": "306d55b213eee25bf945f8d0bd97a76e51de5cb86b190d2b763c156f311e1f26",
+          "meaning": "Hub database row for the positive delivery and its recipient."
+        },
+        {
+          "path": "50-daemon.log",
+          "sha256": "45b2284fccb7a849a4d794d45c703eb16f6bf846bcf3a67a86104436e838b072",
+          "meaning": "Combined daemon log across the positive and three negative-control phases."
+        },
+        {
+          "path": "51-daemon-chain.txt",
+          "sha256": "2a10b531aafa03e2aaeeb2c179f99b6dfea400afc5f7324a3d0b9e1d21a538b2",
+          "meaning": "Positive chain excerpt: admitted, reserved, attempting, then helper exit 0 with released/attempted."
+        },
+        {
+          "path": "60-transcript-rows.json",
+          "sha256": "0083d81e4d038f073041fdb73eec1355c607c09a8aeb1616d9eea9db4e6ac789",
+          "meaning": "Exactly one native enqueue, one peer-origin turn and one matching Bash tool-use/result pair."
+        },
+        {
+          "path": "62-claude-deliveries.json",
+          "sha256": "91fb1dbfefd45a8764a780a00ad4bcb1e2e15b511a0ec8a72c0d9f4db6e46629",
+          "meaning": "Operator CLI ledger snapshot after the positive write, showing released/attempted and no pending claims."
+        },
+        {
+          "path": "70-hold-send.json",
+          "sha256": "586eac8f9a6f2b46d7d14720f0bc6bc81682802a7771a65155b6e616167a5597",
+          "meaning": "CLI send receipt for the hold-priority negative control."
+        },
+        {
+          "path": "71-hold-inbox.json",
+          "sha256": "ecaf294e3f55f6a80a83f57990ef20e3967955afb996292edc2def2182d62d3b",
+          "meaning": "Read-only CLI inbox output proving the held message is still retrievable."
+        },
+        {
+          "path": "73-hub-acks.json",
+          "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+          "meaning": "Hub database query returning zero acknowledgement rows."
+        },
+        {
+          "path": "74-hub-delivery-states.json",
+          "sha256": "d5ea41513deb901dd3e858de67c24651825fe9d5928dc802898e5b2a0372f0dd",
+          "meaning": "Hub database query confirming all four canary deliveries remained queued."
+        },
+        {
+          "path": "80-crash-send.json",
+          "sha256": "dfca7e30c235e4b37fdb22e05e776e67806e72c6fac45cd5a7c81cf5fc29a8e7",
+          "meaning": "CLI send receipt for the pre-write daemon crash control."
+        },
+        {
+          "path": "81-crash-attempting.txt",
+          "sha256": "c043d2fcad432470fe60614822c68b4accdeb8357b588a629dd0e59e284ea4ac",
+          "meaning": "Durable attempting event and exit 137 from the canary-only SIGKILL seam."
+        },
+        {
+          "path": "82-crash-claim.json",
+          "sha256": "b4d4868990acc77b94e5fd56fb9ef5929cb2790545294998fb5959fe065e7d6b",
+          "meaning": "Claim observed as attempting at crash and uncertain after restart/reconcile, with zero transcript hits."
+        },
+        {
+          "path": "90-cap-send.json",
+          "sha256": "22e87eeb099f5a57d9151bc6bd89fd442dd0b8bdb8d9d6978bca498719cd2ce0",
+          "meaning": "CLI send receipt for the wake rejected by the local pending-claim cap."
+        },
+        {
+          "path": "91-cap-seed.json",
+          "sha256": "e88f384b12ecc5088c2b692aa0014b4a754226001a505f47bc28f3fa312d84c1",
+          "meaning": "Count and binding scope of the 128 synthetic unresolved claims."
+        },
+        {
+          "path": "92-cap-deliveries.json",
+          "sha256": "41e19d34249d845852781b998abbcf3657538570d25bfb6983b85d172e2c1228",
+          "meaning": "Operator ledger snapshot showing 129 pending, blocked_pending_limit, and no claim for the new wake."
+        },
+        {
+          "path": "93-cap-status.json",
+          "sha256": "ebc2933668933f51fc8881826a669ca243372398e01eb6c75a818665644c2b71",
+          "meaning": "Independent Claude status command confirming the pending-limit latch."
+        },
+        {
+          "path": "98-summary.json",
+          "sha256": "f436f22db5dec903ccb357e706759a7de51f17baf0d75504c2e8f30870f9ce88",
+          "meaning": "Machine-readable outcomes for the complete captured canary."
+        },
+        {
+          "path": "99-teardown.txt",
+          "sha256": "d1029ef3587bb00d5e258edce32b4a12fab16c690dfe94bd33571e3c13138a36",
+          "meaning": "Verified private tmux shutdown, no stray sessions, and raw run state disposed."
+        },
+        {
+          "path": "frames/frame-0000.txt",
+          "sha256": "852f54b37124e2268d05fcc92c1136c49c258bb9e8df4692638b6061cccce815",
+          "meaning": "Claude tmux pane snapshot at t+4.6s."
+        },
+        {
+          "path": "frames/frame-0001.txt",
+          "sha256": "af2a5c6e3f259290c9b28bc2552a271aa1af0d1bfea25a27182540ec23f201ab",
+          "meaning": "Claude tmux pane snapshot at t+5.2s."
+        },
+        {
+          "path": "frames/frame-0002.txt",
+          "sha256": "92d1836ad089d367d9c95673128fb3cdf3aea294d104f1fb27b020d10b3168fa",
+          "meaning": "Claude tmux pane snapshot at t+5.8s."
+        },
+        {
+          "path": "frames/frame-0003.txt",
+          "sha256": "291a08567e59091718860bfadeacf89c4c94b761c443977f59c9f738ef931c84",
+          "meaning": "Claude tmux pane snapshot at t+6.4s."
+        },
+        {
+          "path": "frames/frame-0004.txt",
+          "sha256": "fb98360a9616f37fb3ace4bf2b55f4897048b9c0e3b7aee8b003b52b263b9615",
+          "meaning": "Claude tmux pane snapshot at t+7.0s."
+        },
+        {
+          "path": "frames/frame-0005.txt",
+          "sha256": "00e4e634a6285c1c587d2bdce4fd47e468f179f22e1663cb6ac3009370a5d649",
+          "meaning": "Claude tmux pane snapshot at t+7.6s."
+        },
+        {
+          "path": "frames/frame-0006.txt",
+          "sha256": "5da51ade8a79adfb8099b5350519724865fb308ab5956fb1cccedba61c65d80a",
+          "meaning": "Claude tmux pane snapshot at t+8.2s."
+        },
+        {
+          "path": "frames/frame-0007.txt",
+          "sha256": "5da51ade8a79adfb8099b5350519724865fb308ab5956fb1cccedba61c65d80a",
+          "meaning": "Claude tmux pane snapshot at t+8.8s."
+        },
+        {
+          "path": "frames/frame-0008.txt",
+          "sha256": "6f7074f56111f79f1122b98f7c1dab4fd9839cb94ed3b7a997b0daab2f1a51a8",
+          "meaning": "Claude tmux pane snapshot at t+9.5s."
+        },
+        {
+          "path": "frames/frame-0009.txt",
+          "sha256": "4e76c927777ac3e3549276bcf3f87706da0be416466caef5d6ad134f6b3d2424",
+          "meaning": "Claude tmux pane snapshot at t+10.1s."
+        },
+        {
+          "path": "frames/frame-0010.txt",
+          "sha256": "84c3807bfff54af37c39928d97ac179a59135bc30d06def08b07383d35f2ddcc",
+          "meaning": "Claude tmux pane snapshot at t+10.7s."
+        },
+        {
+          "path": "frames/frame-0011.txt",
+          "sha256": "12bd84528f0041ee1dd89165682332dd01e8fc1b17dba32a4f186a22263a130d",
+          "meaning": "Claude tmux pane snapshot at t+11.3s."
+        },
+        {
+          "path": "frames/frame-0012.txt",
+          "sha256": "12bd84528f0041ee1dd89165682332dd01e8fc1b17dba32a4f186a22263a130d",
+          "meaning": "Claude tmux pane snapshot at t+11.9s."
+        },
+        {
+          "path": "frames/frame-0013.txt",
+          "sha256": "12bd84528f0041ee1dd89165682332dd01e8fc1b17dba32a4f186a22263a130d",
+          "meaning": "Claude tmux pane snapshot at t+12.5s."
+        },
+        {
+          "path": "frames/frame-0014.txt",
+          "sha256": "12bd84528f0041ee1dd89165682332dd01e8fc1b17dba32a4f186a22263a130d",
+          "meaning": "Claude tmux pane snapshot at t+13.1s."
+        },
+        {
+          "path": "frames/frame-0015.txt",
+          "sha256": "12bd84528f0041ee1dd89165682332dd01e8fc1b17dba32a4f186a22263a130d",
+          "meaning": "Claude tmux pane snapshot at t+13.7s."
+        },
+        {
+          "path": "frames/frame-0016.txt",
+          "sha256": "12bd84528f0041ee1dd89165682332dd01e8fc1b17dba32a4f186a22263a130d",
+          "meaning": "Claude tmux pane snapshot at t+14.3s."
+        },
+        {
+          "path": "frames/frame-0017.txt",
+          "sha256": "12bd84528f0041ee1dd89165682332dd01e8fc1b17dba32a4f186a22263a130d",
+          "meaning": "Claude tmux pane snapshot at t+14.9s."
+        },
+        {
+          "path": "frames/frame-0018.txt",
+          "sha256": "12bd84528f0041ee1dd89165682332dd01e8fc1b17dba32a4f186a22263a130d",
+          "meaning": "Claude tmux pane snapshot at t+15.5s."
+        },
+        {
+          "path": "frames/frame-0019.txt",
+          "sha256": "12bd84528f0041ee1dd89165682332dd01e8fc1b17dba32a4f186a22263a130d",
+          "meaning": "Claude tmux pane snapshot at t+16.1s."
+        },
+        {
+          "path": "frames/frame-0020.txt",
+          "sha256": "9fabada67d52aed5b1b1953418c8339529266d73d4e018198d21ef2547f6a5a2",
+          "meaning": "Claude tmux pane snapshot at t+16.7s."
+        },
+        {
+          "path": "frames/frame-0021.txt",
+          "sha256": "9fabada67d52aed5b1b1953418c8339529266d73d4e018198d21ef2547f6a5a2",
+          "meaning": "Claude tmux pane snapshot at t+17.3s."
+        },
+        {
+          "path": "frames/frame-0022.txt",
+          "sha256": "9fabada67d52aed5b1b1953418c8339529266d73d4e018198d21ef2547f6a5a2",
+          "meaning": "Claude tmux pane snapshot at t+17.9s."
+        },
+        {
+          "path": "frames/frame-0023.txt",
+          "sha256": "9fabada67d52aed5b1b1953418c8339529266d73d4e018198d21ef2547f6a5a2",
+          "meaning": "Claude tmux pane snapshot at t+18.5s."
+        },
+        {
+          "path": "frames/frame-0024.txt",
+          "sha256": "9fabada67d52aed5b1b1953418c8339529266d73d4e018198d21ef2547f6a5a2",
+          "meaning": "Claude tmux pane snapshot at t+19.1s."
+        },
+        {
+          "path": "frames/frame-0025.txt",
+          "sha256": "9fabada67d52aed5b1b1953418c8339529266d73d4e018198d21ef2547f6a5a2",
+          "meaning": "Claude tmux pane snapshot at t+19.7s."
+        },
+        {
+          "path": "frames/frame-0026.txt",
+          "sha256": "9fabada67d52aed5b1b1953418c8339529266d73d4e018198d21ef2547f6a5a2",
+          "meaning": "Claude tmux pane snapshot at t+20.3s."
+        },
+        {
+          "path": "frames/frame-0027.txt",
+          "sha256": "9fabada67d52aed5b1b1953418c8339529266d73d4e018198d21ef2547f6a5a2",
+          "meaning": "Claude tmux pane snapshot at t+20.9s."
+        },
+        {
+          "path": "frames/frame-0028.txt",
+          "sha256": "9fabada67d52aed5b1b1953418c8339529266d73d4e018198d21ef2547f6a5a2",
+          "meaning": "Claude tmux pane snapshot at t+21.5s."
+        },
+        {
+          "path": "frames/frame-0029.txt",
+          "sha256": "9fabada67d52aed5b1b1953418c8339529266d73d4e018198d21ef2547f6a5a2",
+          "meaning": "Claude tmux pane snapshot at t+22.1s."
+        },
+        {
+          "path": "frames/frame-0030.txt",
+          "sha256": "9fabada67d52aed5b1b1953418c8339529266d73d4e018198d21ef2547f6a5a2",
+          "meaning": "Claude tmux pane snapshot at t+22.7s."
+        },
+        {
+          "path": "frames/frame-0031.txt",
+          "sha256": "9fabada67d52aed5b1b1953418c8339529266d73d4e018198d21ef2547f6a5a2",
+          "meaning": "Claude tmux pane snapshot at t+23.3s."
+        },
+        {
+          "path": "frames/frame-0032.txt",
+          "sha256": "9fabada67d52aed5b1b1953418c8339529266d73d4e018198d21ef2547f6a5a2",
+          "meaning": "Claude tmux pane snapshot at t+23.9s."
+        },
+        {
+          "path": "frames/frame-0033.txt",
+          "sha256": "9fabada67d52aed5b1b1953418c8339529266d73d4e018198d21ef2547f6a5a2",
+          "meaning": "Claude tmux pane snapshot at t+24.5s."
+        },
+        {
+          "path": "frames/frame-0034.txt",
+          "sha256": "6f2fe3b8776c3a31f16148f7fd037c3077db042c27375eb2b0e74567cd212c4e",
+          "meaning": "Claude tmux pane snapshot at t+25.1s."
+        },
+        {
+          "path": "frames/frame-0035.txt",
+          "sha256": "6f2fe3b8776c3a31f16148f7fd037c3077db042c27375eb2b0e74567cd212c4e",
+          "meaning": "Claude tmux pane snapshot at t+25.7s."
+        },
+        {
+          "path": "frames/frame-0036.txt",
+          "sha256": "6f2fe3b8776c3a31f16148f7fd037c3077db042c27375eb2b0e74567cd212c4e",
+          "meaning": "Claude tmux pane snapshot at t+26.3s."
+        },
+        {
+          "path": "frames/frame-0037.txt",
+          "sha256": "6f2fe3b8776c3a31f16148f7fd037c3077db042c27375eb2b0e74567cd212c4e",
+          "meaning": "Claude tmux pane snapshot at t+27.0s."
+        },
+        {
+          "path": "frames/frame-0038.txt",
+          "sha256": "6f2fe3b8776c3a31f16148f7fd037c3077db042c27375eb2b0e74567cd212c4e",
+          "meaning": "Claude tmux pane snapshot at t+27.6s."
+        },
+        {
+          "path": "frames/frame-0039.txt",
+          "sha256": "6f2fe3b8776c3a31f16148f7fd037c3077db042c27375eb2b0e74567cd212c4e",
+          "meaning": "Claude tmux pane snapshot at t+28.2s."
+        },
+        {
+          "path": "frames/frame-0040.txt",
+          "sha256": "6f2fe3b8776c3a31f16148f7fd037c3077db042c27375eb2b0e74567cd212c4e",
+          "meaning": "Claude tmux pane snapshot at t+28.8s."
+        },
+        {
+          "path": "frames/frame-0041.txt",
+          "sha256": "6f2fe3b8776c3a31f16148f7fd037c3077db042c27375eb2b0e74567cd212c4e",
+          "meaning": "Claude tmux pane snapshot at t+29.4s."
+        },
+        {
+          "path": "frames/frame-0042.txt",
+          "sha256": "6f2fe3b8776c3a31f16148f7fd037c3077db042c27375eb2b0e74567cd212c4e",
+          "meaning": "Claude tmux pane snapshot at t+30.0s."
+        },
+        {
+          "path": "frames/frame-0043.txt",
+          "sha256": "6f2fe3b8776c3a31f16148f7fd037c3077db042c27375eb2b0e74567cd212c4e",
+          "meaning": "Claude tmux pane snapshot at t+30.6s."
+        },
+        {
+          "path": "frames/frame-0044.txt",
+          "sha256": "6f2fe3b8776c3a31f16148f7fd037c3077db042c27375eb2b0e74567cd212c4e",
+          "meaning": "Claude tmux pane snapshot at t+31.2s."
+        },
+        {
+          "path": "frames/frame-0045.txt",
+          "sha256": "6f2fe3b8776c3a31f16148f7fd037c3077db042c27375eb2b0e74567cd212c4e",
+          "meaning": "Claude tmux pane snapshot at t+31.8s."
+        },
+        {
+          "path": "frames/frame-0046.txt",
+          "sha256": "6f2fe3b8776c3a31f16148f7fd037c3077db042c27375eb2b0e74567cd212c4e",
+          "meaning": "Claude tmux pane snapshot at t+32.4s."
+        },
+        {
+          "path": "frames/frame-0047.txt",
+          "sha256": "9f17698ac44d132130078d575897c51f5268e99071967e0f607d5e5caa8e6268",
+          "meaning": "Claude tmux pane snapshot at t+33.0s."
+        },
+        {
+          "path": "frames/frame-0048.txt",
+          "sha256": "9f17698ac44d132130078d575897c51f5268e99071967e0f607d5e5caa8e6268",
+          "meaning": "Claude tmux pane snapshot at t+33.6s."
+        },
+        {
+          "path": "frames/frame-0049.txt",
+          "sha256": "9f17698ac44d132130078d575897c51f5268e99071967e0f607d5e5caa8e6268",
+          "meaning": "Claude tmux pane snapshot at t+34.2s."
+        },
+        {
+          "path": "frames/frame-0050.txt",
+          "sha256": "9f17698ac44d132130078d575897c51f5268e99071967e0f607d5e5caa8e6268",
+          "meaning": "Claude tmux pane snapshot at t+34.8s."
+        },
+        {
+          "path": "frames/frame-0051.txt",
+          "sha256": "9f17698ac44d132130078d575897c51f5268e99071967e0f607d5e5caa8e6268",
+          "meaning": "Claude tmux pane snapshot at t+35.4s."
+        },
+        {
+          "path": "frames/frame-0052.txt",
+          "sha256": "9f17698ac44d132130078d575897c51f5268e99071967e0f607d5e5caa8e6268",
+          "meaning": "Claude tmux pane snapshot at t+36.0s."
+        },
+        {
+          "path": "frames/frame-0053.txt",
+          "sha256": "9f17698ac44d132130078d575897c51f5268e99071967e0f607d5e5caa8e6268",
+          "meaning": "Claude tmux pane snapshot at t+36.6s."
+        },
+        {
+          "path": "frames/frame-0054.txt",
+          "sha256": "9f17698ac44d132130078d575897c51f5268e99071967e0f607d5e5caa8e6268",
+          "meaning": "Claude tmux pane snapshot at t+37.2s."
+        },
+        {
+          "path": "frames/frame-0055.txt",
+          "sha256": "9f17698ac44d132130078d575897c51f5268e99071967e0f607d5e5caa8e6268",
+          "meaning": "Claude tmux pane snapshot at t+37.8s."
+        },
+        {
+          "path": "frames/frame-0056.txt",
+          "sha256": "9f17698ac44d132130078d575897c51f5268e99071967e0f607d5e5caa8e6268",
+          "meaning": "Claude tmux pane snapshot at t+38.4s."
+        },
+        {
+          "path": "frames/frame-0057.txt",
+          "sha256": "9f17698ac44d132130078d575897c51f5268e99071967e0f607d5e5caa8e6268",
+          "meaning": "Claude tmux pane snapshot at t+39.0s."
+        },
+        {
+          "path": "frames/frame-0058.txt",
+          "sha256": "9f17698ac44d132130078d575897c51f5268e99071967e0f607d5e5caa8e6268",
+          "meaning": "Claude tmux pane snapshot at t+39.6s."
+        },
+        {
+          "path": "frames/frame-0059.txt",
+          "sha256": "9f17698ac44d132130078d575897c51f5268e99071967e0f607d5e5caa8e6268",
+          "meaning": "Claude tmux pane snapshot at t+40.2s."
+        },
+        {
+          "path": "frames/frame-0060.txt",
+          "sha256": "9f17698ac44d132130078d575897c51f5268e99071967e0f607d5e5caa8e6268",
+          "meaning": "Claude tmux pane snapshot at t+40.8s."
+        },
+        {
+          "path": "frames/frame-0061.txt",
+          "sha256": "9f17698ac44d132130078d575897c51f5268e99071967e0f607d5e5caa8e6268",
+          "meaning": "Claude tmux pane snapshot at t+41.4s."
+        },
+        {
+          "path": "frames/frame-0062.txt",
+          "sha256": "9f17698ac44d132130078d575897c51f5268e99071967e0f607d5e5caa8e6268",
+          "meaning": "Claude tmux pane snapshot at t+42.0s."
+        },
+        {
+          "path": "frames/frame-0063.txt",
+          "sha256": "9f17698ac44d132130078d575897c51f5268e99071967e0f607d5e5caa8e6268",
+          "meaning": "Claude tmux pane snapshot at t+42.6s."
+        },
+        {
+          "path": "frames/frame-0064.txt",
+          "sha256": "9f17698ac44d132130078d575897c51f5268e99071967e0f607d5e5caa8e6268",
+          "meaning": "Claude tmux pane snapshot at t+43.2s."
+        },
+        {
+          "path": "frames/frame-0065.txt",
+          "sha256": "9f17698ac44d132130078d575897c51f5268e99071967e0f607d5e5caa8e6268",
+          "meaning": "Claude tmux pane snapshot at t+43.8s."
+        },
+        {
+          "path": "frames/frame-0066.txt",
+          "sha256": "9f17698ac44d132130078d575897c51f5268e99071967e0f607d5e5caa8e6268",
+          "meaning": "Claude tmux pane snapshot at t+44.5s."
+        },
+        {
+          "path": "frames/frame-0067.txt",
+          "sha256": "9f17698ac44d132130078d575897c51f5268e99071967e0f607d5e5caa8e6268",
+          "meaning": "Claude tmux pane snapshot at t+45.1s."
+        },
+        {
+          "path": "frames/frame-0068.txt",
+          "sha256": "9f17698ac44d132130078d575897c51f5268e99071967e0f607d5e5caa8e6268",
+          "meaning": "Claude tmux pane snapshot at t+45.7s."
+        },
+        {
+          "path": "frames/frame-0069.txt",
+          "sha256": "9f17698ac44d132130078d575897c51f5268e99071967e0f607d5e5caa8e6268",
+          "meaning": "Claude tmux pane snapshot at t+46.3s."
+        },
+        {
+          "path": "player-data.json",
+          "sha256": "21d2d433921cb478916630ef2b3d770dc56a8dbb572f99aab081e4ca50d4fcd1",
+          "meaning": "Timestamped frame index, annotations, and lifecycle events for the gallery player."
+        }
+      ]
+    }
+  ]
+}

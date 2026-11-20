@@ -8,7 +8,9 @@ import type { Clock, EventStream, HubApi, Log } from '../../hub-client/src/ports
 import { createEventStream } from '../../hub-client/src/stream.ts';
 import type { SendRequest } from '../../hub-client/src/wire.ts';
 import type { Backend, BackendCapabilities, BackendHealth, PermissionMode, SessionHandle, SettleResult } from './backend.ts';
-import { startCodexConnector } from './codex/connector.ts';
+import { claudeDeliveryCanaryEnabled } from './delivery/claude-adapter.ts';
+import { createClaudeStatus, spawnClaudeSnapshot } from './delivery/claude-status.ts';
+import { startDeliveryHost } from './delivery/host.ts';
 import { ConfigError, parseDuration } from './config.ts';
 import type { LauncherConfig } from './config.ts';
 import { createDirectory } from './directory.ts';
@@ -514,11 +516,19 @@ export async function startDaemon(o: { cfg: LauncherConfig; hub?: HubApi; stream
     });
     every(cfg.presence.heartbeat_ms, async () => { await refreshHealth(); changed(); });
 
-    // Exact-root bindings retain the current generation-fenced connector.
-    const codex = startCodexConnector({ kv: ledger.kv('codex'), clock, log, env: o.env ?? process.env });
-    // A dead connector must fail the embedded service as well, not leave a
+    // Passive Claude status is the default auxiliary adapter: it rides the
+    // elected host lease, never elects its own, and adds no stream or post.
+    const deliveryEnv = o.env ?? process.env;
+    const delivery = startDeliveryHost({
+      kv: ledger.kv('codex'), clock, log, env: deliveryEnv,
+      // Native Claude delivery stays off unless the explicit experimental
+      // canary opt-in is present; passive status is the default auxiliary.
+      claudeDeliveryCanary: claudeDeliveryCanaryEnabled(deliveryEnv),
+      auxiliary: () => createClaudeStatus({ env: deliveryEnv, clock, log, fetchSnapshot: spawnClaudeSnapshot(deliveryEnv) }),
+    });
+    // A dead delivery host must fail the embedded service as well, not leave a
     // healthy-looking launcher process that can never publish readiness again.
-    void codex.stopped.then(outcome => {
+    void delivery.stopped.then(outcome => {
       if (outcome.reason === 'stopped' || dead) return;
       log.error('codex connector stopped', { reason: outcome.reason });
       process.exitCode = 1;
@@ -540,7 +550,7 @@ export async function startDaemon(o: { cfg: LauncherConfig; hub?: HubApi; stream
         await Promise.allSettled([...loops]);
         await Promise.allSettled([...lanes.values()].map(l => l.stop()));
         // Before the ledger closes: engines release unsent claims and unsubscribe.
-        await codex.stop().catch(() => {});
+        await delivery.stop().catch(() => {});
         await presence!.stop();
         halt();
         try { ledger.close(); } catch { /* already closed */ }
@@ -556,7 +566,7 @@ export async function startDaemon(o: { cfg: LauncherConfig; hub?: HubApi; stream
         halt();
         stopping = Promise.resolve();
         for (const lane of lanes.values()) void lane.stop().catch(() => {});
-        void codex.stop().catch(() => {});
+        void delivery.stop().catch(() => {});
         void presence?.stop().catch(() => {});
         try { ledger.close(); } catch { /* already closed */ }
         markStopped();

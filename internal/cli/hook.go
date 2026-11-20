@@ -423,6 +423,17 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 	if a.namedProfile() == "" {
 		return hookResult{} // a hook never makes a bare run (operator.go)
 	}
+	if event == "session-start" {
+		// SessionStart routes to passive registration only: bounded local
+		// work, no hub lookup, no context output. The delivery path stays
+		// with user-prompt and post-tool, whose behavior is unchanged.
+		_ = a.claudeRegisterHook(ctx, a.namedProfile(), raw)
+		return hookResult{}
+	}
+	// A verified first user prompt may update registration before the
+	// ordinary legacy path. Registration is silent and passive, so the
+	// hook's output is byte-identical with or without it.
+	_ = a.claudeRegisterHook(ctx, a.namedProfile(), raw)
 	c, name, ch, e := a.connect()
 	if e != nil || ctx.Err() != nil {
 		return hookResult{}
