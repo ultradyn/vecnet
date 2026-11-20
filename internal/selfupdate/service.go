@@ -256,6 +256,12 @@ func (s *Service) run(parent context.Context, version string) {
 	// one (say a pre-release installed by hand) is never replaced.
 	inst, reason := Redetect(ctx, s.Sys, current)
 	if inst == nil {
+		// Remember the refusal: Status stops offering one-click and Start
+		// refuses (ErrUnavailable), so repeated clicks write no audit rows
+		// for updates that cannot run. A restart re-detects from scratch.
+		s.mu.Lock()
+		s.inst, s.reason = nil, reason
+		s.mu.Unlock()
 		s.Log.Warn("vecnet-hub: update refused; installation changed since start", "reason", reason)
 		s.fail("this installation no longer qualifies for one-click update (" + reason + "); nothing was installed" + keeps)
 		return
@@ -269,7 +275,8 @@ func (s *Service) run(parent context.Context, version string) {
 		"--ignore-scripts", "--no-audit", "--no-fund", "--loglevel=error", PackageName + "@" + version}
 	out, err := install(ctx, inst.NPM, args, NPMEnv(s.Sys.Getenv, inst))
 	if err != nil {
-		s.Log.Warn("vecnet-hub: npm install failed", "version", version, "err", err.Error(), "output", tail(out, 4096))
+		s.Log.Warn("vecnet-hub: npm install failed", "version", version, "err", err.Error(), "output", tail(out, 4096),
+			"reinstall", reinstall(version))
 		what := "npm install failed"
 		switch {
 		case parent.Err() != nil:

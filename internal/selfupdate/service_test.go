@@ -451,3 +451,52 @@ func TestEphemeralListenRefusesOneClick(t *testing.T) {
 		t.Fatalf("Start = %v", err)
 	}
 }
+
+// N3: a refusal found when a job starts is remembered, so the card stops
+// offering one-click and further clicks neither audit nor run.
+func TestRedetectRefusalIsRemembered(t *testing.T) {
+	f := newServiceFixture(t, "0.2.7", true)
+	audits := 0
+	f.svc.Audit = func(string, string) error { audits++; return nil }
+	f.host.setFile(pkgRoot+"/package.json", `{"name":"vecnet","version":"0.3.0-rc.1"}`)
+	if _, _, err := f.svc.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waitJob(t, f.svc, StateFailed)
+	st := f.svc.Status()
+	if st.OneClick || st.ManualReason != ReasonVersion || st.ManualCommand == "" {
+		t.Fatalf("Status = %+v", st)
+	}
+	f.advance(time.Hour)
+	if _, _, err := f.svc.Start(); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("second Start = %v", err)
+	}
+	if audits != 1 || len(f.installs) != 0 {
+		t.Fatalf("audits %d installs %d", audits, len(f.installs))
+	}
+}
+
+// N2: the self-check reads standard output only; standard error noise
+// (a Node or loader warning) neither fails nor passes it.
+func TestSelfCheckReadsStdoutOnly(t *testing.T) {
+	inst := &Install{Prefix: prefix, Root: pkgRoot, Exe: nativeExe}
+	sys := System{RunStdout: func(context.Context, string, []string, []string) ([]byte, []byte, error) {
+		return []byte("vecnet-hub 0.2.7\n"), []byte("warning: something noisy\n"), nil
+	}}
+	if err := SelfCheck(context.Background(), sys, inst, "0.2.7"); err != nil {
+		t.Fatalf("stderr noise failed the check: %v", err)
+	}
+	sys.RunStdout = func(context.Context, string, []string, []string) ([]byte, []byte, error) {
+		return nil, []byte("vecnet-hub 0.2.7\n"), nil
+	}
+	if err := SelfCheck(context.Background(), sys, inst, "0.2.7"); err == nil {
+		t.Fatal("a version on stderr passed the check")
+	}
+	sys.RunStdout = func(context.Context, string, []string, []string) ([]byte, []byte, error) {
+		return nil, []byte("error while loading shared libraries\n"), errors.New("exit status 127")
+	}
+	err := SelfCheck(context.Background(), sys, inst, "0.2.7")
+	if err == nil || !strings.Contains(err.Error(), "did not run (stderr: error while loading shared libraries)") {
+		t.Fatalf("err = %v", err)
+	}
+}

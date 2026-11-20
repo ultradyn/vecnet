@@ -387,7 +387,7 @@ npm runs:
 - from `/`, without a shell, in its own process group;
 - pinned to the registry the hub checked (`--registry` overrides any `.npmrc` registry setting) with TLS verification forced on;
 - with a minimal environment that excludes every `VECNET_*` variable;
-- with a 10-minute limit. On timeout, or if the hub is stopped meanwhile, the whole process group is killed.
+- with a 10-minute limit. On timeout, or if the hub is stopped meanwhile, the whole process group gets SIGTERM, then SIGKILL 5 s later if it is still running. An interrupted npm can leave the package half replaced: reinstall the version named in the log (`reinstall=`) before restarting.
 
 The hub logs at most the last 4 KiB of npm's output.
 
@@ -395,7 +395,7 @@ Before restarting, the hub verifies the result:
 
 - `package.json` must hold the new version;
 - the native binary must be an executable ELF file for this CPU architecture;
-- the new binary must run: `vecnet-hub --version` with an empty environment and a 15 s limit must print exactly `vecnet-hub <version>`.
+- the new binary must run: `vecnet-hub --version`, with only `PATH=/usr/bin:/bin` in its environment and a 15 s limit, must print exactly `vecnet-hub <version>` on standard output.
 
 Only after that does the hub restart. It drains the same way as for a signal: it announces `hub_restarting`, ends streams, waits for in-flight requests (up to 10 s) and closes the database. It then re-executes the new binary in place, with the same PID, arguments and environment, so the npm wrapper, a terminal or a systemd unit sees no exit. Clients reconnect after the restart hint. A stop signal (Ctrl-C, SIGTERM) that arrives during that drain wins: the hub exits and does not start the new binary.
 

@@ -6,6 +6,7 @@ import (
 	"debug/elf"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -64,6 +65,10 @@ type System struct {
 	ReadHead func(path string, n int) ([]byte, error)
 	// Run runs a command (npm prefix -g) and returns its standard output.
 	Run Runner
+	// RunStdout runs a command keeping standard output and standard error
+	// apart (the update self-check); nil means Run, its output read as
+	// standard output.
+	RunStdout func(ctx context.Context, name string, args, env []string) (stdout, stderr []byte, err error)
 }
 
 // Runner runs name with args and the given environment and returns its
@@ -90,6 +95,20 @@ func ExecRunner(ctx context.Context, name string, args, env []string) ([]byte, e
 	return out.Bytes(), err
 }
 
+// ExecStdout is ExecRunner with standard output and standard error kept
+// apart, each capped at MaxCommandOutput.
+func ExecStdout(ctx context.Context, name string, args, env []string) (stdout, stderr []byte, err error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Env = env
+	cmd.Dir = string(filepath.Separator)
+	cmd.WaitDelay = 5 * time.Second
+	ownProcessGroup(cmd)
+	out, errOut := &cappedBuffer{max: MaxCommandOutput}, &cappedBuffer{max: MaxCommandOutput}
+	cmd.Stdout, cmd.Stderr = out, errOut
+	err = cmd.Run()
+	return out.Bytes(), errOut.Bytes(), err
+}
+
 // cappedBuffer keeps the first max bytes written and discards the rest.
 type cappedBuffer struct {
 	bytes.Buffer
@@ -109,7 +128,7 @@ func DefaultSystem() System {
 		GOOS: runtime.GOOS, GOARCH: runtime.GOARCH,
 		Executable: os.Executable, EvalSymlinks: evalSymlinks, Getenv: os.Getenv,
 		Stat: os.Stat, ReadFile: os.ReadFile, LookPath: exec.LookPath, Writable: writable,
-		ReadHead: readHead, Run: ExecRunner,
+		ReadHead: readHead, Run: ExecRunner, RunStdout: ExecStdout,
 	}
 }
 
@@ -361,20 +380,41 @@ func elfMachine(head []byte) (elf.Machine, bool) {
 // SelfCheckTimeout bounds the new binary's --version run.
 const SelfCheckTimeout = 15 * time.Second
 
-// SelfCheck runs the installed binary's `vecnet-hub --version` with an empty
-// environment and requires it to print exactly "vecnet-hub <version>". It
+// SelfCheck runs the installed binary's `vecnet-hub --version` with only
+// PATH=/usr/bin:/bin in its environment and requires its standard output to
+// be exactly "vecnet-hub <version>"; standard error goes into the error. It
 // proves the new binary loads and runs on this host before the hub drains.
 func SelfCheck(ctx context.Context, sys System, inst *Install, version string) error {
 	ctx, cancel := context.WithTimeout(ctx, SelfCheckTimeout)
 	defer cancel()
-	out, err := sys.Run(ctx, inst.Exe, []string{"--version"}, []string{"PATH=/usr/bin:/bin"})
+	run := sys.RunStdout
+	if run == nil {
+		run = func(ctx context.Context, name string, args, env []string) ([]byte, []byte, error) {
+			out, err := sys.Run(ctx, name, args, env)
+			return out, nil, err
+		}
+	}
+	out, errOut, err := run(ctx, inst.Exe, []string{"--version"}, []string{"PATH=/usr/bin:/bin"})
 	if err != nil {
-		return errors.New("installed vecnet-hub binary did not run")
+		return fmt.Errorf("installed vecnet-hub binary did not run%s", stderrNote(errOut))
 	}
 	if strings.TrimSpace(string(out)) != "vecnet-hub "+version {
-		return errors.New("installed vecnet-hub binary reported an unexpected version")
+		return fmt.Errorf("installed vecnet-hub binary reported an unexpected version%s", stderrNote(errOut))
 	}
 	return nil
+}
+
+// stderrNote is a short, single-line excerpt of a command's standard error
+// for an error message, or "".
+func stderrNote(b []byte) string {
+	s := strings.Join(strings.Fields(string(b)), " ")
+	if s == "" {
+		return ""
+	}
+	if len(s) > 200 {
+		s = s[:200] + "…"
+	}
+	return " (stderr: " + s + ")"
 }
 
 // evalSymlinks resolves symlinks and returns a slash-separated path: the
