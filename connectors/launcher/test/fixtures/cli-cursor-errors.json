@@ -1,0 +1,6 @@
+{
+  "comment": "Exact stderr and exit code of the real `vecnet --json inbox --since <cursor>` when the hub refuses the cursor itself. Pinned against a loopback hub by internal/cli TestInboxCursorRefusalStderr; reproduced by the claude-adapter TS stub.",
+  "exit": 2,
+  "purged": "cursor_purged: cursor is from another epoch or below retention\n",
+  "malformed": "invalid_value: cursor must look like e<epoch>.<seq>\n"
+}

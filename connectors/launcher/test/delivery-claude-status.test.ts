@@ -45,7 +45,7 @@ test('claude status never elects a lease and publishes only while the singleton 
   s.clock.advance(10_000);
   await until(() => existsSync(s.sidecar), 'sidecar under the held lease');
   const doc = JSON.parse(readFileSync(s.sidecar, 'utf8'));
-  assert.equal(doc.version, 1);
+  assert.equal(doc.version, 2, 'the sidecar is v2 (native canary marker capable)');
   assert.equal(doc.host_pid, process.pid);
   assert.equal(typeof doc.host_start, 'string');
   assert.match(doc.host_start, /^[0-9]{1,32}$/);
@@ -106,16 +106,53 @@ test('claude status sidecar never republishes the adapter admission or scope coo
   // child-spawn coordinates; the strict sidecar must project both away.
   const admitted = (async () => ({ version: 1 as const, bindings: [{
     binding_key: 'ab'.repeat(32), generation: '01'.repeat(16), state: 'registered' as const,
-    admission: { live: true, policy: true, version_qualified: true },
-    scope: { profile: 'p', hub_endpoint: 'https://hub.example', caller: 'peer_A', recipient: 'peer_A' },
+    admission: { live: true, policy: true, version_qualified: true, canary: true, witness: true },
+    scope: { profile: 'p', config: '/bind/LEAK-CONFIG/vecnet.toml', hub_identity: 'ed25519:IVL40Zt5HSRFMkLhXy6rbLfP-ntqXtMAl5YOBpiB2xI',
+      hub_endpoint: 'https://hub.example', caller: 'peer_A', recipient: 'peer_A' },
   }] })) as unknown as () => Promise<ClaudeSnapshot>;
   const status = createClaudeStatus({ ...s, fetchSnapshot: admitted });
   status.start();
   await until(() => existsSync(s.sidecar), 'sidecar published');
   const raw = readFileSync(s.sidecar, 'utf8');
-  for (const marker of ['admission', 'scope', 'profile', 'hub.example', 'peer_A', 'version_qualified']) {
+  for (const marker of ['admission', 'scope', 'profile', 'hub.example', 'peer_A', 'version_qualified',
+    'witness', 'LEAK-CONFIG', 'vecnet.toml', 'hub_identity', 'ed25519:', 'config']) {
     assert.ok(!raw.includes(marker), `sidecar leaked ${marker}`);
   }
   assert.deepEqual(Object.keys(JSON.parse(raw).bindings[0]).sort(), ['binding_key', 'generation', 'state']);
   await status.stop();
+});
+
+test('an old snapshot without admission.canary stays valid as canary=false and never admits', unix, async t => {
+  const s = fixture(t);
+  const lease = await openDeliveryLease(s.authority, euid, { env: s.env });
+  assert.ok(lease);
+  t.after(() => lease!.close());
+  // A master-era CLI's snapshot: the admission has no canary flag. A newer
+  // launcher keeps the row valid (passive status still publishes) and reads
+  // the missing flag as false, so native delivery stays fail-closed — the
+  // delivery adapter's own admission check independently refuses the row
+  // (see claude-adapter.test.ts, "canary absent").
+  const old = (async () => ({ version: 1, bindings: [{
+    binding_key: 'ab'.repeat(32), generation: '01'.repeat(16), state: 'registered',
+    admission: { live: true, policy: true, version_qualified: true },
+  }] })) as unknown as () => Promise<ClaudeSnapshot>;
+  const status = createClaudeStatus({ ...s, fetchSnapshot: old });
+  status.start();
+  await until(() => existsSync(s.sidecar), 'the old snapshot still publishes passive status');
+  const doc = JSON.parse(readFileSync(s.sidecar, 'utf8'));
+  assert.deepEqual(doc.bindings, [{ binding_key: 'ab'.repeat(32), generation: '01'.repeat(16), state: 'registered' }],
+    'the row is republished passively with no native marker');
+  await status.stop();
+  // A canary that is present but not a boolean still invalidates the row:
+  // only a missing flag is read as false.
+  for (const bad of [null, 'true', 1]) {
+    const row = { binding_key: 'ab'.repeat(32), generation: '01'.repeat(16), state: 'registered',
+      admission: { live: true, policy: true, version_qualified: true, canary: bad } };
+    const log = s.log.entries.length;
+    const other = createClaudeStatus({ ...s, fetchSnapshot: (async () => ({ version: 1, bindings: [row] })) as unknown as () => Promise<ClaudeSnapshot> });
+    other.start();
+    await until(() => s.log.entries.slice(log).some(e => e.msg === 'claude_snapshot_unavailable'), `canary ${String(bad)} is refused`);
+    await other.stop();
+    assert.equal(existsSync(s.sidecar), false, `canary ${String(bad)} published a sidecar`);
+  }
 });

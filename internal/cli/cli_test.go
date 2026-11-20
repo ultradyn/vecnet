@@ -1301,3 +1301,21 @@ func TestThreadShowsSendTimeName(t *testing.T) {
 		t.Fatalf("second line = %q", lines[1])
 	}
 }
+
+// TestUsageListsInboxNoDisplayProof pins the global usage lines for the
+// delivery host's machine inbox read and the per-profile canary verbs.
+func TestUsageListsInboxNoDisplayProof(t *testing.T) {
+	u := newUser(t)
+	code, out, errs := u.run("--help")
+	if code != 0 {
+		t.Fatalf("--help exit %d: %s", code, errs)
+	}
+	for _, want := range []string{
+		"inbox [--since CURSOR] [--ack] [--limit N] [--include-sender-chain] [--no-display-proof]",
+		"claude canary enable|disable",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("usage lacks %q:\n%s", want, out)
+		}
+	}
+}

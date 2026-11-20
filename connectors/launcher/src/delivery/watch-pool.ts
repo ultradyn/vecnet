@@ -37,8 +37,10 @@ export function spawnWatchChild(spec: {
   env: Record<string, string>;
   log: Log;
   context?: Record<string, unknown>;
+  /** Process port (node's spawn unless a test injects one). */
+  spawnChild?: typeof spawn;
 }): WatchChild {
-  const child = spawn(spec.command.file, spec.command.args, { ...spec.command, windowsHide: true, env: spec.env, stdio: ['ignore', 'pipe', 'ignore'] });
+  const child = (spec.spawnChild ?? spawn)(spec.command.file, spec.command.args, { ...spec.command, windowsHide: true, env: spec.env, stdio: ['ignore', 'pipe', 'ignore'] });
   const listeners = new Set<(event: WakeEvent) => void>();
   let terminalStatus: number | undefined, settled = false, fenced = false;
   let resolveEnded!: (end: WatchEnd) => void;

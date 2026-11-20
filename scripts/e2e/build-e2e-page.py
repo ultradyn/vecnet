@@ -70,11 +70,27 @@ def verify_proof(run):
         summary = read_json("98-summary.json")
         results = summary["results"]
         pos, hold, crash, cap = (results[name] for name in ("positive", "hold", "crash", "cap"))
+        backlog, off, kill = (results[name] for name in ("backlog", "canary_off", "kill_switch"))
         meta = read_json("00-run-meta.json")
         require(meta["nonce"] == summary["nonce"])
 
+    with gate("no provision"):
+        require(meta["provisions"] == [] and meta["canary_opt_in"] == harness.CANARY_ENABLE
+                and "claude_code_version_provision" not in meta)
+        environ = text("24-claude-environ-names.txt").splitlines()
+        require("CLAUDE_CODE_VERSION present: false" in environ and "CLAUDE_CODE_VERSION" not in environ
+                and "CLAUDE_CONFIG_DIR" in environ)
+        daemon_env = text("30-daemon-env.txt").splitlines()
+        require(not any(line.startswith(harness.CANARY_ENV + "=") for line in daemon_env))
+        require(text("25-canary-enable.txt").startswith("$ " + harness.CANARY_ENABLE + "\n"))
+        status = doc("34-status-canary.json")
+        harness.check_no_provision(b"CLAUDE_CONFIG_DIR=x\0", status)
+        require(results["no_provision"] == {"claude_code_version_present": False, "mode": "canary",
+                                            "canary_opt_in": True, "build_check": "disabled"})
+
     with gate("ordered lifecycle"):
-        controls = ((hold, "70-hold-send.json"), (crash, "80-crash-send.json"), (cap, "90-cap-send.json"))
+        controls = ((hold, "70-hold-send.json"), (crash, "80-crash-send.json"), (cap, "90-cap-send.json"),
+                    (backlog, "26-backlog-send.json"), (off, "94-off-send.json"), (kill, "100-kill-send.json"))
         expected = {}
         message_ids = set()
         for result, filename in ((pos, "40-send-wake.json"), *controls):
@@ -93,12 +109,46 @@ def verify_proof(run):
         binding, = [b for b in doc("32-runtime-snapshot.json")["bindings"]
                     if b["binding_key"] == scope and b["generation"] == generation]
         require(binding["state"] == "registered" and binding["scope"]["caller"] == recipient
-                and all(binding["admission"][key] is True for key in ("live", "policy", "version_qualified")))
+                and all(binding["admission"][key] is True
+                        for key in ("live", "policy", "version_qualified", "canary", "witness"))
+                and binding["admission"]["build_check"] == "disabled"
+                and harness.PEER_ID.match(recipient))
         events = [json.loads(line) for line in text("50-daemon.log").splitlines() if line.startswith("{")]
         lifecycle = harness.ordered_lifecycle(events, scope, generation, delivery_id)
         require([json.loads(line) for line in text("51-daemon-chain.txt").splitlines()] == lifecycle)
         state = ("released", "attempted")
         require((lifecycle[-1]["exit"], lifecycle[-1]["state"], lifecycle[-1]["disposition"]) == (0, *state))
+        require(status["generation"] == generation)
+
+    with gate("baseline before any send"):
+        base = read_json("33-baseline.json")
+        baselined = base["baselined"]
+        require(baselined["msg"] == "claude_delivery_scope_baselined"
+                and (baselined["scope"], baselined["generation"]) == (scope, generation))
+        first = next(i for i, e in enumerate(events) if e.get("msg") == "claude_delivery_scope_baselined")
+        require(events[first] == baselined)
+        claims_before = [e for e in events[:first] if e.get("msg") in harness.CLAIM_EVENTS]
+        require(not claims_before and events.index(lifecycle[1]) > first)
+        require(base["cli_head_events"] == [] and base["backlog_delivery_id"] == backlog["delivery_id"])
+        (be, bs), (se, ss), (he, hs) = (harness.cursor_seq(base[k]) for k in
+                                        ("backlog_cursor", "stored_cursor", "cli_head_next_cursor"))
+        require(be == se == he and bs <= ss <= hs)
+        require(results["baseline"]["stored_cursor"] == base["stored_cursor"])
+
+    with gate("pre-admission backlog"):
+        require(not any(backlog["delivery_id"] in json.dumps(e) for e in events))
+        require(backlog["pointer_frames"] == 0)
+
+    with gate("rejected-cursor rebaseline"):
+        rb = read_json("75-rebaseline.json")
+        require(rb["corrupted_to"] == harness.FOREIGN_CURSOR
+                and rb["real_cli_refusal"].startswith("cursor_purged: ")
+                and rb["stored_after"] != harness.FOREIGN_CURSOR
+                and harness.cursor_seq(rb["stored_after"])[0] == harness.cursor_seq(rb["stored_before"])[0])
+        require([e["msg"] for e in rb["events"]] == results["rebaseline"]["events"]
+                == ["claude_delivery_cursor_rejected", "claude_delivery_scope_baselined"]
+                and all(e["scope"] == scope for e in rb["events"]))
+        require(all(e in events for e in rb["events"]))
         claims = doc("62-claude-deliveries.json")
         claim, = [c for c in claims["deliveries"] if c["delivery_id"] == delivery_id]
         require(claims["pending_count"] == 0 and claim["message_id"] == pos["message_id"]
@@ -143,9 +193,10 @@ def verify_proof(run):
                 and [f["file"] for f in index] == frame_names
                 and set(frame_names) == {p.name for p in (run / "frames").glob("frame-*.txt")})
         paths = [run / "frames" / name for name in frame_names]
-        for control, prefix in ((hold, "HOLD"), (crash, "CRASH"), (cap, "CAP")):
+        for control, prefix in ((hold, "HOLD"), (crash, "CRASH"), (cap, "CAP"), (off, "OFF"), (kill, "KILL")):
             harness.verify_control_frames(paths, control["message_id"], f"{prefix}-E2E-")
             require(all(control["message_id"] not in json.dumps(row) for row in rows))
+        harness.check_backlog(paths, rows, events, backlog["message_id"], backlog["delivery_id"])
 
     with gate("positive frames"):
         frames = [path.read_text() for path in paths]
@@ -184,6 +235,22 @@ def verify_proof(run):
                 and all(d[k] is True for d, k in ((final, "blocked_pending_limit"),
                         (status, "blocked_pending_limit"), (cap, "blocked"))))
 
+    with gate("canary off"):
+        off_doc, off_status = doc("95-off-deliveries.json"), doc("96-off-status.json")
+        require(harness.check_canary_off(off_doc, off_status, off["delivery_id"], off["fenced"])
+                == {k: off[k] for k in ("mode", "canary_opt_in", "fenced", "claims_for_wake")})
+        fenced = [json.loads(line) for line in text("97-off-fence.txt").splitlines()]
+        require(any(e["deliveryId"] == off["fenced"] and e["state"] == "released" and e["scope"] == scope
+                    for e in fenced) and all(e in events for e in fenced))
+        require(not any(off["delivery_id"] in json.dumps(e) for e in events))
+
+    with gate("kill switch"):
+        kill_status = doc("101-kill-status.json")
+        require((kill_status["mode"], kill_status["canary_opt_in"], kill_status["build_check"])
+                == ("legacy", True, "disabled") and "has not admitted" in kill_status["reason"])
+        require(harness.CANARY_ENV + "=0" in text("102-kill-env.txt").splitlines())
+        require(kill["adapter_events"] == 0 and not any(kill["delivery_id"] in json.dumps(e) for e in events))
+
     with gate("enrollment and teardown"):
         if "enrollment" in results:
             require("credentials saved; claude setup registered:" in text("21-enrol-claude-rx.txt")
@@ -201,8 +268,9 @@ def verify_proof(run):
 # whose capture-time redaction was incomplete.
 CREDENTIAL = re.compile(
     rb"vn_(?:peer|operator|enrol)_[A-Za-z0-9_-]+|"
-    rb"sk-ant-[A-Za-z0-9_-]+|-----BEGIN [A-Z ]*PRIVATE KEY-----"
+    rb"sk-ant-[A-Za-z0-9_.-]+|dummy-e2e-key|-----BEGIN [A-Z ]*PRIVATE KEY-----"
 )
+API_KEY_ECHO = re.compile(rb"(ANTHROPIC_API_KEY:\s*)\S+")
 
 
 def publish(src: Path, dst: Path, *, is_frame=False) -> None:
@@ -243,6 +311,9 @@ def publish(src: Path, dst: Path, *, is_frame=False) -> None:
             observations.append(json.dumps({"path": row["path"], "body": json.dumps({"messages": messages})}))
         data = ("\n".join(observations) + "\n").encode()
     elif is_frame:
+        # Claude's API-key dialog echoes the key's masked form; the lab key is
+        # a placeholder, but no key-shaped value is ever published.
+        data = API_KEY_ECHO.sub(rb"\1<redacted>", data)
         # Some frames show the stub echoing startup context before the actual
         # conversation. Keep the visible canary run, not that context.
         lines = data.splitlines(keepends=True)
@@ -263,9 +334,15 @@ def chain_rows(results):
              if "enrollment" in results else "")
     return f"""
       {enrol}
+      <tr><td>0a · no provision</td><td>no <code>CLAUDE_CODE_VERSION</code> in the disposable Claude process; daemon env carries no canary variable</td>
+        <td><a href="assets/24-claude-environ-names.txt">environ names</a> · <a href="assets/30-daemon-env.txt">daemon env</a></td></tr>
+      <tr><td>0b · per-profile opt-in</td><td><code>vecnet --net claude-rx claude canary enable</code> before the daemon starts; status <code>mode:"canary"</code>, <code>canary_opt_in:true</code>, <code>build_check:"disabled"</code></td>
+        <td><a href="assets/25-canary-enable.txt">canary enable</a> · <a href="assets/34-status-canary.json">claude status --json</a></td></tr>
+      <tr><td>0c · new-arrivals baseline</td><td><code>claude_delivery_scope_baselined</code> at a real hub head before any send; the real CLI <code>inbox --json --since head</code> agrees</td>
+        <td><a href="assets/33-baseline.json">baseline</a> · <a href="assets/33b-head-read-cli.txt">head read</a></td></tr>
       <tr><td>1 · hub send receipt</td><td>sender CLI + hub row</td>
         <td><a href="assets/40-send-wake.json">send --json</a> · <a href="assets/41-hub-delivery.json">hub delivery row</a></td></tr>
-      <tr><td>2 · daemon admission</td><td>binding registered, live/policy/version-qualified</td>
+      <tr><td>2 · daemon admission</td><td>binding registered, live/policy/canary/witness; build check disabled</td>
         <td><a href="assets/32-runtime-snapshot.json">runtime-snapshot</a> · <code>claude_delivery_scope_admitted</code> in <a href="assets/51-daemon-chain.txt">chain log</a></td></tr>
       <tr><td>3 · reserved → attempting</td><td>durable claim before any byte leaves</td>
         <td><code>claude_delivery_claim_reserved</code> / <code>claude_delivery_claim_attempting</code></td></tr>
@@ -317,7 +394,8 @@ def build_page(run, page_dir, summary, meta, index):
                            "label": " · ".join(labels) or None})
 
     # Per-frame daemon context: chain lines whose timestamp precedes the frame.
-    chain_keys = ("claude_delivery_scope_admitted", "claude_delivery_claim_held",
+    chain_keys = ("claude_delivery_scope_admitted", "claude_delivery_scope_baselined",
+                  "claude_delivery_cursor_rejected", "claude_delivery_claim_fenced", "claude_delivery_claim_held",
                   "claude_delivery_claim_reserved", "claude_delivery_claim_attempting",
                   "claude_delivery_disposition", "claude_delivery_uncertain_restart",
                   "claude_delivery_blocked_pending_limit", "Killed")
@@ -326,7 +404,11 @@ def build_page(run, page_dir, summary, meta, index):
     for ev_name in ("00-run-meta.json", "10-hub-init.txt", "11-hub-serve.log", "20-enrol-sender.txt",
                     "21-enrol-claude-rx.txt", "22-config.toml.redacted",
                     "23-runtime-stage.txt" if "enrollment" in results else "23-hook-install.txt",
+                    "24-claude-environ-names.txt", "25-canary-enable.txt", "26-backlog-send.json",
                     "30-daemon-env.txt", "31-stub-observed.jsonl", "32-runtime-snapshot.json",
+                    "33-baseline.json", "33b-head-read-cli.txt", "34-status-canary.json",
+                    "75-rebaseline.json", "94-off-send.json", "95-off-deliveries.json", "96-off-status.json",
+                    "97-off-fence.txt", "100-kill-send.json", "101-kill-status.json", "102-kill-env.txt",
                     "40-send-wake.json", "40b-send-wake-cli.txt", "41-hub-delivery.json",
                     "50-daemon.log", "51-daemon-chain.txt", "60-transcript-rows.json",
                     "62-claude-deliveries.json", "70-hold-send.json", "71-hold-inbox.json",
@@ -346,7 +428,7 @@ def build_page(run, page_dir, summary, meta, index):
     <head>
       <meta charset="utf-8">
       <meta name="viewport" content="width=device-width, initial-scale=1">
-      <meta name="description" content="End-to-end canary proof of Vecnet's native Claude Code delivery chain: hub send to native inbox pointer with durable claims, captured against a real Claude Code 2.1.322 session.">
+      <meta name="description" content="End-to-end canary proof of Vecnet's native Claude Code delivery chain: hub send to native inbox pointer with durable claims, captured against a real Claude Code session with no test-env provision.">
       <title>Vecnet native delivery canary — end-to-end proof</title>
 {CANONICAL_ASSETS}
     </head>
@@ -355,9 +437,9 @@ def build_page(run, page_dir, summary, meta, index):
       <div class="l-shell">
         <header class="doc-header">
           <div class="doc-header__identity">
-            <p class="doc-header__kicker">Vecnet · Claude delivery chain · task 9 canary</p>
-            <h1 class="type-hero">Native pointer delivery, proven end to end.</h1>
-            <p class="doc-header__summary">One disposable run inside a loopback-only network namespace: a real Claude&nbsp;Code 2.1.322 session receives a Vecnet hub message as a native cross-session pointer, fetches it through the packaged CLI, and never acknowledges the hub. Every link is a captured artifact.</p>
+            <p class="doc-header__kicker">Vecnet · Claude delivery chain · Phase 2 acceptance</p>
+            <h1 class="type-hero">Provision-free native pointer delivery, proven end to end.</h1>
+            <p class="doc-header__summary">One disposable run inside a loopback-only network namespace: the per-profile canary record alone admits a real Claude&nbsp;Code session, which receives a Vecnet hub message as a native cross-session pointer, fetches it through the packaged CLI, and never acknowledges the hub. Every link is a captured artifact.</p>
           </div>
           <div class="doc-header__tools">
             <div class="theme-control" role="group" aria-label="Colour theme">
@@ -380,9 +462,9 @@ def build_page(run, page_dir, summary, meta, index):
           <main class="workspace__main" id="main-content" tabindex="-1">
             <section class="workspace-section prose" id="overview" aria-labelledby="overview-title">
               <h2 id="overview-title">Overview</h2>
-              <p>Run <code>{E(summary['nonce'])}</code> at {E(meta['started'])}, commit <code>{E(results['build']['commit'][:12])}</code>, Claude Code <strong>{E(results['build']['claude'])}</strong> (the qualified lab baseline). The whole chain — disposable loopback hub, freshly enrolled peers, the standalone delivery daemon under <code>VECNET_CLAUDE_DELIVERY_CANARY=1</code>, the Claude session and its scripted loopback model stub — ran inside one bubblewrap network namespace with loopback as its only interface. No paid provider was reachable at any point.</p>
-              <p><code>CLAUDE_CODE_VERSION</code> was exported by the harness for the disposable session and its enrollment child from its own <code>claude --version</code> observation; the qualified-baseline check never guesses a version, and production activation stays gated behind the canary opt-in.</p>
-              <p><strong>Run results:</strong> released/attempted · hold inbox-only · crash uncertain, no resend · pending limit latched · zero hub acks.</p>
+              <p>Run <code>{E(summary['nonce'])}</code> at {E(meta['started'])}, commit <code>{E(results['build']['commit'][:12])}</code>, Claude Code <strong>{E(results['build']['claude'])}</strong> (observed only: build checking is parked, so any build is admitted and none is hashed). The whole chain — disposable loopback hub, freshly enrolled <code>peer_&lt;ULID&gt;</code> identities, the standalone delivery daemon with no canary variable in its environment, the Claude session and its scripted loopback model stub — ran inside one bubblewrap network namespace with loopback as its only interface. No paid provider was reachable at any point.</p>
+              <p><strong>No provisions.</strong> Nothing was exported for the session: <code>CLAUDE_CODE_VERSION</code> is absent from the disposable Claude process environment, and the only gate is the durable record written by <code>{E(harness.CANARY_ENABLE)}</code> before the daemon started.</p>
+              <p><strong>Run results:</strong> baseline before any send · released/attempted · backlog never pointered · hold inbox-only · rejected cursor rebaselined once · crash uncertain, no resend · pending limit latched · canary off drains to legacy · kill switch builds no adapter · zero hub acks.</p>
               <p><strong>Documented limit:</strong> this proof exercises the idle-path injection only — the pointer lands while the session sits idle (a queue-operation enqueue plus a peer-origin turn in the transcript evidence). Busy-turn <code>queued_command</code> placement is a separately gated experiment and is neither exercised nor claimed here.</p>
             </section>
             <section class="workspace-section" id="chain" aria-labelledby="chain-title">
@@ -408,19 +490,26 @@ def build_page(run, page_dir, summary, meta, index):
             <section class="workspace-section prose" id="controls" aria-labelledby="controls-title">
               <h2 id="controls-title">Negative controls</h2>
               <dl>
-                <dt>Hold stays inbox-only</dt>
+                <dt>Pre-admission backlog is never pointered</dt>
+                <dd>Wake <code>{E(results['backlog']['delivery_id'])}</code> was sent before the canary record existed. The first admission baselined at the hub head past it (<a href="assets/33-baseline.json">baseline</a>), it never entered the claim lifecycle, and no frame or transcript row carries a pointer for it. It stays on the legacy inbox path, so it remains readable and unacked.</dd>
+                <dt>A rejected stored cursor rebaselines</dt>
+                <dd>The scope's stored cursor was rewritten to the foreign-epoch <code>{E(harness.FOREIGN_CURSOR)}</code>, which the real CLI refuses with <code>cursor_purged</code>. The restarted daemon logged one <code>claude_delivery_cursor_rejected</code>, then one <code>claude_delivery_scope_baselined</code> at <code>{E(results['rebaseline']['stored_after'])}</code>, and no retry loop followed (<a href="assets/75-rebaseline.json">record</a>).</dd>
                 <dd>Delivery <code>{E(hold['delivery_id'])}</code> quarantined <code>{E(hold['state'])}</code>/<code>{E(hold['disposition'])}</code>; no native pointer in any captured frame, no transcript row, still readable in the inbox (<a href="assets/71-hold-inbox.json">inbox read</a>), never acked.</dd>
                 <dt>SIGKILL between <code>attempting</code> and the write</dt>
                 <dd>The canary crash seam killed the daemon after <code>attempting</code> was durable and before any byte could leave (exit 137). No captured frame contains a native pointer for this control message. The replacement host recovered the claim to <code>{E(crash['final_state'])}</code> (<code>{E(crash['reason'])}</code>) and never resent: the parsed claim is unchanged after a later reconcile tick and the transcript holds zero rows for the marker (<a href="assets/82-crash-claim.json">claim record</a>).</dd>
                 <dt>The pending limit with 129 unresolved claims</dt>
                 <dd>With 128 unresolved claims seeded for the live scope (plus the crash control's uncertain claim), the new wake message <code>{E(cap['delivery_id'])}</code> was never staged: pending {E(str(cap['pending']))}, <code>blocked_pending_limit</code> latched, nothing staged for that delivery and no captured frame contains its native pointer (<a href="assets/92-cap-deliveries.json">deliveries</a> · <a href="assets/93-cap-status.json">status</a>).</dd>
+                <dt>Canary off</dt>
+                <dd>After <code>claude canary disable</code> (and with the harness's own 128 cap seeds removed, so nothing hides behind the latch), a seeded <code>reserved</code> row drained to <code>released</code>/<code>fenced_scope_not_admitted</code>. The wake <code>{E(results['canary_off']['delivery_id'])}</code> got no claim and no pointer, and status reports <code>mode:"legacy"</code> with <code>canary_opt_in:false</code> (<a href="assets/95-off-deliveries.json">deliveries</a> · <a href="assets/96-off-status.json">status</a>).</dd>
+                <dt><code>VECNET_CLAUDE_DELIVERY_CANARY=0</code> kill switch</dt>
+                <dd>With the canary re-enabled but the daemon started with <code>=0</code>, no delivery adapter was constructed: there were zero <code>claude_delivery_*</code> log lines, and wake <code>{E(results['kill_switch']['delivery_id'])}</code> got no claim and no pointer. Status stays <code>legacy</code>, with the opt-in present and the host "has not admitted" reason (<a href="assets/101-kill-status.json">status</a>).</dd>
                 <dt>No acknowledgement, anywhere</dt>
-                <dd>The hub's <code>acks</code> table is empty and all four deliveries remain <code>queued</code>: the adapter, the hooks, the inbox reads and the fetch never ack (<a href="assets/73-hub-acks.json">acks</a> · <a href="assets/74-hub-delivery-states.json">states</a>).</dd>
+                <dd>The hub's <code>acks</code> table is empty and all {len(results['no_ack']['deliveries'])} deliveries remain <code>queued</code>: the adapter, the hooks, the inbox reads and the fetch never ack (<a href="assets/73-hub-acks.json">acks</a> · <a href="assets/74-hub-delivery-states.json">states</a>).</dd>
               </dl>
             </section>
             <section class="workspace-section prose" id="evidence" aria-labelledby="evidence-title">
               <h2 id="evidence-title">Evidence &amp; teardown</h2>
-              <p>Every published evidence artifact sits beside this page under <code>assets/</code>; the committed index with SHA-256 digests is <code>docs/research/evidence/claude-delivery-e2e-2026-11-19.json</code> in the vecnet repository. Full daemon log: <a href="assets/50-daemon.log">50-daemon.log</a>; enrolments and receipts: <a href="assets/20-enrol-sender.txt">sender</a> · <a href="assets/21-enrol-claude-rx.txt">receiver</a> · <a href="assets/40b-send-wake-cli.txt">send output</a>; transcript rows: <a href="assets/60-transcript-rows.json">60-transcript-rows.json</a>.</p>
+              <p>Every published evidence artifact sits beside this page under <code>assets/</code>; the committed index with SHA-256 digests is <code>docs/research/evidence/claude-delivery-e2e-phase2-2026-11-21.json</code> in the vecnet repository. Full daemon log: <a href="assets/50-daemon.log">50-daemon.log</a>; enrolments and receipts: <a href="assets/20-enrol-sender.txt">sender</a> · <a href="assets/21-enrol-claude-rx.txt">receiver</a> · <a href="assets/40b-send-wake-cli.txt">send output</a>; transcript rows: <a href="assets/60-transcript-rows.json">60-transcript-rows.json</a>.</p>
               <p>Teardown was verified in the same run: the <code>vecnet-test-*</code> tmux session was killed on its private server, the server itself reported <em>no server running</em>, and the default server listed no <code>vecnet-test-*</code> sessions (<a href="assets/99-teardown.txt">teardown record</a>). Raw lab state: <strong>{E(results.get("teardown", {}).get("raw_disposition", "not disposed by this historical harness"))}</strong>.</p>
               <details class="disclosure-row">
                 <summary>How the run was isolated</summary>

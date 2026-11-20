@@ -10,6 +10,8 @@ import type { TestContext } from 'node:test';
 import { fakeClock, memoryLog } from '../../hub-client/testing/fixtures.ts';
 import { codexAuthority } from '../src/codex/connector.ts';
 import { openDeliveryLease, openStatusPublisher } from '../src/codex/connector-status.ts';
+import { claudeDeliveryCanaryAllowed } from '../src/delivery/claude-adapter.ts';
+import { createClaudeStatus, spawnClaudeSnapshot } from '../src/delivery/claude-status.ts';
 import { startDeliveryHost } from '../src/delivery/host.ts';
 import type { HostedAdapter } from '../src/delivery/host.ts';
 import { harness, until } from './daemon-harness.ts';
@@ -259,6 +261,27 @@ test('optional adapter startup failure is visible and leaves Codex v1 status hea
   assert.equal(stops, 1);
 });
 
+test('a throwing status factory still drains the built delivery adapter and closes its ledger', unix, async t => {
+  // (An fd count cannot prove the close: SQLite defers a closed
+  // connection's fd while the Codex connector's own connection to the same
+  // database holds a POSIX lock, so the host logs the close instead.)
+  const s = fixture(t);
+  let factoryCalls = 0;
+  const host = startDeliveryHost({ ...s, claudeDeliveryCanary: true, auxiliary: native => {
+    factoryCalls++;
+    assert.equal(native().size, 0, 'the unstarted delivery adapter admits nothing');
+    throw new Error('private factory detail');
+  } });
+  s.cleanup.push(() => host.stop());
+  await until(() => s.log.entries.some(e => e.msg === 'delivery_auxiliary_start_failed'), 'the factory failure is reported');
+  await until(() => s.log.entries.some(e => e.msg === 'claude_delivery_ledger_closed'),
+    'the built delivery adapter is drained and its ledger closed before host stop');
+  assert.equal(factoryCalls, 1);
+  assert.doesNotMatch(JSON.stringify(s.log.entries), /private factory detail/);
+  await host.stop();
+  assert.equal(s.log.entries.filter(e => e.msg === 'claude_delivery_ledger_closed').length, 1, 'closed exactly once');
+});
+
 test('embedded delivery takes over the managed entry’s lock after SIGKILL leaves stale readiness', unix, async t => {
   const s = fixture(t);
   // The managed entry refuses a VECNET_BIN not owned by this user or root, or
@@ -369,15 +392,19 @@ test('registered Claude root is visible through the same host across restart',
 // the explicit experimental canary flag. One private CLI stub stands in for
 // the packaged children on both sides of the flag; nothing here reaches a
 // hub or a real Claude socket.
-function claudeCanaryStub(t: TestContext, home: string, admitted: boolean): { calls: () => string[]; bin: string } {
+function claudeCanaryStub(t: TestContext, home: string, admitted: boolean, canary = true): { calls: () => string[]; bin: string } {
   const key = 'ab'.repeat(32), generation = '01'.repeat(16);
   const calls = join(home, 'stub-calls.log');
   const stub = join(home, 'vecnet-stub');
   const snapshot = JSON.stringify(admitted
     ? { version: 1, bindings: [{ binding_key: key, generation, state: 'registered',
-        admission: { live: true, policy: true, version_qualified: true },
-        scope: { profile: 'p', hub_endpoint: 'https://hub.example', caller: 'peer_A', recipient: 'peer_A' } }] }
+        admission: { live: true, policy: true, version_qualified: true, canary, witness: true },
+        scope: { profile: 'p', config: join(home, 'bind.toml'), hub_identity: 'ed25519:IVL40Zt5HSRFMkLhXy6rbLfP-ntqXtMAl5YOBpiB2xI',
+          hub_endpoint: 'https://hub.example', caller: 'peer_A', recipient: 'peer_A' } }] }
     : { version: 1, bindings: [] });
+  // The first admitted pass baselines at the head (Phase 2 task 5); the
+  // delivery behind it arrives on the next read.
+  const head = JSON.stringify({ events: [], next_cursor: 'e1.0' });
   const inbox = JSON.stringify({ events: [
     { cursor: 'e1.1', type: 'delivery', data: { delivery_id: 'dly_00000000000000000000000001',
       message: { message_id: 'msg_00000000000000000000000001', thread_id: 'thr_01ARZ3NDEKTSV4RRFFQ69G5FAV', kind: 'message', priority: 'wake' } } },
@@ -398,7 +425,10 @@ function claudeCanaryStub(t: TestContext, home: string, admitted: boolean): { ca
     '  exec sleep 300',
     'fi',
     'if [ "$1" = --net ] && [ "$3" = inbox ]; then',
-    `  printf '%s\\n' ${JSON.stringify(inbox)}`,
+    '  case "$*" in',
+    `    *"--since head"*) printf '%s\\n' ${JSON.stringify(head)} ;;`,
+    `    *) printf '%s\\n' ${JSON.stringify(inbox)} ;;`,
+    '  esac',
     '  exit 0',
     'fi',
     'exit 1',
@@ -408,25 +438,43 @@ function claudeCanaryStub(t: TestContext, home: string, admitted: boolean): { ca
   return { calls: () => { try { return readFileSync(calls, 'utf8').trim().split('\n').filter(Boolean); } catch { return []; } }, bin: stub };
 }
 
-test('claude native delivery is absent by default and rides the host behind the explicit canary flag',
-  { skip: process.platform === 'win32' && 'Unix flock and CLI stub fixture', timeout: 30_000 }, async t => {
+test('claude native delivery reaches only the durable canary record and VECNET_CLAUDE_DELIVERY_CANARY=0 constructs no adapter',
+  { skip: process.platform !== 'linux' && 'native delivery is Linux-only (Unix flock and CLI stub fixture)', timeout: 30_000 }, async t => {
+    // The kill switch: no delivery adapter at all, so no watch, inbox or
+    // deliver child, and the status adapter receives empty admissions.
     const off = fixture(t);
     const offStub = claudeCanaryStub(t, off.env.HOME, true);
-    const offEnv = { ...off.env, VECNET_BIN: offStub.bin };
-    const offHost = startDeliveryHost({ ...off, env: offEnv });
+    const offEnv = { ...off.env, VECNET_BIN: offStub.bin, VECNET_CLAUDE_DELIVERY_CANARY: '0' };
+    let offNative: (() => ReadonlyMap<string, string>) | undefined;
+    const offHost = startDeliveryHost({ ...off, env: offEnv, claudeDeliveryCanary: claudeDeliveryCanaryAllowed(offEnv),
+      auxiliary: native => { offNative = native; return { start() {}, stop: async () => {} }; } });
     off.cleanup.push(() => offHost.stop());
-    await until(() => existsSync(off.status), 'host elects with the canary off');
+    await until(() => existsSync(off.status), 'host elects with the kill switch thrown');
     await new Promise(resolve => setTimeout(resolve, 300));
-    for (const line of offStub.calls()) {
-      assert.equal(line, 'claude runtime-snapshot', `the default host spawns only the passive snapshot child: ${line}`);
+    assert.deepEqual(offStub.calls(), [], 'the kill switch constructs no delivery adapter and spawns no child');
+    assert.ok(offNative, 'the status adapter still receives an admissions source');
+    assert.equal(offNative!().size, 0, 'and it is always empty');
+
+    // Allowed but not opted in: the adapter runs and reads snapshots, but
+    // never opens a watch or reaches the transport.
+    const unopted = fixture(t);
+    const unoptedStub = claudeCanaryStub(t, unopted.env.HOME, true, false);
+    const unoptedEnv = { ...unopted.env, VECNET_BIN: unoptedStub.bin };
+    const unoptedHost = startDeliveryHost({ ...unopted, env: unoptedEnv, claudeDeliveryCanary: claudeDeliveryCanaryAllowed(unoptedEnv) });
+    unopted.cleanup.push(() => unoptedHost.stop());
+    await until(() => unoptedStub.calls().includes('claude runtime-snapshot'), 'the allowed adapter reads the snapshot');
+    await new Promise(resolve => setTimeout(resolve, 300));
+    for (const line of unoptedStub.calls()) {
+      assert.equal(line, 'claude runtime-snapshot', `a scope without the canary record reached a child: ${line}`);
     }
 
+    // Allowed and opted in (the default env): the adapter delivers.
     const on = fixture(t);
     const onStub = claudeCanaryStub(t, on.env.HOME, true);
-    const onEnv = { ...on.env, VECNET_BIN: onStub.bin, VECNET_CLAUDE_DELIVERY_CANARY: '1' };
-    const onHost = startDeliveryHost({ ...on, env: onEnv, claudeDeliveryCanary: true });
+    const onEnv = { ...on.env, VECNET_BIN: onStub.bin };
+    const onHost = startDeliveryHost({ ...on, env: onEnv, claudeDeliveryCanary: claudeDeliveryCanaryAllowed(onEnv) });
     on.cleanup.push(() => onHost.stop());
-    await until(() => existsSync(on.status), 'host elects with the canary on');
+    await until(() => existsSync(on.status), 'host elects with the canary allowed');
     await until(() => onStub.calls().some(line => line.startsWith('claude deliver --binding-key ')),
       'the canary adapter resolves a binding and invokes the transport child', 15_000);
     const deliver = onStub.calls().find(line => line.startsWith('claude deliver --binding-key '))!;
@@ -435,4 +483,65 @@ test('claude native delivery is absent by default and rides the host behind the 
     assert.ok(!deliver.includes('--ack'), 'no child ever acknowledges');
     await onHost.stop();
     assert.equal(existsSync(on.status), false);
+  });
+
+test('sidecar marks native canary only for the admitted generation',
+  { skip: process.platform === 'win32' && 'Unix flock and CLI stub fixture', timeout: 30_000 }, async t => {
+    const s = fixture(t);
+    const stub = claudeCanaryStub(t, s.env.HOME, true);
+    const env = { ...s.env, VECNET_BIN: stub.bin };
+    const sidecar = s.authority + '.claude-status.json';
+    const key = 'ab'.repeat(32), generation = '01'.repeat(16);
+    // A controlled admissions source stands in for the delivery adapter (the
+    // next test drives the real one), so each case is exact.
+    let admissions: () => ReadonlyMap<string, string> = () => new Map();
+    const host = startDeliveryHost({
+      ...s, env,
+      auxiliary: () => createClaudeStatus({ env, clock: s.clock, log: s.log, fetchSnapshot: spawnClaudeSnapshot(env),
+        nativeAdmissions: () => admissions() }),
+    });
+    s.cleanup.push(() => host.stop());
+    const read = () => JSON.parse(readFileSync(sidecar, 'utf8')) as { version: number; bindings: Array<Record<string, unknown>> };
+    await until(() => existsSync(sidecar), 'the status adapter publishes');
+    assert.equal(read().version, 2);
+    assert.deepEqual(read().bindings, [{ binding_key: key, generation, state: 'registered' }], 'no admission yet: no marker');
+
+    // A stale generation for the key never marks the row.
+    admissions = () => new Map([[key, '02'.repeat(16)]]);
+    const first = readFileSync(sidecar, 'utf8');
+    s.clock.advance(10_000);
+    await until(() => existsSync(sidecar) && readFileSync(sidecar, 'utf8') !== first, 'another heartbeat');
+    assert.equal(read().bindings[0].native, undefined, 'a stale-generation admission is not a native marker');
+
+    // The admitted generation marks exactly that row.
+    admissions = () => new Map([[key, generation]]);
+    s.clock.advance(10_000);
+    await until(() => existsSync(sidecar) && read().bindings[0]?.native === 'canary', 'the admitted generation is marked');
+    assert.deepEqual(read().bindings, [{ binding_key: key, generation, state: 'registered', native: 'canary' }]);
+    const raw = readFileSync(sidecar, 'utf8');
+    for (const marker of ['admission', 'scope', 'peer_A', 'hub.example']) assert.ok(!raw.includes(marker), `sidecar leaked ${marker}`);
+
+    // A throwing admissions source marks nothing.
+    admissions = () => { throw new Error('boom'); };
+    s.clock.advance(10_000);
+    await until(() => existsSync(sidecar) && read().bindings[0]?.native === undefined, 'an unknown admission state is unmarked');
+    await host.stop();
+  });
+
+test('the host hands the real delivery adapter admissions to the status adapter',
+  { skip: process.platform === 'win32' && 'Unix flock and CLI stub fixture', timeout: 30_000 }, async t => {
+    const s = fixture(t);
+    const stub = claudeCanaryStub(t, s.env.HOME, true);
+    const env = { ...s.env, VECNET_BIN: stub.bin };
+    const sidecar = s.authority + '.claude-status.json';
+    const host = startDeliveryHost({
+      ...s, env, claudeDeliveryCanary: true,
+      auxiliary: nativeAdmissions => createClaudeStatus({ env, clock: s.clock, log: s.log, fetchSnapshot: spawnClaudeSnapshot(env), nativeAdmissions }),
+    });
+    s.cleanup.push(() => host.stop());
+    await until(() => stub.calls().some(line => line.startsWith('claude deliver ')), 'the adapter admits the canary scope');
+    s.clock.advance(10_000);
+    await until(() => existsSync(sidecar) && JSON.parse(readFileSync(sidecar, 'utf8')).bindings[0]?.native === 'canary',
+      'the sidecar marks the adapter-admitted row', 15_000);
+    await host.stop();
   });

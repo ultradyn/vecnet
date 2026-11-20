@@ -103,3 +103,20 @@ Report `local_received`, `hub_sent`, `forward_failed`, or `hub_outcome_unknown` 
 Use pure codec/identity/claim-state tests and fake endpoint tests for deterministic failures. Use a disposable loopback hub and model stub plus private `vecnet-test-<nonce>` tmux for native Linux acceptance; match captures across TUI, saved transcript, actual request and hub receipts, and clean up even on failure. Add a subprocess daemon kill/replace test on the real runtime and a separate shared-writer test of active old/new clients. An optional real-provider test needs separate approval and fresh disposable credentials. Never use a user's working Claude session, hub identity or transcript as a test fixture.
 
 Implementation can proceed in slices after spec and plan approval: (1) shared host and exact registration/status with no output change; (2) claim fence and fake transport with crash/handoff tests; (3) Linux native canary and publication of its compatibility status; (4) default native `wake` only once the applicable gates pass; (5) separately qualified replies and any further payload/priority/platform expansion. If an upstream limitation blocks a slice, retain the earlier working path rather than weakening a gate.
+
+## Addendum 2026-11-21
+
+Owner rulings recorded when the Phase 2 real-host canary branch
+(`claude-delivery-phase2`) was finalized:
+
+- Build-version gating is parked: the build is not observed or attested,
+  status and the runtime snapshot report `build_check: "disabled"`
+  (the snapshot keeps `version_qualified: true`), and the per-profile
+  canary record is the sole durable gate on a native write.
+- `CLAUDE_CODE_VERSION` is ignored.
+- Every admission baselines at head: the first admitted pass after every
+  daemon start, restart or kill-switch recovery, and every re-admission
+  after the canary or policy was withdrawn and returned, reads
+  `inbox --since head` and stages nothing. Wakes that arrive while the
+  scope is not admitted, or while the daemon is down, get no native
+  pointer; they stay in the inbox on the legacy path.

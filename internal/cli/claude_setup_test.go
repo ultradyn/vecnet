@@ -27,9 +27,9 @@ const (
 	claudeTestSecret = "vn_peer_SYNTHETICSECRETDONOTPRINT0123456789"
 	claudeTestToken  = "vn_enrol_Zm9vYmFyYmF6cXV4MDEyMzQ1Njc4OWFiY2RlZmdoaWo"
 
-	// claudeFixtureVersion is the qualified baseline build the fixtures pose
-	// as (research: Claude Code 2.1.322 on Linux x86-64).
-	claudeFixtureVersion = "2.1.322"
+	// claudeTestHubPin is the fixture hub's pinned ed25519 identity (the
+	// public key of a fixed test seed; no real hub ever carries it).
+	claudeTestHubPin = "ed25519:IVL40Zt5HSRFMkLhXy6rbLfP-ntqXtMAl5YOBpiB2xI"
 )
 
 // claudeSetupFixture is one enrollable Claude-session user.
@@ -86,7 +86,6 @@ func newClaudeSetupFixture(t *testing.T) *claudeSetupFixture {
 		"CLAUDE_CONFIG_DIR":        f.root,
 		"CLAUDE_PID":               strconv.Itoa(os.Getpid()),
 		"CLAUDE_CODE_SESSION_ID":   "S1",
-		"CLAUDE_CODE_VERSION":      claudeFixtureVersion,
 		"VECNET_LOCAL_MAINTENANCE": "0",
 	}
 	return f
@@ -145,7 +144,7 @@ func (f *claudeSetupFixture) enroll() {
 		}
 		f.hits.Add(1)
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]string{"peer_id": claudeTestPeerID, "secret": claudeTestSecret, "name": "scout"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"peer_id": claudeTestPeerID, "secret": claudeTestSecret, "name": "scout", "hub_pubkey": claudeTestHubPin})
 	}))
 	f.t.Cleanup(srv.Close)
 	code, out, errs := f.run("enrol", "--hub", srv.URL, "--token", claudeTestToken, "--profile", "scout", "--allow-insecure-http")
@@ -280,10 +279,11 @@ func TestClaudeSetupReplacementProfileStaysUntouched(t *testing.T) {
 
 // TestClaudeRuntimeSnapshotRedaction covers the private runtime-snapshot
 // child's redaction (parked from task 3, extended in task 7): opaque keys,
-// generations, passive states, the admission booleans and the hub/profile
-// coordinates the host's own scoped children need. The root's private
+// generations, passive states, the admission booleans and the coordinates
+// the host's own scoped children need, which since phase 2 task 5 include
+// the binding's config path and pinned hub identity. The root's private
 // coordinates — config root, session id, socket path, process identity and
-// build version — never leave the registry.
+// build evidence — never leave the registry.
 func TestClaudeRuntimeSnapshotRedaction(t *testing.T) {
 	d, err := canonicalCodexPath(t.TempDir())
 	if err != nil {
@@ -303,16 +303,18 @@ func TestClaudeRuntimeSnapshotRedaction(t *testing.T) {
 	scope := claudeScope{
 		ConfigPath:  configPath,
 		Profile:     "p",
-		HubIdentity: "https://hub.example.com",
+		HubIdentity: claudeTestHubPin,
 		HubEndpoint: "https://hub.example.com",
 		Caller:      "peer_A",
 		Recipient:   "peer_A",
 	}
-	doc := `{"version":1,"bindings":[{"config_path":` + jsonString(scope.ConfigPath) +
-		`,"profile":"p","hub_identity":"https://hub.example.com","hub_endpoint":"https://hub.example.com","caller":"peer_A","recipient":"peer_A",` +
+	// Parked build evidence on the stored row must not leak either.
+	digest := strings.Repeat("5e", 32)
+	doc := `{"version":2,"bindings":[{"config_path":` + jsonString(scope.ConfigPath) +
+		`,"profile":"p","hub_identity":` + jsonString(claudeTestHubPin) + `,"hub_endpoint":"https://hub.example.com","caller":"peer_A","recipient":"peer_A",` +
 		`"config_root":` + jsonString(configRoot) + `,"session_id":"S-SNAPSHOT-REDACT-SESSION","socket_path":` + jsonString(socketPath) + `,` +
-		`"process_start":"12","boot_id":"01234567-89ab-cdef-0123-456789abcdef","version":"2.1.322","pid":4242,"uid":1000,` +
-		`"generation":"0123456789abcdef0123456789abcdef","updated_at":"2026-11-19T00:00:00Z"}],"opt_outs":[]}`
+		`"process_start":"12","boot_id":"01234567-89ab-cdef-0123-456789abcdef","build":"SNAPSHOT-REDACT-BUILD","exe_sha256":"` + digest + `","exe_identity":"77:88:99:11:22","pid":4242,"uid":1000,` +
+		`"generation":"0123456789abcdef0123456789abcdef","updated_at":"2026-11-19T00:00:00Z"}],"opt_outs":[],"canary":[]}`
 	claudeSeedLocalState(t, env, claudeBindingsName, []byte(doc))
 	var out, errs bytes.Buffer
 	code := Run([]string{"claude", "runtime-snapshot"}, strings.NewReader(""), &out, &errs, func(k string) string { return env[k] })
@@ -350,27 +352,40 @@ func TestClaudeRuntimeSnapshotRedaction(t *testing.T) {
 	}
 	// The task-7 admission gate and the host's child-spawn coordinates.
 	var admission struct {
-		Live             bool `json:"live"`
-		Policy           bool `json:"policy"`
-		VersionQualified bool `json:"version_qualified"`
+		Live             bool   `json:"live"`
+		Policy           bool   `json:"policy"`
+		VersionQualified bool   `json:"version_qualified"`
+		BuildCheck       string `json:"build_check"`
 	}
+	// Build gating is parked: version_qualified holds and build_check says
+	// no build was verified; the dead root is what keeps it unadmitted.
 	if err := json.Unmarshal(rows[0]["admission"], &admission); err != nil || admission.Policy != true ||
-		admission.Live != false || admission.VersionQualified != claudeVersionQualified("2.1.322") {
+		admission.Live != false || admission.VersionQualified != true || admission.BuildCheck != "disabled" {
 		t.Fatalf("admission evidence missing or wrong: %q", rows[0]["admission"])
 	}
 	var scopeRow struct {
 		Profile     string `json:"profile"`
+		Config      string `json:"config"`
+		HubIdentity string `json:"hub_identity"`
 		HubEndpoint string `json:"hub_endpoint"`
 		Caller      string `json:"caller"`
 		Recipient   string `json:"recipient"`
 	}
 	if err := json.Unmarshal(rows[0]["scope"], &scopeRow); err != nil || scopeRow.Profile != "p" ||
-		scopeRow.HubEndpoint != "https://hub.example.com" || scopeRow.Caller != "peer_A" || scopeRow.Recipient != "peer_A" {
+		scopeRow.HubEndpoint != "https://hub.example.com" || scopeRow.Caller != "peer_A" || scopeRow.Recipient != "peer_A" ||
+		scopeRow.HubIdentity != claudeTestHubPin || scopeRow.Config != configPath {
 		t.Fatalf("scope coordinates missing or wrong: %q", rows[0]["scope"])
 	}
-	// The root's private coordinates never leave the registry.
-	for _, marker := range []string{"SNAPSHOT-REDACT", jsonString(d)[1 : len(jsonString(d))-1], "4242", "vecnet.toml", "2.1.322"} {
-		if strings.Contains(out.String(), marker) {
+	// Phase 2 task 5: the binding's own config path is the one path the
+	// host needs (its scoped children run against it). With that single
+	// field removed, the root's private coordinates — config root, session,
+	// socket, process identity and build evidence — never leave the registry.
+	redacted := strings.Replace(out.String(), jsonString(configPath), `"<config>"`, 1)
+	if strings.Contains(redacted, "SNAPSHOT-REDACT-CONFIG/") || strings.Count(out.String(), jsonString(configPath)) != 1 {
+		t.Fatalf("the config path appears outside scope.config: %s", out.String())
+	}
+	for _, marker := range []string{"SNAPSHOT-REDACT", jsonString(d)[1 : len(jsonString(d))-1], "4242", "vecnet.toml", digest, "77:88:99"} {
+		if strings.Contains(redacted, marker) {
 			t.Fatalf("snapshot leaked %q: %s", marker, out.String())
 		}
 	}

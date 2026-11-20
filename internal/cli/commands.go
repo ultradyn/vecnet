@@ -62,7 +62,7 @@ messaging:
   react <message_id> <emoji|name> [--remove] [--wake|--wake-idle|--hold]
        default priority depends on the emoji: ✅ ❓ ❗ wake_idle, others hold
   mcp                                 stdio MCP relay to the hub's /mcp as this profile [--as X]; needs --net P
-  inbox [--since CURSOR] [--ack] [--limit N] [--include-sender-chain]
+  inbox [--since CURSOR] [--ack] [--limit N] [--include-sender-chain] [--no-display-proof]
   blob get SHA [--blob-id ID] --out PATH [--json]
        URLs are short-lived; call get again whenever you need the file, as long as it hasn't expired.
   ack <cursor>
@@ -87,6 +87,8 @@ messaging:
        read-only: ready requires fresh (30s), matching-owner, ready/live connector status; unresolved legacy bindings block readiness
        enrollment automatically stages/activates supported standalone delivery; retry pending setup with vecnet repair
        requires Node >=22.18, Linux user systemd or Windows Task Scheduler, and a supported app-server host; docs/connectors/codex-appserver.md
+  claude canary enable|disable                    needs --net P; per-profile native canary opt-in (local record, no hub request)
+       one peer recipient per user, never --as or a principal; never clears an opt-out
   projects list [--json] | projects forget PATH
        private local installation inventory; forgetting leaves hooks and ownership intact
   repair [--status] [--json]
@@ -247,9 +249,12 @@ type app struct {
 	// retainedRequestID is the agent-add id for this process, generated or
 	// explicit, so a verified hub follow redispatches the same submission.
 	retainedRequestID string
-	prefsCmd          bool                        // preferences exit codes and JSON errors
-	claudeDeliverCmd  bool                        // claude deliver's private 0/2/3/4 exit contract
-	localRuntime      func(context.Context) error // runtime port for disposable setup fixtures
+	prefsCmd          bool // preferences exit codes and JSON errors
+	claudeDeliverCmd  bool // claude deliver's private 0/2/3/4/5 exit contract
+	// claudeDeliverParsed marks claude deliver's flags parsed: a later usage
+	// error is a pre-write refusal (5), not a flag-parse failure (2).
+	claudeDeliverParsed bool
+	localRuntime        func(context.Context) error // runtime port for disposable setup fixtures
 	// An explicit per-app inventory also enters the task check on other OSes
 	// for isolated repair fixtures. Nil retains native platform selection.
 	localLauncherTasks   func(context.Context) ([]string, error)
