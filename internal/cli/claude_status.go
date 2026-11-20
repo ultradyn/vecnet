@@ -17,7 +17,6 @@ import (
 	"io"
 	"os"
 	"regexp"
-	"runtime"
 	"slices"
 	"strings"
 	"time"
@@ -200,15 +199,19 @@ func claudeReadPrivate(path string) ([]byte, error) {
 // status, evidence the singleton lease is held (an additional check, never
 // proof of the writer, and never obtained by unlinking the lock), and the
 // addressed binding present as registered at the current generation.
+//
+// An unpinned profile (the legacy endpoint form) reports legacy with the
+// fixed pending reason: it can own nothing until a pin exists.
 func (a *app) readClaudeStatus(ctx context.Context, scope claudeScope) (claudeStatusResult, error) {
-	if err := claudeScopeValid(scope); err != nil {
+	if err := claudeOptOutScopeValid(scope); err != nil {
 		return claudeStatusResult{}, err
 	}
 	result := claudeStatusResult{Version: 1, Owner: "none", Mode: "legacy", PendingCount: 0}
 	// The durable claim ledger is factual whatever the passive modes say:
-	// unresolved native reservations and the staging cap state are reported
-	// even when no host is live.
-	summary, err := a.claudeClaimsSummary(claudeBindingKey(scope))
+	// unresolved native reservations (including slice-3 claims recorded under
+	// the legacy endpoint key) and the staging cap state are reported even
+	// when no host is live.
+	summary, err := a.claudeClaimsSummary(claudeClaimScopeKeys(scope)...)
 	if err != nil {
 		return claudeStatusResult{}, err
 	}
@@ -251,6 +254,10 @@ func (a *app) readClaudeStatus(ctx context.Context, scope claudeScope) (claudeSt
 	if opted {
 		// A durable disable states its mode and never implies a live owner.
 		result.Mode, result.Generation = "opted_out", ""
+		return result, nil
+	}
+	if !claudeHubPinned(scope.HubIdentity) {
+		result.Reason, result.Generation = errClaudeHubUnpinned.Error(), ""
 		return result, nil
 	}
 
@@ -388,23 +395,28 @@ type claudeSnapshotScope struct {
 	Recipient   string `json:"recipient"`
 }
 
-// claudeVersionQualifiedBuilds is the qualified compatibility baseline: Linux
-// x86-64 Claude Code 2.1.322 is the initial lab baseline, and unknown or
-// untested builds stay legacy until qualified — no version-number guessing.
-var claudeVersionQualifiedBuilds = []string{"2.1.322"}
-
-func claudeVersionQualified(version string) bool {
-	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
+// claudeBuildQualified reports whether a stored root's build is a qualified
+// native target: its recorded digest is in the pinned table for this
+// platform under the recorded label, and the attested executable is still
+// the pid's live image (dev:ino). No version string, path or environment
+// value takes part; unknown or untested builds stay legacy.
+func claudeBuildQualified(r claudeRoot) bool {
+	if r.Build == "" || r.ExeSHA256 == "" || r.ExeIdentity == "" {
 		return false
 	}
-	return slices.Contains(claudeVersionQualifiedBuilds, version)
+	build, ok := claudeQualifiedBuildFor(r.ExeSHA256)
+	if !ok || build.Label != r.Build {
+		return false
+	}
+	return claudeExeIdentityLive(r.PID, r.ExeIdentity)
 }
 
 // claudeAdmissionEvidence computes the native-delivery admission booleans:
 // live is exact process evidence (this boot, live pid, start identity, OS
 // user), policy is the absence of both durable opt-outs, and version
-// qualification is the compatibility range. The deliver helper recomputes
-// the same evidence under the registry lock before resolving an endpoint.
+// qualification (JSON version_qualified, unchanged for the host) is the
+// kernel-attested build digest. The deliver helper recomputes the same
+// evidence under the registry lock before resolving an endpoint.
 func claudeAdmissionEvidence(b claudeBinding, optOuts []claudeScope, globalDisable bool) claudeSnapshotAdmission {
 	policy := !globalDisable && !slices.ContainsFunc(optOuts, func(s claudeScope) bool {
 		return claudeSameRecipient(s, b.claudeScope)
@@ -413,7 +425,7 @@ func claudeAdmissionEvidence(b claudeBinding, optOuts []claudeScope, globalDisab
 	if boot := claudeBootID(); boot != "" && b.BootID == boot && claudeHostLive(b.PID, b.ProcessStart) {
 		live = claudeProcUser(b.PID, b.UID) == nil
 	}
-	return claudeSnapshotAdmission{Live: live, Policy: policy, VersionQualified: claudeVersionQualified(b.Version)}
+	return claudeSnapshotAdmission{Live: live, Policy: policy, VersionQualified: claudeBuildQualified(b.claudeRoot)}
 }
 
 // claudeBindingPassiveState classifies one stored row for the snapshot:
@@ -449,7 +461,7 @@ func (a *app) cmdClaudeStatus(args []string) error {
 	if profile == "" {
 		return usageErr("claude status requires the addressed profile: --net PROFILE")
 	}
-	scope, err := a.claudeScopeForProfile(profile)
+	scope, err := a.claudeScopeForProfileAllowLegacy(profile)
 	if err != nil {
 		return err
 	}
@@ -497,7 +509,10 @@ func (a *app) cmdClaudeDisableEnable(verb string, args []string) error {
 		}
 		return a.ok("claude passive registration " + verb + "d globally (the legacy hook path is unchanged)")
 	}
-	scope, err := a.claudeScopeForProfile(profile)
+	// An opt-out never waits for a pin: an unpinned profile records the
+	// legacy endpoint form, which claudeSameRecipient still matches once the
+	// profile is pinned.
+	scope, err := a.claudeScopeForProfileAllowLegacy(profile)
 	if err != nil {
 		return err
 	}

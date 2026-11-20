@@ -13,6 +13,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -27,10 +29,13 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/XertroV/vecnet/internal/hubid"
+	"golang.org/x/sys/unix"
 )
 
-// claudeFixtureVersion lives in claude_setup_test.go so every platform's
-// tests can share it.
+// claudeTestHubPin lives in claude_setup_test.go so every platform's tests
+// can share it.
 
 // claudeSocketDir is a private fixture directory short enough to bind unix
 // sockets in. t.TempDir() lives under $TMPDIR, which CI points at a deep
@@ -51,6 +56,37 @@ func claudeSocketDir(t *testing.T) string {
 	return d
 }
 
+// claudeSelfBuild returns the kernel build evidence of this test process
+// (its digest and fstat identity, computed directly rather than through the
+// bounded observation) and tables the digest under the fixture label, for
+// fixtures that register this process itself as the Claude root.
+func claudeSelfBuild(t *testing.T) (sha, identity string) {
+	t.Helper()
+	exe, err := os.Open("/proc/self/exe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer exe.Close()
+	var st unix.Stat_t
+	if err := unix.Fstat(int(exe.Fd()), &st); err != nil {
+		t.Fatal(err)
+	}
+	h := sha256.New()
+	if _, err := io.Copy(h, exe); err != nil {
+		t.Fatal(err)
+	}
+	sha = hex.EncodeToString(h.Sum(nil))
+	claudeWithQualifiedBuild(t, sha)
+	return sha, claudeBuildStatIdentity(&st)
+}
+
+// claudeSelfBuildJSON is the stored-row JSON fragment for claudeSelfBuild.
+func claudeSelfBuildJSON(t *testing.T) string {
+	t.Helper()
+	sha, identity := claudeSelfBuild(t)
+	return `"build":` + jsonString(claudeTestBuildLabel) + `,"exe_sha256":` + jsonString(sha) + `,"exe_identity":` + jsonString(identity) + `,`
+}
+
 type claudeRegResult struct {
 	OK      bool          `json:"ok"`
 	Binding claudeBinding `json:"binding"`
@@ -69,6 +105,13 @@ type claudeRegFixture struct {
 	seq    int
 	trees  []*claudeTree
 	server *httptest.Server
+	// qualified and blockHash travel to every helper job in its payload: the
+	// jobs run in child processes, where the parent's table extensions and
+	// seams do not reach. Only this test code ever applies them.
+	qualified []string
+	blockHash bool
+	// runtimeOK stubs the local delivery runtime in reconcile jobs.
+	runtimeOK bool
 }
 
 func newClaudeRegFixture(t *testing.T) *claudeRegFixture {
@@ -89,9 +132,9 @@ func newClaudeRegFixture(t *testing.T) *claudeRegFixture {
 	f.hub = f.server.URL
 	f.config = filepath.Join(d, "v.toml")
 	profiles := map[string]Profile{
-		"p": {Hub: f.hub, Secret: "vn_peer_test", PeerID: "peer_A"},
-		"q": {Hub: f.hub, Secret: "vn_peer_test_q", PeerID: "peer_A"},
-		"r": {Hub: f.hub, Secret: "vn_peer_test_r", PeerID: "peer_B"},
+		"p": {Hub: f.hub, HubPubkey: claudeTestHubPin, Secret: "vn_peer_test", PeerID: "peer_A"},
+		"q": {Hub: f.hub, HubPubkey: claudeTestHubPin, Secret: "vn_peer_test_q", PeerID: "peer_A"},
+		"r": {Hub: f.hub, HubPubkey: claudeTestHubPin, Secret: "vn_peer_test_r", PeerID: "peer_B"},
 	}
 	if err := saveConfig(f.config, Config{Profiles: profiles}); err != nil {
 		t.Fatal(err)
@@ -114,7 +157,7 @@ func (f *claudeRegFixture) scope(profile string) claudeScope {
 	return claudeScope{
 		ConfigPath:  f.config,
 		Profile:     profile,
-		HubIdentity: f.hub,
+		HubIdentity: claudeTestHubPin,
 		HubEndpoint: f.hub,
 		Caller:      caller,
 		Recipient:   caller,
@@ -235,10 +278,23 @@ func (tr *claudeTree) root(session string) claudeRoot {
 		SocketPath:   tr.socket,
 		ProcessStart: tr.start,
 		BootID:       tr.f.boot,
-		Version:      claudeFixtureVersion,
 		PID:          tr.pid,
 		UID:          os.Geteuid(),
 	}
+}
+
+// observedRoot is root with the build evidence this test process observes
+// for the tree's executable (the test binary); Build follows this process's
+// table.
+func (tr *claudeTree) observedRoot(session string) claudeRoot {
+	tr.f.t.Helper()
+	ev, err := tr.f.app().observeClaudeBuild(context.Background(), tr.pid, tr.start)
+	if err != nil || ev.SHA256 == "" || ev.Identity == "" {
+		tr.f.t.Fatalf("cannot observe the tree's build: %+v %v", ev, err)
+	}
+	r := tr.root(session)
+	r.Build, r.ExeSHA256, r.ExeIdentity = ev.Build, ev.SHA256, ev.Identity
+	return r
 }
 
 func (tr *claudeTree) kill() {
@@ -269,10 +325,12 @@ func (tr *claudeTree) reg(scope claudeScope, root claudeRoot, env map[string]str
 		merged[k] = v
 	}
 	raw, err := json.Marshal(struct {
-		Env   map[string]string `json:"env"`
-		Scope claudeScope       `json:"scope"`
-		Root  claudeRoot        `json:"root"`
-	}{merged, scope, root})
+		Env       map[string]string `json:"env"`
+		Scope     claudeScope       `json:"scope"`
+		Root      claudeRoot        `json:"root"`
+		Qualified []string          `json:"qualified"`
+		BlockHash bool              `json:"block_hash"`
+	}{merged, scope, root, tr.f.qualified, tr.f.blockHash})
 	if err != nil {
 		tr.f.t.Fatal(err)
 	}
@@ -313,10 +371,12 @@ func (tr *claudeTree) hook(env map[string]string, args []string, stdin string) c
 		merged[k] = v
 	}
 	raw, err := json.Marshal(struct {
-		Env   map[string]string `json:"env"`
-		Args  []string          `json:"args"`
-		Stdin string            `json:"stdin"`
-	}{merged, args, stdin})
+		Env       map[string]string `json:"env"`
+		Args      []string          `json:"args"`
+		Stdin     string            `json:"stdin"`
+		Qualified []string          `json:"qualified"`
+		BlockHash bool              `json:"block_hash"`
+	}{merged, args, stdin, tr.f.qualified, tr.f.blockHash})
 	if err != nil {
 		tr.f.t.Fatal(err)
 	}
@@ -469,7 +529,7 @@ func TestClaudeRegistrationNeverStealsAcrossProfilesOrRoots(t *testing.T) {
 	// canonical recipient: refusal, no second row.
 	aliasConfig := filepath.Join(f.dir, "v2.toml")
 	if err := saveConfig(aliasConfig, Config{Profiles: map[string]Profile{
-		"p2": {Hub: f.hub, Secret: "vn_peer_test_2", PeerID: "peer_A"},
+		"p2": {Hub: f.hub, HubPubkey: claudeTestHubPin, Secret: "vn_peer_test_2", PeerID: "peer_A"},
 	}}); err != nil {
 		t.Fatal(err)
 	}
@@ -503,7 +563,7 @@ func TestClaudeRegistrationFencesResumeAndClear(t *testing.T) {
 	b := f.startTree("b")
 	// Resume keeps the conversation and config root but has a fresh process
 	// and endpoint: Claude's session row for the new pid appears there.
-	resume := claudeRoot{ConfigRoot: a.configRoot, SessionID: "S1", SocketPath: b.socket, ProcessStart: b.start, BootID: f.boot, Version: claudeFixtureVersion, PID: b.pid, UID: os.Geteuid()}
+	resume := claudeRoot{ConfigRoot: a.configRoot, SessionID: "S1", SocketPath: b.socket, ProcessStart: b.start, BootID: f.boot, PID: b.pid, UID: os.Geteuid()}
 	a.sessionRecord(b.pid, "S1", b.socket)
 
 	// The old process is still live: the resume is fenced and refused.
@@ -577,7 +637,11 @@ func TestClaudeRegistrationRejectsUnsafeRegistryAndPIDReuse(t *testing.T) {
 	// Version and schema are strict: unknown fields, missing fields and a
 	// wrong version are all refused without repairing the file.
 	for label, doc := range map[string]string{
-		"wrong version": `{"version":2,"bindings":[],"opt_outs":[]}`,
+		"wrong version": `{"version":3,"bindings":[],"opt_outs":[],"canary":[]}`,
+		"v2 no canary":  `{"version":2,"bindings":[],"opt_outs":[]}`,
+		"v2 bad canary": `{"version":2,"bindings":[],"opt_outs":[],"canary":[{"config_path":"/x","profile":"p","hub_identity":"https://h","hub_endpoint":"https://h","caller":"peer_A","recipient":"peer_A"}]}`,
+		"v2 bad digest": `{"version":2,"bindings":[{"config_path":"/x","profile":"p","hub_identity":"` + claudeTestHubPin + `","hub_endpoint":"https://h","caller":"peer_A","recipient":"peer_A","config_root":"/x","session_id":"S1","process_start":"12","boot_id":"01234567-89ab-cdef-0123-456789abcdef","exe_sha256":"ABC","pid":9,"uid":1000,"generation":"0123456789abcdef0123456789abcdef","updated_at":"2026-11-19T00:00:00Z"}],"opt_outs":[],"canary":[]}`,
+		"v2 old field":  `{"version":2,"bindings":[{"config_path":"/x","profile":"p","hub_identity":"` + claudeTestHubPin + `","hub_endpoint":"https://h","caller":"peer_A","recipient":"peer_A","config_root":"/x","session_id":"S1","process_start":"12","boot_id":"01234567-89ab-cdef-0123-456789abcdef","version":"2.1.322","pid":9,"uid":1000,"generation":"0123456789abcdef0123456789abcdef","updated_at":"2026-11-19T00:00:00Z"}],"opt_outs":[],"canary":[]}`,
 		"unknown field": `{"version":1,"bindings":[{"config_path":"/x","profile":"p","hub_identity":"h","hub_endpoint":"h","caller":"c","recipient":"c","config_root":"/x","session_id":"S1","process_start":"12","boot_id":"01234567-89ab-cdef-0123-456789abcdef","version":"v","pid":9,"uid":1000,"generation":"0123456789abcdef0123456789abcdef","updated_at":"2026-11-19T00:00:00Z","mystery":1}],"opt_outs":[]}`,
 		"missing field": `{"version":1,"bindings":[{"config_path":"/x","profile":"p","hub_identity":"h","hub_endpoint":"h","caller":"c","recipient":"c","config_root":"/x","session_id":"S1","process_start":"12","version":"v","pid":9,"uid":1000,"generation":"0123456789abcdef0123456789abcdef","updated_at":"2026-11-19T00:00:00Z"}],"opt_outs":[]}`,
 		"trailing data": string(base[:len(base)-1]) + "\n{}\n",
@@ -750,11 +814,11 @@ func TestClaudeHelperProcess(t *testing.T) {
 	case "claude":
 		claudeHelperClaude()
 	case "register":
-		claudeHelperRegister()
+		claudeHelperRegister(t)
 	case "reconcile":
-		claudeHelperReconcile()
+		claudeHelperReconcile(t)
 	case "hook":
-		claudeHelperHook()
+		claudeHelperHook(t)
 	default:
 		fmt.Fprintln(os.Stderr, "unknown helper role")
 	}
@@ -799,7 +863,24 @@ func claudeHelperClaude() {
 	}
 }
 
-func claudeHelperRegister() {
+// claudeHelperJobSeams applies a job payload's test-only table extension and
+// hash seam inside the helper child, restored by t.Cleanup like every other
+// table extension. Production binaries carry none of this code.
+func claudeHelperJobSeams(t *testing.T, qualified []string, blockHash bool) {
+	for _, sha := range qualified {
+		claudeWithQualifiedBuild(t, sha)
+	}
+	if blockHash {
+		real := claudeBuildHash
+		claudeBuildHash = func(ctx context.Context, r io.Reader) (string, error) {
+			<-ctx.Done()
+			return "", ctx.Err()
+		}
+		t.Cleanup(func() { claudeBuildHash = real })
+	}
+}
+
+func claudeHelperRegister(t *testing.T) {
 	result := os.Getenv("VECNET_CLAUDE_RESULT")
 	fail := func(msg string) {
 		raw, _ := json.Marshal(claudeRegResult{Err: msg})
@@ -811,13 +892,16 @@ func claudeHelperRegister() {
 		fail("payload: " + err.Error())
 	}
 	var payload struct {
-		Env   map[string]string `json:"env"`
-		Scope claudeScope       `json:"scope"`
-		Root  claudeRoot        `json:"root"`
+		Env       map[string]string `json:"env"`
+		Scope     claudeScope       `json:"scope"`
+		Root      claudeRoot        `json:"root"`
+		Qualified []string          `json:"qualified"`
+		BlockHash bool              `json:"block_hash"`
 	}
 	if err := json.Unmarshal(raw, &payload); err != nil {
 		fail("payload: " + err.Error())
 	}
+	claudeHelperJobSeams(t, payload.Qualified, payload.BlockHash)
 	a := &app{ctx: context.Background(), stdout: io.Discard, stderr: io.Discard, getenv: func(k string) string { return payload.Env[k] }}
 	binding, err := a.registerClaudeRoot(context.Background(), payload.Scope, payload.Root)
 	out := claudeRegResult{OK: err == nil, Binding: binding}
@@ -836,7 +920,7 @@ type claudeHookResult struct {
 
 // claudeHelperReconcile runs one enrollment reconciliation with an isolated
 // environment, as a real child of the claimed Claude process.
-func claudeHelperReconcile() {
+func claudeHelperReconcile(t *testing.T) {
 	result := os.Getenv("VECNET_CLAUDE_RESULT")
 	fail := func(msg string) {
 		raw, _ := json.Marshal(localSetupResult{State: "pending", Reason: msg})
@@ -848,13 +932,20 @@ func claudeHelperReconcile() {
 		fail("payload: " + err.Error())
 	}
 	var payload struct {
-		Env    map[string]string `json:"env"`
-		Record claudeEnrollment  `json:"record"`
+		Env       map[string]string `json:"env"`
+		Record    claudeEnrollment  `json:"record"`
+		Qualified []string          `json:"qualified"`
+		BlockHash bool              `json:"block_hash"`
+		RuntimeOK bool              `json:"runtime_ok"`
 	}
 	if err := json.Unmarshal(raw, &payload); err != nil {
 		fail("payload: " + err.Error())
 	}
+	claudeHelperJobSeams(t, payload.Qualified, payload.BlockHash)
 	a := &app{ctx: context.Background(), stdout: io.Discard, stderr: io.Discard, getenv: func(k string) string { return payload.Env[k] }}
+	if payload.RuntimeOK {
+		a.localRuntime = func(context.Context) error { return nil }
+	}
 	res := a.reconcileClaudeEnrollment(context.Background(), payload.Record)
 	out, _ := json.Marshal(res)
 	_ = os.WriteFile(result, out, 0o600)
@@ -879,9 +970,12 @@ func (tr *claudeTree) reconcile(record claudeEnrollment, env map[string]string) 
 		merged[k] = v
 	}
 	raw, err := json.Marshal(struct {
-		Env    map[string]string `json:"env"`
-		Record claudeEnrollment  `json:"record"`
-	}{merged, record})
+		Env       map[string]string `json:"env"`
+		Record    claudeEnrollment  `json:"record"`
+		Qualified []string          `json:"qualified"`
+		BlockHash bool              `json:"block_hash"`
+		RuntimeOK bool              `json:"runtime_ok"`
+	}{merged, record, tr.f.qualified, tr.f.blockHash, tr.f.runtimeOK})
 	if err != nil {
 		tr.f.t.Fatal(err)
 	}
@@ -908,7 +1002,7 @@ func (tr *claudeTree) reconcile(record claudeEnrollment, env map[string]string) 
 
 // claudeHelperHook runs one hook invocation inside the real hook worker,
 // with an isolated environment, the job's stdin and captured output.
-func claudeHelperHook() {
+func claudeHelperHook(t *testing.T) {
 	result := os.Getenv("VECNET_CLAUDE_RESULT")
 	fail := func(msg string) {
 		raw, _ := json.Marshal(claudeHookResult{Stderr: msg})
@@ -920,13 +1014,16 @@ func claudeHelperHook() {
 		fail("payload: " + err.Error())
 	}
 	var job struct {
-		Env   map[string]string `json:"env"`
-		Args  []string          `json:"args"`
-		Stdin string            `json:"stdin"`
+		Env       map[string]string `json:"env"`
+		Args      []string          `json:"args"`
+		Stdin     string            `json:"stdin"`
+		Qualified []string          `json:"qualified"`
+		BlockHash bool              `json:"block_hash"`
 	}
 	if err := json.Unmarshal(raw, &job); err != nil {
 		fail("payload: " + err.Error())
 	}
+	claudeHelperJobSeams(t, job.Qualified, job.BlockHash)
 	var out, errs bytes.Buffer
 	a := &app{ctx: context.Background(), stdin: strings.NewReader(job.Stdin), stdout: &out, stderr: &errs, getenv: func(k string) string { return job.Env[k] }, inHook: true}
 	a.hookRun(job.Args, hookNow, func() {}, func(data []byte) error {
@@ -965,5 +1062,308 @@ func TestClaudeRegistrationGlobalDisableFailsClosedOnBadSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 	mustReg(t, a.reg(f.scope("p"), a.root("S1"), nil))
+	f.assertPassive()
+}
+
+// --- delivery Phase 2, task 2: binding document v2 ---
+
+// hookRegister runs one owned SessionStart hook from this tree (the real
+// hook path, which observes the build) and returns the stored row for scope.
+func (tr *claudeTree) hookRegister(t *testing.T, profile, session string, extra map[string]string) claudeBinding {
+	t.Helper()
+	env := tr.claudeHookEnv(session)
+	for k, v := range extra {
+		env[k] = v
+	}
+	out := tr.hook(env, []string{"--profile", profile, "--event", "session-start"}, sessionStartPayload(session))
+	if out.Stdout != "" || out.Stderr != "" {
+		t.Fatalf("session-start emitted output: stdout=%q stderr=%q", out.Stdout, out.Stderr)
+	}
+	for _, b := range tr.f.storedRows(t) {
+		if claudeSameRecipient(b.claudeScope, tr.f.scope(profile)) {
+			return b
+		}
+	}
+	t.Fatalf("hook for profile %s registered no row", profile)
+	return claudeBinding{}
+}
+
+// admission evaluates the stored row's admission evidence in this process.
+func (f *claudeRegFixture) admission(t *testing.T, b claudeBinding) claudeSnapshotAdmission {
+	t.Helper()
+	return claudeAdmissionEvidence(b, nil, false)
+}
+
+func TestClaudeRegistrationRecordsKernelBuild(t *testing.T) {
+	f := newClaudeRegFixture(t)
+	digest := claudeFileDigest(t, os.Args[0])
+
+	// Untabled: the row records the attested digest and identity, Build is
+	// empty, admission is unqualified, and registration still succeeds.
+	a := f.startTree("a")
+	a.sessionRecord(a.pid, "S1", a.socket)
+	row := a.hookRegister(t, "p", "S1", nil)
+	want := a.observedRoot("S1")
+	if row.ExeSHA256 != digest || row.ExeIdentity != want.ExeIdentity || row.Build != "" {
+		t.Fatalf("untabled row evidence = (%q, %q, %q), want (%q, %q, \"\")", row.Build, row.ExeSHA256, row.ExeIdentity, digest, want.ExeIdentity)
+	}
+	if adm := f.admission(t, row); !adm.Live || adm.VersionQualified {
+		t.Fatalf("untabled build admission = %+v, want live and unqualified", adm)
+	}
+
+	// Tabled (in the hook child and here): Build is the table label and the
+	// live attested executable qualifies.
+	f.qualified = []string{digest}
+	claudeWithQualifiedBuild(t, digest)
+	b := f.startTree("b")
+	b.sessionRecord(b.pid, "S2", b.socket)
+	row = b.hookRegister(t, "r", "S2", nil)
+	if row.ExeSHA256 != digest || row.Build != claudeTestBuildLabel || row.ExeIdentity == "" {
+		t.Fatalf("tabled row evidence = (%q, %q, %q)", row.Build, row.ExeSHA256, row.ExeIdentity)
+	}
+	if adm := f.admission(t, row); !adm.Live || !adm.VersionQualified {
+		t.Fatalf("tabled build admission = %+v, want live and qualified", adm)
+	}
+	f.assertPassive()
+}
+
+// TestClaudeRegistrationIgnoresVersionEnv pins Review Focus 4: a stale
+// CLAUDE_CODE_VERSION export never qualifies an untabled build, a
+// contradictory one never disqualifies a tabled build, and registration
+// needs none.
+func TestClaudeRegistrationIgnoresVersionEnv(t *testing.T) {
+	f := newClaudeRegFixture(t)
+	digest := claudeFileDigest(t, os.Args[0])
+	claudeWithQualifiedBuild(t, digest) // this process judges admission
+
+	a := f.startTree("a")
+	a.sessionRecord(a.pid, "S1", a.socket)
+	stale := a.hookRegister(t, "p", "S1", map[string]string{"CLAUDE_CODE_VERSION": "2.1.322"})
+	if stale.Build != "" || f.admission(t, stale).VersionQualified {
+		t.Fatalf("a stale version export qualified an untabled build: build=%q", stale.Build)
+	}
+
+	f.qualified = []string{digest}
+	b := f.startTree("b")
+	b.sessionRecord(b.pid, "S2", b.socket)
+	contradict := b.hookRegister(t, "r", "S2", map[string]string{"CLAUDE_CODE_VERSION": "9.9.9"})
+	if contradict.Build != claudeTestBuildLabel || !f.admission(t, contradict).VersionQualified {
+		t.Fatalf("a contradictory version export disqualified a tabled build: build=%q", contradict.Build)
+	}
+
+	// Unset: registration succeeds on kernel evidence alone.
+	q := newClaudeRegFixture(t)
+	c := q.startTree("c")
+	c.sessionRecord(c.pid, "S3", c.socket)
+	env := c.claudeHookEnv("S3")
+	if _, set := env["CLAUDE_CODE_VERSION"]; set {
+		t.Fatal("the hook fixture still exports CLAUDE_CODE_VERSION")
+	}
+	if row := c.hookRegister(t, "p", "S3", nil); row.Generation == "" || row.ExeSHA256 != digest {
+		t.Fatalf("registration without the version export failed: %+v", row)
+	}
+	f.assertPassive()
+	q.assertPassive()
+}
+
+func TestClaudeRegistrationRenewsBuildWithoutNewGeneration(t *testing.T) {
+	f := newClaudeRegFixture(t)
+	a := f.startTree("a")
+	a.sessionRecord(a.pid, "S1", a.socket)
+	first := mustReg(t, a.reg(f.scope("p"), a.root("S1"), nil))
+	base := f.registryBytes()
+
+	// Same process and session with fresh build evidence: renewed in place.
+	claudeWithQualifiedBuild(t, claudeFileDigest(t, os.Args[0]))
+	observed := a.observedRoot("S1")
+	renewed := mustReg(t, a.reg(f.scope("p"), observed, nil))
+	if renewed.Generation != first.Generation {
+		t.Fatalf("build renewal minted a new generation: %s vs %s", renewed.Generation, first.Generation)
+	}
+	if bytes.Equal(base, f.registryBytes()) {
+		t.Fatal("build renewal did not rewrite the row")
+	}
+	rows := f.storedRows(t)
+	if len(rows) != 1 || rows[0].Generation != first.Generation || rows[0].Build != claudeTestBuildLabel ||
+		rows[0].ExeSHA256 != observed.ExeSHA256 || rows[0].ExeIdentity != observed.ExeIdentity {
+		t.Fatalf("renewed row = %+v", rows)
+	}
+
+	// The same evidence again is idempotent.
+	renewedBytes := f.registryBytes()
+	if again := mustReg(t, a.reg(f.scope("p"), observed, nil)); again.Generation != first.Generation {
+		t.Fatal("idempotent renewal changed the generation")
+	}
+	if !bytes.Equal(renewedBytes, f.registryBytes()) {
+		t.Fatal("idempotent renewal rewrote the registry")
+	}
+
+	// Under the lock the attested executable must still be the pid's live
+	// image: an identity from another inode is refused, the row unchanged.
+	stale := observed
+	stale.ExeIdentity = "1:2:3:4:5"
+	refuseReg(t, a.reg(f.scope("p"), stale, nil), "executable changed")
+	if !bytes.Equal(renewedBytes, f.registryBytes()) {
+		t.Fatal("a stale executable identity rewrote the registry")
+	}
+	f.assertPassive()
+}
+
+// TestClaudeRegistrationHubAliasesShareOwner pins Review Focus 5: one hub
+// reached through two URL aliases is one recipient scope.
+func TestClaudeRegistrationHubAliasesShareOwner(t *testing.T) {
+	f := newClaudeRegFixture(t)
+	viaIP := f.hub
+	viaName := strings.Replace(f.hub, "127.0.0.1", "localhost", 1)
+	if viaIP == viaName {
+		t.Fatalf("fixture hub %s is not a 127.0.0.1 URL", f.hub)
+	}
+	if err := saveConfig(f.config, Config{Profiles: map[string]Profile{
+		"a": {Hub: viaIP, HubPubkey: claudeTestHubPin, Secret: "vn_peer_test_a", PeerID: "peer_A"},
+		"b": {Hub: viaName, HubPubkey: claudeTestHubPin, Secret: "vn_peer_test_b", PeerID: "peer_A"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	app := f.app()
+	scopeA, err := app.claudeScopeForProfile("a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	scopeB, err := app.claudeScopeForProfile("b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scopeA.HubEndpoint == scopeB.HubEndpoint || scopeA.HubIdentity != claudeTestHubPin || scopeB.HubIdentity != claudeTestHubPin {
+		t.Fatalf("alias scopes are not one pinned hub through two endpoints: %+v %+v", scopeA, scopeB)
+	}
+	if claudeBindingKey(scopeA) != claudeBindingKey(scopeB) {
+		t.Fatal("two URL aliases of one pinned hub gave two binding keys")
+	}
+
+	first := f.startTree("first")
+	first.sessionRecord(first.pid, "S1", first.socket)
+	owner := mustReg(t, first.reg(scopeA, first.root("S1"), nil))
+	base := f.registryBytes()
+	second := f.startTree("second")
+	second.sessionRecord(second.pid, "S2", second.socket)
+	refuseReg(t, second.reg(scopeB, second.root("S2"), nil), "cannot be stolen")
+	if !bytes.Equal(base, f.registryBytes()) {
+		t.Fatal("the refused alias root rewrote the registry")
+	}
+	if rows := f.storedRows(t); len(rows) != 1 || rows[0].Generation != owner.Generation || rows[0].PID != first.pid {
+		t.Fatalf("the alias disturbed the owner: %+v", rows)
+	}
+	f.assertPassive()
+}
+
+func TestClaudeRegistrationNeedsPinnedHub(t *testing.T) {
+	f := newClaudeRegFixture(t)
+	if err := saveConfig(f.config, Config{Profiles: map[string]Profile{
+		"u": {Hub: f.hub, Secret: "vn_peer_test_u", PeerID: "peer_A"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	app := f.app()
+	const reason = "claude registration needs a pinned hub identity; run a vecnet command for this profile once"
+	if _, err := app.claudeScopeForProfile("u"); err == nil || err.Error() != reason {
+		t.Fatalf("unpinned scope derivation = %v, want the fixed reason", err)
+	}
+	// The endpoint form is never accepted as a hub identity.
+	legacy, err := app.claudeScopeForProfileAllowLegacy("u")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy.HubIdentity != legacy.HubEndpoint {
+		t.Fatalf("unpinned legacy scope = %+v", legacy)
+	}
+	a := f.startTree("a")
+	a.sessionRecord(a.pid, "S1", a.socket)
+	if r := a.reg(legacy, a.root("S1"), nil); r.OK || r.Err != reason {
+		t.Fatalf("unpinned registration = %+v, want refusal with the fixed reason", r)
+	}
+	// The real hook path stays silent and registers nothing.
+	a.hook(a.claudeHookEnv("S1"), []string{"--profile", "u", "--event", "session-start"}, sessionStartPayload("S1"))
+	if n := f.storedBindingCount(t); n != 0 {
+		t.Fatalf("an unpinned profile registered %d rows", n)
+	}
+	// Status reports legacy with the same fixed reason.
+	if status := claudeStatusJSON(t, f.env, "--net", "u", "claude", "status", "--json"); status.Mode != "legacy" || status.Owner != "none" || status.Reason != reason {
+		t.Fatalf("unpinned status = %+v", status)
+	}
+
+	// A TOFU pin (the sidecar a first ordinary command writes) is enough.
+	hub, err := hubid.NormalizeURL(f.hub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.updatePins(func(m map[string]pinRecord) error {
+		m["u"] = pinRecord{Hub: hub, Pubkey: claudeTestHubPin, PinnedAt: time.Now().UTC().Format(time.RFC3339Nano), How: "tofu"}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	pinned, err := app.claudeScopeForProfile("u")
+	if err != nil || pinned.HubIdentity != claudeTestHubPin {
+		t.Fatalf("TOFU-pinned scope = %+v, %v", pinned, err)
+	}
+	mustReg(t, a.reg(pinned, a.root("S1"), nil))
+	f.assertPassive()
+}
+
+func TestClaudeBindingsV1Migrates(t *testing.T) {
+	f := newClaudeRegFixture(t)
+	endpoint := normalizeHub(f.hub)
+	// A slice-3 v1 document: one endpoint-keyed binding with a version
+	// string, and one opt-out for peer_A in the endpoint form.
+	v1 := `{"version":1,"bindings":[{"config_path":` + jsonString(f.config) + `,"profile":"p","hub_identity":` + jsonString(endpoint) +
+		`,"hub_endpoint":` + jsonString(endpoint) + `,"caller":"peer_B","recipient":"peer_B","config_root":"/x","session_id":"S9",` +
+		`"process_start":"12","boot_id":"01234567-89ab-cdef-0123-456789abcdef","version":"2.1.322","pid":9,"uid":1000,` +
+		`"generation":"0123456789abcdef0123456789abcdef","updated_at":"2026-11-19T00:00:00Z"}],` +
+		`"opt_outs":[{"config_path":` + jsonString(f.config) + `,"profile":"p","hub_identity":` + jsonString(endpoint) +
+		`,"hub_endpoint":` + jsonString(endpoint) + `,"caller":"peer_A","recipient":"peer_A"}]}`
+	claudeSeedLocalState(t, f.env, claudeBindingsName, []byte(v1))
+
+	if rows := f.storedRows(t); len(rows) != 0 {
+		t.Fatalf("v1 bindings were not discarded: %+v", rows)
+	}
+	// The kept opt-out blocks the pinned form (registration, and a profile
+	// alias of the same recipient) and the legacy endpoint form (status).
+	a := f.startTree("a")
+	a.sessionRecord(a.pid, "S1", a.socket)
+	refuseReg(t, a.reg(f.scope("p"), a.root("S1"), nil), "opt-out")
+	refuseReg(t, a.reg(f.scope("q"), a.root("S1"), nil), "opt-out")
+	legacy := f.scope("p")
+	legacy.HubIdentity = legacy.HubEndpoint
+	for label, scope := range map[string]claudeScope{"pinned": f.scope("p"), "legacy": legacy} {
+		status, err := f.app().readClaudeStatus(context.Background(), scope)
+		if err != nil || status.Mode != "opted_out" {
+			t.Fatalf("%s form is not opted out after migration: %+v %v", label, status, err)
+		}
+	}
+	if !bytes.Equal(f.registryBytes(), []byte(v1)) {
+		t.Fatal("a refused registration rewrote the v1 document")
+	}
+
+	// The next write emits v2 with the opt-out kept and no canary record.
+	b := f.startTree("b")
+	b.sessionRecord(b.pid, "S2", b.socket)
+	mustReg(t, b.reg(f.scope("r"), b.root("S2"), nil))
+	var doc struct {
+		Version  int               `json:"version"`
+		Bindings []json.RawMessage `json:"bindings"`
+		OptOuts  []claudeScope     `json:"opt_outs"`
+		Canary   []claudeScope     `json:"canary"`
+	}
+	if err := json.Unmarshal(f.registryBytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc.Version != 2 || len(doc.Bindings) != 1 || len(doc.OptOuts) != 1 || doc.OptOuts[0].Recipient != "peer_A" ||
+		doc.Canary == nil || len(doc.Canary) != 0 {
+		t.Fatalf("the rewrite is not v2 with the opt-out kept: %s", f.registryBytes())
+	}
+	if bytes.Contains(f.registryBytes(), []byte(`"version":"2.1.322"`)) || bytes.Contains(f.registryBytes(), []byte(`"S9"`)) {
+		t.Fatalf("the rewrite kept a v1 binding: %s", f.registryBytes())
+	}
+	refuseReg(t, a.reg(f.scope("p"), a.root("S1"), nil), "opt-out")
 	f.assertPassive()
 }

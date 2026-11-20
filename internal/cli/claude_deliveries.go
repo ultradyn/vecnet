@@ -202,10 +202,22 @@ func openClaudeClaimsLedger(path string) (*sql.DB, error) {
 	return db, nil
 }
 
-// readClaudeClaims returns the decodable claim documents of one addressed
-// scope, plus the count of claim rows the strict decoder refused (mirroring
-// the host's own warn-and-skip of corrupt rows).
-func readClaudeClaims(db *sql.DB, scopeKey string) ([]claudeClaimRecord, int, error) {
+// claudeClaimScopeKeys is the set of claim scope keys one addressed scope
+// owns: its pinned binding key and, when it differs, the legacy endpoint key
+// slice-3 claims were recorded under. Legacy-key claims stay visible,
+// counted and resolvable inbox-only; they are never admitted again.
+func claudeClaimScopeKeys(scope claudeScope) []string {
+	key, legacy := claudeBindingKey(scope), claudeLegacyBindingKey(scope)
+	if key == legacy {
+		return []string{key}
+	}
+	return []string{key, legacy}
+}
+
+// readClaudeClaims returns the decodable claim documents of the addressed
+// scope keys, plus the count of claim rows the strict decoder refused
+// (mirroring the host's own warn-and-skip of corrupt rows).
+func readClaudeClaims(db *sql.DB, scopeKeys ...string) ([]claudeClaimRecord, int, error) {
 	rows, err := db.Query(`SELECT value FROM kv WHERE ns = ? AND key LIKE 'claude-claims:claim:%'`, claudeClaimsNS)
 	if err != nil {
 		return nil, 0, err
@@ -227,7 +239,7 @@ func readClaudeClaims(db *sql.DB, scopeKey string) ([]claudeClaimRecord, int, er
 			corrupt++
 			continue
 		}
-		if claim.Scope == scopeKey {
+		if slices.Contains(scopeKeys, claim.Scope) {
 			claims = append(claims, claim)
 		}
 	}
@@ -264,7 +276,9 @@ type claudeClaimsSummary struct {
 	BlockedPendingLimit bool
 }
 
-func (a *app) claudeClaimsSummary(scopeKey string) (claudeClaimsSummary, error) {
+// claudeClaimsSummary counts the unresolved claims under every given scope
+// key; the cap state comes from the first (current) key's staging record.
+func (a *app) claudeClaimsSummary(scopeKeys ...string) (claudeClaimsSummary, error) {
 	path, err := claudeClaimsLedgerPath(a.getenv)
 	if err != nil {
 		return claudeClaimsSummary{}, err
@@ -277,11 +291,11 @@ func (a *app) claudeClaimsSummary(scopeKey string) (claudeClaimsSummary, error) 
 		return claudeClaimsSummary{}, nil
 	}
 	defer db.Close()
-	claims, _, err := readClaudeClaims(db, scopeKey)
+	claims, _, err := readClaudeClaims(db, scopeKeys...)
 	if err != nil {
 		return claudeClaimsSummary{}, err
 	}
-	progress, present, err := readClaudeScopeProgress(db, scopeKey)
+	progress, present, err := readClaudeScopeProgress(db, scopeKeys[0])
 	if err != nil {
 		return claudeClaimsSummary{}, err
 	}
@@ -328,8 +342,9 @@ type claudeDeliveriesResult struct {
 }
 
 // cmdClaudeDeliveries lists the addressed recipient's bounded dispositions.
-// It reads only the durable claim documents, lists only the addressed scope,
-// and never touches a hub or an inbox.
+// It reads only the durable claim documents, lists only the addressed scope
+// (its pinned key plus the legacy endpoint key slice-3 claims carry), and
+// never touches a hub or an inbox.
 func (a *app) cmdClaudeDeliveries(args []string) error {
 	o, err := parseFlags("claude deliveries", args, nil)
 	if err != nil {
@@ -342,11 +357,11 @@ func (a *app) cmdClaudeDeliveries(args []string) error {
 	if profile == "" {
 		return usageErr("claude deliveries requires the addressed profile: --net PROFILE")
 	}
-	scope, err := a.claudeScopeForProfile(profile)
+	scope, err := a.claudeScopeForProfileAllowLegacy(profile)
 	if err != nil {
 		return err
 	}
-	if err := claudeScopeValid(scope); err != nil {
+	if err := claudeOptOutScopeValid(scope); err != nil {
 		return err
 	}
 	key := claudeBindingKey(scope)
@@ -361,7 +376,7 @@ func (a *app) cmdClaudeDeliveries(args []string) error {
 	}
 	if db != nil {
 		defer db.Close()
-		claims, corrupt, err := readClaudeClaims(db, key)
+		claims, corrupt, err := readClaudeClaims(db, claudeClaimScopeKeys(scope)...)
 		if err != nil {
 			return err
 		}
@@ -449,8 +464,8 @@ func (a *app) cmdClaudeDeliveries(args []string) error {
 // claudeResolveAdmission recomputes the native-delivery admission for one
 // binding key under the claude-bindings lock, exactly as the deliver helper
 // does at attempt time: a retry may only re-arm a claim whose scope is
-// currently registered, live, policy-enabled, version-qualified and still
-// fenced by the same generation.
+// currently registered under its pinned hub identity, live,
+// policy-enabled, build-qualified and still fenced by the same generation.
 func (a *app) claudeResolveAdmission(key, generation string) error {
 	ctx, cancel := context.WithTimeout(a.localRegistryContext(), 5*time.Second)
 	defer cancel()
@@ -535,14 +550,17 @@ func (a *app) cmdClaudeResolve(args []string) error {
 	if profile == "" {
 		return usageErr("claude resolve requires the addressed profile: --net PROFILE")
 	}
-	scope, err := a.claudeScopeForProfile(profile)
+	// An unpinned profile still reaches its legacy-key claims for
+	// --keep-inbox; --retry needs the pinned key and refuses below.
+	scope, err := a.claudeScopeForProfileAllowLegacy(profile)
 	if err != nil {
 		return err
 	}
-	if err := claudeScopeValid(scope); err != nil {
+	if err := claudeOptOutScopeValid(scope); err != nil {
 		return err
 	}
 	key := claudeBindingKey(scope)
+	keys := claudeClaimScopeKeys(scope)
 	path, err := claudeClaimsLedgerPath(a.getenv)
 	if err != nil {
 		return err
@@ -578,7 +596,7 @@ func (a *app) cmdClaudeResolve(args []string) error {
 	if err != nil {
 		return usageErr("claude resolve: the stored claim is corrupt and is never promoted")
 	}
-	if claim.Scope != key {
+	if !slices.Contains(keys, claim.Scope) {
 		return usageErr("claude resolve: the claim belongs to another recipient scope")
 	}
 	if claim.Generation != expect {
@@ -597,6 +615,12 @@ func (a *app) cmdClaudeResolve(args []string) error {
 		case "refused", "uncertain", "released", "expired":
 		default:
 			return usageErr("claude resolve --retry: the claim is not in a resolvable state (it still owes a native disposition); re-read `claude deliveries`")
+		}
+		// A claim recorded under the legacy endpoint key (or addressed
+		// through a profile with no pinned hub identity) belongs to a scope
+		// that can never be admitted again: inbox-only.
+		if !claudeHubPinned(scope.HubIdentity) || claim.Scope != key {
+			return usageErr("claude resolve --retry: the claim was recorded under the legacy endpoint-keyed scope, which is never admitted again; use --keep-inbox")
 		}
 		if err := a.claudeResolveAdmission(key, expect); err != nil {
 			return err

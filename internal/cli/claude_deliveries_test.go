@@ -28,10 +28,19 @@ const (
 )
 
 // claudeDeliveryScopeKey is the addressed binding key of the witnessed
-// profile in claudeStatusFixture (hub https://hub.example.com, peer_A).
+// profile in claudeStatusFixture (pinned hub claudeTestHubPin, peer_A).
 func claudeDeliveryScopeKey() string {
 	return claudeBindingKey(claudeScope{
-		HubIdentity: "https://hub.example.com",
+		HubIdentity: claudeTestHubPin,
+		Recipient:   "peer_A",
+	})
+}
+
+// claudeDeliveryLegacyScopeKey is the slice-3 key the same recipient's claims
+// were recorded under, when the hub identity was the endpoint.
+func claudeDeliveryLegacyScopeKey() string {
+	return claudeLegacyBindingKey(claudeScope{
+		HubEndpoint: "https://hub.example.com",
 		Recipient:   "peer_A",
 	})
 }
@@ -528,5 +537,72 @@ func TestClaudeStatusShowsPendingCapState(t *testing.T) {
 	}
 	if !strings.Contains(text, "pending_count: 2") || !strings.Contains(text, "blocked_pending_limit: true") {
 		t.Fatalf("status text hides the cap state: %s", text)
+	}
+}
+
+// TestClaudeDeliveriesListsLegacyKeyRows pins the slice-3 migration of the
+// claim ledger: claims recorded under the legacy endpoint-derived key stay
+// listed, counted and resolvable inbox-only, while --retry refuses because
+// that scope can never be admitted again.
+func TestClaudeDeliveriesListsLegacyKeyRows(t *testing.T) {
+	home, env := claudeStatusFixture(t)
+	legacyKey := claudeDeliveryLegacyScopeKey()
+	if legacyKey == claudeDeliveryScopeKey() {
+		t.Fatal("the legacy and pinned keys coincide")
+	}
+	legacyID, pinnedID := "dly_000000000000000000000000L1", "dly_000000000000000000000000P1"
+	claudeDeliveryLedger(t, home, map[string]string{
+		claudeDeliveryClaimKey(legacyID): claudeDeliveryClaimJSON(t, map[string]any{
+			"deliveryId": legacyID, "scope": legacyKey, "state": "uncertain",
+			"disposition": "uncertain", "dispositionReason": "write_failed_or_partial",
+		}),
+		claudeDeliveryClaimKey(pinnedID): claudeDeliveryClaimJSON(t, map[string]any{
+			"deliveryId": pinnedID, "msgId": "0f0e0d0c0b0a090807060504030201ff",
+		}),
+	})
+
+	result := claudeDeliveriesJSON(t, env, "deliveries", "--json")
+	list, _ := result["deliveries"].([]any)
+	seen := map[string]string{}
+	for _, raw := range list {
+		row, _ := raw.(map[string]any)
+		seen[row["delivery_id"].(string)], _ = row["scope"].(string)
+	}
+	if len(seen) != 2 || seen[legacyID] != legacyKey || seen[pinnedID] != claudeDeliveryScopeKey() {
+		t.Fatalf("the legacy-key claim is not listed beside the pinned one: %v", result)
+	}
+	if result["pending_count"] != float64(1) {
+		t.Fatalf("deliveries pending_count must count the legacy-key claim: %v", result["pending_count"])
+	}
+	if status := claudeStatusJSON(t, env, "--net", "p", "claude", "status", "--json"); status.PendingCount != 1 {
+		t.Fatalf("status pending_count must count the legacy-key claim: %+v", status)
+	}
+
+	// --retry on a legacy-key claim is refused and changes nothing.
+	before := claudeDeliveryKV(t, home)
+	code, _, errs := claudeStatusRun(t, env, "--net", "p", "claude", "resolve", legacyID,
+		"--expect-generation", claudeDeliveryTestGen, "--retry", "--confirm-duplicate-risk")
+	if code == 0 || !strings.Contains(errs, "legacy endpoint-keyed scope") {
+		t.Fatalf("retry on a legacy-key claim was not refused: %d %s", code, errs)
+	}
+	if after := claudeDeliveryKV(t, home); after[claudeDeliveryClaimKey(legacyID)] != before[claudeDeliveryClaimKey(legacyID)] {
+		t.Fatalf("the refused retry changed the claim: %s", after[claudeDeliveryClaimKey(legacyID)])
+	}
+
+	// --keep-inbox holds it.
+	code, out, errs := claudeStatusRun(t, env, "--net", "p", "claude", "resolve", legacyID,
+		"--expect-generation", claudeDeliveryTestGen, "--keep-inbox")
+	if code != 0 {
+		t.Fatalf("keep-inbox on a legacy-key claim exit %d: %s %s", code, out, errs)
+	}
+	var held map[string]any
+	if err := json.Unmarshal([]byte(claudeDeliveryKV(t, home)[claudeDeliveryClaimKey(legacyID)]), &held); err != nil {
+		t.Fatal(err)
+	}
+	if held["state"] != "held" || held["scope"] != legacyKey {
+		t.Fatalf("keep-inbox did not hold the legacy-key claim: %v", held)
+	}
+	if status := claudeStatusJSON(t, env, "--net", "p", "claude", "status", "--json"); status.PendingCount != 0 {
+		t.Fatalf("the held legacy-key claim still counts as pending: %+v", status)
 	}
 }

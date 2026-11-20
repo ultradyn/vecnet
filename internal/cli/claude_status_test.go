@@ -24,7 +24,7 @@ func claudeStatusFixture(t *testing.T) (home string, env map[string]string) {
 	d := t.TempDir()
 	config := filepath.Join(d, "v.toml")
 	if err := saveConfig(config, Config{Profiles: map[string]Profile{
-		"p": {Hub: "https://hub.example.com", Secret: "vn_peer_test", PeerID: "peer_A"},
+		"p": {Hub: "https://hub.example.com", HubPubkey: claudeTestHubPin, Secret: "vn_peer_test", PeerID: "peer_A"},
 	}}); err != nil {
 		t.Fatal(err)
 	}
@@ -81,16 +81,16 @@ func TestClaudeStatusDisableEnableLeavesLegacy(t *testing.T) {
 	scope := claudeScope{
 		ConfigPath:  env["VECNET_CONFIG"],
 		Profile:     "p",
-		HubIdentity: "https://hub.example.com",
+		HubIdentity: claudeTestHubPin,
 		HubEndpoint: "https://hub.example.com",
 		Caller:      "peer_A",
 		Recipient:   "peer_A",
 	}
 	stored := claudeBinding{claudeScope: scope, claudeRoot: claudeRoot{
 		ConfigRoot: filepath.Join(home, "root"), SessionID: "S1", ProcessStart: "12",
-		BootID: "01234567-89ab-cdef-0123-456789abcdef", Version: "2.1.322", PID: 4242, UID: 1000,
+		BootID: "01234567-89ab-cdef-0123-456789abcdef", PID: 4242, UID: 1000,
 	}, Generation: "0123456789abcdef0123456789abcdef", UpdatedAt: time.Now().UTC()}
-	rows, err := json.Marshal(claudeBindingsFile{Version: 1, Bindings: []claudeBinding{stored}, OptOuts: []claudeScope{}})
+	rows, err := json.Marshal(claudeBindingsFile{Version: 2, Bindings: []claudeBinding{stored}, OptOuts: []claudeScope{}, Canary: []claudeScope{}})
 	if err != nil {
 		t.Fatal(err)
 	}

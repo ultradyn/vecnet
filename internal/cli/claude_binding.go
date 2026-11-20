@@ -1,13 +1,21 @@
 package cli
 
-// Passive Claude root registration (claude delivery foundation, task 3).
+// Passive Claude root registration (claude delivery foundation, task 3;
+// binding document v2 in delivery Phase 2, task 2).
 //
-// The registry is one strict v1 private document (claude-bindings.json) in
+// The registry is one strict v2 private document (claude-bindings.json) in
 // the canonical per-user state domain, mutated only under
 // lockLocalState("claude-bindings") with the existing private atomic
 // writers. Registration is passive: it performs no hub request, no socket
 // write and no Claude-side output. A refused registration leaves the
 // stored state (and the legacy hook/Monitor path) untouched.
+//
+// v2 records the kernel-attested build evidence of each root (the table
+// label, executable digest and identity; never CLAUDE_CODE_VERSION) and keys
+// every binding by the profile's pinned ed25519 hub identity, so two URL
+// aliases of one hub are one recipient scope. A v1 document still decodes:
+// its endpoint-keyed bindings are discarded (they re-register at the next
+// hook) and its opt-outs are kept; the next write emits v2.
 
 import (
 	"bytes"
@@ -27,6 +35,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/XertroV/vecnet/internal/hubid"
 )
 
 const (
@@ -34,11 +44,17 @@ const (
 	claudeLockName     = "claude-bindings"
 	claudeBindingsMax  = 16
 	claudeOptOutsMax   = 64
+	claudeCanaryMax    = 1
+	claudeBindingsV2   = 2
 )
 
 var (
 	errClaudeUnsupported = errors.New("claude session ownership requires a qualified platform; this build stays on the legacy path")
 	errClaudeOptOut      = errors.New("claude registration disabled by a durable opt-out; explicit claude enable is required to clear it")
+	// errClaudeHubUnpinned is the fixed pending reason for a profile with no
+	// canonical pinned hub identity: an endpoint string is never a hub
+	// identity, so registration waits for the first ordinary command's pin.
+	errClaudeHubUnpinned = errors.New("claude registration needs a pinned hub identity; run a vecnet command for this profile once")
 
 	claudeHubKey   = regexp.MustCompile(`^[A-Za-z0-9._:/-]{1,256}$`)
 	claudeStartID  = regexp.MustCompile(`^[0-9]{1,32}$`)
@@ -47,8 +63,8 @@ var (
 )
 
 // claudeScope is the exact delivery scope a registration claims: the
-// canonical Vecnet config and profile, the verified hub identity and
-// endpoint, and the caller/recipient pair. It never comes from model-input
+// canonical Vecnet config and profile, the pinned ed25519 hub identity and
+// the endpoint it was reached through, and the caller/recipient pair. It never comes from model-input
 // strings or a profile name alone; registerClaudeRoot re-checks it against
 // the present config before committing.
 type claudeScope struct {
@@ -63,14 +79,19 @@ type claudeScope struct {
 
 // claudeRoot anchors one Claude Code process and conversation on the local
 // host: canonical config root, session id, private messaging endpoint, and
-// PID plus start/boot identity so a reused pid never matches.
+// PID plus start/boot identity so a reused pid never matches. Build,
+// ExeSHA256 and ExeIdentity are the kernel-attested build evidence
+// (observeClaudeBuild): Build is the pinned table label, or "" for an
+// unqualified or unobserved build, which still registers and stays legacy.
 type claudeRoot struct {
 	ConfigRoot   string `json:"config_root"`
 	SessionID    string `json:"session_id"`
 	SocketPath   string `json:"socket_path,omitempty"`
 	ProcessStart string `json:"process_start"`
 	BootID       string `json:"boot_id"`
-	Version      string `json:"version"`
+	Build        string `json:"build,omitempty"`
+	ExeSHA256    string `json:"exe_sha256,omitempty"`
+	ExeIdentity  string `json:"exe_identity,omitempty"`
 	PID          int    `json:"pid"`
 	UID          int    `json:"uid"`
 }
@@ -84,16 +105,44 @@ type claudeBinding struct {
 	UpdatedAt  time.Time `json:"updated_at"`
 }
 
-// claudeBindingsFile is the strict v1 private document holding both the
-// binding rows and the addressed opt-outs.
+// claudeBindingsFile is the strict v2 private document holding the binding
+// rows, the addressed opt-outs and the native canary record (at most one;
+// written only by the canary opt-in).
 type claudeBindingsFile struct {
 	Version  int             `json:"version"`
 	Bindings []claudeBinding `json:"bindings"`
 	OptOuts  []claudeScope   `json:"opt_outs"`
+	Canary   []claudeScope   `json:"canary"`
 }
 
 func claudeDocumentEmpty() claudeBindingsFile {
-	return claudeBindingsFile{Version: 1, Bindings: []claudeBinding{}, OptOuts: []claudeScope{}}
+	return claudeBindingsFile{Version: claudeBindingsV2, Bindings: []claudeBinding{}, OptOuts: []claudeScope{}, Canary: []claudeScope{}}
+}
+
+// The v1 document shape, read only to migrate it: its rows carried an
+// unattested version string and an endpoint-derived hub identity.
+type claudeRootV1 struct {
+	ConfigRoot   string `json:"config_root"`
+	SessionID    string `json:"session_id"`
+	SocketPath   string `json:"socket_path,omitempty"`
+	ProcessStart string `json:"process_start"`
+	BootID       string `json:"boot_id"`
+	Version      string `json:"version"`
+	PID          int    `json:"pid"`
+	UID          int    `json:"uid"`
+}
+
+type claudeBindingV1 struct {
+	claudeScope
+	claudeRootV1
+	Generation string    `json:"generation"`
+	UpdatedAt  time.Time `json:"updated_at"`
+}
+
+type claudeBindingsFileV1 struct {
+	Version  int               `json:"version"`
+	Bindings []claudeBindingV1 `json:"bindings"`
+	OptOuts  []claudeScope     `json:"opt_outs"`
 }
 
 // claudeScopeRecipient mirrors codexRecipient: acting as a peer addresses
@@ -105,7 +154,37 @@ func claudeScopeRecipient(s claudeScope) string {
 	return s.Caller
 }
 
+// claudeScopeValid validates a binding, canary or addressed scope: its hub
+// identity must be a canonical pinned ed25519 key.
 func claudeScopeValid(s claudeScope) error {
+	if err := claudeScopeShape(s); err != nil {
+		return err
+	}
+	if !claudeHubPinned(s.HubIdentity) {
+		return usageErr("claude scope requires a canonical pinned ed25519 hub identity")
+	}
+	return nil
+}
+
+// claudeOptOutScopeValid also admits the legacy endpoint form (hub identity
+// equal to the endpoint), which v1 opt-outs and an opt-out written before a
+// profile is pinned carry: an opt-out must never be lost for want of a pin.
+func claudeOptOutScopeValid(s claudeScope) error {
+	if err := claudeScopeShape(s); err != nil {
+		return err
+	}
+	if s.HubIdentity != s.HubEndpoint && !claudeHubPinned(s.HubIdentity) {
+		return usageErr("claude opt-out hub identity is neither pinned nor its endpoint")
+	}
+	return nil
+}
+
+func claudeHubPinned(identity string) bool {
+	_, err := hubid.DecodePubkey(identity)
+	return err == nil
+}
+
+func claudeScopeShape(s claudeScope) error {
 	if !localRegistryPath(s.ConfigPath) {
 		return usageErr("claude scope requires a clean absolute config path")
 	}
@@ -117,12 +196,6 @@ func claudeScopeValid(s claudeScope) error {
 	}
 	if !claudeHubKey.MatchString(s.HubEndpoint) || normalizeHub(s.HubEndpoint) != s.HubEndpoint {
 		return usageErr("claude scope requires a canonical hub endpoint")
-	}
-	// v1 pins the hub identity to the normalized endpoint; a separate
-	// pinned-key identity arrives with host-side verification, never from
-	// an input string.
-	if s.HubIdentity != s.HubEndpoint {
-		return usageErr("claude scope hub identity does not match its endpoint")
 	}
 	if !hookID.MatchString(s.Caller) {
 		return usageErr("claude scope caller is not a verified identity")
@@ -151,8 +224,17 @@ func claudeRootShape(r claudeRoot) error {
 	if !codexThreadID.MatchString(r.BootID) {
 		return usageErr("claude root requires a boot identity")
 	}
-	if r.Version == "" || !localRegistryText(r.Version) {
-		return usageErr("claude root requires the observed build version")
+	// Build evidence is optional (an unqualified or unobserved build still
+	// registers and stays legacy) but well formed whenever present, and a
+	// label never stands without the digest and identity it came from.
+	if r.ExeSHA256 != "" && !claudeExeDigestRE.MatchString(r.ExeSHA256) {
+		return usageErr("claude root executable digest is malformed")
+	}
+	if r.ExeIdentity != "" && !claudeExeIdentityRE.MatchString(r.ExeIdentity) {
+		return usageErr("claude root executable identity is malformed")
+	}
+	if r.Build != "" && (!localRegistryText(r.Build) || r.ExeSHA256 == "" || r.ExeIdentity == "") {
+		return usageErr("claude root build label requires its attested executable digest and identity")
 	}
 	if r.PID <= 1 {
 		return usageErr("claude root requires a real process")
@@ -172,15 +254,30 @@ func claudeGeneration() (string, error) {
 }
 
 // claudeBindingKey is the stable opaque local key for one
-// (hub identity, recipient) pair. It derives from nothing else: not CWD,
-// not time, not labels.
+// (pinned hub identity, recipient) pair. It derives from nothing else: not
+// CWD, not time, not labels, not the URL the hub was reached through.
 func claudeBindingKey(s claudeScope) string {
-	sum := sha256.Sum256([]byte("vecnet-claude-binding\x00" + s.HubIdentity + "\x00" + s.Recipient))
+	return claudeKeyOver(s.HubIdentity, s.Recipient)
+}
+
+// claudeLegacyBindingKey is the same formula over the endpoint: the key
+// slice-3 claims were recorded under, when the hub identity was the
+// endpoint. Such claims stay visible and resolvable inbox-only; the scope
+// can never be admitted again.
+func claudeLegacyBindingKey(s claudeScope) string {
+	return claudeKeyOver(s.HubEndpoint, s.Recipient)
+}
+
+func claudeKeyOver(hub, recipient string) string {
+	sum := sha256.Sum256([]byte("vecnet-claude-binding\x00" + hub + "\x00" + recipient))
 	return hex.EncodeToString(sum[:])
 }
 
+// claudeSameRecipient matches one recipient across URL aliases (same pinned
+// identity) and across the legacy endpoint form (same endpoint), so neither
+// an alias nor a pre-pin opt-out can be bypassed.
 func claudeSameRecipient(a, b claudeScope) bool {
-	return a.HubIdentity == b.HubIdentity && a.Recipient == b.Recipient
+	return a.Recipient == b.Recipient && (a.HubIdentity == b.HubIdentity || a.HubEndpoint == b.HubEndpoint)
 }
 
 // claudeJSONFields flattens embedded coordinate structs for strict decoding.
@@ -287,11 +384,12 @@ func claudeJSONValue(d *json.Decoder, t reflect.Type) error {
 }
 
 func claudeDocumentValidate(doc claudeBindingsFile) error {
-	if doc.Version != 1 || doc.Bindings == nil || doc.OptOuts == nil ||
-		len(doc.Bindings) > claudeBindingsMax || len(doc.OptOuts) > claudeOptOutsMax {
+	if doc.Version != claudeBindingsV2 || doc.Bindings == nil || doc.OptOuts == nil || doc.Canary == nil ||
+		len(doc.Bindings) > claudeBindingsMax || len(doc.OptOuts) > claudeOptOutsMax || len(doc.Canary) > claudeCanaryMax {
 		return usageErr("unsupported or invalid claude binding document")
 	}
 	recipients := map[string]bool{}
+	endpoints := map[string]bool{}
 	processes := map[string]bool{}
 	conversations := map[string]bool{}
 	for _, b := range doc.Bindings {
@@ -304,11 +402,13 @@ func claudeDocumentValidate(doc claudeBindingsFile) error {
 		if !claudeToken.MatchString(b.Generation) || b.UpdatedAt.IsZero() {
 			return usageErr("invalid claude binding row")
 		}
-		key := claudeBindingKey(b.claudeScope)
-		if recipients[key] {
+		// One row per recipient under either key form, exactly as
+		// claudeSameRecipient matches them.
+		key, legacy := claudeBindingKey(b.claudeScope), claudeLegacyBindingKey(b.claudeScope)
+		if recipients[key] || endpoints[legacy] {
 			return usageErr("duplicate claude recipient in binding document")
 		}
-		recipients[key] = true
+		recipients[key], endpoints[legacy] = true, true
 		proc := fmt.Sprintf("%d\x00%s\x00%s", b.PID, b.ProcessStart, b.BootID)
 		if processes[proc] {
 			return usageErr("duplicate claude process in binding document")
@@ -322,7 +422,7 @@ func claudeDocumentValidate(doc claudeBindingsFile) error {
 	}
 	opted := map[string]bool{}
 	for _, s := range doc.OptOuts {
-		if err := claudeScopeValid(s); err != nil {
+		if err := claudeOptOutScopeValid(s); err != nil {
 			return err
 		}
 		key := claudeBindingKey(s)
@@ -330,6 +430,11 @@ func claudeDocumentValidate(doc claudeBindingsFile) error {
 			return usageErr("duplicate claude opt-out in binding document")
 		}
 		opted[key] = true
+	}
+	for _, s := range doc.Canary {
+		if err := claudeScopeValid(s); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -342,13 +447,19 @@ func claudeDocumentDecode(raw []byte) (claudeBindingsFile, error) {
 	if !utf8.Valid(raw) {
 		return doc, usageErr("claude binding document is not UTF-8")
 	}
-	d := json.NewDecoder(bytes.NewReader(raw))
-	d.UseNumber()
-	if err := claudeJSONValue(d, reflect.TypeFor[claudeBindingsFile]()); err != nil {
-		return doc, usageErr("invalid claude binding document: " + err.Error())
+	// The version selects the strict schema; the strict pass then checks
+	// every key (including the version's own spelling) against it.
+	var head struct {
+		Version json.Number `json:"version"`
 	}
-	if _, err := d.Token(); !errors.Is(err, io.EOF) {
-		return doc, usageErr("trailing data in claude binding document")
+	if err := json.Unmarshal(raw, &head); err != nil {
+		return doc, usageErr("invalid claude binding document")
+	}
+	if head.Version.String() == "1" {
+		return claudeDocumentDecodeV1(raw)
+	}
+	if err := claudeStrictShape(raw, reflect.TypeFor[claudeBindingsFile]()); err != nil {
+		return doc, err
 	}
 	var out claudeBindingsFile
 	if err := json.Unmarshal(raw, &out); err != nil {
@@ -358,6 +469,41 @@ func claudeDocumentDecode(raw []byte) (claudeBindingsFile, error) {
 		return doc, err
 	}
 	return out, nil
+}
+
+// claudeDocumentDecodeV1 migrates a strict v1 document in memory: its
+// bindings are discarded (endpoint-keyed and version-string qualified, they
+// re-register at the next hook under the pinned identity) and its opt-outs
+// are kept, never cleared. The next write emits v2.
+func claudeDocumentDecodeV1(raw []byte) (claudeBindingsFile, error) {
+	doc := claudeDocumentEmpty()
+	if err := claudeStrictShape(raw, reflect.TypeFor[claudeBindingsFileV1]()); err != nil {
+		return doc, err
+	}
+	var v1 claudeBindingsFileV1
+	if err := json.Unmarshal(raw, &v1); err != nil || v1.Version != 1 || v1.Bindings == nil || v1.OptOuts == nil ||
+		len(v1.Bindings) > claudeBindingsMax || len(v1.OptOuts) > claudeOptOutsMax {
+		return doc, usageErr("unsupported or invalid claude binding document")
+	}
+	out := claudeDocumentEmpty()
+	out.OptOuts = v1.OptOuts
+	if err := claudeDocumentValidate(out); err != nil {
+		return doc, err
+	}
+	return out, nil
+}
+
+// claudeStrictShape runs the exact-keys structural pass for one schema.
+func claudeStrictShape(raw []byte, t reflect.Type) error {
+	d := json.NewDecoder(bytes.NewReader(raw))
+	d.UseNumber()
+	if err := claudeJSONValue(d, t); err != nil {
+		return usageErr("invalid claude binding document: " + err.Error())
+	}
+	if _, err := d.Token(); !errors.Is(err, io.EOF) {
+		return usageErr("trailing data in claude binding document")
+	}
+	return nil
 }
 
 // readClaudeBindingsDocument is the strict reader; the caller holds the
@@ -403,9 +549,10 @@ func (a *app) readClaudeBindings() ([]claudeBinding, error) {
 // setClaudeOptOut latches (disabled=true) or clears (disabled=false) the
 // addressed opt-out for one canonical (hub identity, recipient) pair. It
 // grants no ownership, is never cleared by registration or repair, and
-// matches profile aliases of the same recipient so they cannot bypass it.
+// matches profile and URL aliases of the same recipient (and its legacy
+// endpoint form) so they cannot bypass it.
 func (a *app) setClaudeOptOut(ctx context.Context, scope claudeScope, disabled bool) error {
-	if err := claudeScopeValid(scope); err != nil {
+	if err := claudeOptOutScopeValid(scope); err != nil {
 		return err
 	}
 	unlock, err := a.lockLocalState(ctx, claudeLockName)
@@ -452,8 +599,9 @@ func claudeInvocationChecks(getenv func(string) string, root claudeRoot) error {
 }
 
 // claudeScopeWitness ties the scope to the present config: the profile
-// must exist there, its hub must match, and a stored profile witness
-// (peer id or committed enrollment caller) must match the claimed caller.
+// must exist there, its hub and pinned hub identity must match, and a
+// stored profile witness (peer id or committed enrollment caller) must match
+// the claimed caller.
 // Scope never comes from a profile name alone, and a profile with no
 // witness at all cannot witness anything: shape-only matches refuse.
 func (a *app) claudeScopeWitness(scope claudeScope) error {
@@ -478,6 +626,13 @@ func (a *app) claudeScopeWitness(scope claudeScope) error {
 	}
 	if normalizeHub(p.Hub) != scope.HubEndpoint {
 		return usageErr("claude registration hub differs from the present config")
+	}
+	pinned, err := a.claudeHubIdentity(scope.Profile, p)
+	if err != nil {
+		return err
+	}
+	if pinned != scope.HubIdentity {
+		return usageErr("claude registration hub identity differs from the profile's present pin")
 	}
 	if p.PeerID == "" && p.EnrollmentCaller == "" {
 		return usageErr("claude registration requires a stored caller witness in the present config")
@@ -530,10 +685,10 @@ func claudeRegisterTransition(doc *claudeBindingsFile, scope claudeScope, root c
 			// neither resume nor clear: it stays pending.
 			return claudeBinding{}, "", usageErr("claude endpoint changed without a process or conversation transition; it stays pending")
 		}
-		// Exact same conversation, process and endpoint: idempotent. A
-		// newer observed build version renews metadata without a new
-		// generation.
-		if b.Version != root.Version {
+		// Exact same conversation, process and endpoint: idempotent.
+		// Fresh build evidence (a first or retried observation, or a newly
+		// tabled digest) renews the row without a new generation.
+		if b.Build != root.Build || b.ExeSHA256 != root.ExeSHA256 || b.ExeIdentity != root.ExeIdentity {
 			b.claudeRoot = root
 			b.UpdatedAt = now
 			doc.Bindings[existing] = b
@@ -571,8 +726,11 @@ func claudeRegisterTransition(doc *claudeBindingsFile, scope claudeScope, root c
 // legacy hook/Monitor path, unchanged.
 func (a *app) registerClaudeRoot(ctx context.Context, scope claudeScope, root claudeRoot) (claudeBinding, error) {
 	var none claudeBinding
-	if err := claudeScopeValid(scope); err != nil {
+	if err := claudeScopeShape(scope); err != nil {
 		return none, err
+	}
+	if !claudeHubPinned(scope.HubIdentity) {
+		return none, errClaudeHubUnpinned
 	}
 	if err := claudeRootShape(root); err != nil {
 		return none, err
@@ -598,6 +756,11 @@ func (a *app) registerClaudeRoot(ctx context.Context, scope claudeScope, root cl
 	}
 	if err := claudeRootAncestry(root); err != nil {
 		return none, err
+	}
+	// The digest was taken before the lock (a hash is never held under it);
+	// the attested executable must still be the pid's live image now.
+	if root.ExeIdentity != "" && !claudeExeIdentityLive(root.PID, root.ExeIdentity) {
+		return none, usageErr("claude executable changed since its build was observed; registration stays pending")
 	}
 	if err := a.claudeScopeWitness(scope); err != nil {
 		return none, err

@@ -274,3 +274,31 @@ func TestClaudeStatusRejectsDeadOrMismatchedHost(t *testing.T) {
 	}
 	f.assertPassive()
 }
+
+// TestClaudeAdmissionRequiresLiveExeIdentity pins build admission to the
+// live attested executable: a tabled digest and label qualify only while the
+// pid's current image is the recorded dev:ino.
+func TestClaudeAdmissionRequiresLiveExeIdentity(t *testing.T) {
+	f := newClaudeRegFixture(t)
+	claudeWithQualifiedBuild(t, claudeFileDigest(t, os.Args[0]))
+	a := f.startTree("a")
+	a.sessionRecord(a.pid, "S1", a.socket)
+	b := claudeBinding{claudeScope: f.scope("p"), claudeRoot: a.observedRoot("S1")}
+	if adm := claudeAdmissionEvidence(b, nil, false); !adm.Live || !adm.VersionQualified {
+		t.Fatalf("the live attested build is not qualified: %+v", adm)
+	}
+	foreign := b
+	foreign.ExeIdentity = "1:2:3:4:5"
+	if adm := claudeAdmissionEvidence(foreign, nil, false); adm.VersionQualified {
+		t.Fatalf("a stored identity that is not the live exe qualified: %+v", adm)
+	}
+	relabeled := b
+	relabeled.Build = "2.1.322"
+	if adm := claudeAdmissionEvidence(relabeled, nil, false); adm.VersionQualified {
+		t.Fatalf("a label the table does not give the digest qualified: %+v", adm)
+	}
+	a.kill()
+	if adm := claudeAdmissionEvidence(b, nil, false); adm.Live || adm.VersionQualified {
+		t.Fatalf("a dead root kept its admission: %+v", adm)
+	}
+}

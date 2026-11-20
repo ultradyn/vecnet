@@ -5,7 +5,7 @@ package cli
 // Task 8 (claude delivery chain): the retry resolution against a live
 // registered root. Re-arming a claim for one fresh native attempt must still
 // pass admission at resolve time: the exact binding is live, policy-enabled
-// and version-qualified, and its generation still fences the claim. This test
+// and build-qualified (kernel digest), and its generation still fences the claim. This test
 // registers the test process itself as the Claude root, exactly as the
 // deliver helper's tests do.
 
@@ -13,7 +13,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -24,9 +23,6 @@ import (
 // attempt, and the delivery host's own fences (generation, admission, fresh
 // correlation ids at attempt time) stay in charge of the write itself.
 func TestClaudeResolveRetryReArmsAfterAdmission(t *testing.T) {
-	if runtime.GOARCH != "amd64" {
-		t.Skip("the qualified native baseline is x86-64")
-	}
 	home, env := claudeStatusFixture(t)
 	dir := t.TempDir()
 	configRoot := filepath.Join(dir, "claude-config")
@@ -41,19 +37,19 @@ func TestClaudeResolveRetryReArmsAfterAdmission(t *testing.T) {
 	scope := claudeScope{
 		ConfigPath:  env["VECNET_CONFIG"],
 		Profile:     "p",
-		HubIdentity: "https://hub.example.com",
+		HubIdentity: claudeTestHubPin,
 		HubEndpoint: "https://hub.example.com",
 		Caller:      "peer_A",
 		Recipient:   "peer_A",
 	}
-	doc := `{"version":1,"bindings":[{` +
+	doc := `{"version":2,"bindings":[{` +
 		`"config_path":` + jsonString(scope.ConfigPath) + `,"profile":"p",` +
-		`"hub_identity":"https://hub.example.com","hub_endpoint":"https://hub.example.com",` +
+		`"hub_identity":` + jsonString(claudeTestHubPin) + `,"hub_endpoint":"https://hub.example.com",` +
 		`"caller":"peer_A","recipient":"peer_A",` +
 		`"config_root":` + jsonString(configRoot) + `,"session_id":` + jsonString(session) + `,` +
 		`"process_start":` + jsonString(procStart(os.Getpid())) + `,"boot_id":` + jsonString(claudeBootID()) + `,` +
-		`"version":"2.1.322","pid":` + strconv.Itoa(os.Getpid()) + `,"uid":` + strconv.Itoa(os.Geteuid()) + `,` +
-		`"generation":` + jsonString(claudeDeliveryTestGen) + `,"updated_at":"2026-11-19T00:00:00Z"}],"opt_outs":[]}`
+		claudeSelfBuildJSON(t) + `"pid":` + strconv.Itoa(os.Getpid()) + `,"uid":` + strconv.Itoa(os.Geteuid()) + `,` +
+		`"generation":` + jsonString(claudeDeliveryTestGen) + `,"updated_at":"2026-11-19T00:00:00Z"}],"opt_outs":[],"canary":[]}`
 	stateDir := filepath.Join(home, ".local", "state", "vecnet", "projects")
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		t.Fatal(err)

@@ -23,7 +23,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -283,9 +282,6 @@ func TestClaudeDeliverSocketShapeRefused(t *testing.T) {
 // with the sink as its messaging endpoint, exactly as the hook path would.
 func deliverBindingFixture(t *testing.T) (env map[string]string, dir, socket, key, generation string) {
 	t.Helper()
-	if runtime.GOARCH != "amd64" {
-		t.Skip("the qualified native baseline is x86-64")
-	}
 	env, dir = claudeDeliverFixture(t)
 	newDeliverSink(t, dir, "owned.sock")
 	socket = filepath.Join(dir, "owned.sock")
@@ -300,21 +296,21 @@ func deliverBindingFixture(t *testing.T) (env map[string]string, dir, socket, ke
 	scope := claudeScope{
 		ConfigPath:  "/home/user/.config/vecnet/vecnet.toml",
 		Profile:     "p",
-		HubIdentity: "https://hub.example.com",
+		HubIdentity: claudeTestHubPin,
 		HubEndpoint: "https://hub.example.com",
 		Caller:      "peer_A",
 		Recipient:   "peer_A",
 	}
 	generation = "0123456789abcdef0123456789abcdef"
-	doc := `{"version":1,"bindings":[{` +
+	doc := `{"version":2,"bindings":[{` +
 		`"config_path":` + jsonString(scope.ConfigPath) + `,"profile":"p",` +
-		`"hub_identity":"https://hub.example.com","hub_endpoint":"https://hub.example.com",` +
+		`"hub_identity":` + jsonString(claudeTestHubPin) + `,"hub_endpoint":"https://hub.example.com",` +
 		`"caller":"peer_A","recipient":"peer_A",` +
 		`"config_root":` + jsonString(configRoot) + `,"session_id":` + jsonString(deliverTestSession) + `,` +
 		`"socket_path":` + jsonString(socket) + `,` +
 		`"process_start":` + jsonString(procStart(os.Getpid())) + `,"boot_id":` + jsonString(claudeBootID()) + `,` +
-		`"version":"2.1.322","pid":` + strconv.Itoa(os.Getpid()) + `,"uid":` + strconv.Itoa(os.Geteuid()) + `,` +
-		`"generation":` + jsonString(generation) + `,"updated_at":"2026-11-19T00:00:00Z"}],"opt_outs":[]}`
+		claudeSelfBuildJSON(t) + `"pid":` + strconv.Itoa(os.Getpid()) + `,"uid":` + strconv.Itoa(os.Geteuid()) + `,` +
+		`"generation":` + jsonString(generation) + `,"updated_at":"2026-11-19T00:00:00Z"}],"opt_outs":[],"canary":[]}`
 	stateDir := filepath.Join(dir, ".local", "state", "vecnet", "projects")
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -392,7 +388,7 @@ func TestClaudeDeliverBindingModeRefusals(t *testing.T) {
 }
 
 // TestClaudeDeliverBindingModeAdmissionRefusals re-registers the fixture with
-// disqualifying rows: an unqualified build version and a latched global
+// disqualifying rows: a build label the table does not give the digest and a latched global
 // disable each refuse the attempt at exit 2 with zero connections.
 func TestClaudeDeliverBindingModeAdmissionRefusals(t *testing.T) {
 	env, dir, socket, key, generation := deliverBindingFixture(t)
@@ -408,14 +404,14 @@ func TestClaudeDeliverBindingModeAdmissionRefusals(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(stateDir, claudeSettingsName), []byte(`{"version":1,"disabled":false}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// An unqualified build version on the stored row.
+	// A stored label the pinned table does not give this digest.
 	bindings, err := os.ReadFile(filepath.Join(stateDir, claudeBindingsName))
 	if err != nil {
 		t.Fatal(err)
 	}
-	unqualified := strings.Replace(string(bindings), "2.1.322", "9.9.9", 1)
+	unqualified := strings.Replace(string(bindings), `"build":"`+claudeTestBuildLabel+`"`, `"build":"9.9.9"`, 1)
 	if unqualified == string(bindings) {
-		t.Fatal("fixture does not carry the qualified version")
+		t.Fatal("fixture does not carry the qualified build label")
 	}
 	if err := os.WriteFile(filepath.Join(stateDir, claudeBindingsName), []byte(unqualified), 0o600); err != nil {
 		t.Fatal(err)
