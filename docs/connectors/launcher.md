@@ -84,6 +84,23 @@ Repeat `--acp-arg=VALUE` for exact, ordered argv entries, for example `--acp-arg
 
 ACP stdio sessions remain attached to the launcher process. Hub reconnect preserves the live process, but a launcher process restart cannot resume it: recovery remains outcome unknown and never spawns a replacement for the same job. This backend advertises `resume: none`; persistent native Codex restart continuity is separate.
 
+## Set up Antigravity (`agy`) through ACP
+
+The same ACP backend also runs Google's Antigravity CLI, qualified at version 1.5.13 (`agy acp` speaks ACP v1 and advertises modes `default`, `accept-edits` and `plan`). Pass the absolute agy path as the command and its `acp` subcommand as a repeated argument:
+
+```sh
+vecnet --net PROFILE launcher setup --backend acp \
+  --acp-command /abs/path/to/agy --acp-arg=acp \
+  --acp-provider agy --acp-mode default \
+  --project PROJECT --repo /absolute/repository --base-ref master --write
+vecnet --net PROFILE launcher install --write --enable --start
+vecnet --net PROFILE launcher check
+```
+
+Only `--acp-mode default` is accepted: the backend's preset guard rejects mode ids matching bypass/full-access/accept-edits/auto (`acp_invalid_preset`), so agy's ask flow is its `default` mode plus the launcher's typed approvals. Production agy authenticates from its own login on that host (run `agy` once as the service account); setup never copies credentials. An API-key agy setup needs a wrapper for the same reason the backend scrubs other agents' environments: the ACP child environment deliberately drops `*_API_KEY` and `*_BASE_URL` names, so `GEMINI_API_KEY`/`GOOGLE_GEMINI_BASE_URL` never reach a directly spawned child. Point `--acp-command` at an absolute 0700 wrapper script that exports those variables (and a dedicated `HOME`) and execs `agy acp`.
+
+`scripts/agy-acp-smoke.mjs` qualifies this end to end without a real model: it drives the real ACP backend against `agy acp` in a disposable HOME through a loopback Gemini stub, covering initialize, modes, a launch prompt turn, a typed permission round-trip, a follow-up turn, mid-turn cancel, settle and process teardown, then prints a sanitized receipt; `scripts/agy-acp-smoke.test.mjs` unit-tests its helpers.
+
 ## Legacy T3 installation on xsm
 
 These steps are for Max or the coordinator. A build task never runs them.
