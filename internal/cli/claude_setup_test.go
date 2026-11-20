@@ -295,8 +295,13 @@ func TestClaudeRuntimeSnapshotRedaction(t *testing.T) {
 		"XDG_CONFIG_HOME": filepath.Join(d, "xdg"),
 		"XDG_CACHE_HOME":  filepath.Join(d, "cache"),
 	}
+	// Every stored path is absolute on this platform (the registry refuses
+	// anything else) and carries a marker that must never reach the output.
+	configPath := filepath.Join(d, "SNAPSHOT-REDACT-CONFIG", "vecnet.toml")
+	configRoot := filepath.Join(d, "SNAPSHOT-REDACT-CONFIG-ROOT")
+	socketPath := filepath.Join(d, "vecnet-SNAPSHOT-REDACT-SOCKET.sock")
 	scope := claudeScope{
-		ConfigPath:  "/home/user/.config/vecnet/vecnet.toml",
+		ConfigPath:  configPath,
 		Profile:     "p",
 		HubIdentity: "https://hub.example.com",
 		HubEndpoint: "https://hub.example.com",
@@ -305,7 +310,7 @@ func TestClaudeRuntimeSnapshotRedaction(t *testing.T) {
 	}
 	doc := `{"version":1,"bindings":[{"config_path":` + jsonString(scope.ConfigPath) +
 		`,"profile":"p","hub_identity":"https://hub.example.com","hub_endpoint":"https://hub.example.com","caller":"peer_A","recipient":"peer_A",` +
-		`"config_root":"/home/user/SNAPSHOT-REDACT-CONFIG-ROOT","session_id":"S-SNAPSHOT-REDACT-SESSION","socket_path":"/tmp/vecnet-SNAPSHOT-REDACT-SOCKET.sock",` +
+		`"config_root":` + jsonString(configRoot) + `,"session_id":"S-SNAPSHOT-REDACT-SESSION","socket_path":` + jsonString(socketPath) + `,` +
 		`"process_start":"12","boot_id":"01234567-89ab-cdef-0123-456789abcdef","version":"2.1.322","pid":4242,"uid":1000,` +
 		`"generation":"0123456789abcdef0123456789abcdef","updated_at":"2026-11-19T00:00:00Z"}],"opt_outs":[]}`
 	claudeSeedLocalState(t, env, claudeBindingsName, []byte(doc))
@@ -358,7 +363,7 @@ func TestClaudeRuntimeSnapshotRedaction(t *testing.T) {
 		t.Fatalf("scope coordinates missing or wrong: %q", rows[0]["scope"])
 	}
 	// The root's private coordinates never leave the registry.
-	for _, marker := range []string{"SNAPSHOT-REDACT", "/home/user", "4242", "vecnet.toml", "2.1.322"} {
+	for _, marker := range []string{"SNAPSHOT-REDACT", jsonString(d)[1 : len(jsonString(d))-1], "4242", "vecnet.toml", "2.1.322"} {
 		if strings.Contains(out.String(), marker) {
 			t.Fatalf("snapshot leaked %q: %s", marker, out.String())
 		}
