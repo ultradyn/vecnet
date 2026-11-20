@@ -407,11 +407,17 @@ func (a *app) cmdClaudeRuntimeSnapshot() error {
 	snapshot := claudeRuntimeSnapshot{Version: 1, Bindings: make([]claudeSnapshotBinding, 0, len(rows.Bindings))}
 	for _, b := range rows.Bindings {
 		state, reason := claudeBindingPassiveState(b, rows.OptOuts, settings.Disabled)
+		admission := claudeAdmissionEvidence(b, rows.OptOuts, rows.Canary, settings.Disabled)
+		// The witness re-proves the stored scope against the config at its
+		// own stored path, not this child's VECNET_CONFIG: the host runs the
+		// scope's children against exactly that file.
+		admission.Witness = a.claudeScopeWitnessAt(b.claudeScope) == nil
 		snapshot.Bindings = append(snapshot.Bindings, claudeSnapshotBinding{
 			BindingKey: claudeBindingKey(b.claudeScope), Generation: b.Generation, State: state, Reason: reason,
-			Admission: claudeAdmissionEvidence(b, rows.OptOuts, rows.Canary, settings.Disabled),
+			Admission: admission,
 			Scope: claudeSnapshotScope{
-				Profile: b.Profile, As: b.As, HubEndpoint: b.HubEndpoint, Caller: b.Caller, Recipient: b.Recipient,
+				Profile: b.Profile, As: b.As, Config: b.ConfigPath, HubIdentity: b.HubIdentity,
+				HubEndpoint: b.HubEndpoint, Caller: b.Caller, Recipient: b.Recipient,
 			},
 		})
 	}
@@ -423,21 +429,29 @@ func (a *app) cmdClaudeRuntimeSnapshot() error {
 // consent, the build check (parked: version_qualified stays true and
 // build_check says "disabled") and the per-profile canary opt-in, which is
 // true only for a peer credential's own inbox matching the single stored
-// canary record. No paths.
+// canary record. witness (phase 2 task 5) is true only while the config at
+// the binding's stored path still names this exact scope: profile, hub,
+// pinned identity and caller witness. No paths.
 type claudeSnapshotAdmission struct {
 	Live             bool   `json:"live"`
 	Policy           bool   `json:"policy"`
 	VersionQualified bool   `json:"version_qualified"`
 	BuildCheck       string `json:"build_check"`
 	Canary           bool   `json:"canary"`
+	Witness          bool   `json:"witness"`
 }
 
 // claudeSnapshotScope carries only the coordinates the shared host needs to
 // open its own scoped CLI children (watch, inbox) for this recipient: the
-// profile name and hub/caller/recipient identities. No config paths.
+// profile name, the binding's own canonical config path (the children run
+// with VECNET_CONFIG set to it, never the daemon default), and the pinned
+// hub identity plus hub/caller/recipient identities. Neither the config path
+// nor the identity reaches the status sidecar.
 type claudeSnapshotScope struct {
 	Profile     string `json:"profile"`
 	As          string `json:"as,omitempty"`
+	Config      string `json:"config"`
+	HubIdentity string `json:"hub_identity"`
 	HubEndpoint string `json:"hub_endpoint"`
 	Caller      string `json:"caller"`
 	Recipient   string `json:"recipient"`

@@ -1,6 +1,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { closeSync, constants, lstatSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { posix, win32 } from 'node:path';
 import { cliEnvironment, commandInvocation, terminateProcess } from '../../../hub-client/src/platform.ts';
 import type { Clock, Log } from '../../../hub-client/src/ports.ts';
 import { CODEX_RELOAD_MS, codexAuthorityLocation } from '../codex/connector.ts';
@@ -14,11 +15,16 @@ export type ClaudeBindingState = 'registered' | 'unsupported' | 'opted_out' | 'b
  * consent, the build check (parked: version_qualified holds) and the
  * per-profile canary opt-in (Phase 2 task 3) — the sole durable gate on a
  * native write. Booleans only; a snapshot row without `canary` is refused. */
-export interface ClaudeSnapshotAdmission { live: boolean; policy: boolean; version_qualified: boolean; canary: boolean }
+export interface ClaudeSnapshotAdmission { live: boolean; policy: boolean; version_qualified: boolean; canary: boolean; witness?: boolean }
 /** The coordinates the shared host needs to open its own scoped CLI children
- * for this recipient. Hub coordinates and profile name only: no config paths,
- * no socket paths, no session ids. */
-export interface ClaudeSnapshotScope { profile: string; as?: string; hub_endpoint: string; caller: string; recipient: string }
+ * for this recipient: the profile name, the binding's own absolute config
+ * path (Phase 2 task 5: every child runs with `VECNET_CONFIG` set to it,
+ * never the daemon default), the pinned hub identity and the hub/caller/
+ * recipient identities. No socket paths, no session ids. Neither `config`
+ * nor `hub_identity` ever reaches the status sidecar. `config`,
+ * `hub_identity` and `admission.witness` are optional at parse time (an
+ * older CLI still yields passive status) but required for admission. */
+export interface ClaudeSnapshotScope { profile: string; as?: string; config?: string; hub_identity?: string; hub_endpoint: string; caller: string; recipient: string }
 export interface ClaudeSnapshotBinding {
   binding_key: string; generation: string; state: ClaudeBindingState; reason?: string;
   admission?: ClaudeSnapshotAdmission; scope?: ClaudeSnapshotScope;
@@ -78,7 +84,17 @@ function validAdmission(input: unknown): ClaudeSnapshotAdmission | undefined {
   const a = input as Record<string, unknown>;
   if (typeof a.live !== 'boolean' || typeof a.policy !== 'boolean' || typeof a.version_qualified !== 'boolean' ||
     typeof a.canary !== 'boolean') return; // An older CLI without the canary flag is refused: fail closed.
-  return { live: a.live, policy: a.policy, version_qualified: a.version_qualified, canary: a.canary };
+  if (a.witness !== undefined && typeof a.witness !== 'boolean') return;
+  const out: ClaudeSnapshotAdmission = { live: a.live, policy: a.policy, version_qualified: a.version_qualified, canary: a.canary };
+  if (a.witness !== undefined) out.witness = a.witness as boolean;
+  return out;
+}
+
+/** An absolute local path for a child's `VECNET_CONFIG`: bounded, no NUL or
+ * other control character, POSIX-absolute or (on Windows) drive/UNC-absolute. */
+export function claudeConfigPathValid(path: unknown): path is string {
+  if (typeof path !== 'string' || path.length < 1 || path.length > 4096 || /[\x00-\x1f]/.test(path)) return false;
+  return process.platform === 'win32' ? win32.isAbsolute(path) && !/^[\\/](?![\\/])/.test(path) : posix.isAbsolute(path);
 }
 
 function validScope(input: unknown): ClaudeSnapshotScope | undefined {
@@ -89,9 +105,13 @@ function validScope(input: unknown): ClaudeSnapshotScope | undefined {
   for (const field of ['hub_endpoint', 'caller', 'recipient'] as const) {
     if (typeof s[field] !== 'string' || s[field]!.length < 1 || s[field]!.length > 256) return;
   }
-  return s.as === undefined
-    ? { profile: s.profile, hub_endpoint: s.hub_endpoint as string, caller: s.caller as string, recipient: s.recipient as string }
-    : { profile: s.profile, as: s.as, hub_endpoint: s.hub_endpoint as string, caller: s.caller as string, recipient: s.recipient as string };
+  if (s.config !== undefined && !claudeConfigPathValid(s.config)) return;
+  if (s.hub_identity !== undefined && (typeof s.hub_identity !== 'string' || s.hub_identity.length < 1 || s.hub_identity.length > 256)) return;
+  const out: ClaudeSnapshotScope = { profile: s.profile, hub_endpoint: s.hub_endpoint as string, caller: s.caller as string, recipient: s.recipient as string };
+  if (s.as !== undefined) out.as = s.as;
+  if (s.config !== undefined) out.config = s.config;
+  if (s.hub_identity !== undefined) out.hub_identity = s.hub_identity as string;
+  return out;
 }
 
 function validSnapshot(input: unknown): ClaudeSnapshot | undefined {

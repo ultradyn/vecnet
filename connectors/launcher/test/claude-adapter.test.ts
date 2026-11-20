@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -22,6 +22,7 @@ import type { WatchPool, WatchRequest, WakeEvent, WatchEnd } from '../src/delive
 
 const KEY = 'ab'.repeat(32), GEN = '01'.repeat(16), OTHER_GEN = '02'.repeat(16);
 const THREAD = 'thr_01ARZ3NDEKTSV4RRFFQ69G5FAV';
+const BIND_CONFIG = '/bind/config.toml', HUB_PIN = 'ed25519:IVL40Zt5HSRFMkLhXy6rbLfP-ntqXtMAl5YOBpiB2xI';
 
 function memoryKv() {
   const map = new Map<string, string>();
@@ -74,8 +75,8 @@ function fakePool() {
 function admittedRow(over: Record<string, unknown> = {}) {
   return {
     binding_key: KEY, generation: GEN, state: 'registered',
-    admission: { live: true, policy: true, version_qualified: true, canary: true },
-    scope: { profile: 'p', hub_endpoint: 'https://hub.example', caller: 'peer_A', recipient: 'peer_A' },
+    admission: { live: true, policy: true, version_qualified: true, canary: true, witness: true },
+    scope: { profile: 'p', config: BIND_CONFIG, hub_identity: HUB_PIN, hub_endpoint: 'https://hub.example', caller: 'peer_A', recipient: 'peer_A' },
     ...over,
   };
 }
@@ -104,8 +105,14 @@ interface Fixture {
   setExit(exit: DeliverExit): void;
 }
 
-function fixture(t: TestContext, deps: Partial<ClaudeDeliveryAdapterDeps> = {}): Fixture {
+/** Most tests exercise staging after the first-admission baseline: the
+ * fixture seeds a progress record already baselined at `e1.0` for the
+ * admitted generation. `{ baselined: false }` starts from no record. */
+function fixture(t: TestContext, deps: Partial<ClaudeDeliveryAdapterDeps> = {}, opts: { baselined?: boolean } = {}): Fixture {
   const clock = fakeClock(1000), log = memoryLog(), store = memoryKv();
+  if (opts.baselined !== false) {
+    store.kv.set('claude-claims:scope:' + KEY, JSON.stringify({ v: 1, generation: GEN, cursor: 'e1.0', blockedPendingLimit: false, updatedAt: 1000 }));
+  }
   const { pool, recording } = fakePool();
   const transportCalls: ClaudeDeliveryFrame[] = [];
   let exit: DeliverExit = 0;
@@ -465,9 +472,9 @@ test('non-message kinds and non-delivery events never become native instructions
 });
 
 test('child argument builders carry no ack, no display proof and no raw endpoint coordinates', () => {
-  const inbox = claudeInboxArgs({ profile: 'p', hubEndpoint: 'https://hub.example', caller: 'peer_A', recipient: 'peer_A' }, 'e1.4');
+  const inbox = claudeInboxArgs({ profile: 'p', config: BIND_CONFIG, hubEndpoint: 'https://hub.example', caller: 'peer_A', recipient: 'peer_A' }, 'e1.4');
   assert.deepEqual(inbox, ['--net', 'p', 'inbox', '--json', '--limit', '32', '--no-display-proof', '--since', 'e1.4']);
-  const fresh = claudeInboxArgs({ profile: 'p', as: 'peer_B', hubEndpoint: 'https://hub.example', caller: 'peer_A', recipient: 'peer_B' }, undefined);
+  const fresh = claudeInboxArgs({ profile: 'p', as: 'peer_B', config: BIND_CONFIG, hubEndpoint: 'https://hub.example', caller: 'peer_A', recipient: 'peer_B' }, undefined);
   assert.deepEqual(fresh, ['--net', 'p', '--as', 'peer_B', 'inbox', '--json', '--limit', '32', '--no-display-proof']);
   const deliver = claudeDeliverArgs({ bindingKey: KEY, generation: GEN, msgId: 'n'.repeat(26), threadId: THREAD, messageId: 'msg_01E8YQZ5N8W3C4R6T7A9A2B4CD' });
   assert.deepEqual(deliver, ['claude', 'deliver', '--binding-key', KEY, '--expect-generation', GEN,
@@ -576,7 +583,7 @@ test('an unknown stream event type stalls the window', async t => {
   f.adapter.start();
   await settle();
   assert.equal(f.transportCalls.length, 0, 'an unknown event type is never skipped past');
-  assert.equal(f.kv.scope(KEY)!.cursor, '', 'the checkpoint does not advance past an unknown event type');
+  assert.equal(f.kv.scope(KEY)!.cursor, 'e1.0', 'the checkpoint does not advance past an unknown event type');
 });
 
 test('peer-visible non-delivery events (reaction, hub_notice, operator_view) advance the window', async t => {
@@ -706,4 +713,189 @@ test('exit 5 is a definite pre-write refusal', unixChild, async t => {
   assert.equal(claim.disposition, 'refused');
   assert.equal(claim.dispositionReason, 'refused_before_write');
   assert.notEqual(claim.hubAckObserved, true, 'a refusal is never acked');
+});
+
+// Phase 2 task 5: the host's scoped children run against the binding's own
+// config, and a scope's first admission (no progress record, a new
+// generation, or an empty cursor) baselines at the hub head and promotes
+// only later arrivals. Earlier unacked deliveries stay on the legacy path.
+
+test('children run against the binding config, not the daemon default', unixChild, async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'vn-claude-config-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const bin = join(dir, 'vecnet');
+  const envLog = join(dir, 'envs.log');
+  // Every child records its argv and VECNET_CONFIG; the inbox answers one
+  // empty page at a fixed head, the watch idles.
+  writeFileSync(bin, [
+    '#!/bin/sh',
+    `printf '%s|%s\\n' "$VECNET_CONFIG" "$*" >> ${JSON.stringify(envLog)}`,
+    'case "$*" in',
+    `  *inbox*) printf '%s\\n' '{"events":[],"next_cursor":"e1.7"}' ;;`,
+    '  *watch*) exec sleep 30 ;;',
+    'esac',
+    '',
+  ].join('\n'), { mode: 0o700 });
+  const clock = fakeClock(1000), log = memoryLog(), store = memoryKv();
+  const { createWatchPool } = await import('../src/delivery/watch-pool.ts');
+  const pool = createWatchPool({ log });
+  t.after(() => pool.close());
+  const adapter = createClaudeDeliveryAdapter({
+    pool, clock, log, kv: store.kv,
+    env: { HOME: dir, PATH: process.env.PATH, VECNET_BIN: bin, VECNET_CONFIG: '/other' },
+    fetchSnapshot: async () => ({ version: 1, bindings: [admittedRow()] }) as unknown as import('../src/delivery/claude-status.ts').ClaudeSnapshot,
+    transport: async () => 0,
+  });
+  t.after(() => adapter.stop());
+  adapter.start();
+  const lines = () => { try { return readFileSync(envLog, 'utf8').trim().split('\n').filter(Boolean); } catch { return []; } };
+  for (let i = 0; i < 200 && !(lines().some(l => l.includes('inbox')) && lines().some(l => l.includes('watch'))); i++) await settle(25);
+  const seen = lines();
+  assert.ok(seen.some(l => l.includes(' inbox ') || l.includes('|--net p inbox')), `an inbox child ran: ${seen}`);
+  assert.ok(seen.some(l => l.includes('watch')), `a watch child ran: ${seen}`);
+  for (const line of seen) {
+    assert.equal(line.split('|')[0], BIND_CONFIG, `a child ran against the daemon default: ${line}`);
+  }
+  await adapter.stop();
+});
+
+test('first admission baselines at head and promotes only later arrivals', async t => {
+  const calls: Array<string | undefined> = [];
+  let pages: ClaudeCandidatePage[] = [];
+  const backlog = Array.from({ length: 40 }, (_, i) => deliveryEvent('e1.' + (i + 1), i + 1));
+  const f = fixture(t, {
+    fetchCandidates: async (_c, cursor) => {
+      calls.push(cursor);
+      // The hub answers `--since head` with no events and the head cursor;
+      // any other read would expose the 40-event unacked backlog.
+      if (cursor === 'head') return { events: [], nextCursor: 'e1.40' };
+      return pages.shift() ?? { events: cursor === undefined ? backlog : [] };
+    },
+  }, { baselined: false });
+  f.adapter.start();
+  await settle();
+  assert.deepEqual(calls, ['head'], 'the first admitted pass reads only the head');
+  assert.equal(f.kv.claims().length, 0, 'no claim for the pre-admission backlog');
+  assert.equal(f.transportCalls.length, 0, 'no transport for the pre-admission backlog');
+  assert.equal(f.kv.scope(KEY)!.cursor, 'e1.40');
+  assert.equal(f.kv.scope(KEY)!.generation, GEN);
+  assert.ok(f.log.entries.some(e => e.msg === 'claude_delivery_scope_baselined'), 'the baseline is logged');
+
+  // One wake after the baseline: exactly one claim, read since the head.
+  pages = [{ events: [deliveryEvent('e1.41', 41)] }];
+  f.pool.recording.notify('exclusive:claude:' + KEY, { priority: 'wake' });
+  await settle();
+  assert.equal(calls[1], 'e1.40', 'the next read continues from the baseline');
+  assert.equal(f.kv.claims().length, 1, 'exactly the post-baseline arrival is claimed');
+  assert.equal(f.transportCalls.length, 1);
+  assert.equal(f.transportCalls[0].messageId, 'msg_' + ulid(41));
+});
+
+test('generation change rebaselines instead of replaying the window', async t => {
+  const calls: Array<string | undefined> = [];
+  const f = fixture(t, {
+    fetchCandidates: async (_c, cursor) => {
+      calls.push(cursor);
+      if (cursor === 'head') return { events: [], nextCursor: 'e1.90' };
+      return { events: [deliveryEvent('e1.5', 5), deliveryEvent('e1.6', 6)] };
+    },
+  });
+  // The stored progress belongs to an older generation of this scope.
+  f.kv.kv.set('claude-claims:scope:' + KEY, JSON.stringify({ v: 1, generation: OTHER_GEN, cursor: 'e1.4', blockedPendingLimit: false, updatedAt: 1000 }));
+  f.adapter.start();
+  await settle();
+  assert.deepEqual(calls, ['head'], 'a generation change reads the head, never the old window');
+  assert.equal(f.kv.claims().length, 0);
+  assert.equal(f.transportCalls.length, 0);
+  assert.deepEqual([f.kv.scope(KEY)!.generation, f.kv.scope(KEY)!.cursor], [GEN, 'e1.90']);
+
+  // An empty cursor at the current generation also rebaselines.
+  const g = fixture(t, {
+    fetchCandidates: async (_c, cursor: string | undefined) => {
+      (calls as Array<string | undefined>).push(cursor);
+      return cursor === 'head' ? { events: [], nextCursor: 'e1.91' } : { events: [deliveryEvent('e1.5', 5)] };
+    },
+  });
+  g.kv.kv.set('claude-claims:scope:' + KEY, JSON.stringify({ v: 1, generation: GEN, cursor: '', blockedPendingLimit: false, updatedAt: 1000 }));
+  calls.length = 0;
+  g.adapter.start();
+  await settle();
+  assert.deepEqual(calls, ['head'], 'an empty cursor reads the head');
+  assert.equal(g.transportCalls.length, 0);
+  assert.equal(g.kv.scope(KEY)!.cursor, 'e1.91');
+});
+
+test('failed baseline read stages nothing and retries', async t => {
+  const calls: Array<string | undefined> = [];
+  let answers: Array<ClaudeCandidatePage | undefined> = [undefined, { events: [] }, { events: [], nextCursor: 'e1.12' }];
+  const f = fixture(t, {
+    fetchCandidates: async (_c, cursor) => {
+      calls.push(cursor);
+      if (cursor !== 'head') return { events: [deliveryEvent('e1.3', 3)] };
+      return answers.shift();
+    },
+  }, { baselined: false });
+  f.adapter.start();
+  await settle();
+  // A failed read (no page) and a page without a head cursor both stage
+  // nothing and persist nothing.
+  assert.deepEqual(calls, ['head']);
+  assert.equal(f.kv.scope(KEY), undefined, 'a failed baseline persists no progress');
+  assert.equal(f.kv.claims().length, 0);
+  assert.ok(f.log.entries.some(e => e.msg === 'claude_delivery_reconcile_failed'), 'the failure backs off');
+  f.clock.advance(1000); // first backoff step
+  await settle();
+  assert.deepEqual(calls, ['head', 'head'], 'the next pass retries the baseline');
+  assert.equal(f.kv.scope(KEY), undefined, 'a head page without next_cursor is not a baseline');
+  f.clock.advance(2000);
+  await settle();
+  assert.deepEqual(calls, ['head', 'head', 'head']);
+  assert.equal(f.kv.scope(KEY)!.cursor, 'e1.12', 'a good head read baselines');
+  assert.equal(f.kv.claims().length, 0);
+  assert.equal(f.transportCalls.length, 0, 'the baseline pass stages nothing');
+  answers = [];
+});
+
+test('claudeInboxArgs emits --since head for the baseline read', () => {
+  assert.deepEqual(claudeInboxArgs({ profile: 'p', config: BIND_CONFIG, hubEndpoint: 'https://hub.example', caller: 'peer_A', recipient: 'peer_A' }, 'head'),
+    ['--net', 'p', 'inbox', '--json', '--limit', '32', '--no-display-proof', '--since', 'head']);
+});
+
+test('admission requires the config witness and an absolute binding config', async t => {
+  for (const [name, row] of [
+    ['witness false', admittedRow({ admission: { live: true, policy: true, version_qualified: true, canary: true, witness: false } })],
+    ['witness absent', admittedRow({ admission: { live: true, policy: true, version_qualified: true, canary: true } })],
+    ['config absent', admittedRow({ scope: { profile: 'p', hub_identity: HUB_PIN, hub_endpoint: 'https://hub.example', caller: 'peer_A', recipient: 'peer_A' } })],
+    ['config relative', admittedRow({ scope: { profile: 'p', config: 'bind/config.toml', hub_identity: HUB_PIN, hub_endpoint: 'https://hub.example', caller: 'peer_A', recipient: 'peer_A' } })],
+  ] as const) {
+    const f = fixture(t);
+    f.setSnapshot([row]);
+    f.setPages([{ events: [deliveryEvent('e1.1', 1)] }]);
+    f.adapter.start();
+    await settle();
+    assert.equal(f.pool.recording.requests.length, 0, `${name}: no watch`);
+    assert.equal(f.transportCalls.length, 0, `${name}: no transport`);
+    assert.equal(f.adapter.admitted().size, 0, `${name}: not admitted`);
+  }
+});
+
+test('a config or generation change reopens the scope watch', async t => {
+  const f = fixture(t);
+  f.adapter.start();
+  await settle();
+  assert.equal(f.pool.recording.requests.length, 1, 'one watch for the admitted scope');
+  // The same key and generation, but the binding now names another config.
+  f.setSnapshot([admittedRow({ scope: { profile: 'p', config: '/bind/moved.toml', hub_identity: HUB_PIN, hub_endpoint: 'https://hub.example', caller: 'peer_A', recipient: 'peer_A' } })]);
+  f.pool.recording.notify('exclusive:claude:' + KEY, { priority: 'wake' });
+  await settle();
+  assert.equal(f.pool.recording.requests.length, 2, 'a config change reopens the watch');
+  f.setSnapshot([admittedRow({ generation: OTHER_GEN, scope: { profile: 'p', config: '/bind/moved.toml', hub_identity: HUB_PIN, hub_endpoint: 'https://hub.example', caller: 'peer_A', recipient: 'peer_A' } })]);
+  f.pool.recording.notify('exclusive:claude:' + KEY, { priority: 'wake' });
+  await settle();
+  assert.equal(f.pool.recording.requests.length, 3, 'a generation change reopens the watch');
+  assert.equal(f.pool.recording.requests[2].revision, OTHER_GEN);
+  // Unchanged: no reopen.
+  f.pool.recording.notify('exclusive:claude:' + KEY, { priority: 'wake' });
+  await settle();
+  assert.equal(f.pool.recording.requests.length, 3, 'an unchanged scope keeps its watch');
 });

@@ -398,9 +398,13 @@ function claudeCanaryStub(t: TestContext, home: string, admitted: boolean, canar
   const stub = join(home, 'vecnet-stub');
   const snapshot = JSON.stringify(admitted
     ? { version: 1, bindings: [{ binding_key: key, generation, state: 'registered',
-        admission: { live: true, policy: true, version_qualified: true, canary },
-        scope: { profile: 'p', hub_endpoint: 'https://hub.example', caller: 'peer_A', recipient: 'peer_A' } }] }
+        admission: { live: true, policy: true, version_qualified: true, canary, witness: true },
+        scope: { profile: 'p', config: join(home, 'bind.toml'), hub_identity: 'ed25519:IVL40Zt5HSRFMkLhXy6rbLfP-ntqXtMAl5YOBpiB2xI',
+          hub_endpoint: 'https://hub.example', caller: 'peer_A', recipient: 'peer_A' } }] }
     : { version: 1, bindings: [] });
+  // The first admitted pass baselines at the head (Phase 2 task 5); the
+  // delivery behind it arrives on the next read.
+  const head = JSON.stringify({ events: [], next_cursor: 'e1.0' });
   const inbox = JSON.stringify({ events: [
     { cursor: 'e1.1', type: 'delivery', data: { delivery_id: 'dly_00000000000000000000000001',
       message: { message_id: 'msg_00000000000000000000000001', thread_id: 'thr_01ARZ3NDEKTSV4RRFFQ69G5FAV', kind: 'message', priority: 'wake' } } },
@@ -421,7 +425,10 @@ function claudeCanaryStub(t: TestContext, home: string, admitted: boolean, canar
     '  exec sleep 300',
     'fi',
     'if [ "$1" = --net ] && [ "$3" = inbox ]; then',
-    `  printf '%s\\n' ${JSON.stringify(inbox)}`,
+    '  case "$*" in',
+    `    *"--since head"*) printf '%s\\n' ${JSON.stringify(head)} ;;`,
+    `    *) printf '%s\\n' ${JSON.stringify(inbox)} ;;`,
+    '  esac',
     '  exit 0',
     'fi',
     'exit 1',

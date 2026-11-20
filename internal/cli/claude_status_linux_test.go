@@ -342,7 +342,7 @@ func TestClaudeAdmissionIgnoresBuild(t *testing.T) {
 		}
 	}
 	raw, err := json.Marshal(claudeAdmissionEvidence(unknown, nil, nil, false))
-	if err != nil || string(raw) != `{"live":true,"policy":true,"version_qualified":true,"build_check":"disabled","canary":false}` {
+	if err != nil || string(raw) != `{"live":true,"policy":true,"version_qualified":true,"build_check":"disabled","canary":false,"witness":false}` {
 		t.Fatalf("admission JSON = %s, %v", raw, err)
 	}
 	if adm := claudeAdmissionEvidence(unknown, []claudeScope{f.scope("q")}, nil, false); adm.Policy {

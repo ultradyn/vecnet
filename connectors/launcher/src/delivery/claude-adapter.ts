@@ -3,7 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { cliEnvironment, commandInvocation, terminateProcess } from '../../../hub-client/src/platform.ts';
 import type { Clock, Log } from '../../../hub-client/src/ports.ts';
 import type { KeyValue } from '../backend.ts';
-import { spawnClaudeSnapshot } from './claude-status.ts';
+import { claudeConfigPathValid, spawnClaudeSnapshot } from './claude-status.ts';
 import type { ClaudeSnapshot, ClaudeSnapshotBinding } from './claude-status.ts';
 import type { HostedAdapter } from './host.ts';
 import { spawnWatchChild } from './watch-pool.ts';
@@ -86,7 +86,10 @@ export interface ClaudeDeliveryFrame {
   messageId: string;
 }
 
-export interface ClaudeDeliveryScopeCoordinates { profile: string; as?: string; hubEndpoint: string; caller: string; recipient: string }
+/** A scope's child-spawn coordinates. `config` is the binding's own absolute
+ * config path: every scoped child (inbox, watch) runs with `VECNET_CONFIG`
+ * set to it, never the daemon's default (Phase 2 task 5). */
+export interface ClaudeDeliveryScopeCoordinates { profile: string; as?: string; config: string; hubEndpoint: string; caller: string; recipient: string }
 
 /** One staged inbox event in the adapter's post-parse shape. */
 export interface ClaudeDeliveryCandidate {
@@ -98,7 +101,9 @@ export interface ClaudeDeliveryCandidate {
   priority: string;
   kind: string;
 }
-export interface ClaudeCandidatePage { events: ClaudeDeliveryCandidate[] }
+/** One inbox page. `nextCursor` is the CLI's `next_cursor`: after a
+ * `--since head` read it is the hub head the scope baselines at. */
+export interface ClaudeCandidatePage { events: ClaudeDeliveryCandidate[]; nextCursor?: string }
 
 export interface ClaudeDeliveryAdapterDeps {
   pool: WatchPool;
@@ -109,6 +114,15 @@ export interface ClaudeDeliveryAdapterDeps {
   transport?: (frame: ClaudeDeliveryFrame) => Promise<DeliverExit>;
   fetchSnapshot?: () => Promise<ClaudeSnapshot | undefined>;
   fetchCandidates?: (coordinates: ClaudeDeliveryScopeCoordinates, cursor: string | undefined) => Promise<ClaudeCandidatePage | undefined>;
+  /** Process port for the scoped inbox and watch children (node's spawn
+   * unless a test injects one). */
+  spawnChild?: typeof spawn;
+}
+
+/** The child environment for one scope: the daemon's CLI environment with
+ * `VECNET_CONFIG` pinned to the binding's own config. */
+export function claudeScopeEnv(base: Record<string, string>, coordinates: ClaudeDeliveryScopeCoordinates): Record<string, string> {
+  return { ...base, VECNET_CONFIG: coordinates.config };
 }
 
 /** The host kill switch for the pointer-only canary: `=0` constructs no
@@ -137,7 +151,7 @@ export interface ClaudeDeliveryAdapter extends HostedAdapter {
 }
 
 /** The host's inbox read: bounded, strictly `--since` the durable staging
- * cursor, never `--ack`, and `--no-display-proof` — hub read/accepted/processed
+ * cursor (or `head` for a first-admission baseline), never `--ack`, and `--no-display-proof` — hub read/accepted/processed
  * semantics stay untouched, the adapter never claims cursor ownership, and the
  * machine read never records legacy hook display state, so a later
  * UserPromptSubmit hook still shows what the daemon merely observed. */
@@ -204,14 +218,16 @@ export function spawnClaudeDeliver(env: NodeJS.ProcessEnv, clock: Clock, spawnCh
 }
 
 /** The default candidate source: the profile-scoped CLI inbox read. */
-export function spawnClaudeInbox(env: NodeJS.ProcessEnv, clock: Clock): (coordinates: ClaudeDeliveryScopeCoordinates, cursor: string | undefined) => Promise<ClaudeCandidatePage | undefined> {
-  const childEnv = cliEnvironment(Object.fromEntries(Object.entries(env).filter((e): e is [string, string] => typeof e[1] === 'string')));
-  const bin = childEnv.VECNET_BIN || 'vecnet';
+export function spawnClaudeInbox(env: NodeJS.ProcessEnv, clock: Clock, spawnChild: typeof spawn = spawn): (coordinates: ClaudeDeliveryScopeCoordinates, cursor: string | undefined) => Promise<ClaudeCandidatePage | undefined> {
+  const baseEnv = cliEnvironment(Object.fromEntries(Object.entries(env).filter((e): e is [string, string] => typeof e[1] === 'string')));
+  const bin = baseEnv.VECNET_BIN || 'vecnet';
   return (coordinates, cursor) => new Promise(resolve => {
+    if (!claudeConfigPathValid(coordinates.config)) { resolve(undefined); return; } // Never the daemon default.
+    const childEnv = claudeScopeEnv(baseEnv, coordinates);
     let command;
     try { command = commandInvocation([bin, ...claudeInboxArgs(coordinates, cursor)], childEnv); }
     catch { resolve(undefined); return; }
-    const child = spawn(command.file, command.args, { ...command, windowsHide: true, env: childEnv, stdio: ['ignore', 'pipe', 'ignore'] });
+    const child = spawnChild(command.file, command.args, { ...command, windowsHide: true, env: childEnv, stdio: ['ignore', 'pipe', 'ignore'] });
     let out = '', settled = false;
     const finish = (value: ClaudeCandidatePage | undefined) => { if (!settled) { settled = true; timer.cancel(); resolve(value); } };
     const timer = clock.timer(FETCH_TIMEOUT, () => terminateProcess(child));
@@ -236,7 +252,7 @@ export function spawnClaudeInbox(env: NodeJS.ProcessEnv, clock: Clock): (coordin
             kind: typeof message.kind === 'string' ? message.kind : '',
           };
         });
-        finish({ events });
+        finish(typeof parsed.next_cursor === 'string' && parsed.next_cursor !== '' ? { events, nextCursor: parsed.next_cursor } : { events });
       } catch { finish(undefined); }
     });
   });
@@ -246,16 +262,18 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Cl
   const { clock, log, kv } = deps;
   const env = { ...deps.env };
   const fetchSnapshot = deps.fetchSnapshot ?? spawnClaudeSnapshot(env);
-  const fetchCandidates = deps.fetchCandidates ?? spawnClaudeInbox(env, clock);
+  const spawnChild = deps.spawnChild ?? spawn;
+  const fetchCandidates = deps.fetchCandidates ?? spawnClaudeInbox(env, clock, spawnChild);
   const transport = deps.transport ?? spawnClaudeDeliver(env, clock);
-  const watchEnv = cliEnvironment(Object.fromEntries(Object.entries(env).filter((e): e is [string, string] => typeof e[1] === 'string')));
-  const watchBin = watchEnv.VECNET_BIN || 'vecnet';
+  const baseEnv = cliEnvironment(Object.fromEntries(Object.entries(env).filter((e): e is [string, string] => typeof e[1] === 'string')));
+  const watchBin = baseEnv.VECNET_BIN || 'vecnet';
 
   let running = false, passQueued = false, passRunning = false, failStreak = 0, scopeFailures = 0;
   let backoff: { cancel(): void } | undefined, reload: { cancel(): void } | undefined;
   let chain: Promise<void> = Promise.resolve(); // Drains in-flight work on stop.
   const chains = new Map<string, Promise<void>>(); // One attempt lane per scope.
   const releases = new Map<string, () => void>(); // Watch subscriptions by binding key.
+  const opened = new Map<string, string>(); // The generation and config each watch was opened under.
   const watchStopped = new Map<string, string>(); // Terminal watch end, by generation.
   const inFlight = new Set<string>(); // Delivery ids attempted by this run.
   const blockedLogged = new Set<string>();
@@ -354,30 +372,40 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Cl
   /** Admission: a live, policy-enabled, version-qualified (build check
    * parked), canary-opted binding of a peer credential's own inbox (no `as`;
    * the `peer_` prefix is defence in depth behind the CLI's strict id check)
-   * carrying the child-spawn coordinates. Every flag must be exactly `true`:
-   * a snapshot from an older CLI without `canary` admits nothing. Anything
-   * else stays legacy/inbox-only. */
+   * whose stored scope is still witnessed by the config at its own path, and
+   * carrying the child-spawn coordinates including that absolute config.
+   * Every flag must be exactly `true`: a snapshot from an older CLI without
+   * `canary` or `witness` admits nothing. Anything else stays legacy. */
+  /** The admitted row's child-spawn coordinates (admittedRow proved them). */
+  function scopeCoordinates(row: ClaudeSnapshotBinding): ClaudeDeliveryScopeCoordinates {
+    return {
+      profile: row.scope!.profile, as: row.scope!.as, config: row.scope!.config!, hubEndpoint: row.scope!.hub_endpoint,
+      caller: row.scope!.caller, recipient: row.scope!.recipient,
+    };
+  }
+
   function admittedRow(row: ClaudeSnapshotBinding): boolean {
     const admission = obj(row?.admission), scope = obj(row?.scope);
     return row.state === 'registered' && typeof row.binding_key === 'string' && KEY.test(row.binding_key) &&
       typeof row.generation === 'string' && GENERATION.test(row.generation) &&
       admission.live === true && admission.policy === true && admission.version_qualified === true &&
-      admission.canary === true && row.scope !== undefined && scope.as === undefined &&
+      admission.canary === true && admission.witness === true && row.scope !== undefined && scope.as === undefined &&
+      claudeConfigPathValid(scope.config) && HUB_ID.test(scope.hub_identity ?? '') &&
       HUB_ID.test(scope.profile ?? '') && HUB_ID.test(scope.hub_endpoint ?? '') &&
       HUB_ID.test(scope.caller ?? '') && scope.caller.startsWith('peer_') && scope.recipient === scope.caller;
   }
 
   function subscribeWatches(admitted: ClaudeSnapshotBinding[]): void {
-    const live = new Set(admitted.map(row => row.binding_key));
+    // A watch is pinned to the generation and config it was opened under: a
+    // change to either reopens it, so it never outlives its binding config.
+    const wanted = new Map(admitted.map(row => [row.binding_key, row.generation + '\0' + row.scope!.config!]));
     for (const [key, release] of [...releases]) {
-      if (!live.has(key)) { release(); releases.delete(key); }
+      if (wanted.get(key) !== opened.get(key)) { release(); releases.delete(key); opened.delete(key); }
     }
     for (const row of admitted) {
       if (releases.has(row.binding_key) || watchStopped.get(row.binding_key) === row.generation) continue;
-      const coordinates: ClaudeDeliveryScopeCoordinates = {
-        profile: row.scope!.profile, as: row.scope!.as, hubEndpoint: row.scope!.hub_endpoint,
-        caller: row.scope!.caller, recipient: row.scope!.recipient,
-      };
+      const coordinates = scopeCoordinates(row);
+      const watchEnv = claudeScopeEnv(baseEnv, coordinates);
       let invocation;
       try {
         invocation = commandInvocation([watchBin, '--net', coordinates.profile,
@@ -391,13 +419,15 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Cl
           credentialSlot: 'claude', scope: 'exclusive:claude:' + row.binding_key,
         },
         revision: row.generation,
-        start: () => spawnWatchChild({ command: invocation, env: watchEnv, log, context: { scope: row.binding_key } }),
+        start: () => spawnWatchChild({ command: invocation, env: watchEnv, log, context: { scope: row.binding_key }, spawnChild }),
       };
       const release = deps.pool.subscribe(request, event => {
         // wake only: wake_idle stays on the legacy path, never degraded.
         if (event.priority === 'wake') schedulePass();
       }, end => {
+        if (releases.get(row.binding_key) !== release) return; // A reopened watch replaced this one.
         releases.delete(row.binding_key);
+        opened.delete(row.binding_key);
         if (!running) return;
         if (end.kind === 'terminal') {
           // The watch's own refusal: resubscribing would repeat it every
@@ -409,6 +439,7 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Cl
         clock.timer(1000, () => { if (running) schedulePass(); });
       });
       releases.set(row.binding_key, release);
+      opened.set(row.binding_key, wanted.get(row.binding_key)!);
       log.info('claude_delivery_scope_admitted', { scope: row.binding_key, generation: row.generation });
     }
   }
@@ -467,21 +498,30 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Cl
    * cursor order. The durable checkpoint advances only past fully handled
    * events; an unknown or corrupt event stalls the window for this pass. */
   async function stageScope(row: ClaudeSnapshotBinding): Promise<void> {
-    const coordinates: ClaudeDeliveryScopeCoordinates = {
-      profile: row.scope!.profile, as: row.scope!.as, hubEndpoint: row.scope!.hub_endpoint,
-      caller: row.scope!.caller, recipient: row.scope!.recipient,
-    };
+    const coordinates = scopeCoordinates(row);
     const scopeKey = SCOPE_PREFIX + row.binding_key;
     const record = obj(JSON.parse(kv.get(scopeKey) ?? '{}'));
+    const stored = typeof record.generation === 'string' && typeof record.cursor === 'string';
+    if (!stored || record.generation !== row.generation || record.cursor === '' || !CURSOR.test(record.cursor)) {
+      // First admission, a new generation or an empty cursor: new arrivals
+      // only, no tail. Read the hub head, persist it as the cursor, and stage
+      // nothing this pass. Earlier unacked deliveries stay on the legacy
+      // hook/inbox path. A failed read persists nothing and retries.
+      const head = await bounded(fetchCandidates(coordinates, 'head'), FETCH_TIMEOUT, clock);
+      if (!head || typeof head.nextCursor !== 'string' || !CURSOR.test(head.nextCursor)) throw new Error('baseline_unavailable');
+      kv.set(scopeKey, JSON.stringify({ v: 1, generation: row.generation, cursor: head.nextCursor,
+        blockedPendingLimit: record.blockedPendingLimit === true && record.generation === row.generation, updatedAt: clock.now() }));
+      log.info('claude_delivery_scope_baselined', { scope: row.binding_key, generation: row.generation });
+      return;
+    }
     const progress = {
       v: 1 as const,
-      generation: typeof record.generation === 'string' ? record.generation : row.generation,
-      cursor: typeof record.cursor === 'string' ? record.cursor : '',
+      generation: row.generation,
+      cursor: record.cursor as string,
       blockedPendingLimit: record.blockedPendingLimit === true,
       updatedAt: clock.now(),
     };
-    if (progress.generation !== row.generation) { progress.generation = row.generation; progress.cursor = ''; }
-    const page = await bounded(fetchCandidates(coordinates, progress.cursor || undefined), FETCH_TIMEOUT, clock);
+    const page = await bounded(fetchCandidates(coordinates, progress.cursor), FETCH_TIMEOUT, clock);
     if (!page || !Array.isArray(page.events)) throw new Error('candidates_unavailable');
     const existing = new Set(claims().map(claim => claim.deliveryId));
     let cursor = progress.cursor;

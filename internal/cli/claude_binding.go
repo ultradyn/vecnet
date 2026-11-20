@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"slices"
@@ -618,6 +619,28 @@ func claudeInvocationChecks(getenv func(string) string, root claudeRoot) error {
 // the claimed caller.
 // Scope never comes from a profile name alone, and a profile with no
 // witness at all cannot witness anything: shape-only matches refuse.
+// claudeScopeWitnessAt is claudeScopeWitness against the config at the
+// scope's own stored path rather than the env-derived one: every config
+// derived path (the pin store included) resolves from scope.ConfigPath, so
+// the result never depends on this process's VECNET_CONFIG.
+func (a *app) claudeScopeWitnessAt(scope claudeScope) error {
+	if scope.ConfigPath == "" || !filepath.IsAbs(scope.ConfigPath) {
+		return usageErr("claude binding names no absolute config path")
+	}
+	at := *a
+	getenv := a.getenv
+	at.getenv = func(k string) string {
+		if k == "VECNET_CONFIG" {
+			return scope.ConfigPath
+		}
+		if getenv == nil {
+			return ""
+		}
+		return getenv(k)
+	}
+	return at.claudeScopeWitness(scope)
+}
+
 func (a *app) claudeScopeWitness(scope claudeScope) error {
 	present, err := configPath(a.getenv)
 	if err != nil {

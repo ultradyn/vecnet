@@ -279,8 +279,9 @@ func TestClaudeSetupReplacementProfileStaysUntouched(t *testing.T) {
 
 // TestClaudeRuntimeSnapshotRedaction covers the private runtime-snapshot
 // child's redaction (parked from task 3, extended in task 7): opaque keys,
-// generations, passive states, the admission booleans and the hub/profile
-// coordinates the host's own scoped children need. The root's private
+// generations, passive states, the admission booleans and the coordinates
+// the host's own scoped children need, which since phase 2 task 5 include
+// the binding's config path and pinned hub identity. The root's private
 // coordinates — config root, session id, socket path, process identity and
 // build evidence — never leave the registry.
 func TestClaudeRuntimeSnapshotRedaction(t *testing.T) {
@@ -364,17 +365,27 @@ func TestClaudeRuntimeSnapshotRedaction(t *testing.T) {
 	}
 	var scopeRow struct {
 		Profile     string `json:"profile"`
+		Config      string `json:"config"`
+		HubIdentity string `json:"hub_identity"`
 		HubEndpoint string `json:"hub_endpoint"`
 		Caller      string `json:"caller"`
 		Recipient   string `json:"recipient"`
 	}
 	if err := json.Unmarshal(rows[0]["scope"], &scopeRow); err != nil || scopeRow.Profile != "p" ||
-		scopeRow.HubEndpoint != "https://hub.example.com" || scopeRow.Caller != "peer_A" || scopeRow.Recipient != "peer_A" {
+		scopeRow.HubEndpoint != "https://hub.example.com" || scopeRow.Caller != "peer_A" || scopeRow.Recipient != "peer_A" ||
+		scopeRow.HubIdentity != claudeTestHubPin || scopeRow.Config != configPath {
 		t.Fatalf("scope coordinates missing or wrong: %q", rows[0]["scope"])
 	}
-	// The root's private coordinates never leave the registry.
+	// Phase 2 task 5: the binding's own config path is the one path the
+	// host needs (its scoped children run against it). With that single
+	// field removed, the root's private coordinates — config root, session,
+	// socket, process identity and build evidence — never leave the registry.
+	redacted := strings.Replace(out.String(), jsonString(configPath), `"<config>"`, 1)
+	if strings.Contains(redacted, "SNAPSHOT-REDACT-CONFIG/") || strings.Count(out.String(), jsonString(configPath)) != 1 {
+		t.Fatalf("the config path appears outside scope.config: %s", out.String())
+	}
 	for _, marker := range []string{"SNAPSHOT-REDACT", jsonString(d)[1 : len(jsonString(d))-1], "4242", "vecnet.toml", digest, "77:88:99"} {
-		if strings.Contains(out.String(), marker) {
+		if strings.Contains(redacted, marker) {
 			t.Fatalf("snapshot leaked %q: %s", marker, out.String())
 		}
 	}
