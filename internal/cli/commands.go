@@ -249,9 +249,12 @@ type app struct {
 	// retainedRequestID is the agent-add id for this process, generated or
 	// explicit, so a verified hub follow redispatches the same submission.
 	retainedRequestID string
-	prefsCmd          bool                        // preferences exit codes and JSON errors
-	claudeDeliverCmd  bool                        // claude deliver's private 0/2/3/4 exit contract
-	localRuntime      func(context.Context) error // runtime port for disposable setup fixtures
+	prefsCmd          bool // preferences exit codes and JSON errors
+	claudeDeliverCmd  bool // claude deliver's private 0/2/3/4/5 exit contract
+	// claudeDeliverParsed marks claude deliver's flags parsed: a later usage
+	// error is a pre-write refusal (5), not a flag-parse failure (2).
+	claudeDeliverParsed bool
+	localRuntime        func(context.Context) error // runtime port for disposable setup fixtures
 	// An explicit per-app inventory also enters the task check on other OSes
 	// for isolated repair fixtures. Nil retains native platform selection.
 	localLauncherTasks   func(context.Context) ([]string, error)

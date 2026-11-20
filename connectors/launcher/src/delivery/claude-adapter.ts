@@ -16,7 +16,7 @@ import type { WatchPool, WatchRequest } from './watch-pool.ts';
 // inbox candidates per admitted scope. A wake candidate is committed
 // `reserved` then `attempting` in the canonical per-user kv BEFORE the single
 // bounded transport invocation; the helper's exit contract decides the
-// disposition (0 write-completed — never presentation proof, 2/3 refused,
+// disposition (0 write-completed — never presentation proof, 3/5 refused,
 // 4 uncertain). Nothing here ever acknowledges the hub: observed dispositions
 // and the hub-acked position stay separate, tombstones survive reconcile, and
 // `hold`/`wake_idle` never enter a native batch.
@@ -42,10 +42,13 @@ const PRIORITIES = ['wake', 'wake_idle', 'hold'] as const;
 const STATES = ['reserved', 'attempting', 'held', 'refused', 'expired', 'uncertain', 'released'] as const;
 
 export type ClaudeClaimState = typeof STATES[number];
-/** The Go helper's private exit contract: 0 confirmed full write (never proof
- * of presentation), 2 usage/validation, 3 connect refused or timeout,
- * 4 write failure or partial write (bytes may have left). */
-export type DeliverExit = 0 | 2 | 3 | 4;
+/** The Go helper's private exit contract as the transport reports it:
+ * 0 full write plus EOF flush (never proof of presentation), 3 connect
+ * failed (zero bytes), 5 refused before any write (zero bytes), 4 write
+ * failure, partial write, or any unknown outcome (bytes may have left). The
+ * helper's own exit 2 is flag parsing only; for this adapter's fixed argv it
+ * can only mean a fatal runtime panic, so the transport reports it as 4. */
+export type DeliverExit = 0 | 3 | 4 | 5;
 
 /** Durable claim record under `claude-claims:claim:<deliveryId>`: opaque ids,
  * cursors, states and bounded timestamps only — no body, no credentials, no
@@ -173,23 +176,24 @@ function bounded<T>(p: Promise<T>, ms: number, clock: Clock): Promise<T | undefi
 }
 
 /** The default transport: one bounded `claude deliver` child per attempt.
- * Child output is never logged. A signal, an unmapped code or a timeout is
- * uncertain (bytes may have left); a spawn failure is definitely unwritten. */
+ * Child output is never logged. Exit 2, a signal, an unmapped code or a
+ * timeout is uncertain (4: bytes may have left); a spawn failure is a
+ * definite pre-write refusal (5: the child never ran). */
 export function spawnClaudeDeliver(env: NodeJS.ProcessEnv, clock: Clock): (frame: ClaudeDeliveryFrame) => Promise<DeliverExit> {
   const childEnv = cliEnvironment(Object.fromEntries(Object.entries(env).filter((e): e is [string, string] => typeof e[1] === 'string')));
   const bin = childEnv.VECNET_BIN || 'vecnet';
   return frame => new Promise(resolve => {
     let command;
     try { command = commandInvocation([bin, ...claudeDeliverArgs(frame)], childEnv); }
-    catch { resolve(3); return; }
+    catch { resolve(5); return; }
     const child = spawn(command.file, command.args, { ...command, windowsHide: true, env: childEnv, stdio: ['ignore', 'ignore', 'ignore'] });
     let settled = false;
     const finish = (exit: DeliverExit) => { if (!settled) { settled = true; timer.cancel(); resolve(exit); } };
     const timer = clock.timer(CHILD_TIMEOUT, () => terminateProcess(child));
-    child.once('error', () => finish(3)); // The child never ran: no byte could leave.
+    child.once('error', () => finish(5)); // The child never ran: no byte could leave.
     child.once('close', code => {
-      if (code === 0 || code === 2 || code === 3 || code === 4) finish(code);
-      else finish(4); // Signal or unmapped death: fail closed as uncertain.
+      if (code === 0 || code === 3 || code === 4 || code === 5) finish(code);
+      else finish(4); // Exit 2 (fatal panic), a signal or an unmapped death: uncertain.
     });
   });
 }
@@ -565,14 +569,15 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Cl
         claim.state = 'released';
         claim.disposition = 'attempted';
         claim.dispositionReason = 'write_completed_no_presentation_proof';
-      } else if (exit === 2 || exit === 3) {
+      } else if (exit === 3 || exit === 5) {
         claim.state = 'refused';
         claim.disposition = 'refused';
-        claim.dispositionReason = exit === 2 ? 'validation_refused_before_write' : 'connect_refused_or_timeout';
+        claim.dispositionReason = exit === 5 ? 'refused_before_write' : 'connect_refused_or_timeout';
       } else {
+        // 4, or anything an injected transport returns outside the contract.
         claim.state = 'uncertain';
         claim.disposition = 'uncertain';
-        claim.dispositionReason = 'write_failed_or_partial';
+        claim.dispositionReason = 'write_failed_or_outcome_unknown';
       }
       log.info('claude_delivery_disposition', { deliveryId: claim.deliveryId, scope: claim.scope, exit, state: claim.state, disposition: claim.disposition, reason: claim.dispositionReason });
     } catch {

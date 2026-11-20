@@ -1,10 +1,14 @@
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import type { TestContext } from 'node:test';
 import type { KeyValue } from '../src/backend.ts';
 import { fakeClock, memoryLog } from '../../hub-client/testing/fixtures.ts';
 import type { Log } from '../../hub-client/src/ports.ts';
-import { createClaudeDeliveryAdapter, claudeDeliveryCanaryAllowed, claudeInboxArgs, claudeDeliverArgs } from '../src/delivery/claude-adapter.ts';
+import { createClaudeDeliveryAdapter, claudeDeliveryCanaryAllowed, claudeInboxArgs, claudeDeliverArgs, spawnClaudeDeliver } from '../src/delivery/claude-adapter.ts';
 import type { ClaudeCandidatePage, ClaudeClaimRecord, ClaudeDeliveryAdapterDeps, ClaudeDeliveryFrame, DeliverExit } from '../src/delivery/claude-adapter.ts';
 import type { WatchPool, WatchRequest, WakeEvent, WatchEnd } from '../src/delivery/watch-pool.ts';
 
@@ -313,7 +317,7 @@ test('transport exit 3 records refused; exit 4 records uncertain', async t => {
   await settle();
   const uncertainClaim = uncertain.kv.claim('dly_' + ulid(1))!;
   assert.equal(uncertainClaim.state, 'uncertain');
-  assert.equal(uncertainClaim.dispositionReason, 'write_failed_or_partial');
+  assert.equal(uncertainClaim.dispositionReason, 'write_failed_or_outcome_unknown');
   // An uncertain claim from this same run is never retried by a later wake.
   uncertain.setPages([{ events: [] }]);
   uncertain.pool.recording.notify('exclusive:claude:' + KEY, { priority: 'wake' });
@@ -615,4 +619,74 @@ test('an operator resolution landing mid-attempt is never overwritten by the ada
   assert.equal(after.state, 'held', 'the operator resolution survives the in-flight attempt');
   assert.equal(after.dispositionReason, 'operator_keep_inbox');
   assert.ok(f.log.entries.some(e => e.msg === 'claude_delivery_claim_superseded'), 'the superseded write is surfaced');
+});
+
+// Phase 2 task 4: the helper's exit contract is 0 full write, 3 connect
+// failed, 5 refused before any write, 4 write failure or unknown outcome.
+// Exit 2 is flag parsing only, which for a correctly built argv can only
+// mean an unrecoverable runtime fatal (Go exits 2 on a fatal panic) — the
+// outcome is unknown, so it is never a refusal.
+
+const unixChild = { skip: process.platform === 'win32' && 'POSIX shell stub child' };
+
+/** A stub `vecnet` that runs `body` for the deliver child. */
+function deliverStub(t: TestContext, body: string): string {
+  const dir = mkdtempSync(join(tmpdir(), 'vn-claude-deliver-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const bin = join(dir, 'vecnet');
+  writeFileSync(bin, '#!/bin/sh\n' + body + '\n', { mode: 0o700 });
+  return bin;
+}
+
+const frame: ClaudeDeliveryFrame = { bindingKey: KEY, generation: GEN, msgId: 'n'.repeat(32), threadId: THREAD, messageId: 'msg_' + ulid(1) };
+
+async function spawnExit(t: TestContext, body: string | undefined, drive?: (clock: ReturnType<typeof fakeClock>) => Promise<void>): Promise<DeliverExit> {
+  const clock = fakeClock(1000);
+  const bin = body === undefined ? join(tmpdir(), 'vn-no-such-dir-' + randomUUID(), 'vecnet') : deliverStub(t, body);
+  const pending = spawnClaudeDeliver({ HOME: tmpdir(), PATH: process.env.PATH, VECNET_BIN: bin }, clock)(frame);
+  if (drive) await drive(clock);
+  return pending;
+}
+
+test('helper exit 2, signals and unmapped codes are uncertain, never refused', unixChild, async t => {
+  assert.equal(await spawnExit(t, 'exit 2'), 4, 'exit 2 (a fatal runtime panic) is uncertain');
+  assert.equal(await spawnExit(t, 'kill -KILL $$'), 4, 'a signal death is uncertain');
+  assert.equal(await spawnExit(t, 'exit 1'), 4, 'an unmapped code is uncertain');
+  assert.equal(await spawnExit(t, 'exit 7'), 4, 'an unmapped code is uncertain');
+  assert.equal(await spawnExit(t, 'exec sleep 30', async clock => {
+    await settle(100); // the child is running
+    clock.advance(5000);
+  }), 4, 'a child timeout is uncertain');
+  assert.equal(await spawnExit(t, 'exit 4'), 4);
+  assert.equal(await spawnExit(t, 'exit 0'), 0);
+  assert.equal(await spawnExit(t, 'exit 3'), 3);
+
+  // The adapter maps anything outside 0/3/5 — including a stray 2 from an
+  // injected transport — to uncertain with the unknown-outcome reason.
+  for (const exit of [2, 4, 9] as number[]) {
+    const f = fixture(t);
+    f.setPages([{ events: [deliveryEvent('e1.1', 1)] }]);
+    f.setExit(exit as DeliverExit);
+    f.adapter.start();
+    await settle();
+    const claim = f.kv.claim('dly_' + ulid(1))!;
+    assert.equal(claim.state, 'uncertain', `exit ${exit} is uncertain`);
+    assert.equal(claim.disposition, 'uncertain');
+    assert.equal(claim.dispositionReason, 'write_failed_or_outcome_unknown');
+  }
+});
+
+test('exit 5 is a definite pre-write refusal', unixChild, async t => {
+  assert.equal(await spawnExit(t, 'exit 5'), 5, 'the helper refusal passes through');
+  assert.equal(await spawnExit(t, undefined), 5, 'a child that never spawned wrote nothing');
+  const f = fixture(t);
+  f.setPages([{ events: [deliveryEvent('e1.1', 1)] }]);
+  f.setExit(5);
+  f.adapter.start();
+  await settle();
+  const claim = f.kv.claim('dly_' + ulid(1))!;
+  assert.equal(claim.state, 'refused');
+  assert.equal(claim.disposition, 'refused');
+  assert.equal(claim.dispositionReason, 'refused_before_write');
+  assert.notEqual(claim.hubAckObserved, true, 'a refusal is never acked');
 });

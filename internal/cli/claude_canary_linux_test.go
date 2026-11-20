@@ -112,8 +112,8 @@ func TestClaudeDeliverAndRetryRequireCanary(t *testing.T) {
 	}
 
 	code, _, errs := claudeDeliverRun(t, env, deliverBindingArgs(key, generation)...)
-	if code != 2 || !strings.Contains(errs, "the recipient has not opted into the native canary") {
-		t.Fatalf("deliver without the canary: exit %d %q, want 2 with the canary reason", code, errs)
+	if code != 5 || !strings.Contains(errs, "the recipient has not opted into the native canary") {
+		t.Fatalf("deliver without the canary: exit %d %q, want 5 with the canary reason", code, errs)
 	}
 	// A delegated or principal record shape can never be stored to unlock it.
 	for name, mutate := range map[string]func(*claudeScope){

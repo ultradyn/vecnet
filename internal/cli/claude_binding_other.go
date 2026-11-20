@@ -9,6 +9,9 @@ func validateClaudeRoot(root claudeRoot) error { return errClaudeUnsupported }
 
 func claudeRootAncestry(root claudeRoot) error { return errClaudeUnsupported }
 
+// claudeSessionRecordValid has no session registry evidence to check here.
+func claudeSessionRecordValid(root claudeRoot) error { return errClaudeUnsupported }
+
 // claudeProcessFenced fails closed: without qualified platform evidence no
 // transition that requires fencing may proceed.
 func claudeProcessFenced(pid int, start, boot string) bool { return false }
