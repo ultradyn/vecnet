@@ -292,6 +292,89 @@ func agyNoSideEffects(t *testing.T, h *agyHub, u *user, before map[string]map[st
 	}
 }
 
+// The agy extensions are opt-in: only VECNET_MCP_CLIENT=agy — exactly what
+// the agy installer bakes into the server's env — appends vecnet_wait to
+// tools/list, answers vecnet_wait locally and strips toolSummary. Without
+// the variable a Claude-style relay forwards everything unchanged, byte for
+// byte: a vecnet_wait call reaches the hub like any other unknown tool.
+func TestMCPRelayAgyExtensionsOptIn(t *testing.T) {
+	const listBody = `{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"vecnet_inbox","inputSchema":{"properties":{"as":{"type":"string"}}}},{"name":"vecnet_send"}]}}`
+	optInHub := func(t *testing.T) *httptest.Server {
+		return relayFake(t, func(w http.ResponseWriter, r *http.Request) {
+			req := relayRequest(t, r)
+			w.Header().Set("Content-Type", "application/json")
+			if string(req["method"]) == `"tools/list"` {
+				_, _ = w.Write([]byte(listBody))
+				return
+			}
+			var p struct {
+				Name      string          `json:"name"`
+				Arguments json.RawMessage `json:"arguments"`
+			}
+			_ = json.Unmarshal(req["params"], &p)
+			fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%s,"result":{"name":%q,"arguments":%s}}`, req["id"], p.Name, string(p.Arguments))
+		})
+	}
+	t.Run("tools/list byte-identical without the env", func(t *testing.T) {
+		u := profileUser(t, optInHub(t).URL, "relay-test-secret")
+		code, out, errs := relayRun(t, u, relayLine(1, "tools/list", map[string]any{})+"\n")
+		if code != 0 || errs != "" {
+			t.Fatalf("relay exit %d, stderr %s", code, errs)
+		}
+		if out != listBody+"\n" {
+			t.Fatalf("relay rewrote tools/list bytes without VECNET_MCP_CLIENT:\n got %s\nwant %s", out, listBody)
+		}
+	})
+	t.Run("tools/list gains vecnet_wait only with the env", func(t *testing.T) {
+		u := profileUser(t, optInHub(t).URL, "relay-test-secret")
+		u.env["VECNET_MCP_CLIENT"] = "agy"
+		code, out, errs := relayRun(t, u, relayLine(1, "tools/list", map[string]any{})+"\n")
+		if code != 0 || errs != "" {
+			t.Fatalf("relay exit %d, stderr %s", code, errs)
+		}
+		if out == listBody+"\n" || strings.Count(out, `"vecnet_wait"`) != 1 {
+			t.Fatalf("agy relay did not append vecnet_wait exactly once:\n%s", out)
+		}
+	})
+	t.Run("vecnet_wait and toolSummary forwarded without the env", func(t *testing.T) {
+		for _, bound := range []bool{false, true} {
+			t.Run(fmt.Sprintf("bound=%t", bound), func(t *testing.T) {
+				u := profileUser(t, optInHub(t).URL, "relay-test-secret")
+				args := []string{}
+				if bound {
+					args = []string{"--as", "peer_A"}
+				}
+				input := relayLine(1, "tools/list", map[string]any{}) + "\n" +
+					relayCall(2, "vecnet_wait", map[string]any{"timeout_seconds": 5, "toolSummary": "agy summary"}) + "\n"
+				code, out, errs := relayRun(t, u, input, args...)
+				if code != 0 || errs != "" {
+					t.Fatalf("relay exit %d, stderr %s", code, errs)
+				}
+				replies := relayReplies(t, out)
+				relayIDs(t, replies, 1, 2)
+				var echo struct {
+					Name      string         `json:"name"`
+					Arguments map[string]any `json:"arguments"`
+				}
+				if err := json.Unmarshal(replies[1].Result, &echo); err != nil {
+					t.Fatal(err)
+				}
+				if echo.Name != "vecnet_wait" {
+					t.Fatalf("vecnet_wait was not forwarded: %s", replies[1].Result)
+				}
+				if echo.Arguments["toolSummary"] != "agy summary" || echo.Arguments["timeout_seconds"] != float64(5) {
+					t.Fatalf("arguments changed without VECNET_MCP_CLIENT: %+v", echo.Arguments)
+				}
+				for _, line := range nonEmptyLines(out) {
+					if strings.Contains(line, "Vecnet: ") {
+						t.Fatalf("relay answered vecnet_wait locally without the env: %s", line)
+					}
+				}
+			})
+		}
+	})
+}
+
 func TestMCPRelayAgyStripsToolSummary(t *testing.T) {
 	for _, bound := range []bool{false, true} {
 		t.Run(fmt.Sprintf("bound=%t", bound), func(t *testing.T) {
@@ -300,6 +383,7 @@ func TestMCPRelayAgyStripsToolSummary(t *testing.T) {
 				<-r.Context().Done()
 			})
 			u := profileUser(t, h.URL, "relay-test-secret")
+			u.env["VECNET_MCP_CLIENT"] = "agy"
 			args := []string{}
 			if bound {
 				args = []string{"--as", "peer_A"}
@@ -356,6 +440,7 @@ func TestMCPRelayAgyToolSummaryNonStringForwarded(t *testing.T) {
 					<-r.Context().Done()
 				})
 				u := profileUser(t, h.URL, "relay-test-secret")
+				u.env["VECNET_MCP_CLIENT"] = "agy"
 				args := []string{}
 				if bound {
 					args = []string{"--as", "peer_A"}
@@ -408,6 +493,7 @@ func TestMCPRelayAgyToolSummaryAliasStillRejected(t *testing.T) {
 				<-r.Context().Done()
 			})
 			u := profileUser(t, h.URL, "relay-test-secret")
+			u.env["VECNET_MCP_CLIENT"] = "agy"
 			replies := relayOK(t, u, []string{relayLine(1, "tools/list", map[string]any{}), input}, "--as", "peer_A")
 			relayIDs(t, replies, 1, 2)
 			if replies[1].Error == nil || replies[1].Error.Code != -32602 {
@@ -429,6 +515,7 @@ func TestMCPRelayAgyWaitListedOnce(t *testing.T) {
 			<-r.Context().Done()
 		})
 		u := profileUser(t, h.URL, "relay-test-secret")
+		u.env["VECNET_MCP_CLIENT"] = "agy"
 		replies := relayOK(t, u, []string{
 			relayInit("2025-11-25"),
 			relayLine(2, "tools/list", map[string]any{}),
@@ -492,6 +579,7 @@ func TestMCPRelayAgyWaitListedOnce(t *testing.T) {
 			relayResult(w, req["id"], map[string]any{"tools": []any{map[string]any{"name": "vecnet_send"}}})
 		})
 		u := profileUser(t, server.URL, "relay-test-secret")
+		u.env["VECNET_MCP_CLIENT"] = "agy"
 		replies := relayOK(t, u, []string{
 			relayLine(1, "tools/list", map[string]any{}),
 			relayLine(2, "tools/list", map[string]any{"cursor": "page2"}),
@@ -513,6 +601,7 @@ func TestMCPRelayAgyWaitListedOnce(t *testing.T) {
 			}})
 		})
 		u := profileUser(t, server.URL, "relay-test-secret")
+		u.env["VECNET_MCP_CLIENT"] = "agy"
 		replies := relayOK(t, u, []string{relayLine(1, "tools/list", map[string]any{})})
 		relayIDs(t, replies, 1)
 		if strings.Count(string(replies[0].Result), `"vecnet_wait"`) != 1 {
@@ -537,6 +626,7 @@ func TestMCPRelayAgyWaitWake(t *testing.T) {
 				<-r.Context().Done()
 			})
 			u := profileUser(t, h.URL, "relay-test-secret")
+			u.env["VECNET_MCP_CLIENT"] = "agy"
 			s := startRelay(t, u)
 			s.send(relayCall(2, "vecnet_wait", map[string]any{"toolSummary": "agy summary"}))
 			h.waitRequest(regexp.MustCompile(`GET /v1/events`), 5*time.Second)
@@ -556,6 +646,7 @@ func TestMCPRelayAgyWaitHoldOnlyTimesOut(t *testing.T) {
 		<-r.Context().Done()
 	})
 	u := profileUser(t, h.URL, "relay-test-secret")
+	u.env["VECNET_MCP_CLIENT"] = "agy"
 	s := startRelay(t, u)
 	s.send(relayCall(2, "vecnet_wait", map[string]any{"timeout_seconds": 1, "toolSummary": "agy summary"}))
 	h.waitRequest(regexp.MustCompile(`GET /v1/events`), 5*time.Second)
@@ -583,6 +674,7 @@ func TestMCPRelayAgyWaitCursorResume(t *testing.T) {
 		<-r.Context().Done()
 	})
 	u := profileUser(t, h.URL, "relay-test-secret")
+	u.env["VECNET_MCP_CLIENT"] = "agy"
 	s := startRelay(t, u)
 	s.send(relayCall(2, "vecnet_wait", map[string]any{}))
 	h.waitRequest(regexp.MustCompile(`GET /v1/events`), 5*time.Second)
@@ -601,6 +693,7 @@ func TestMCPRelayAgyWaitConcurrent(t *testing.T) {
 		<-r.Context().Done()
 	})
 	u := profileUser(t, h.URL, "relay-test-secret")
+	u.env["VECNET_MCP_CLIENT"] = "agy"
 	s := startRelay(t, u)
 	s.send(relayCall(2, "vecnet_wait", map[string]any{}))
 	h.waitRequest(regexp.MustCompile(`GET /v1/events`), 5*time.Second)
@@ -639,6 +732,7 @@ func TestMCPRelayAgyWaitStdinEOF(t *testing.T) {
 				<-r.Context().Done()
 			})
 			u := profileUser(t, h.URL, "relay-test-secret")
+			u.env["VECNET_MCP_CLIENT"] = "agy"
 			s := startRelay(t, u)
 			s.send(relayCall(2, "vecnet_wait", map[string]any{"timeout_seconds": tc.timeout}))
 			h.waitRequest(regexp.MustCompile(`GET /v1/events`), 5*time.Second)
@@ -678,6 +772,7 @@ func TestMCPRelayAgyWaitParams(t *testing.T) {
 				<-r.Context().Done()
 			})
 			u := profileUser(t, h.URL, "relay-test-secret")
+			u.env["VECNET_MCP_CLIENT"] = "agy"
 			replies := relayOK(t, u, []string{relayCall(2, "vecnet_wait", arguments)})
 			relayIDs(t, replies, 2)
 			relayError(t, replies[0], -32602, agyWaitInvalidArgs)
@@ -695,6 +790,7 @@ func TestMCPRelayAgyWaitParams(t *testing.T) {
 			<-r.Context().Done()
 		})
 		u := profileUser(t, h.URL, "relay-test-secret")
+		u.env["VECNET_MCP_CLIENT"] = "agy"
 		s := startRelay(t, u)
 		s.send(relayCall(2, "vecnet_wait", map[string]any{"timeout_seconds": 1800, "toolSummary": 5}))
 		h.waitRequest(regexp.MustCompile(`GET /v1/events`), 5*time.Second)
@@ -726,6 +822,7 @@ func TestMCPRelayAgyWaitTransportFailures(t *testing.T) {
 				fmt.Fprintf(w, `{"error":{"code":%q,"message":"transport text %s must not leak"}}`, tc.code, agyWaitSecretMarker)
 			})
 			u := profileUser(t, h.URL, "relay-test-secret")
+			u.env["VECNET_MCP_CLIENT"] = "agy"
 			s := startRelay(t, u)
 			s.send(relayCall(2, "vecnet_wait", map[string]any{"timeout_seconds": 30}))
 			h.waitRequest(regexp.MustCompile(`GET /v1/events`), 5*time.Second)
@@ -754,6 +851,7 @@ func TestMCPRelayAgyWaitTransportFailures(t *testing.T) {
 			<-r.Context().Done()
 		})
 		u := profileUser(t, h.URL, "relay-test-secret")
+		u.env["VECNET_MCP_CLIENT"] = "agy"
 		s := startRelay(t, u)
 		s.send(relayCall(2, "vecnet_wait", map[string]any{"timeout_seconds": 30}))
 		h.waitRequest(regexp.MustCompile(`GET /v1/events`), 5*time.Second)

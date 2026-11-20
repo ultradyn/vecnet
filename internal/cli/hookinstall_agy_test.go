@@ -471,7 +471,9 @@ func TestHookInstallAgyRefusesUnknownTracking(t *testing.T) {
 }
 
 func agyWantServer(u *user) map[string]any {
-	env := map[string]any{}
+	// The installer always opts the server's relay into the agy extensions;
+	// VECNET_CONFIG is baked in only when it is set at install time.
+	env := map[string]any{"VECNET_MCP_CLIENT": "agy"}
 	if conf := u.env["VECNET_CONFIG"]; conf != "" {
 		env["VECNET_CONFIG"] = conf
 	}
@@ -527,7 +529,7 @@ func TestHookInstallAgyMCP(t *testing.T) {
 	if string(readSettings(t, hooks)) != hooksBefore || string(readSettings(t, mcpPath)) != mcpBefore {
 		t.Fatal("idempotent re-run changed a file")
 	}
-	// Without VECNET_CONFIG the env is an empty object.
+	// Without VECNET_CONFIG the env carries only the client opt-in.
 	u2, root2 := agyInstallRepo(t)
 	delete(u2.env, "VECNET_CONFIG")
 	installRun(t, u2, "--client", "agy", "--profile", "p", "--mcp", "--write")

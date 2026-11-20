@@ -112,9 +112,10 @@ type agyMCPServer struct {
 
 // mergeAgyMCP merges the installer's vecnet-<profile> MCP server into an
 // agy .agents/mcp_config.json. The entry is identified by name and replaced
-// in place; other servers, and their order, are never touched. env carries
-// VECNET_CONFIG only when it is set, so the MCP relay reads the installer's
-// config; otherwise it stays an empty object.
+// in place; other servers, and their order, are never touched. env always
+// carries VECNET_MCP_CLIENT=agy, the relay's opt-in for its agy extensions
+// (vecnet_wait, toolSummary stripping), and also VECNET_CONFIG when it is
+// set at install time, so the MCP relay reads the installer's config.
 func mergeAgyMCP(existing []byte, bin, profile, mcp string, getenv func(string) string) (out []byte, changed bool, err error) {
 	src := existing
 	if len(bytes.TrimSpace(src)) == 0 {
@@ -138,7 +139,7 @@ func mergeAgyMCP(existing []byte, bin, profile, mcp string, getenv func(string) 
 	entry := agyMCPServer{
 		Command:        bin,
 		Args:           []string{"--net", profile, "mcp"},
-		Env:            map[string]string{},
+		Env:            map[string]string{"VECNET_MCP_CLIENT": "agy"},
 		TimeoutSeconds: 1860,
 	}
 	entry.Tools.Inbox = agyMCPTool{Eager: true}

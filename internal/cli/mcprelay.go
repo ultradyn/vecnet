@@ -60,6 +60,10 @@ type mcpRelay struct {
 	// profile names this relay in vecnet_wait notices (config data, never
 	// peer-controlled).
 	profile string
+	// agy reports whether VECNET_MCP_CLIENT is exactly "agy": the agy
+	// installer's opt-in for the relay's agy extensions (vecnet_wait,
+	// toolSummary stripping). Every other relay forwards bytes unchanged.
+	agy bool
 	// emitMu serializes every JSON-RPC write: the stdin loop and vecnet_wait
 	// goroutines share stdout, and each message must be one locked write.
 	emitMu sync.Mutex
@@ -90,7 +94,7 @@ func (a *app) cmdMCP(args []string) error {
 		return &mcpStartupError{fmt.Sprintf("this session is profile %s; relay for profile %s refuses", v, profile)}
 	}
 	a.ensureRelayPin(profile, c)
-	relay := mcpRelay{a: a, c: c, profile: profile}
+	relay := mcpRelay{a: a, c: c, profile: profile, agy: a.getenv("VECNET_MCP_CLIENT") == "agy"}
 	relay.waitCtx, relay.waitCancel = context.WithCancel(a.ctx)
 	defer relay.stopWaits()
 	scanner := bufio.NewScanner(a.stdin)
@@ -357,12 +361,16 @@ func (r *mcpRelay) exchangeAttempt(raw []byte, msg mcpRelayMessage, emit bool, s
 	return err
 }
 
-// prepareCall readies a tools/call for the hub: agy's injected
+// prepareCall readies a tools/call for the hub: an agy relay's injected
 // arguments.toolSummary is dropped, and a --as relay also binds identity
 // fields. The alias checks always see the caller's original params first.
+// A relay without the agy opt-in changes nothing here.
 func (r *mcpRelay) prepareCall(raw []byte, msg mcpRelayMessage) ([]byte, error) {
 	if r.a.as == "" {
-		return mcpStripToolSummary(raw, msg), nil
+		if r.agy {
+			return mcpStripToolSummary(raw, msg), nil
+		}
+		return raw, nil
 	}
 	return r.bind(raw, msg)
 }
@@ -471,7 +479,9 @@ func (r *mcpRelay) post(raw []byte, msg mcpRelayMessage, emit bool, st *mcpExcha
 				if err := r.cacheTools(reply.Result); err != nil {
 					return err
 				}
-				payload = mcpAppendWaitTool(payload, reply.Result)
+				if r.agy {
+					payload = mcpAppendWaitTool(payload, reply.Result)
+				}
 			case "resources/list":
 				if r.a.as != "" {
 					bound, err := r.boundResources(payload)
@@ -747,8 +757,9 @@ func (r *mcpRelay) bind(raw []byte, msg mcpRelayMessage) ([]byte, error) {
 		}
 	}
 	// agy injects a required string toolSummary into every tool call; the
-	// hub's closed schemas would reject it, so drop it before forwarding.
-	stripped := mcpDropStringKey(arguments, "toolSummary")
+	// hub's closed schemas would reject it, so an opted-in relay drops it
+	// before forwarding. Other relays never touch the arguments.
+	stripped := r.agy && mcpDropStringKey(arguments, "toolSummary")
 	if len(fields) == 0 && !stripped {
 		return raw, nil
 	}
@@ -831,10 +842,16 @@ func mcpRelayEncodeFields(fields map[string]json.RawMessage) []byte {
 
 // --- agy (Google Antigravity CLI) support ---
 //
+// These extensions are opt-in: they run only when VECNET_MCP_CLIENT is
+// exactly "agy", the value the agy installer bakes into the server's env.
 // agy injects a required string toolSummary argument into every MCP tool
 // call and runs vecnet_wait as a background task whose result text is all
-// the model reads, so the relay strips the argument and answers vecnet_wait
-// locally, reading the event stream without ever acknowledging it.
+// the model reads, so an opted-in relay strips the argument and answers
+// vecnet_wait locally, reading the event stream without ever acknowledging
+// it. Any other relay (a Claude Code --mcp client, say) forwards bytes
+// unchanged: tools/list passes through as the hub sent it, and a
+// vecnet_wait call or a toolSummary argument reaches the hub like anything
+// else.
 
 // mcpDropStringKey deletes key from arguments when its value is a JSON
 // string, reporting whether anything changed. Only a string — the raw value
@@ -939,10 +956,12 @@ func (r *mcpRelay) stopWaits() {
 }
 
 // waitRequest answers a vecnet_wait call locally. It returns handled=false
-// for every other request. Invalid arguments are a -32602 binding error
-// with no hub traffic; a valid call spawns the background wait.
+// for every other request, and for every request at all without the agy
+// opt-in: such a relay forwards a vecnet_wait call like any other tool.
+// Invalid arguments are a -32602 binding error with no hub traffic; a valid
+// call spawns the background wait.
 func (r *mcpRelay) waitRequest(msg mcpRelayMessage) (bool, error) {
-	if msg.Method != "tools/call" {
+	if !r.agy || msg.Method != "tools/call" {
 		return false, nil
 	}
 	p, err := mcpRelayFields(msg.Params, "name", "arguments")
