@@ -646,9 +646,9 @@ func TestClaudeDeliverDeadlineIsBounded(t *testing.T) {
 		t.Fatalf("helper connected %d time(s) with an expired window", n)
 	}
 
-	// A window that expires between the connect and the write is a write
-	// failure (exit 4): the bytes may or may not have left, so it is never
-	// reported as refused.
+	// A window that expires between the connect and the write is a pre-write
+	// refusal (exit 5): the deadline check sits before the first byte, so
+	// provably no byte was written.
 	var reads atomic.Int32
 	claudeDeliverNow = func() time.Time {
 		if reads.Add(1) == 1 {
@@ -657,8 +657,8 @@ func TestClaudeDeliverDeadlineIsBounded(t *testing.T) {
 		return time.Now().Add(2 * claudeDeliverWindow)
 	}
 	code, errs = deliverAttempt(t, deliverAttemptInput(socket), nil)
-	if code != 4 {
-		t.Fatalf("expired write deadline exit %d, want 4: %s", code, errs)
+	if code != 5 {
+		t.Fatalf("expired write deadline exit %d, want 5: %s", code, errs)
 	}
 	select {
 	case frame := <-sink.frames:
@@ -1142,20 +1142,24 @@ func TestClaudeDeliverExitContract(t *testing.T) {
 		}
 	})
 	t.Run("4 write phase", func(t *testing.T) {
-		env, _, socket, key, generation, sink := deliverBindingFixtureSink(t)
-		old := claudeDeliverNow
-		t.Cleanup(func() { claudeDeliverNow = old })
-		var calls atomic.Int32
-		claudeDeliverNow = func() time.Time {
-			if calls.Add(1) == 1 {
-				return time.Now()
-			}
-			return time.Now().Add(2 * claudeDeliverWindow) // expired at the write
-		}
-		if code, _, errs := claudeDeliverRun(t, env, deliverBindingArgs(key, generation)...); code != 4 {
+		// The deadline expiring before the write is now a provably zero-byte
+		// refusal (5, above), so the deterministic write-phase failure is the
+		// recovered internal fault during the attempt: exit 4, zero bytes.
+		_, dir := claudeDeliverFixture(t)
+		sink := newDeliverSink(t, dir, "writephase.sock")
+		socket := filepath.Join(dir, "writephase.sock")
+		code, errs := deliverAttempt(t, deliverAttemptInput(socket), func() error { panic("injected write-phase fault") })
+		if code != 4 {
 			t.Fatalf("exit %d, want 4: %s", code, errs)
 		}
-		deliverSinkBarrier(t, sink, socket)
+		select {
+		case frame := <-sink.frames:
+			if len(frame) != 0 {
+				t.Fatalf("the faulted attempt wrote %d bytes, want none", len(frame))
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("the faulted attempt never connected")
+		}
 	})
 	t.Run("5 refused before write", func(t *testing.T) {
 		env, _, socket, key, generation, sink := deliverBindingFixtureSink(t)

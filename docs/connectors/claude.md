@@ -198,7 +198,7 @@ window. Exit codes:
 | ---- | ------- | -------------------- |
 | 0 | Full write and EOF flush. Never proof the session showed it. | `released` / `attempted` |
 | 3 | Connect failed; zero bytes. | `refused` / `connect_refused_or_timeout` |
-| 5 | Refused before any write: resolution, admission, generation, config witness, lock wait (one second), socket type, frame size, peer identity or the pre-write recheck; zero bytes. | `refused` / `refused_before_write` |
+| 5 | Refused before any write: resolution, admission, generation, config witness, lock wait (one second), socket type, frame size, peer identity, the pre-write recheck, or the one-second window expiring before the write began; zero bytes. | `refused` / `refused_before_write` |
 | 4 | Write failure, partial write, or a recovered internal fault: bytes may have left. | `uncertain` / `write_failed_or_outcome_unknown` |
 | 2 | Flag parsing only. | as 4 |
 

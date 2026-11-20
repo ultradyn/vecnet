@@ -19,8 +19,9 @@ package cli
 // EOF flush (never proof of presentation); 2 flag parsing only; 3 connect
 // failed (zero bytes); 4 write failure, partial write, or a recovered panic
 // (outcome uncertain); 5 refused before any write (resolution, admission,
-// generation, lock wait, socket type, frame size, peer identity or the
-// pre-write recheck; zero bytes).
+// generation, lock wait, socket type, frame size, peer identity, the
+// pre-write recheck, or the deadline expiring before the write; zero
+// bytes).
 
 import (
 	"bytes"
@@ -357,8 +358,10 @@ func (a *app) claudeDeliverAttempt(ctx context.Context, in claudeDeliverInput, f
 	if err := recheck(); err != nil {
 		return claudeDeliverRefusalOf(err)
 	}
+	// The window expired before the write began: provably no byte was
+	// written, so this is a pre-write refusal, never an uncertain outcome.
 	if !claudeDeliverNow().Before(deadline) {
-		return claudeDeliverWriteFailure("connect/write deadline expired before the write")
+		return claudeDeliverRefusal("connect/write deadline expired before the write")
 	}
 	if err := uc.SetWriteDeadline(deadline); err != nil {
 		return claudeDeliverWriteFailure("cannot bound the write: " + err.Error())
