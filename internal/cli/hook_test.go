@@ -1064,7 +1064,7 @@ func TestHookHintUnboundUnchanged(t *testing.T) {
 	bound := newHookHintMCP("p", "", "/c/v.toml", "vecnet-p")
 	at := time.Date(2026, 11, 4, 9, 30, 0, 0, time.UTC)
 	o := hookOwner{profiles: []string{"p", "q"}}
-	if hookForeignNotice(bound, at, o) != hookForeignNotice(h, at, o) || hookAmbiguousNotice(bound, o.profiles) != hookAmbiguousNotice(h, o.profiles) {
+	if hookForeignNotice(bound, at, o) != hookForeignNotice(h, at, o) || hookAmbiguousNotice(bound, o) != hookAmbiguousNotice(h, o) {
 		t.Fatal("bound notices differ from unbound ones")
 	}
 	// These worker goldens must survive even when the production supervisor

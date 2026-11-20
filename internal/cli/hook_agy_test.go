@@ -171,7 +171,7 @@ func TestHookAgyTurnStartBindsAndDelivers(t *testing.T) {
 					t.Fatalf("context lacks %q: %q", want, ctx)
 				}
 			}
-			if !strings.Contains(errs, "bound to this Claude Code session") {
+			if !strings.Contains(errs, "bound to this agy conversation") {
 				t.Fatalf("binding stderr=%q", errs)
 			}
 			s := readHookState(t, path)
@@ -254,7 +254,7 @@ func TestHookAgyClearRebinds(t *testing.T) {
 	if ctx := agyContextOf(t, out); !strings.Contains(ctx, "turn one") {
 		t.Fatalf("binding run missed delivery: %q", ctx)
 	}
-	if !strings.Contains(errs, "bound to this Claude Code session") {
+	if !strings.Contains(errs, "bound to this agy conversation") {
 		t.Fatalf("binding stderr=%q", errs)
 	}
 	s := readHookState(t, path)
@@ -276,7 +276,7 @@ func TestHookAgyClearRebinds(t *testing.T) {
 	if ctx := agyContextOf(t, out); !strings.Contains(ctx, "turn two") {
 		t.Fatalf("cleared run missed delivery: %q", ctx)
 	}
-	if !strings.Contains(errs, "new session id") {
+	if !strings.Contains(errs, "new conversation id") {
 		t.Fatalf("cleared stderr=%q", errs)
 	}
 	s = readHookState(t, path)
@@ -370,21 +370,32 @@ func TestHookAgyUnhandledEventsSilent(t *testing.T) {
 }
 
 // The foreign-session notice arrives as a systemMessage step, never a
-// userMessage, and carries no message content.
+// userMessage, and carries no message content. agy's sandbox blocks
+// ~/.config, so the notice tells the model to ask its user to run the
+// rebind outside agy rather than running it itself.
 func TestHookAgyForeignNoticeIsSystemMessage(t *testing.T) {
 	env, path, polls := agyHub(t)
 	seedSession(t, path, boundTo("c1-root"))
 	out, errs := runAgyHook(t, env, strings.NewReader(agyStdin("PreInvocation", "c2-other", 0, "whose profile is this?")), "--profile", "p", "--event", "pre-invocation")
 	ctx := agyContextOf(t, out) // asserts the single-systemMessage shape
-	for _, want := range []string{"belongs to another Claude Code session", "If this session is profile p, run: vecnet hook rebind --profile p.", "Otherwise ignore this."} {
+	for _, want := range []string{
+		"belongs to another agy conversation",
+		"If this conversation is profile p, ask your user to run `vecnet hook rebind --profile p` in a terminal outside agy, then send the next prompt in this conversation.",
+		"Otherwise ignore this.",
+	} {
 		if !strings.Contains(ctx, want) {
 			t.Fatalf("notice lacks %q: %q", want, ctx)
+		}
+	}
+	for _, banned := range []string{"Claude Code", "run: vecnet"} {
+		if strings.Contains(ctx, banned) || strings.Contains(errs, banned) {
+			t.Fatalf("agy notice or stderr names %q: ctx=%q errs=%q", banned, ctx, errs)
 		}
 	}
 	if strings.Contains(ctx, "turn one") || strings.Contains(ctx, "vecnet-inbox") {
 		t.Fatalf("notice carries content: %q", ctx)
 	}
-	if !strings.Contains(errs, "another Claude Code session") {
+	if !strings.Contains(errs, "another agy conversation") {
 		t.Fatalf("notice stderr=%q", errs)
 	}
 	if polls.Load() != 0 {
@@ -398,6 +409,76 @@ func TestHookAgyForeignNoticeIsSystemMessage(t *testing.T) {
 	out, _ = runAgyHook(t, env, strings.NewReader(agyStdin("PreInvocation", "c2-other", 0, "whose profile is this?")), "--profile", "p", "--event", "pre-invocation")
 	if out != "{}\n" {
 		t.Fatalf("repeat foreign out=%q", out)
+	}
+}
+
+// An agy run never takes a rebind window without a prompt: during the
+// window a subagent-shaped run stays silent and changes nothing, and the
+// next agy root prompt takes the window.
+func TestHookAgyRebindWindowNeedsPrompt(t *testing.T) {
+	now := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
+	old := hookNow
+	hookNow = func() time.Time { return now }
+	t.Cleanup(func() { hookNow = old })
+	env, path, polls := agyHub(t)
+	seedSession(t, path, func(s *hookState) { s.RebindUntil = now.Add(5 * time.Minute) })
+	before, _ := os.ReadFile(bindingPath(path))
+	out, errs := runAgyHook(t, env, strings.NewReader(agyStdin("PreInvocation", "c2-sub", 0, "")), "--profile", "p", "--event", "pre-invocation")
+	if out != "{}\n" || errs != "" {
+		t.Fatalf("window subagent out=%q errs=%q", out, errs)
+	}
+	if after, _ := os.ReadFile(bindingPath(path)); !bytes.Equal(before, after) {
+		t.Fatal("window subagent run changed the binding")
+	}
+	if polls.Load() != 0 {
+		t.Fatalf("window subagent run polled %d times", polls.Load())
+	}
+	// The next root prompt inside the window takes it.
+	conv := "0b1c2d3e-4f5a-6b7c-8d9e-0f1a2b3c4d5e"
+	out, errs = runAgyHook(t, env, strings.NewReader(agyStdin("PreInvocation", conv, 0, "mine now")), "--profile", "p", "--event", "pre-invocation")
+	if ctx := agyContextOf(t, out); !strings.Contains(ctx, "turn one") {
+		t.Fatalf("window root prompt missed delivery: %q", ctx)
+	}
+	if !strings.Contains(errs, "rebound to this agy conversation") {
+		t.Fatalf("window root stderr=%q", errs)
+	}
+	s := readHookState(t, path)
+	if s.Session != conv || s.SessionHow != bindRebind || !s.RebindUntil.IsZero() {
+		t.Fatalf("after window: %+v", s.hookBinding)
+	}
+}
+
+// agy notices name the agy conversation and delegate the rebind to the
+// user; Claude's wording stays byte-identical (hook_test.go pins it).
+func TestHookAgyNoticeWording(t *testing.T) {
+	h := newHookHint("p", "", "")
+	bound := time.Date(2026, 11, 4, 9, 30, 0, 0, time.UTC)
+	agy := hookOwner{session: "c2", agy: true, profiles: []string{"p", "q"}}
+	foreign := hookForeignNotice(h, bound, agy)
+	ambiguous := hookAmbiguousNotice(h, agy)
+	for _, notice := range []struct{ name, text string }{
+		{"foreign", foreign},
+		{"ambiguous", ambiguous},
+	} {
+		if strings.Contains(notice.text, "Claude Code") || strings.Contains(notice.text, "session") {
+			t.Fatalf("%s notice names Claude Code or a session: %q", notice.name, notice.text)
+		}
+		for _, want := range []string{
+			"ask your user to run `vecnet hook rebind --profile p` in a terminal outside agy, then send the next prompt in this conversation",
+		} {
+			if !strings.Contains(notice.text, want) {
+				t.Fatalf("%s notice lacks %q: %q", notice.name, want, notice.text)
+			}
+		}
+	}
+	if !strings.Contains(foreign, "another agy conversation (bound 2026-11-04 09:30 UTC)") {
+		t.Fatalf("foreign notice: %q", foreign)
+	}
+	if !strings.Contains(foreign, "This conversation also runs vecnet hooks for several profiles (p, q)") {
+		t.Fatalf("foreign ambiguous clause: %q", foreign)
+	}
+	if !strings.Contains(ambiguous, "not bound to this agy conversation") || !strings.Contains(ambiguous, "the conversation runs vecnet hooks for several profiles (p, q)") {
+		t.Fatalf("ambiguous notice: %q", ambiguous)
 	}
 }
 

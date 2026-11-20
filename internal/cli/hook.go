@@ -209,8 +209,17 @@ func hookSummary(h hookHint, count int, lowerBound bool) string {
 // hookForeignNotice is the once-per-session line for a session whose hook
 // does not own the profile. It carries no message content.
 // When this session is itself ambiguous it says so, since that, not the
-// other session, is why a rebind is needed here.
+// other session, is why a rebind is needed here. An agy run cannot run the
+// rebind itself — agy's sandbox blocks ~/.config — so it is told to ask its
+// user to run it in a terminal outside agy.
 func hookForeignNotice(h hookHint, boundAt time.Time, o hookOwner) string {
+	if o.agy {
+		also := ""
+		if o.ambiguous() {
+			also = " This conversation also runs vecnet hooks for several profiles (" + hookProfileList(o.profiles) + "); launching each conversation with VECNET_PROFILE=<its profile> avoids this."
+		}
+		return fmt.Sprintf("vecnet: profile %s's hook belongs to another agy conversation (bound %s). If this conversation is profile %s, ask your user to run `%s` in a terminal outside agy, then send the next prompt in this conversation. Otherwise ignore this.%s%s", h.profile, boundAt.UTC().Format("2006-01-02 15:04 UTC"), h.profile, h.rebind, also, h.config)
+	}
 	also := ""
 	if o.ambiguous() {
 		also = " This session also runs vecnet hooks for several profiles (" + hookProfileList(o.profiles) + "); launching each session with VECNET_PROFILE=<its profile> avoids this."
@@ -228,8 +237,12 @@ func hookProfileList(profiles []string) string {
 
 // hookAmbiguousNotice is the once-per-session line for an unbound profile
 // whose session runs several profiles' hooks. It carries no message content.
-func hookAmbiguousNotice(h hookHint, profiles []string) string {
-	return fmt.Sprintf("vecnet: profile %s's hook is not bound to this Claude Code session: the session runs vecnet hooks for several profiles (%s), so the hook cannot tell which one it is. If this session is profile %s, run: %s. Otherwise ignore this. Launching each session with VECNET_PROFILE=<its profile> avoids this.%s", h.profile, hookProfileList(profiles), h.profile, h.rebind, h.config)
+// An agy conversation is told to delegate the rebind to its user (above).
+func hookAmbiguousNotice(h hookHint, o hookOwner) string {
+	if o.agy {
+		return fmt.Sprintf("vecnet: profile %s's hook is not bound to this agy conversation: the conversation runs vecnet hooks for several profiles (%s), so the hook cannot tell which one it is. If this conversation is profile %s, ask your user to run `%s` in a terminal outside agy, then send the next prompt in this conversation. Otherwise ignore this. Launching each conversation with VECNET_PROFILE=<its profile> avoids this.%s", h.profile, hookProfileList(o.profiles), h.profile, h.rebind, h.config)
+	}
+	return fmt.Sprintf("vecnet: profile %s's hook is not bound to this Claude Code session: the session runs vecnet hooks for several profiles (%s), so the hook cannot tell which one it is. If this session is profile %s, run: %s. Otherwise ignore this. Launching each session with VECNET_PROFILE=<its profile> avoids this.%s", h.profile, hookProfileList(o.profiles), h.profile, h.rebind, h.config)
 }
 func hookOutput(event, context string) []byte {
 	name := "UserPromptSubmit"
@@ -511,7 +524,7 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 	if agy {
 		proc = agyHookProc() // CLAUDE_PID never names the agy process
 	}
-	owner := hookOwner{session: session, proc: proc, declared: strings.TrimSpace(a.getenv("VECNET_PROFILE")) == name, prompt: event == "user-prompt"}
+	owner := hookOwner{session: session, proc: proc, declared: strings.TrimSpace(a.getenv("VECNET_PROFILE")) == name, prompt: event == "user-prompt", agy: agy}
 	if session != "" {
 		// Unable to tell whether this session runs other profiles' hooks
 		// too, claim nothing rather than guess.
@@ -549,8 +562,14 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 			}
 			notice := hookForeignNotice(hint, s.SessionAt, owner)
 			if outcome == admitAmbiguous {
-				notice = hookAmbiguousNotice(hint, owner.profiles)
-				fmt.Fprintf(a.stderr, "vecnet: hook: this Claude Code session runs hooks for several profiles; profile %s claims nothing until %s\n", hint.profile, hint.rebind)
+				notice = hookAmbiguousNotice(hint, owner)
+				if agy {
+					fmt.Fprintf(a.stderr, "vecnet: hook: this agy conversation runs hooks for several profiles; profile %s claims nothing until its user runs %s in a terminal outside agy\n", hint.profile, hint.rebind)
+				} else {
+					fmt.Fprintf(a.stderr, "vecnet: hook: this Claude Code session runs hooks for several profiles; profile %s claims nothing until %s\n", hint.profile, hint.rebind)
+				}
+			} else if agy {
+				fmt.Fprintf(a.stderr, "vecnet: hook: profile %s is bound to another agy conversation; claiming nothing (ask your user to run %s in a terminal outside agy)\n", hint.profile, hint.rebind)
 			} else {
 				fmt.Fprintf(a.stderr, "vecnet: hook: profile %s is bound to another Claude Code session; claiming nothing (run %s from the right session)\n", hint.profile, hint.rebind)
 			}
@@ -563,7 +582,11 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 			// The notice record commits only if the notice was written.
 			return publish(encode(event, notice))
 		case admitBound:
-			fmt.Fprintf(a.stderr, "vecnet: hook: profile %s bound to this Claude Code session\n", hint.profile)
+			if agy {
+				fmt.Fprintf(a.stderr, "vecnet: hook: profile %s bound to this agy conversation\n", hint.profile)
+			} else {
+				fmt.Fprintf(a.stderr, "vecnet: hook: profile %s bound to this Claude Code session\n", hint.profile)
+			}
 			// An automatic binding claims nothing on its own run, so the
 			// session's other hooks for this event can register first and
 			// an ambiguous session never sees content (see admit).
@@ -572,9 +595,17 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 				return nil
 			}
 		case admitCleared:
-			fmt.Fprintf(a.stderr, "vecnet: hook: profile %s follows this Claude Code process to its new session id\n", hint.profile)
+			if agy {
+				fmt.Fprintf(a.stderr, "vecnet: hook: profile %s follows this agy process to its new conversation id\n", hint.profile)
+			} else {
+				fmt.Fprintf(a.stderr, "vecnet: hook: profile %s follows this Claude Code process to its new session id\n", hint.profile)
+			}
 		case admitRebound:
-			fmt.Fprintf(a.stderr, "vecnet: hook: profile %s rebound to this Claude Code session\n", hint.profile)
+			if agy {
+				fmt.Fprintf(a.stderr, "vecnet: hook: profile %s rebound to this agy conversation\n", hint.profile)
+			} else {
+				fmt.Fprintf(a.stderr, "vecnet: hook: profile %s rebound to this Claude Code session\n", hint.profile)
+			}
 		}
 		if event == "post-tool" && !s.LastPostToolPoll.IsZero() && now.Sub(s.LastPostToolPoll) < hookPostToolEvery {
 			return errHookRateLimited
