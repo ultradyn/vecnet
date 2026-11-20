@@ -62,9 +62,10 @@ type agyInput struct {
 // agyEvent maps one agy hook run onto the Claude Code event semantics the
 // delivery path already implements, and normalises its session identity.
 // ok is false for a run that must stay silent and touch nothing: unusable
-// stdin (which carried an identity this run cannot see), an event Vecnet
-// does not handle (PostInvocation, Stop, unknown), or an --event value the
-// agy installer never writes.
+// stdin (which carried an identity this run cannot see), a payload with no
+// conversationId and no ANTIGRAVITY_CONVERSATION_ID (no identity to admit),
+// an event Vecnet does not handle (PostInvocation, Stop, unknown), or an
+// --event value the agy installer never writes.
 //
 // A PreInvocation starts a turn (Claude user-prompt semantics: may bind)
 // only with invocationNum 0 and a non-empty lastUserInput. Every other
@@ -99,6 +100,11 @@ func agyEvent(o opts, raw []byte, e error, getenv func(string) string) (event, s
 	conv := in.ConversationID
 	if conv == "" {
 		conv = getenv("ANTIGRAVITY_CONVERSATION_ID")
+	}
+	if conv == "" {
+		// No conversation identity at all: this run can neither bind nor
+		// claim, so it is not admitted and touches nothing.
+		return "", "", false
 	}
 	if name == "SessionStart" {
 		return "session-start", hookSession(conv), true

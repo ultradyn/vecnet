@@ -614,6 +614,81 @@ func TestHookInstallAgyMCPDryRunAndSettings(t *testing.T) {
 	}
 }
 
+// Claude's --dry-run/--rollback usage error keeps its exact pre-agy text;
+// agy alone may use --dry-run, and its --rollback refusal stays its own.
+func TestHookInstallDryRunRollbackUsageText(t *testing.T) {
+	u, _ := agyInstallRepo(t)
+	for _, tc := range []struct{ name, client, flag string }{
+		{"claude dry-run", "", "--dry-run"},
+		{"claude rollback", "", "--rollback,backup.json"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := []string{"hook", "install", "--bin", "vecnet", "--profile", "p"}
+			if tc.client != "" {
+				args = append(args, "--client", tc.client)
+			}
+			code, out, errs := u.run(append(args, strings.Split(tc.flag, ",")...)...)
+			if code != 1 || out != "" || !strings.Contains(errs, "hook install: --rollback and --dry-run require --client codex") {
+				t.Fatalf("exit=%d out=%q errs=%q", code, out, errs)
+			}
+		})
+	}
+}
+
+// A git-tracked .agents/mcp_config.json is refused like a tracked
+// hooks.json: --mcp --write without --settings writes nothing.
+func TestHookInstallAgyRefusesTrackedMCPConfig(t *testing.T) {
+	u, root := agyInstallRepo(t)
+	agents := filepath.Join(root, ".agents")
+	hooksPath := filepath.Join(agents, "hooks.json")
+	mcpPath := filepath.Join(agents, "mcp_config.json")
+	if err := cliFixtureMkdirAll(agents, 0755); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{hooksPath, mcpPath} {
+		if err := cliFixtureWriteFile(path, []byte("{}\n"), 0640); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitT(t, "add", "--", ".agents/mcp_config.json")
+	gitT(t, "-c", "commit.gpgsign=false", "-c", "user.name=test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "tracked mcp config")
+	code, out, errs := u.run("hook", "install", "--bin", "vecnet", "--client", "agy", "--profile", "p", "--mcp", "--write")
+	for _, want := range []string{"tracked by git", ".git/info/exclude", "pass --settings " + mcpPath} {
+		if code != 1 || out != "" || !strings.Contains(errs, want) {
+			t.Fatalf("exit=%d out=%q errs=%q (want %q)", code, out, errs, want)
+		}
+	}
+	for _, path := range []string{hooksPath, mcpPath} {
+		if got := string(readSettings(t, path)); got != "{}\n" {
+			t.Fatalf("tracked %s changed: %q", path, got)
+		}
+	}
+}
+
+// When the mcp_config.json step fails after hooks.json was already
+// updated, the error says so and names both paths.
+func TestHookInstallAgyMCPWriteFailureNamesBothPaths(t *testing.T) {
+	u, root := agyInstallRepo(t)
+	hooksPath := filepath.Join(root, ".agents", "hooks.json")
+	mcpPath := filepath.Join(root, ".agents", "mcp_config.json")
+	if err := cliFixtureMkdirAll(filepath.Dir(mcpPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := cliFixtureWriteFile(mcpPath, []byte(`{"mcpServers":`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	code, out, errs := u.run("hook", "install", "--bin", "vecnet", "--client", "agy", "--profile", "p", "--mcp", "--write")
+	if code == 0 || out != "" {
+		t.Fatalf("exit=%d out=%q errs=%q", code, out, errs)
+	}
+	for _, want := range []string{"already updated", hooksPath, mcpPath} {
+		if !strings.Contains(errs, want) {
+			t.Fatalf("error lacks %q: %q", want, errs)
+		}
+	}
+	agyGroup(t, readSettings(t, hooksPath)) // hooks.json itself was written
+}
+
 func TestHookInstallAgyRejectsAutoAck(t *testing.T) {
 	u, root := agyInstallRepo(t)
 	code, out, errs := u.run("hook", "install", "--bin", "vecnet", "--client", "agy", "--profile", "p", "--auto-ack", "--write")

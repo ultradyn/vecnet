@@ -152,17 +152,23 @@ func (a *app) cmdHookInstall(args []string) error {
 	if client != "claude" && client != "codex" && client != "agy" {
 		return usageErr("hook install: --client must be claude or codex, or agy")
 	}
+	if client == "agy" && agyInstallOS == "windows" {
+		// agy runs hook commands under cmd /c, where the installer's POSIX
+		// quoting breaks; the Windows path is not qualified yet.
+		return &refusedError{msg: "hook install: agy hooks are not qualified on Windows yet"}
+	}
 	if client == "codex" && o.has("mcp") {
 		return usageErr("hook install: --mcp registration is supported only for --client claude")
 	}
 	if o.has("write") && o.has("dry-run") {
 		return usageErr("hook install: --write and --dry-run are mutually exclusive")
 	}
-	if client != "codex" && o.has("rollback") {
+	if client == "agy" && o.has("rollback") {
 		return usageErr("hook install: --rollback requires --client codex")
 	}
-	if client != "codex" && client != "agy" && o.has("dry-run") {
-		return usageErr("hook install: --dry-run requires --client codex or agy")
+	if client != "codex" && client != "agy" && (o.has("rollback") || o.has("dry-run")) {
+		// Claude's exact pre-agy wording (git show 68e5aeb8).
+		return usageErr("hook install: --rollback and --dry-run require --client codex")
 	}
 	if client == "codex" && o.has("auto-ack") {
 		return usageErr("hook install: Codex hooks never claim or acknowledge messages; omit --auto-ack")

@@ -591,6 +591,56 @@ func TestHookAgyPipeOutputCapped(t *testing.T) {
 	}
 }
 
+// A run whose payload carries no conversationId, with no
+// ANTIGRAVITY_CONVERSATION_ID either, has no identity to bind or claim
+// with: it is not admitted, whatever its invocationNum says.
+func TestHookAgyNoConversationNotAdmitted(t *testing.T) {
+	var requests atomic.Int32
+	env, path := hookFixtureRaw(t, func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		t.Errorf("unexpected request: %s", r.URL)
+		w.WriteHeader(500)
+	})
+	seedSession(t, path, boundTo("c1-root"))
+	before, _ := os.ReadFile(path)
+	beforeBinding, _ := os.ReadFile(bindingPath(path))
+	for _, tc := range []struct{ name, stdin, event string }{
+		{"turn-start", `{"hookEventName":"PreInvocation","invocationNum":0,"lastUserInput":"hello"}`, "pre-invocation"},
+		{"mid-turn", `{"hookEventName":"PreInvocation","invocationNum":2,"lastUserInput":"hello"}`, "pre-invocation"},
+		{"start", `{"hookEventName":"SessionStart"}`, "session-start"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, errs := runAgyHook(t, env, strings.NewReader(tc.stdin), "--profile", "p", "--event", tc.event)
+			if out != "{}\n" || errs != "" {
+				t.Fatalf("out=%q errs=%q", out, errs)
+			}
+		})
+	}
+	if requests.Load() != 0 {
+		t.Fatalf("no-identity runs made %d requests", requests.Load())
+	}
+	if after, _ := os.ReadFile(path); !bytes.Equal(before, after) {
+		t.Fatal("no-identity run changed state")
+	}
+	if after, _ := os.ReadFile(bindingPath(path)); !bytes.Equal(beforeBinding, after) {
+		t.Fatal("no-identity run changed the binding")
+	}
+}
+
+// The agy installer is not qualified on Windows: agy runs hook commands
+// under cmd /c, where the installed POSIX quoting breaks. The OS gate is
+// an overridable var so the refusal is testable on Linux.
+func TestHookInstallAgyRefusesWindows(t *testing.T) {
+	old := agyInstallOS
+	agyInstallOS = "windows"
+	t.Cleanup(func() { agyInstallOS = old })
+	var out, errs bytes.Buffer
+	code := RunContext(context.Background(), []string{"hook", "install", "--client", "agy", "--profile", "p", "--write"}, strings.NewReader(""), &out, &errs, func(string) string { return "" })
+	if code != 2 || out.String() != "" || !strings.Contains(errs.String(), "hook install: agy hooks are not qualified on Windows yet") {
+		t.Fatalf("exit=%d out=%q errs=%q", code, out.String(), errs.String())
+	}
+}
+
 // Claude and Codex silence is byte-identical to before: only agy answers {}
 // on a silent run.
 func TestHookAgySilenceKeepsClaudeCodexBytes(t *testing.T) {

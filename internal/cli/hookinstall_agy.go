@@ -194,6 +194,11 @@ func agyUntrackedAdvice(rel string) string {
 	return "; to keep this file personal, git rm --cached " + rel + " and list it in .git/info/exclude"
 }
 
+// agyInstallOS gates the agy installer on the host OS: agy runs hook
+// commands under cmd /c there, and the installed POSIX quoting breaks. A
+// var, not runtime.GOOS directly, so the refusal is testable anywhere.
+var agyInstallOS = runtime.GOOS
+
 // installAgyHooks merges the vecnet-<profile> group into path and, with
 // --mcp, the vecnet-<profile> server into mcpPath (the same directory).
 // Guards mirror the Codex installer's strictness: without --settings a
@@ -233,9 +238,14 @@ func (a *app) installAgyHooks(path, mcpPath, root string, unknown error, bin, pr
 	if mcp == "" {
 		return nil
 	}
-	return a.updateAgyJSON(mcpPath, func(existing []byte) ([]byte, bool, error) {
+	if err := a.updateAgyJSON(mcpPath, func(existing []byte) ([]byte, bool, error) {
 		return mergeAgyMCP(existing, bin, profile, mcp, a.getenv)
-	}, "(MCP server "+mcp+")", o)
+	}, "(MCP server "+mcp+")", o); err != nil {
+		// hooks.json is already on disk; say so, or a failed --mcp run looks
+		// like nothing happened.
+		return fmt.Errorf("hook install: %s was already updated; writing %s failed: %w", path, mcpPath, err)
+	}
+	return nil
 }
 
 // updateAgyJSON reads, merges, previews or writes one agy JSON target. A
