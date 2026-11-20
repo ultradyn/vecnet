@@ -106,14 +106,16 @@ test('claude status sidecar never republishes the adapter admission or scope coo
   // child-spawn coordinates; the strict sidecar must project both away.
   const admitted = (async () => ({ version: 1 as const, bindings: [{
     binding_key: 'ab'.repeat(32), generation: '01'.repeat(16), state: 'registered' as const,
-    admission: { live: true, policy: true, version_qualified: true, canary: true },
-    scope: { profile: 'p', hub_endpoint: 'https://hub.example', caller: 'peer_A', recipient: 'peer_A' },
+    admission: { live: true, policy: true, version_qualified: true, canary: true, witness: true },
+    scope: { profile: 'p', config: '/bind/LEAK-CONFIG/vecnet.toml', hub_identity: 'ed25519:IVL40Zt5HSRFMkLhXy6rbLfP-ntqXtMAl5YOBpiB2xI',
+      hub_endpoint: 'https://hub.example', caller: 'peer_A', recipient: 'peer_A' },
   }] })) as unknown as () => Promise<ClaudeSnapshot>;
   const status = createClaudeStatus({ ...s, fetchSnapshot: admitted });
   status.start();
   await until(() => existsSync(s.sidecar), 'sidecar published');
   const raw = readFileSync(s.sidecar, 'utf8');
-  for (const marker of ['admission', 'scope', 'profile', 'hub.example', 'peer_A', 'version_qualified']) {
+  for (const marker of ['admission', 'scope', 'profile', 'hub.example', 'peer_A', 'version_qualified',
+    'witness', 'LEAK-CONFIG', 'vecnet.toml', 'hub_identity', 'ed25519:', 'config']) {
     assert.ok(!raw.includes(marker), `sidecar leaked ${marker}`);
   }
   assert.deepEqual(Object.keys(JSON.parse(raw).bindings[0]).sort(), ['binding_key', 'generation', 'state']);

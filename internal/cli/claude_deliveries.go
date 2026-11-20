@@ -464,8 +464,9 @@ func (a *app) cmdClaudeDeliveries(args []string) error {
 // claudeResolveAdmission recomputes the native-delivery admission for one
 // binding key under the claude-bindings lock, exactly as the deliver helper
 // does at attempt time: a retry may only re-arm a claim whose scope is
-// currently registered under its pinned hub identity, live, policy-enabled
-// and still fenced by the same generation (build qualification is parked).
+// currently registered under its pinned hub identity, live, policy-enabled,
+// still witnessed by the config at its own stored path, and still fenced by
+// the same generation (build qualification is parked).
 func (a *app) claudeResolveAdmission(key, generation string) error {
 	ctx, cancel := context.WithTimeout(a.localRegistryContext(), 5*time.Second)
 	defer cancel()
@@ -499,6 +500,9 @@ func (a *app) claudeResolveAdmission(key, generation string) error {
 			return usageErr("claude resolve: the recipient opted out of native delivery")
 		} else if !evidence.VersionQualified {
 			return usageErr("claude resolve: the registered build is not a qualified native target")
+		}
+		if err := a.claudeScopeWitnessAt(b.claudeScope); err != nil {
+			return usageErr("claude resolve: the binding's stored config no longer witnesses its scope (config witness): " + err.Error())
 		}
 		if err := validateClaudeRoot(b.claudeRoot); err != nil {
 			return usageErr("claude resolve: the registered root no longer validates: " + err.Error())

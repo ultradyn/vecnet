@@ -52,15 +52,23 @@ type PoolRecording = {
   requests: WatchRequest[];
   notify(scope: string, event: WakeEvent): void;
   end(scope: string, end: WatchEnd): void;
+  /** Subscriptions not yet released. */
+  active(): number;
 };
 function fakePool() {
   const requests: WatchRequest[] = [];
   const subs = new Map<string, { notify: (e: WakeEvent) => void; stopped: (e: WatchEnd) => void }>();
+  const live = new Set<object>(); // One token per unreleased subscription.
   const pool: WatchPool = {
     subscribe(request, notify, stopped) {
       requests.push(request);
-      subs.set(request.scope.scope, { notify, stopped });
-      return () => { subs.delete(request.scope.scope); };
+      const entry = { notify, stopped };
+      subs.set(request.scope.scope, entry);
+      live.add(entry);
+      return () => {
+        live.delete(entry);
+        if (subs.get(request.scope.scope) === entry) subs.delete(request.scope.scope);
+      };
     },
     async close() { /* nothing owned */ },
   };
@@ -68,6 +76,7 @@ function fakePool() {
     requests,
     notify: (scope, event) => { const s = subs.get(scope); if (s) s.notify(event); },
     end: (scope, end) => { const s = subs.get(scope); if (s) s.stopped(end); },
+    active: () => live.size,
   };
   return { pool, recording };
 }
@@ -593,15 +602,15 @@ test('peer-visible non-delivery events (reaction, hub_notice, operator_view) adv
   // non-delivery type so the wake behind it still delivers.
   const f = fixture(t);
   f.setPages([{ events: [
-    { cursor: 'e1.0', type: 'reaction', deliveryId: '', messageId: '', threadId: '', priority: '', kind: '' },
-    { cursor: 'e1.0b', type: 'hub_notice', deliveryId: '', messageId: '', threadId: '', priority: '', kind: '' },
-    { cursor: 'e1.0c', type: 'operator_view', deliveryId: '', messageId: '', threadId: '', priority: '', kind: '' },
-    deliveryEvent('e1.1', 1),
+    { cursor: 'e1.1', type: 'reaction', deliveryId: '', messageId: '', threadId: '', priority: '', kind: '' },
+    { cursor: 'e1.2', type: 'hub_notice', deliveryId: '', messageId: '', threadId: '', priority: '', kind: '' },
+    { cursor: 'e1.3', type: 'operator_view', deliveryId: '', messageId: '', threadId: '', priority: '', kind: '' },
+    deliveryEvent('e1.4', 1),
   ] }]);
   f.adapter.start();
   await settle();
   assert.deepEqual(f.transportCalls.map(c => c.threadId), [THREAD], 'exactly the wake behind the non-delivery events is delivered');
-  assert.match(f.kv.scope(KEY)!.cursor as string, /e1\.1/, 'the checkpoint advances past known non-delivery events');
+  assert.equal(f.kv.scope(KEY)!.cursor, 'e1.4', 'the checkpoint advances past known non-delivery events');
 });
 
 test('an operator resolution landing mid-attempt is never overwritten by the adapter', async t => {
@@ -827,7 +836,7 @@ test('generation change rebaselines instead of replaying the window', async t =>
 
 test('failed baseline read stages nothing and retries', async t => {
   const calls: Array<string | undefined> = [];
-  let answers: Array<ClaudeCandidatePage | undefined> = [undefined, { events: [] }, { events: [], nextCursor: 'e1.12' }];
+  const answers: Array<ClaudeCandidatePage | undefined> = [undefined, { events: [] }, { events: [], nextCursor: 'e1.12' }];
   const f = fixture(t, {
     fetchCandidates: async (_c, cursor) => {
       calls.push(cursor);
@@ -853,7 +862,6 @@ test('failed baseline read stages nothing and retries', async t => {
   assert.equal(f.kv.scope(KEY)!.cursor, 'e1.12', 'a good head read baselines');
   assert.equal(f.kv.claims().length, 0);
   assert.equal(f.transportCalls.length, 0, 'the baseline pass stages nothing');
-  answers = [];
 });
 
 test('claudeInboxArgs emits --since head for the baseline read', () => {
@@ -884,18 +892,49 @@ test('a config or generation change reopens the scope watch', async t => {
   f.adapter.start();
   await settle();
   assert.equal(f.pool.recording.requests.length, 1, 'one watch for the admitted scope');
+  assert.equal(f.pool.recording.active(), 1);
   // The same key and generation, but the binding now names another config.
   f.setSnapshot([admittedRow({ scope: { profile: 'p', config: '/bind/moved.toml', hub_identity: HUB_PIN, hub_endpoint: 'https://hub.example', caller: 'peer_A', recipient: 'peer_A' } })]);
   f.pool.recording.notify('exclusive:claude:' + KEY, { priority: 'wake' });
   await settle();
   assert.equal(f.pool.recording.requests.length, 2, 'a config change reopens the watch');
+  assert.equal(f.pool.recording.active(), 1, 'the prior subscription was released, not leaked');
   f.setSnapshot([admittedRow({ generation: OTHER_GEN, scope: { profile: 'p', config: '/bind/moved.toml', hub_identity: HUB_PIN, hub_endpoint: 'https://hub.example', caller: 'peer_A', recipient: 'peer_A' } })]);
   f.pool.recording.notify('exclusive:claude:' + KEY, { priority: 'wake' });
   await settle();
   assert.equal(f.pool.recording.requests.length, 3, 'a generation change reopens the watch');
   assert.equal(f.pool.recording.requests[2].revision, OTHER_GEN);
+  assert.equal(f.pool.recording.active(), 1, 'the prior subscription was released, not leaked');
   // Unchanged: no reopen.
   f.pool.recording.notify('exclusive:claude:' + KEY, { priority: 'wake' });
   await settle();
   assert.equal(f.pool.recording.requests.length, 3, 'an unchanged scope keeps its watch');
+  assert.equal(f.pool.recording.active(), 1);
+});
+
+test('a head page carrying events is not a baseline: it retries', async t => {
+  // The hub resolves `head` and reads the page in separate snapshots: an
+  // arrival in between comes back on the head page with next_cursor past
+  // it. Baselining there would skip it forever, so the pass refuses it.
+  const calls: Array<string | undefined> = [];
+  const answers: ClaudeCandidatePage[] = [
+    { events: [deliveryEvent('e1.5', 5)], nextCursor: 'e1.5' },
+    { events: [], nextCursor: 'e1.5' },
+  ];
+  const f = fixture(t, {
+    fetchCandidates: async (_c, cursor) => {
+      calls.push(cursor);
+      return cursor === 'head' ? answers.shift() : { events: [] };
+    },
+  }, { baselined: false });
+  f.adapter.start();
+  await settle();
+  assert.deepEqual(calls, ['head']);
+  assert.equal(f.kv.scope(KEY), undefined, 'a non-empty head page persists no baseline');
+  assert.equal(f.kv.claims().length, 0);
+  f.clock.advance(1000);
+  await settle();
+  assert.deepEqual(calls, ['head', 'head'], 'the next pass retries the baseline');
+  assert.equal(f.kv.scope(KEY)!.cursor, 'e1.5', 'an empty head page baselines');
+  assert.equal(f.transportCalls.length, 0);
 });

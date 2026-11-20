@@ -613,12 +613,6 @@ func claudeInvocationChecks(getenv func(string) string, root claudeRoot) error {
 	return nil
 }
 
-// claudeScopeWitness ties the scope to the present config: the profile
-// must exist there, its hub and pinned hub identity must match, and a
-// stored profile witness (peer id or committed enrollment caller) must match
-// the claimed caller.
-// Scope never comes from a profile name alone, and a profile with no
-// witness at all cannot witness anything: shape-only matches refuse.
 // claudeScopeWitnessAt is claudeScopeWitness against the config at the
 // scope's own stored path rather than the env-derived one: every config
 // derived path (the pin store included) resolves from scope.ConfigPath, so
@@ -641,6 +635,12 @@ func (a *app) claudeScopeWitnessAt(scope claudeScope) error {
 	return at.claudeScopeWitness(scope)
 }
 
+// claudeScopeWitness ties the scope to the present config: the profile
+// must exist there, its hub and pinned hub identity must match, and a
+// stored profile witness (peer id or committed enrollment caller) must match
+// the claimed caller.
+// Scope never comes from a profile name alone, and a profile with no
+// witness at all cannot witness anything: shape-only matches refuse.
 func (a *app) claudeScopeWitness(scope claudeScope) error {
 	present, err := configPath(a.getenv)
 	if err != nil {

@@ -27,7 +27,7 @@ export const CLAUDE_PENDING_LIMIT = 128;
 const CLAIM_PREFIX = 'claude-claims:claim:', SCOPE_PREFIX = 'claude-claims:scope:';
 const RELOAD_MS = 10_000, CHILD_TIMEOUT = 5000, FETCH_TIMEOUT = 8000, STAGE_BATCH = 32;
 const BACKOFF = [1000, 2000, 4000, 8000, 15_000];
-const KEY = /^[0-9a-f]{64}$/, GENERATION = /^[0-9a-f]{32}$/, CURSOR = /^.{1,256}$/, HUB_ID = /^[\x21-\x7e]{1,256}$/, DELIVERY = /^[A-Za-z0-9_-]{1,128}$/, NATIVE = /^[A-Za-z0-9._:-]{1,128}$/, THREAD = /^thr_[A-HJKMNP-TV-Z0-9]{26}$/, MESSAGE = /^msg_[A-HJKMNP-TV-Z0-9]{26}$/;
+const KEY = /^[0-9a-f]{64}$/, GENERATION = /^[0-9a-f]{32}$/, CURSOR = /^e\d{1,19}\.\d{1,19}$/, HUB_ID = /^[\x21-\x7e]{1,256}$/, DELIVERY = /^[A-Za-z0-9_-]{1,128}$/, NATIVE = /^[A-Za-z0-9._:-]{1,128}$/, THREAD = /^thr_[A-HJKMNP-TV-Z0-9]{26}$/, MESSAGE = /^msg_[A-HJKMNP-TV-Z0-9]{26}$/;
 /** Known message kinds. Only `message` is ever a native candidate; the others
  * are known non-instructions and are staged past, while an unlisted kind
  * stalls the window (fail closed). */
@@ -369,13 +369,6 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Cl
     });
   }
 
-  /** Admission: a live, policy-enabled, version-qualified (build check
-   * parked), canary-opted binding of a peer credential's own inbox (no `as`;
-   * the `peer_` prefix is defence in depth behind the CLI's strict id check)
-   * whose stored scope is still witnessed by the config at its own path, and
-   * carrying the child-spawn coordinates including that absolute config.
-   * Every flag must be exactly `true`: a snapshot from an older CLI without
-   * `canary` or `witness` admits nothing. Anything else stays legacy. */
   /** The admitted row's child-spawn coordinates (admittedRow proved them). */
   function scopeCoordinates(row: ClaudeSnapshotBinding): ClaudeDeliveryScopeCoordinates {
     return {
@@ -384,6 +377,13 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Cl
     };
   }
 
+  /** Admission: a live, policy-enabled, version-qualified (build check
+   * parked), canary-opted binding of a peer credential's own inbox (no `as`;
+   * the `peer_` prefix is defence in depth behind the CLI's strict id check)
+   * whose stored scope is still witnessed by the config at its own path, and
+   * carrying the child-spawn coordinates including that absolute config.
+   * Every flag must be exactly `true`: a snapshot from an older CLI without
+   * `canary` or `witness` admits nothing. Anything else stays legacy. */
   function admittedRow(row: ClaudeSnapshotBinding): boolean {
     const admission = obj(row?.admission), scope = obj(row?.scope);
     return row.state === 'registered' && typeof row.binding_key === 'string' && KEY.test(row.binding_key) &&
@@ -508,7 +508,12 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Cl
       // nothing this pass. Earlier unacked deliveries stay on the legacy
       // hook/inbox path. A failed read persists nothing and retries.
       const head = await bounded(fetchCandidates(coordinates, 'head'), FETCH_TIMEOUT, clock);
-      if (!head || typeof head.nextCursor !== 'string' || !CURSOR.test(head.nextCursor)) throw new Error('baseline_unavailable');
+      // The hub resolves `head` and reads the page in separate snapshots: an
+      // arrival in between comes back on this page with next_cursor past
+      // it, and baselining there would skip it. Only an empty head page is
+      // a baseline; anything else retries.
+      if (!head || !Array.isArray(head.events) || head.events.length !== 0 ||
+        typeof head.nextCursor !== 'string' || !CURSOR.test(head.nextCursor)) throw new Error('baseline_unavailable');
       kv.set(scopeKey, JSON.stringify({ v: 1, generation: row.generation, cursor: head.nextCursor,
         blockedPendingLimit: record.blockedPendingLimit === true && record.generation === row.generation, updatedAt: clock.now() }));
       log.info('claude_delivery_scope_baselined', { scope: row.binding_key, generation: row.generation });

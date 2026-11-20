@@ -182,8 +182,9 @@ func claudeDeliverFrame(in claudeDeliverInput) ([]byte, error) {
 // claudeDeliverAdmitted finds the binding for key in the live registry and
 // recomputes admission at attempt time: a binding that is not canary-opted,
 // live and policy-enabled (build qualification is parked, so
-// version_qualified holds for every stored binding), or whose generation
-// moved past the adapter's fence, is refused. The caller holds the
+// version_qualified holds for every stored binding), whose generation moved
+// past the adapter's fence, or whose stored scope the config at its own
+// stored path no longer witnesses, is refused. The caller holds the
 // claude-bindings lock; resolution and the pre-write recheck both use this.
 func (a *app) claudeDeliverAdmitted(key, expectGeneration string) (claudeBinding, error) {
 	rows, err := a.readClaudeBindingsDocument()
@@ -211,6 +212,9 @@ func (a *app) claudeDeliverAdmitted(key, expectGeneration string) (claudeBinding
 			return claudeBinding{}, usageErr("claude deliver: the recipient opted out of native delivery")
 		} else if !evidence.VersionQualified {
 			return claudeBinding{}, usageErr("claude deliver: the registered build is not a qualified native target")
+		}
+		if err := a.claudeScopeWitnessAt(b.claudeScope); err != nil {
+			return claudeBinding{}, usageErr("claude deliver: the binding's stored config no longer witnesses its scope (config witness): " + err.Error())
 		}
 		return b, nil
 	}
@@ -257,9 +261,11 @@ func (a *app) claudeDeliverRecheckLocked(key, expectGeneration string, resolved 
 }
 
 // cmdClaudeDeliver performs one bounded connect+check+write attempt for one
-// binding key. It reads no configuration and no environment: the endpoint
-// and the expected owner are resolved from the live binding registry under
-// the claude-bindings lock, which stays held from resolution through
+// binding key. It takes no endpoint, identity or config from the command
+// line or the environment: the endpoint and the expected owner are resolved
+// from the live binding registry, and the only config it reads is the one at
+// the binding's own stored path (the scope witness, at resolution and again
+// before the first byte), all under the claude-bindings lock, which stays held from resolution through
 // CloseWrite so no registration can commit a new generation mid-attempt.
 // There is no explicit endpoint mode. Every recovered panic is exit 4
 // (uncertain), never a refusal.

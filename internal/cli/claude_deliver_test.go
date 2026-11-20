@@ -366,8 +366,17 @@ func deliverBindingFixtureAt(t *testing.T, endpoint func(dir string) string) (en
 	if err := os.WriteFile(filepath.Join(configRoot, "sessions", strconv.Itoa(os.Getpid())+".json"), []byte(sessionRow), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// The binding's own config, witnessed at write time from its stored
+	// canonical path: deliberately not the env's VECNET_CONFIG.
+	bindConfig, err := canonicalLocalSetupPath(filepath.Join(dir, "bind", "vecnet.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := saveConfig(bindConfig, deliverBindConfig()); err != nil {
+		t.Fatal(err)
+	}
 	scope := claudeScope{
-		ConfigPath:  "/home/user/.config/vecnet/vecnet.toml",
+		ConfigPath:  bindConfig,
 		Profile:     "p",
 		HubIdentity: claudeTestHubPin,
 		HubEndpoint: "https://hub.example.com",
@@ -392,6 +401,14 @@ func deliverBindingFixtureAt(t *testing.T, endpoint func(dir string) string) (en
 		t.Fatal(err)
 	}
 	return env, dir, socket, claudeBindingKey(scope), generation
+}
+
+// deliverBindConfig is the config the deliver fixture's binding was
+// registered from: profile "p" witnesses the stored scope.
+func deliverBindConfig() Config {
+	return Config{Profiles: map[string]Profile{
+		"p": {Hub: "https://hub.example.com", HubPubkey: claudeTestHubPin, Secret: "vn_peer_test", PeerID: claudeTestPeerID},
+	}}
 }
 
 func deliverBindingArgs(key, generation string) []string {
@@ -1279,5 +1296,68 @@ func TestClaudeDeliverRefusalMessageForm(t *testing.T) {
 		if got := errs.String(); !strings.HasPrefix(got, "vecnet: claude deliver: ") || strings.Count(got, "claude deliver: ") != 1 {
 			t.Fatalf("%s: stderr %q, want the helper named exactly once", name, got)
 		}
+	}
+}
+
+// TestClaudeDeliverWitnessesStoredConfigAtWrite pins the config witness on
+// the native write path: the profile disappears from the binding's STORED
+// config between the snapshot and the attempt, so the helper refuses before
+// any connect (exit 5, zero connections), whatever the env's VECNET_CONFIG
+// says. A config replaced after resolution is caught by the pre-write
+// recheck with a zero-byte connection. Restoring the config delivers.
+func TestClaudeDeliverWitnessesStoredConfigAtWrite(t *testing.T) {
+	env, dir, socket, key, generation, sink := deliverBindingFixtureSink(t)
+	bindConfig := filepath.Join(dir, "bind", "vecnet.toml")
+	removed := Config{Profiles: map[string]Profile{
+		"r": {Hub: "https://hub.example.com", HubPubkey: claudeTestHubPin, Secret: "vn_peer_test_r", PeerID: claudeTestPeerB},
+	}}
+	if err := saveConfig(bindConfig, removed); err != nil {
+		t.Fatal(err)
+	}
+	// The env's config still witnesses the scope: only the stored one counts.
+	if err := saveConfig(env["VECNET_CONFIG"], deliverBindConfig()); err != nil {
+		t.Fatal(err)
+	}
+	code, _, errs := claudeDeliverRun(t, env, deliverBindingArgs(key, generation)...)
+	if code != 5 || !strings.Contains(errs, "config witness") {
+		t.Fatalf("a removed profile: exit %d %q, want 5 with the witness reason", code, errs)
+	}
+	if early := deliverSinkBarrier(t, sink, socket); len(early) != 0 {
+		t.Fatalf("an unwitnessed deliver connected %d time(s): %q", len(early), early)
+	}
+
+	// Replaced after resolution: the recheck refuses on the open connection.
+	if err := saveConfig(bindConfig, deliverBindConfig()); err != nil {
+		t.Fatal(err)
+	}
+	old := claudeDeliverNow
+	t.Cleanup(func() { claudeDeliverNow = old })
+	var calls atomic.Int32
+	claudeDeliverNow = func() time.Time {
+		if calls.Add(1) == 1 { // resolved, not yet connected
+			if err := saveConfig(bindConfig, removed); err != nil {
+				t.Error(err)
+			}
+		}
+		return time.Now()
+	}
+	if code, _, errs := claudeDeliverRun(t, env, deliverBindingArgs(key, generation)...); code != 5 {
+		t.Fatalf("a config replaced before the write: exit %d, want 5: %s", code, errs)
+	}
+	for _, frame := range deliverSinkBarrier(t, sink, socket) {
+		if len(frame) != 0 {
+			t.Fatalf("the rechecked attempt wrote %d bytes, want none", len(frame))
+		}
+	}
+
+	claudeDeliverNow = old
+	if err := saveConfig(bindConfig, deliverBindConfig()); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, errs := claudeDeliverRun(t, env, deliverBindingArgs(key, generation)...); code != 0 {
+		t.Fatalf("the restored config: exit %d: %s", code, errs)
+	}
+	if got := deliverSinkBarrier(t, sink, socket); len(got) != 1 || string(got[0]) != deliverWantFrame {
+		t.Fatalf("the restored config delivered %q", got)
 	}
 }
