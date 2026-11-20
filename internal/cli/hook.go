@@ -37,6 +37,14 @@ const (
 
 var hookID = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,80}$`)
 var hookKind = regexp.MustCompile(`^[a-z_]{1,32}$`)
+
+// hookFlagKinds is `vecnet hook`'s flag surface, shared by hookRun and the
+// cmdHook client detection (hook_agy.go).
+var hookFlagKinds = map[string]flagKind{"event": strFlag, "profile": strFlag, "auto-ack": boolFlag, "mcp": strFlag, "release": boolFlag, "claim": strFlag, "priorities": strFlag, "expect-hub": strFlag, "expect-caller": strFlag, "client": strFlag, "thread": strFlag, "codex-home": strFlag, "expect-generation": strFlag}
+
+// hookClaudeRegister is Claude's passive root registration, a seam for
+// tests: the agy client never runs it.
+var hookClaudeRegister = (*app).claudeRegisterHook
 var hookAngles = strings.NewReplacer("＜", "<", "＞", ">", "﹤", "<", "﹥", ">", "‹", "<", "›", ">", "⟨", "<", "⟩", ">", "〈", "<", "〉", ">", "〈", "<", "〉", ">")
 var hookEscape = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", "\"", "&quot;")
 
@@ -276,6 +284,18 @@ func (a *app) cmdHook(args []string) (err error) {
 		limit = hookPipeAtomicBytes
 	}
 	done := make(chan hookResult, 1)
+	// agy requires JSON on stdout whenever the hook exits 0, so a silent agy
+	// run still answers {} (hook_agy.go). The Claude and Codex paths print
+	// nothing, exactly as before.
+	agy := hookAgyClient(args)
+	run := publish
+	var emitted bool
+	if agy {
+		run = func(data []byte) error {
+			emitted = true
+			return publish(data)
+		}
+	}
 	// Local filesystem reads cannot take a context. Supervise the complete
 	// operation so blocked config, cache or stdin I/O cannot hold up a turn.
 	go func() {
@@ -289,7 +309,7 @@ func (a *app) cmdHook(args []string) (err error) {
 			result.diagnostics = diagnostics.Bytes()
 			done <- result
 		}()
-		result = worker.hookRun(args, nowTime, afterPoll, publish, limit)
+		result = worker.hookRun(args, nowTime, afterPoll, run, limit)
 	}()
 	var result hookResult
 	select {
@@ -299,6 +319,9 @@ func (a *app) cmdHook(args []string) (err error) {
 	}
 	if len(result.diagnostics) > 0 {
 		_ = hookWrite(ctx, stderr, result.diagnostics)
+	}
+	if agy && !emitted {
+		_ = publish(agyHookOutput(""))
 	}
 	return nil
 }
@@ -343,7 +366,7 @@ func hookWrite(ctx context.Context, w io.Writer, data []byte) error {
 // the encoded output in bytes as well as the context in UTF-16 units.
 func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(), publish func([]byte) error, limit int) hookResult {
 	ctx := a.ctx
-	o, e := parseFlags("hook", args, map[string]flagKind{"event": strFlag, "profile": strFlag, "auto-ack": boolFlag, "mcp": strFlag, "release": boolFlag, "claim": strFlag, "priorities": strFlag, "expect-hub": strFlag, "expect-caller": strFlag, "client": strFlag, "thread": strFlag, "codex-home": strFlag, "expect-generation": strFlag})
+	o, e := parseFlags("hook", args, hookFlagKinds)
 	if e != nil || len(o.pos) != 0 {
 		return hookResult{}
 	}
@@ -364,61 +387,80 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 	if o.str("client") == "codex" || isCodexEnvironment(a.getenv) {
 		return hookResult{}
 	}
-	if o.has("client") && o.str("client") != "claude" {
+	agy := o.str("client") == "agy"
+	if o.has("client") && !agy && o.str("client") != "claude" {
 		return hookResult{}
 	}
 	event := o.str("event")
-	// Claude Code sends JSON on stdin even when --event names the event; its
-	// session_id binds the profile to one session. A terminal is not read.
-	var input struct {
-		HookEventName string `json:"hook_event_name"`
-		SessionID     string `json:"session_id"`
-		AgentID       string `json:"agent_id"`
+	// Every publish is encoded for the host that runs the hook: the Claude
+	// envelope, or agy's single systemMessage step (hook_agy.go).
+	encode := func(event, context string) []byte { return hookOutput(event, context) }
+	if agy {
+		encode = func(_, context string) []byte { return agyHookOutput(context) }
 	}
 	raw, e := hookStdin(a.stdin)
-	if e != nil || len(raw) > 1<<20 || json.Unmarshal(raw, &input) != nil {
-		// Only --event with no input at all (a terminal or empty stdin) is
-		// a manual run without a session id. Nonempty input that cannot be
-		// read or decoded, such as a tool_response over the cap, carried an
-		// identity this run cannot see (a foreign session_id or a
-		// subagent's agent_id): claim nothing and touch no state.
-		if !o.has("event") || e != nil || len(bytes.TrimSpace(raw)) != 0 {
+	var session string
+	if agy {
+		// The agy payload's conversationId binds the profile to one
+		// conversation; unusable input carried an identity this run cannot
+		// see, so it claims nothing and touches nothing.
+		ev, sess, ok := agyEvent(o, raw, e, a.getenv)
+		if !ok || ctx.Err() != nil {
 			return hookResult{}
 		}
-		input.HookEventName, input.SessionID, input.AgentID = "", "", ""
-	}
-	// A subagent or teammate shares its parent's session_id, so its tool
-	// hooks would pass the binding and claim into the subagent's context,
-	// which the parent may never see. Leave deliveries for the parent's own
-	// runs: claim nothing, say nothing, touch no state (issue 39).
-	if input.AgentID != "" {
-		return hookResult{}
-	}
-	if ctx.Err() != nil {
-		return hookResult{}
-	}
-	session := input.SessionID
-	if session == "" {
-		session = a.getenv("CLAUDE_CODE_SESSION_ID")
-	}
-	session = hookSession(session)
-	if !o.has("event") {
-		switch input.HookEventName {
-		case "UserPromptSubmit":
-			event = "user-prompt"
-		case "PostToolUse":
-			event = "post-tool"
-		case "SessionStart":
-			event = "session-start"
-		default:
+		event, session = ev, sess
+	} else {
+		// Claude Code sends JSON on stdin even when --event names the event;
+		// its session_id binds the profile to one session.
+		var input struct {
+			HookEventName string `json:"hook_event_name"`
+			SessionID     string `json:"session_id"`
+			AgentID       string `json:"agent_id"`
+		}
+		if e != nil || len(raw) > 1<<20 || json.Unmarshal(raw, &input) != nil {
+			// Only --event with no input at all (a terminal or empty stdin) is
+			// a manual run without a session id. Nonempty input that cannot be
+			// read or decoded, such as a tool_response over the cap, carried an
+			// identity this run cannot see (a foreign session_id or a
+			// subagent's agent_id): claim nothing and touch no state.
+			if !o.has("event") || e != nil || len(bytes.TrimSpace(raw)) != 0 {
+				return hookResult{}
+			}
+			input.HookEventName, input.SessionID, input.AgentID = "", "", ""
+		}
+		// A subagent or teammate shares its parent's session_id, so its tool
+		// hooks would pass the binding and claim into the subagent's context,
+		// which the parent may never see. Leave deliveries for the parent's own
+		// runs: claim nothing, say nothing, touch no state (issue 39).
+		if input.AgentID != "" {
 			return hookResult{}
+		}
+		if ctx.Err() != nil {
+			return hookResult{}
+		}
+		session = input.SessionID
+		if session == "" {
+			session = a.getenv("CLAUDE_CODE_SESSION_ID")
+		}
+		session = hookSession(session)
+		if !o.has("event") {
+			switch input.HookEventName {
+			case "UserPromptSubmit":
+				event = "user-prompt"
+			case "PostToolUse":
+				event = "post-tool"
+			case "SessionStart":
+				event = "session-start"
+			default:
+				return hookResult{}
+			}
 		}
 	}
 	if event != "user-prompt" && event != "post-tool" && event != "session-start" {
 		return hookResult{}
 	}
 	fits := func(context string) bool {
-		return utf16Len(context) <= hookMaxUnits && (limit <= 0 || len(hookOutput(event, context)) <= limit)
+		return utf16Len(context) <= hookMaxUnits && (limit <= 0 || len(encode(event, context)) <= limit)
 	}
 	if a.namedProfile() == "" {
 		return hookResult{} // a hook never makes a bare run (operator.go)
@@ -426,14 +468,20 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 	if event == "session-start" {
 		// SessionStart routes to passive registration only: bounded local
 		// work, no hub lookup, no context output. The delivery path stays
-		// with user-prompt and post-tool, whose behavior is unchanged.
-		_ = a.claudeRegisterHook(ctx, a.namedProfile(), raw)
+		// with user-prompt and post-tool, whose behavior is unchanged. agy
+		// has no Claude root to register.
+		if !agy {
+			_ = hookClaudeRegister(a, ctx, a.namedProfile(), raw)
+		}
 		return hookResult{}
 	}
 	// A verified first user prompt may update registration before the
 	// ordinary legacy path. Registration is silent and passive, so the
-	// hook's output is byte-identical with or without it.
-	_ = a.claudeRegisterHook(ctx, a.namedProfile(), raw)
+	// hook's output is byte-identical with or without it. agy has no
+	// Claude root to register.
+	if !agy {
+		_ = hookClaudeRegister(a, ctx, a.namedProfile(), raw)
+	}
 	c, name, ch, e := a.connect()
 	if e != nil || ctx.Err() != nil {
 		return hookResult{}
@@ -459,7 +507,11 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 		return hookResult{}
 	}
 	f := stateFile{path: path}
-	owner := hookOwner{session: session, proc: currentProc(a.getenv), declared: strings.TrimSpace(a.getenv("VECNET_PROFILE")) == name, prompt: event == "user-prompt"}
+	proc := currentProc(a.getenv)
+	if agy {
+		proc = agyHookProc() // CLAUDE_PID never names the agy process
+	}
+	owner := hookOwner{session: session, proc: proc, declared: strings.TrimSpace(a.getenv("VECNET_PROFILE")) == name, prompt: event == "user-prompt"}
 	if session != "" {
 		// Unable to tell whether this session runs other profiles' hooks
 		// too, claim nothing rather than guess.
@@ -509,7 +561,7 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 				return errHookForeign // already told: leave the state untouched
 			}
 			// The notice record commits only if the notice was written.
-			return publish(hookOutput(event, notice))
+			return publish(encode(event, notice))
 		case admitBound:
 			fmt.Fprintf(a.stderr, "vecnet: hook: profile %s bound to this Claude Code session\n", hint.profile)
 			// An automatic binding claims nothing on its own run, so the
@@ -543,7 +595,7 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 	// (including expiry) aborts the commit, so the next run shows it again.
 	finish := func(s *hookState) error {
 		if output != "" {
-			if err := publish(hookOutput(event, output)); err != nil {
+			if err := publish(encode(event, output)); err != nil {
 				return err
 			}
 			if displayVerified {

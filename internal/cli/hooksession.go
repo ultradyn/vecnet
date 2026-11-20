@@ -73,6 +73,19 @@ func currentProc(getenv func(string) string) hookProc {
 	return hookProc{PID: pid, Start: procStart(pid), Host: host}
 }
 
+// agyHookProc is the Antigravity process that ran this hook. agy exports no
+// PID variable to hooks (evidence H3) but launches hooks through sh -c, so
+// the agy process is the hook's grandparent. Unknown stays the zero value,
+// which never matches.
+func agyHookProc() hookProc {
+	pid := procGrandparent()
+	if pid <= 1 {
+		return hookProc{}
+	}
+	host, _ := os.Hostname()
+	return hookProc{PID: pid, Start: procStart(pid), Host: host}
+}
+
 // same reports whether p and q are known to be one process.
 func (p hookProc) same(q hookProc) bool {
 	return p.PID != 0 && p == q
