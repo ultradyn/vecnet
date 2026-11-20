@@ -63,9 +63,11 @@ messaging:
   blob get SHA [--blob-id ID] --out PATH [--json]
        URLs are short-lived; call get again whenever you need the file, as long as it hasn't expired.
   ack <cursor>
-  watch [--for-monitor] [--since CURSOR] [--auto-ack] [--deliveries-only]
+  watch [--for-monitor] [--since CURSOR] [--auto-ack] [--deliveries-only] [--once]
        does not ack; use --auto-ack or vecnet ack <cursor> to avoid replaying
        the log after a restart
+       --once exits 0 right after the first printed wake/wake_idle delivery;
+       never with --auto-ack
   hook [--event user-prompt|post-tool|session-start|app-server] [--profile P] [--auto-ack] [--mcp vecnet-P]
        Claude Code hook: always exits 0; --mcp names the registered MCP server in its hints
   hook --client codex --event user-prompt|post-tool|session-start

@@ -212,12 +212,16 @@ func inboxLine(ev envelope.Event, names map[string]string) string {
 func (a *app) cmdWatch(args []string) error {
 	o, err := parseFlags("watch", args, map[string]flagKind{
 		"for-monitor": boolFlag, "since": strFlag, "auto-ack": boolFlag, "deliveries-only": boolFlag,
+		"once": boolFlag,
 	})
 	if err != nil {
 		return err
 	}
 	if len(o.pos) != 0 {
-		return usageErr("usage: vecnet watch [--for-monitor] [--since CURSOR] [--auto-ack] [--deliveries-only]")
+		return usageErr("usage: vecnet watch [--for-monitor] [--since CURSOR] [--auto-ack] [--deliveries-only] [--once]")
+	}
+	if o.has("once") && o.has("auto-ack") {
+		return usageErr("--once cannot be combined with --auto-ack: a one-shot idle waiter never acks")
 	}
 	c, name, ch, err := a.connect()
 	if err != nil {
@@ -227,6 +231,7 @@ func (a *app) cmdWatch(args []string) error {
 		a: a, c: c, ch: ch, name: name,
 		names:      ch.peerNames(),
 		forMonitor: o.has("for-monitor"), autoAck: o.has("auto-ack"), deliveriesOnly: o.has("deliveries-only"),
+		once:  o.has("once"),
 		retry: watchStartRetry, seen: newDedupe(dedupeWindow),
 	}
 	if w.forMonitor && !a.json {
@@ -257,6 +262,11 @@ type watcher struct {
 	names map[string]string
 
 	forMonitor, autoAck, deliveriesOnly bool
+
+	// once ends the watch (exit 0) right after the first printed delivery
+	// whose message priority is wake or wake_idle; hold deliveries and
+	// non-delivery events never end it, and it never acks.
+	once bool
 
 	// identityOff skips the per-connection hub identity proof and the moving
 	// notice refresh. Only unit tests of the reconnect loop set it: they talk
@@ -362,6 +372,9 @@ var errMoveDue = errors.New("moving notice due")
 var errMoveUnavailable = errors.New("move destination unavailable")
 var errWatchOutput = errors.New("watch output failed")
 
+// errOnceDone ends `watch --once` after its first printed wake delivery.
+var errOnceDone = errors.New("one-shot watch woken")
+
 func (w *watcher) run() error {
 	ctx := w.a.ctx
 	defer w.stopMoveTimer()
@@ -434,6 +447,9 @@ func (w *watcher) run() error {
 				failures = 0
 				continue
 			}
+		}
+		if errors.Is(err, errOnceDone) {
+			return nil // a one-shot waiter ends at its first printed wake (exit 0)
 		}
 		if errors.Is(err, errWatchOutput) {
 			return err
@@ -1274,6 +1290,18 @@ func (w *watcher) retryDeferred() error {
 	}
 }
 
+// wakePriority reports whether a delivery's message priority (wake or
+// wake_idle) wakes a one-shot `watch --once` waiter; hold never does, and an
+// undecodable payload is treated as not worth waking for.
+func wakePriority(data json.RawMessage) bool {
+	var d struct {
+		Message struct {
+			Priority string `json:"priority"`
+		} `json:"message"`
+	}
+	return json.Unmarshal(data, &d) == nil && (d.Message.Priority == "wake" || d.Message.Priority == "wake_idle")
+}
+
 // handle prints one event (deduped on delivery_id), caches its message
 // thread and queues its cursor for --auto-ack.
 func (w *watcher) handle(evType, data string, replay bool) error {
@@ -1355,6 +1383,12 @@ func (w *watcher) handle(evType, data string, replay bool) error {
 			w.seen.add(f.deliveryID)
 		}
 		w.a.rememberEvents(w.ch, []envelope.Event{ev})
+		if w.once && wakePriority(ev.Data) {
+			// The first printed wake delivery ends a one-shot waiter.
+			// Deduped and display-deferred deliveries returned before this
+			// point without printing, so they never end it.
+			return errOnceDone
+		}
 	} else if !w.deliveriesOnly {
 		if err := printEvent(); err != nil {
 			return err
