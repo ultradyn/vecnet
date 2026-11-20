@@ -22,6 +22,8 @@ import (
 func (s *server) adminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/admin/notices", s.adminPostNotice)
 	mux.HandleFunc("POST /v1/admin/notices/{id}/clear", s.adminClearNotice)
+	mux.HandleFunc("GET /v1/admin/update", s.getUpdate)
+	mux.HandleFunc("POST /v1/admin/update", s.postUpdate)
 	s.opRoutes(mux)
 	mux.HandleFunc("GET /v1/admin/prefs", s.adminGetPreferences)
 	mux.HandleFunc("PATCH /v1/admin/prefs", s.adminPatchPreferences)

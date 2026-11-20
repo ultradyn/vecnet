@@ -14,6 +14,7 @@ import (
 	"github.com/XertroV/vecnet/internal/mcpserver"
 	"github.com/XertroV/vecnet/internal/oauth"
 	"github.com/XertroV/vecnet/internal/opview"
+	"github.com/XertroV/vecnet/internal/selfupdate"
 	"github.com/XertroV/vecnet/internal/ui"
 )
 
@@ -66,6 +67,10 @@ type Deps struct {
 	// Fly's proxy can set (vecnet-hub --trust-fly-client-ip). Off, a direct
 	// client could name any address there, so RemoteAddr is used.
 	TrustFlyClientIP bool
+
+	// Update is the npm version check and one-click update
+	// (GET/POST /v1/admin/update); nil reports the check disabled.
+	Update *selfupdate.Service
 }
 
 // Server timeouts (PROTOCOL §20.3). ReadTimeout bounds reading a whole
