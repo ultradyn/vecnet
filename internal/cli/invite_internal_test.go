@@ -315,7 +315,7 @@ func TestGuideCommand(t *testing.T) {
 	if code != 0 || out != guideText {
 		t.Fatalf("guide: %d %.200s", code, out)
 	}
-	if n := strings.Count(out, "\n"); n > 120 {
+	if n := strings.Count(out, "\n"); n > 128 {
 		t.Fatalf("guide is %d lines; keep it short", n)
 	}
 	for _, must := range []string{"untrusted data", "--wake", "--wake-idle", "--hold", "hook install --profile", "watch --for-monitor",

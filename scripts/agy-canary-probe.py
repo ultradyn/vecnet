@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
-"""Disposable Antigravity CLI (agy) canary probes for Vecnet delivery (Slice 0).
+"""Disposable Antigravity CLI (agy) canary probes for Vecnet delivery.
 
 Every probe runs agy under a throwaway HOME with a dummy GEMINI_API_KEY and a
 loopback Gemini API stub (GOOGLE_GEMINI_BASE_URL). Nothing touches the real
 ~/.gemini, no model tokens are spent, and no network traffic leaves loopback
 for model calls. Output is a sanitized JSON evidence document: markers, roles,
 field names and booleans only; no conversation IDs, paths, or tokens.
+
+The `e2e` probe additionally builds this checkout's vecnet and vecnet-hub into
+its own disposable directory, starts a loopback hub, invites and enrols two
+throwaway peers, installs the agy hooks and MCP config with the built CLI, and
+drives one stream-json session plus one TUI session against the real hook and
+relay binaries (still through the loopback model stub).
 
 Usage: python3 -I scripts/agy-canary-probe.py [--probe NAME ...] [--out FILE]
 """
@@ -947,6 +953,382 @@ def probe_session_identity():
     return out
 
 
+# ----------------------------------------------------------------- e2e probe
+
+
+class Fail(Exception):
+    pass
+
+
+class Steps:
+    """Named boolean results; failures are collected and fail the whole probe."""
+
+    def __init__(self):
+        self.rows = {}
+        self.failed = []
+
+    def check(self, name, ok, **detail):
+        row = {"ok": bool(ok)}
+        row.update(detail)
+        self.rows[name] = row
+        if not ok:
+            self.failed.append(name)
+        return bool(ok)
+
+
+def cli_env(home, config, **extra):
+    e = {
+        "PATH": os.environ["PATH"],
+        "HOME": home,
+        "VECNET_CONFIG": config,
+        "TERM": "dumb",
+        "LANG": "C.UTF-8",
+        "GIT_CONFIG_NOSYSTEM": "1",
+    }
+    e.update(extra)
+    return e
+
+
+def vrun(vec, env, *args, cwd=None, stdin=None, timeout=90):
+    return subprocess.run([vec, *args], cwd=cwd, env=env, input=stdin,
+                          capture_output=True, text=True, timeout=timeout)
+
+
+def await_body(stub, marker, timeout=60, need_tools=True, without=None):
+    """Index of the first stub request whose contents mention marker, or -1.
+
+    need_tools skips agy's tool-less side requests (titles): with tools set, a
+    marker only matches real turn requests that carry tool declarations.
+    `without` names a marker that must NOT appear (a subagent request mentions
+    its prompt marker inside the root's tool result too, once it completes).
+    """
+    end = time.time() + timeout
+    while time.time() < end:
+        with stub.lock:
+            for i, r in enumerate(stub.requests):
+                if need_tools and not r["body"].get("tools"):
+                    continue
+                b = json.dumps(r["body"].get("contents", []))
+                if marker in b and (without is None or without not in b):
+                    return i
+        time.sleep(0.2)
+    return -1
+
+
+def part_text_with(body, marker):
+    """Full text of the contents part that carries marker, or None."""
+    for c in body.get("contents", []):
+        for p in c.get("parts", []):
+            if marker in p.get("text", ""):
+                return p["text"]
+    return None
+
+
+def tool_response(body, suffix):
+    """The parsed response of the last functionResponse named *suffix."""
+    for c in reversed(body.get("contents", [])):
+        for p in reversed(c.get("parts", [])):
+            fr = p.get("functionResponse")
+            if fr and str(fr.get("name", "")).endswith(suffix):
+                return fr.get("response")
+    return None
+
+
+def await_tool_response(stub, suffix, timeout=90):
+    """Index of the first request carrying a functionResponse named *suffix."""
+    end = time.time() + timeout
+    while time.time() < end:
+        with stub.lock:
+            for i, r in enumerate(stub.requests):
+                if tool_response(r["body"], suffix) is not None:
+                    return i
+        time.sleep(0.2)
+    return -1
+
+
+def last_json(text):
+    """The last JSON object/array line of a CLI output (prose may precede it)."""
+    for line in reversed((text or "").splitlines()):
+        line = line.strip()
+        if line.startswith(("{", "[")):
+            return json.loads(line)
+    return None
+
+
+def probe_e2e():
+    """Disposable hub + built CLI + real agy: install, hooks, subagent, MCP, wait, no ack.
+
+    Steps (task 6 brief): (1) hook install --client agy --mcp --write with the
+    built binary; (2) a hub message reaches the next PreInvocation's
+    injectSteps and the model request inside the inert frame; (3) a subagent
+    turn with a pending delivery gets nothing; (4) an MCP vecnet_inbox call
+    with agy's toolSummary succeeds; (5) a background vecnet_wait wakes the
+    idle TUI session after a hub message; (6) no hub ack happened.
+    """
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    lab = Lab("e2e")
+    steps = Steps()
+    hub_proc = None
+    tui = None
+    stub = stub2 = None
+    RX, SEND = "agyrx", "sender"
+    try:
+        # ---- build this checkout's CLI into the disposable lab (never bin/)
+        bindir = os.path.join(lab.root, "bin")
+        subprocess.run(["go", "build", "-o", bindir + os.sep, "./cmd/..."],
+                       cwd=repo, check=True, capture_output=True, timeout=600)
+        vec = os.path.join(bindir, "vecnet")
+        steps.check("1_build", os.path.exists(vec) and os.path.exists(os.path.join(bindir, "vecnet-hub")))
+
+        # ---- disposable loopback hub (scripts/mcp-conformance-local.sh recipe)
+        hubdir = os.path.join(lab.root, "hubdata")
+        init = subprocess.run([os.path.join(bindir, "vecnet-hub"), "init", "--data-dir", hubdir,
+                               "--operator-name", "e2e"], capture_output=True, text=True, timeout=60)
+        m = re.search(r"^operator secret:\s+(\S+)$", init.stdout + init.stderr, re.M)
+        hub_log = os.path.join(lab.root, "hub.log")
+        hub_proc = subprocess.Popen([os.path.join(bindir, "vecnet-hub"), "--listen", "127.0.0.1:0",
+                                     "--data-dir", hubdir],
+                                    stdout=open(hub_log, "w"), stderr=subprocess.STDOUT)
+        addr = ""
+        end = time.time() + 30
+        while time.time() < end:
+            if os.path.exists(hub_log):
+                a = re.search(r"addr=(127\.0\.0\.1:\d+)", open(hub_log).read())
+                if a:
+                    addr = a.group(1)
+                    break
+            if hub_proc.poll() is not None:
+                raise Fail("hub exited during startup")
+            time.sleep(0.1)
+        steps.check("1_hub", bool(m) and bool(addr))
+        hub_url = "http://" + addr
+
+        # ---- operator profile, two invites, two enrolments (disposable configs)
+        op_home = os.path.join(lab.root, "op-home")
+        rx_home = os.path.join(lab.root, "rx-home")
+        send_home = os.path.join(lab.root, "send-home")
+        for d in (op_home, rx_home, send_home):
+            os.makedirs(d, mode=0o700)
+        op_cfg = os.path.join(lab.root, "op-config.toml")
+        rx_cfg = os.path.join(lab.root, "rx-config.toml")
+        send_cfg = os.path.join(lab.root, "send-config.toml")
+        with open(op_cfg, "w") as f:
+            f.write(f'operator_profile = "op"\n[profiles.op]\nhub = "{hub_url}"\nsecret = "{m.group(1)}"\n')
+        op_env = cli_env(op_home, op_cfg)
+        rx_env = cli_env(rx_home, rx_cfg)
+        send_env = cli_env(send_home, send_cfg)
+        tokens = {}
+        for name in (RX, SEND):
+            r = vrun(vec, op_env, "--net", "op", "--json", "peer", "invite", "--name", "e2e-" + name)
+            j = last_json(r.stdout) or {}
+            tokens[name] = j.get("enrol_token", "")
+        rx_peer = ""
+        r = vrun(vec, op_env, "--net", "op", "--json", "peers")
+        entries = last_json(r.stdout) or []
+        if isinstance(entries, dict):
+            entries = entries.get("peers", [])
+        for p in entries:
+            if p.get("name") == "e2e-" + RX:
+                rx_peer = p.get("peer_id") or p.get("id") or ""
+        enrolled = all(
+            vrun(vec, env, "enrol", "--hub", hub_url, "--token", "-", "--profile", name,
+                 "--allow-insecure-http", stdin=tokens[name]).returncode == 0
+            for name, env in ((RX, rx_env), (SEND, send_env)))
+        steps.check("1_peers", enrolled and bool(rx_peer))
+
+        # ---- workspace repo + install (step 1)
+        g = lambda *a: subprocess.run(["git", *a], cwd=lab.ws, check=True, capture_output=True,
+                                      env={**os.environ, "HOME": lab.home, "GIT_CONFIG_NOSYSTEM": "1"})
+        open(os.path.join(lab.ws, "note.txt"), "w").write("e2e\n")
+        g("init", "-q", "-b", "main")
+        g("add", ".")
+        g("-c", "user.name=probe", "-c", "user.email=probe@invalid", "commit", "-qm", "init")
+        # --bin: the lab is temporary, and defaultBin deliberately refuses to
+        # bake a temporary path into the workspace files (it would fall back to
+        # a PATH "vecnet", which here is some other install).
+        ins = vrun(vec, rx_env, "hook", "install", "--client", "agy", "--profile", RX,
+                   "--mcp", "--write", "--bin", vec, cwd=lab.ws)
+        hooks = json.load(open(os.path.join(lab.ws, ".agents", "hooks.json")))
+        group = hooks.get("vecnet-" + RX, {})
+        mcp = json.load(open(os.path.join(lab.ws, ".agents", "mcp_config.json")))
+        server = mcp.get("mcpServers", {}).get("vecnet-" + RX, {})
+        steps.check("1_install", ins.returncode == 0
+                    and sorted(set(group) - {"enabled"}) == ["PreInvocation", "SessionStart"]
+                    and group.get("enabled") is True
+                    and server.get("command") == vec
+                    and server.get("args") == ["--net", RX, "mcp"]
+                    and server.get("timeoutSeconds") == 1860
+                    and server.get("tools", {}).get("vecnet_wait", {}).get("background") == "always",
+                    install_advice=[scrub(l) for l in ins.stderr.splitlines() if l.startswith("agy:")])
+
+        def send_hub(text, priority):
+            return vrun(vec, send_env, "--net", SEND, "send", rx_peer, text, priority)
+
+        # ---- stream-json session: steps 2, 3, 4. Nothing is sent before the
+        # first hook run: a fresh profile's first PreInvocation only counts a
+        # backlog and points at the inbox, so every marker below is sent after
+        # that run has set the poll cursor.
+        wake_sent = threading.Event()
+        sub2_sent = threading.Event()
+
+        def script(body, idx):
+            b = json.dumps(body.get("contents", []))
+            if "E2E_SUB_PROMPT" in b and not has_function_response(body):
+                return text("E2E_SUB_DONE")
+            if not body.get("tools"):
+                return text("side")
+            if "E2E_T2" in b and not has_function_response(body):
+                sub2_sent.wait(30)  # the pending delivery must exist before the subagent
+                return call("invoke_subagent", Prompt="E2E_SUB_PROMPT inspect nothing", TypeName="self",
+                            Role="Probe helper", Workspace=lab.ws, Model="inherit")
+            if "E2E_T2" in b:
+                return text("E2E_T2_DONE")
+            if "E2E_T1" in b and has_function_response(body):
+                return text("E2E_T1_DONE")
+            if "E2E_T1" in b:
+                # Hold the reply until the wake marker is on the hub, so the
+                # inbox tool call below reads it.
+                wake_sent.wait(30)
+                d = next((d for t in body.get("tools", []) for d in t.get("functionDeclarations", [])
+                          if d["name"].endswith("vecnet_inbox")), {})
+                return call(d.get("name", "mcp_vecnet-" + RX + "_vecnet_inbox"), toolSummary="Read the Vecnet inbox")
+            return text(f"E2E_SIDE_{idx}")
+
+        stub = Stub(script)
+        proc = subprocess.Popen([AGY, "--input-format", "stream-json", "--output-format", "stream-json",
+                                 "--dangerously-skip-permissions", "--settings", json.dumps({"modelProvider": "gemini"})],
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, cwd=lab.ws, env=lab.env(stub, VECNET_CONFIG=rx_cfg))
+        proc.stdin.write(json.dumps({"event": "user", "message": {"content": "E2E_T1 say hi"}}) + "\n")
+        proc.stdin.flush()
+        t1 = await_body(stub, "E2E_T1")
+        wake_ok = t1 >= 0 and send_hub("MK_E2E_WAKE ping the root session", "--hold").returncode == 0
+        wake_sent.set()
+        tinb = await_tool_response(stub, "vecnet_inbox", 90)  # the request following the tool result
+        inbox_resp = tool_response(stub.requests[tinb]["body"], "vecnet_inbox") if tinb >= 0 else None
+        steps.check("4_mcp_inbox", wake_ok and tinb >= 0 and inbox_resp is not None
+                    and "MK_E2E_WAKE" in json.dumps(inbox_resp),
+                    request=tinb)
+        time.sleep(1)  # let turn 1 finish before the mid-session message
+        sub_sent = send_hub("MK_E2E_SUB mid-session for the next turn", "--hold").returncode == 0
+        proc.stdin.write(json.dumps({"event": "user", "message": {"content": "E2E_T2 continue"}}) + "\n")
+        proc.stdin.flush()
+        t2 = await_body(stub, "E2E_T2", 90)
+        # A delivery that lands mid-session is claimed and injected at the next
+        # turn-start PreInvocation, inside the inert frame.
+        t2hits = find_marker(stub.requests[t2]["body"], "MK_E2E_SUB") if t2 >= 0 else []
+        steps.check("2_hook_delivery", sub_sent and t2 >= 0 and bool(t2hits)
+                    and any(h.get("role") == "user" and h.get("system_message_frame") for h in t2hits)
+                    and '<vecnet-inbox untrusted="true">' in (part_text_with(stub.requests[t2]["body"], "MK_E2E_SUB") or ""),
+                    request=t2)
+        sub2_ok = send_hub("MK_E2E_SUB2 must stay away from the subagent", "--hold").returncode == 0
+        sub2_sent.set()
+        # The subagent's own conversation has no root history, so "without the
+        # root prompt marker" picks it out from the root's follow-up request,
+        # which quotes the subagent prompt inside the tool result.
+        tsub = await_body(stub, "E2E_SUB_PROMPT", 90, need_tools=False, without="E2E_T2")
+        sub_body = stub.requests[tsub]["body"] if tsub >= 0 else {}
+        steps.check("3_subagent_silent", sub2_ok and tsub >= 0
+                    and "vecnet-inbox" not in json.dumps(sub_body.get("contents", []))
+                    and "MK_E2E_SUB2" not in json.dumps(sub_body.get("contents", [])),
+                    request=tsub)
+        if await_body(stub, "E2E_SUB_DONE", 30, need_tools=False) < 0:
+            time.sleep(3)  # the root's close-out request carries the subagent reply
+        proc.stdin.close()
+        proc.communicate(timeout=60)
+        stub.close()
+        stub = None
+
+        # ---- TUI session: step 5 (print mode exits before a background result).
+        # Every earlier marker was sent --hold: the relay's first vecnet_wait
+        # starts at the acked cursor and an unacked wake backlog would wake it
+        # at once, while hold stays inbox-only, so the wait really sleeps until
+        # the one --wake message below.
+        def script2(body, idx):
+            b = json.dumps(body.get("contents", []))
+            if "Vecnet: new inbox activity" in b:
+                return text("E2E_WOKE_DONE")
+            if "E2E_WAIT" in b and not has_function_response(body):
+                d = next((d for t in body.get("tools", []) for d in t.get("functionDeclarations", [])
+                          if d["name"].endswith("vecnet_wait")), {})
+                if not d:
+                    return text("E2E_MCP_LATE")
+                return call(d["name"], timeout_seconds=150, toolSummary="Wait for Vecnet messages")
+            if "E2E_WARM" in b and not has_function_response(body):
+                return text("E2E_WARM_DONE")
+            return text("E2E_TUI_DONE")
+
+        stub2 = Stub(script2)
+        tui = Tui(lab, stub2, {"toolPermission": "always-proceed"})
+        tui.prompt("E2E_WARM")
+        steps.check("5_tui_warm", tui.wait_for("E2E_WARM_DONE", 25))
+        time.sleep(3)  # MCP connects lazily in the TUI; let the warm turn finish
+        tui.prompt("E2E_WAIT_GO")
+        waited = await_body(stub2, "E2E_WAIT")
+        if waited >= 0 and not any(d.get("name", "").endswith("vecnet_wait")
+                                   for t in stub2.requests[waited]["body"].get("tools", [])
+                                   for d in t.get("functionDeclarations", [])):
+            time.sleep(2)
+            tui.prompt("E2E_WAIT_GO2")
+            waited = await_body(stub2, "E2E_WAIT")
+        task_bar = tui.wait_for("task", 10)
+        time.sleep(1)
+        with stub2.lock:
+            n_before = len(stub2.requests)
+            early = any("Vecnet: new inbox activity" in json.dumps(r["body"].get("contents", []))
+                        for r in stub2.requests)
+        t_send = time.time()
+        wait_sent = send_hub("MK_E2E_WAIT wake the idle session", "--wake").returncode == 0
+        woke = -1
+        end = time.time() + 40
+        while time.time() < end and woke < 0:
+            with stub2.lock:
+                for i, r in enumerate(list(stub2.requests)[n_before:], start=n_before):
+                    if not r["body"].get("tools"):
+                        continue
+                    if "Vecnet: new inbox activity for profile" in json.dumps(r["body"].get("contents", [])):
+                        woke = i
+                        break
+            time.sleep(0.2)
+        hit = None
+        if woke >= 0:
+            hit = find_marker(stub2.requests[woke]["body"], "Vecnet: new inbox activity for profile")
+        steps.check("5_wait_wakes_idle", wait_sent and not early and woke >= 0 and bool(hit)
+                    and any(h.get("role") == "user" and h.get("system_message_frame") for h in hit),
+                    request=woke, seconds_after_send=round(time.time() - t_send, 1) if woke >= 0 else None,
+                    task_bar=task_bar, woke_before_send=early)
+        rendered = tui.wait_for("E2E_WOKE_DONE", 20)
+        steps.rows.setdefault("5_wait_wakes_idle", {})["reply_rendered"] = rendered
+
+        # ---- step 6: nothing acked (an inbox read without ack replays them all)
+        fin = vrun(vec, rx_env, "--net", RX, "--json", "inbox")
+        inbox_json = json.dumps(last_json(fin.stdout))
+        steps.check("6_no_ack", fin.returncode == 0
+                    and all(mk in inbox_json for mk in ("MK_E2E_WAKE", "MK_E2E_WAIT", "MK_E2E_SUB2")))
+
+        if steps.failed:
+            return {"steps": steps.rows, "failed_steps": steps.failed}
+        return {"steps": steps.rows}
+    finally:
+        if tui:
+            tui.kill()
+        if stub:
+            stub.close()
+        if stub2:
+            stub2.close()
+        if lab:
+            # The relay (vecnet --net … mcp) can outlive a killed TUI; the hub
+            # is stopped by its own pid below, never by this pattern.
+            subprocess.run(["pkill", "-f", os.path.join(lab.root, "bin", "vecnet") + " --net "], capture_output=True)
+        if hub_proc:
+            hub_proc.terminate()
+            try:
+                hub_proc.wait(10)
+            except subprocess.TimeoutExpired:
+                hub_proc.kill()
+        lab.cleanup()
+
+
 PROBES = {
     "hooks": probe_hooks,
     "inject_variants": probe_inject_variants,
@@ -956,6 +1338,7 @@ PROBES = {
     "acp": probe_acp,
     "tui": probe_tui,
     "session_identity": probe_session_identity,
+    "e2e": probe_e2e,
 }
 
 
@@ -979,6 +1362,11 @@ def main():
         with open(a.out, "w") as f:
             f.write(s + "\n")
     print(s)
+    # A full run collects evidence and never fails the process; a probe named
+    # explicitly is a verification and an error in it must fail the command.
+    if a.probe and any(isinstance(doc.get(n), dict) and ("error" in doc[n] or doc[n].get("failed_steps"))
+                       for n in a.probe):
+        return 1
 
 
 if __name__ == "__main__":

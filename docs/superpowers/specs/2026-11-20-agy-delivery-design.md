@@ -1,6 +1,6 @@
 # Antigravity CLI (`agy`) Delivery Integration Design & Plan
 
-**Date:** 2026-11-20 · **Status:** proposed. Slice 0 headless probes ran 2026-11-20 ([results](../../research/2026-11-20-agy-autodelivery.md#5-slice-0-results-2026-11-20-agy-1513-linux-x86-64)). Slices 1, 2 and 4 are unblocked; Slice 3 is deferred. Interactive TUI checks were run too.
+**Date:** 2026-11-20 · **Status:** implemented (2026-11-21): Slices 1.1–1.2 (agy hook install + hook runtime), 2 (`vecnet_wait` background waiter + `watch --once`) and 4 (`agy acp` launcher qualification) are built and covered by a disposable end-to-end probe ([connector guide](../../connectors/agy.md), [evidence](../../research/evidence/agy-1.5.13.json)). Slice 1.3 (enrollment/local authority/passive status) and Slice 3 (native sidecar push) are deferred; Slice 0 probes ran 2026-11-20 ([results](../../research/2026-11-20-agy-autodelivery.md#5-slice-0-results-2026-11-20-agy-1513-linux-x86-64)), interactive TUI checks included.
 
 [Research report](../../research/2026-11-20-agy-autodelivery.md) · [Claude delivery spec](./2026-11-19-claude-delivery-design.md) · [Codex app-server connector](../../connectors/codex-appserver.md) · [Launcher ACP setup](../../connectors/launcher.md#set-up-claude-through-acp)
 

@@ -824,5 +824,51 @@
         "agy_process": "same"
       }
     ]
+  },
+  "e2e": {
+    "steps": {
+      "1_build": {
+        "ok": true
+      },
+      "1_hub": {
+        "ok": true
+      },
+      "1_peers": {
+        "ok": true
+      },
+      "1_install": {
+        "ok": true,
+        "install_advice": [
+          "agy: each git worktree needs its own install; agy reads .agents/hooks.json from the workspace root, not the main checkout's",
+          "agy: agy asks before each vecnet_wait call unless you add the allow rule mcp(vecnet-agyrx/vecnet_wait)"
+        ]
+      },
+      "4_mcp_inbox": {
+        "ok": true,
+        "request": 1
+      },
+      "2_hook_delivery": {
+        "ok": true,
+        "request": 2
+      },
+      "3_subagent_silent": {
+        "ok": true,
+        "request": 4
+      },
+      "5_tui_warm": {
+        "ok": true
+      },
+      "5_wait_wakes_idle": {
+        "ok": true,
+        "request": 4,
+        "seconds_after_send": 0.5,
+        "task_bar": true,
+        "woke_before_send": false,
+        "reply_rendered": true
+      },
+      "6_no_ack": {
+        "ok": true
+      }
+    }
   }
 }

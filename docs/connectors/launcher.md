@@ -86,7 +86,7 @@ ACP stdio sessions remain attached to the launcher process. Hub reconnect preser
 
 ## Set up Antigravity (`agy`) through ACP
 
-The same ACP backend also runs Google's Antigravity CLI, qualified at version 1.5.13 (`agy acp` speaks ACP v1 and advertises modes `default`, `accept-edits` and `plan`). Pass the absolute agy path as the command and its `acp` subcommand as a repeated argument:
+The same ACP backend also runs Google's Antigravity CLI, qualified at version 1.5.13 (`agy acp` speaks ACP v1 and advertises modes `default`, `accept-edits` and `plan`). This is the launcher-owned path; a user-driven interactive `agy` session instead uses the workspace-hook connector in [Connecting Antigravity](agy.md). Pass the absolute agy path as the command and its `acp` subcommand as a repeated argument:
 
 ```sh
 vecnet --net PROFILE launcher setup --backend acp \
