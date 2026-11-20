@@ -484,21 +484,21 @@
       ],
       "requests": [
         {
-          "t": 0.4,
+          "t": 0.5,
           "last_role": "user",
           "function_response_says_background": false,
           "function_response_excerpt": null,
           "wait_result": null
         },
         {
-          "t": 0.4,
+          "t": 0.5,
           "last_role": "model",
           "function_response_says_background": true,
           "function_response_excerpt": "{\"output\": \"Tool is running as a background task with task id: <id>/task-2\\nTask logs are available at: <path>",
           "wait_result": null
         },
         {
-          "t": 4.4,
+          "t": 4.6,
           "last_role": "user",
           "function_response_says_background": false,
           "function_response_excerpt": null,
@@ -512,9 +512,9 @@
         }
       ],
       "mcp_timeline": {
-        "call_start": 0.4,
-        "call_end": 4.4,
-        "stdin_eof": 10.0
+        "call_start": 0.5,
+        "call_end": 4.5,
+        "stdin_eof": 10.1
       },
       "results": [
         {
@@ -558,7 +558,7 @@
       "mcp_timeline": {
         "call_start": 0.4,
         "call_end": 4.4,
-        "stdin_eof": 10.1
+        "stdin_eof": 10.0
       },
       "results": [
         {
@@ -705,5 +705,38 @@
       "usage_update"
     ],
     "model_requests": 5
+  },
+  "tui": {
+    "bg_mcp_wake": {
+      "turn_ended_first": true,
+      "woke_and_rendered": true,
+      "wake_requests": 1,
+      "mcp_events": [
+        "spawn",
+        "call_start",
+        "call_end"
+      ]
+    },
+    "exit_with_pending_call": {
+      "pending_calls": 1,
+      "status_bar_showed_task": true,
+      "tui_exited": true,
+      "mcp_server_alive_after": false,
+      "mcp_events_after": [
+        "call_start",
+        "call_end",
+        "call_start"
+      ]
+    },
+    "plugin_sidecar": {
+      "opt_in_written": true,
+      "sidecar_started": false
+    },
+    "agentapi_idle_send": {
+      "turn_ended_first": true,
+      "send_exit": 0,
+      "woke_and_rendered": true,
+      "pointer_text_shown_in_tui": false
+    }
   }
 }

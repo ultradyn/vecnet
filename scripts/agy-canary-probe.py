@@ -703,6 +703,177 @@ def probe_acp():
         lab.cleanup()
 
 
+class Tui:
+    """Interactive agy TUI in a private tmux session. Seeds the onboarding record (ToS accepted,
+    interactions-data collection opted out) so a fresh HOME reaches the prompt."""
+
+    def __init__(self, lab, stub, settings):
+        self.sess = "vecnet-test-" + os.urandom(4).hex()
+        ag = os.path.join(lab.home, ".gemini", "antigravity-cli")
+        os.makedirs(os.path.join(ag, "cache"), exist_ok=True)
+        with open(os.path.join(ag, "cache", "onboarding.json"), "w") as f:
+            json.dump({"consumerOnboardingComplete": True, "enterpriseOnboardingComplete": False, "onboardingComplete": True}, f)
+        with open(os.path.join(ag, "settings.json"), "w") as f:
+            json.dump({"modelProvider": "gemini", "colorScheme": "dark", "trustedWorkspaces": [lab.ws], **settings}, f)
+        env = " ".join(f"{k}={v!r}" for k, v in lab.env(stub, TERM="xterm-256color").items())
+        subprocess.run(["tmux", "new-session", "-d", "-s", self.sess, "-x", "160", "-y", "45",
+                        f"cd {lab.ws!r} && env -i {env} {AGY}"], check=True)
+        self.wait_for("for shortcuts", 20)
+
+    def pane(self):
+        return subprocess.run(["tmux", "capture-pane", "-p", "-t", self.sess], capture_output=True, text=True).stdout
+
+    def wait_for(self, s, secs):
+        end = time.time() + secs
+        while time.time() < end:
+            if s in self.pane():
+                return True
+            time.sleep(0.5)
+        return False
+
+    def prompt(self, s):
+        subprocess.run(["tmux", "send-keys", "-t", self.sess, "-l", s])
+        time.sleep(0.5)
+        subprocess.run(["tmux", "send-keys", "-t", self.sess, "Enter"])
+
+    def alive(self):
+        return subprocess.run(["tmux", "has-session", "-t", self.sess], capture_output=True).returncode == 0
+
+    def kill(self):
+        subprocess.run(["tmux", "kill-session", "-t", self.sess], capture_output=True)
+
+
+def probe_tui():
+    """Interactive TUI: background-MCP idle wake, /exit with a pending call, plugin sidecar, idle agentapi send."""
+    out = {}
+    # (a) background MCP wake + /exit with pending call
+    lab = Lab("tbg")
+    srv = os.path.join(lab.root, "mcp.py")
+    with open(srv, "w") as f:
+        f.write(MCP_SRC.format(log=lab.log))
+    os.makedirs(os.path.join(lab.ws, ".agents"))
+    with open(os.path.join(lab.ws, ".agents", "mcp_config.json"), "w") as f:
+        json.dump({"mcpServers": {"probe": {"command": "python3", "args": ["-I", srv],
+                                            "tools": {"probe_wait": {"eager": True, "background": "always"}}}}}, f)
+    tags = []
+
+    def s1(b, i):
+        last = json.dumps(b.get("contents", [])[-1:])
+        u = last_user_text(b)
+        if not b.get("tools"):
+            return text("side")
+        if "MK_WAIT_DONE" in last:
+            tags.append("wake")
+            return text("WOKE_BY_BG_MARK")
+        if not has_function_response(b) and "WAIT_SHORT" in u:
+            return call("mcp_probe_probe_wait", seconds=5, toolSummary="Short wait")
+        if not has_function_response(b) and "WAIT_LONG" in u:
+            return call("mcp_probe_probe_wait", seconds=120, toolSummary="Long wait")
+        return text("TURN_DONE_MARK")
+
+    stub = Stub(s1)
+    t = None
+    try:
+        t = Tui(lab, stub, {"toolPermission": "always-proceed"})
+        mcp_ev = lambda: [e["ev"] for e in lab.events() if e["kind"] == "mcp"]
+        # MCP connects lazily in the TUI: a first-turn call can race it ("unknown tool"), so warm up first.
+        t.prompt("warmup")
+        t.wait_for("TURN_DONE_MARK", 15)
+        time.sleep(3)
+        t.prompt("WAIT_SHORT")
+        woke = t.wait_for("WOKE_BY_BG_MARK", 25)
+        pane = t.pane()
+        out["bg_mcp_wake"] = {"turn_ended_first": pane.count("TURN_DONE_MARK") >= 2, "woke_and_rendered": woke,
+                              "wake_requests": tags.count("wake"), "mcp_events": mcp_ev()}
+        t.prompt("WAIT_LONG")
+        time.sleep(8)
+        pending = mcp_ev().count("call_start") - mcp_ev().count("call_end")
+        status_bar_task = "1 task(s)" in t.pane()
+        t.prompt("/exit")
+        time.sleep(5)
+        out["exit_with_pending_call"] = {
+            "pending_calls": pending, "status_bar_showed_task": status_bar_task,
+            "tui_exited": not t.alive(),
+            "mcp_server_alive_after": subprocess.run(["pgrep", "-f", srv], capture_output=True).returncode == 0,
+            "mcp_events_after": mcp_ev()[-3:],
+        }
+    finally:
+        if t:
+            t.kill()
+        stub.close()
+        subprocess.run(["pkill", "-f", srv], capture_output=True)
+        lab.cleanup()
+
+    # (b) plugin sidecar with documented opt-in
+    lab = Lab("tsc")
+    src = os.path.join(lab.root, "probeplug")
+    scdir = os.path.join(src, "sidecars", "bridge")
+    os.makedirs(scdir)
+    with open(os.path.join(src, "plugin.json"), "w") as f:
+        json.dump({"name": "probeplug", "version": "0.0.1", "description": "probe"}, f)
+    sclog = os.path.join(lab.root, "sc.jsonl")
+    with open(os.path.join(scdir, "run.py"), "w") as f:
+        f.write(f"import json, os, time\nopen({sclog!r}, 'a').write(json.dumps(sorted(k for k in os.environ if k.startswith('ANTIGRAVITY'))) + '\\n')\ntime.sleep(30)\n")
+    with open(os.path.join(scdir, "sidecar.json"), "w") as f:
+        json.dump({"command": "python3", "args": ["-I", os.path.join(scdir, "run.py")], "restart_policy": "never"}, f)
+    stub = Stub(lambda b, i: text("ok"))
+    t = None
+    try:
+        for cmd in (["plugin", "install", src], ["plugin", "enable", "probeplug"]):
+            subprocess.run([AGY, *cmd], env=lab.env(stub), cwd=lab.ws, capture_output=True, timeout=60)
+        cfg_path = os.path.join(lab.home, ".gemini", "config", "config.json")
+        cfg = json.load(open(cfg_path)) if os.path.exists(cfg_path) else {}
+        cfg.setdefault("sidecars", {})["probeplug/bridge"] = {"enabled": True}
+        with open(cfg_path, "w") as f:
+            json.dump(cfg, f)
+        t = Tui(lab, stub, {})
+        t.prompt("hi")
+        time.sleep(8)
+        out["plugin_sidecar"] = {"opt_in_written": True, "sidecar_started": os.path.exists(sclog)}
+    finally:
+        if t:
+            t.kill()
+        stub.close()
+        subprocess.run(["pkill", "-f", scdir], capture_output=True)
+        lab.cleanup()
+
+    # (c) agentapi send-message to the idle TUI from a still-running daemon task
+    lab = Lab("taa")
+    sh = os.path.join(lab.root, "send.sh")
+    rc_f = os.path.join(lab.root, "rc")
+    with open(sh, "w") as f:
+        f.write(f"#!/bin/sh\nsleep 5\n{AGY} agentapi send-message \"$ANTIGRAVITY_CONVERSATION_ID\" MK_AGENTAPI_PTR >/dev/null 2>&1\necho $? > {rc_f}\nsleep 30\n")
+    os.chmod(sh, 0o700)
+
+    def s3(b, i):
+        if not b.get("tools"):
+            return text("side")
+        if "MK_AGENTAPI_PTR" in json.dumps(b.get("contents", [])[-1:]):
+            return text("WOKE_BY_AGENTAPI_MARK")
+        if "SEND_IT" in last_user_text(b) and not has_function_response(b):
+            return call("run_command", CommandLine=sh, WaitMsBeforeAsync=500, IsDaemon=True, toolSummary="Delayed send")
+        return text("TURN_DONE_MARK")
+
+    stub = Stub(s3)
+    t = None
+    try:
+        t = Tui(lab, stub, {"toolPermission": "always-proceed"})
+        t.prompt("SEND_IT")
+        ended = t.wait_for("TURN_DONE_MARK", 15)
+        woke = t.wait_for("WOKE_BY_AGENTAPI_MARK", 20)
+        pane = t.pane()
+        rc = open(rc_f).read().strip() if os.path.exists(rc_f) else None
+        out["agentapi_idle_send"] = {"turn_ended_first": ended, "send_exit": int(rc) if rc and rc.isdigit() else rc,
+                                     "woke_and_rendered": woke, "pointer_text_shown_in_tui": "MK_AGENTAPI_PTR" in pane}
+    finally:
+        if t:
+            t.kill()
+        stub.close()
+        subprocess.run(["pkill", "-f", sh], capture_output=True)
+        lab.cleanup()
+    return out
+
+
 PROBES = {
     "hooks": probe_hooks,
     "inject_variants": probe_inject_variants,
@@ -710,6 +881,7 @@ PROBES = {
     "background_mcp": probe_background_mcp,
     "sidecar_agentapi": probe_sidecar_and_agentapi,
     "acp": probe_acp,
+    "tui": probe_tui,
 }
 
 

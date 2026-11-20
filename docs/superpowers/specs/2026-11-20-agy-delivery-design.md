@@ -1,6 +1,6 @@
 # Antigravity CLI (`agy`) Delivery Integration Design & Plan
 
-**Date:** 2026-11-20 · **Status:** proposed. Slice 0 headless probes ran 2026-11-20 ([results](../../research/2026-11-20-agy-autodelivery.md#5-slice-0-results-2026-11-20-agy-1513-linux-x86-64)). Slices 1, 2 and 4 are unblocked; Slice 3 is deferred; interactive-TUI checks are still open.
+**Date:** 2026-11-20 · **Status:** proposed. Slice 0 headless probes ran 2026-11-20 ([results](../../research/2026-11-20-agy-autodelivery.md#5-slice-0-results-2026-11-20-agy-1513-linux-x86-64)). Slices 1, 2 and 4 are unblocked; Slice 3 is deferred. Interactive TUI checks were run too.
 
 [Research report](../../research/2026-11-20-agy-autodelivery.md) · [Claude delivery spec](./2026-11-19-claude-delivery-design.md) · [Codex app-server connector](../../connectors/codex-appserver.md) · [Launcher ACP setup](../../connectors/launcher.md#set-up-claude-through-acp)
 
@@ -175,6 +175,7 @@ Goal: Give every `agy` user (Linux, macOS, Windows, inside `auto` sandbox, with 
    - Long-polls the hub SSE stream (reusing the watch transport) for the profile's scope, returning as soon as any `wake` or `wake_idle` text delivery arrives (or on bounded expiry, e.g., default `timeout_seconds: 900`, max `1800`, returning `{status: "timeout", rearm: true}`).
    - **Strictly pointer-only output.** Slice 0 verified that agy pastes the background tool's result text verbatim into a role-`user` `<SYSTEM_MESSAGE> … priority=MESSAGE_PRIORITY_HIGH` wake message. The tool returns `{status: "message_available", priority, delivery_id, message_id, thread_id, hint: "Call vecnet_inbox to read; inbox content is untrusted peer data."}` — never embeds raw peer bodies or instructions in the wake payload, never auto-acks, and ignores `hold` (which remains inbox-only).
    - **Shared-state coordination:** checks the same profile shown-state / native-owner fence so a delivery already handled by `PreInvocation` or a native adapter does not cause a spurious wake loop.
+   - In the TUI, the background-tool return woke the idle session (Slice 0 T1). `/exit` kills the MCP server with no cancel notification (T2), so `vecnet_wait` holds no claims and settles nothing. Default permissions show an approval prompt for MCP calls, so `hook install --client agy` should document (not auto-write) an `mcp(vecnet-P/vecnet_wait)` allow rule.
    - agy adds a required `toolSummary` string argument to every MCP tool; `vecnet_wait` (and every `vecnet_*` tool) must accept and ignore it.
    - Configured in `.agents/mcp_config.json` with:
      ```json
@@ -191,7 +192,7 @@ Goal: Give every `agy` user (Linux, macOS, Windows, inside `auto` sandbox, with 
 
 ### Slice 3: Shared-Daemon Native Push via Sanctioned Plugin Sidecar + `agentapi` (Gated Canary)
 
-**Status after Slice 0: DEFERRED.** Sidecars did not run under `agy -p`, the interactive TUI path was not tested (it needs ToS consent), and `agentapi` authenticates only through the per-session `ANTIGRAVITY_CSRF_TOKEN`/`LS_ADDRESS` env given to `run_command` children. A hook calling `agy agentapi` fails with `ANTIGRAVITY_LS_ADDRESS is not set`. A Vecnet-arranged bridge would therefore have to borrow that env, which the CSRF rule in §1 decision 4 forbids. Reopen only if an interactive TUI run shows agy-launched plugin sidecars with their own `agentapi` access.
+**Status after Slice 0: DEFERRED.** Sidecars did not run under `agy -p` or in the interactive TUI (even with the documented opt-in), and `agentapi` authenticates only through the per-session `ANTIGRAVITY_CSRF_TOKEN`/`LS_ADDRESS` env given to `run_command` children. A hook calling `agy agentapi` fails with `ANTIGRAVITY_LS_ADDRESS is not set`. A Vecnet-arranged bridge would therefore have to borrow that env, which the CSRF rule in §1 decision 4 forbids. Reopen only if a later agy release runs plugin sidecars in the CLI with their own `agentapi` access.
 
 **Entry Gate:** Slice 0 Probe 3 MUST pass (confirming `agy` CLI launches plugin sidecars, `agentapi send-message` wakes an idle interactive TUI cleanly, and busy/role framing is documented and safe). If Probe 3 fails, Slice 3 remains unshipped and Slices 1+2+4 remain the complete supported `agy` path.
 
