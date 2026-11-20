@@ -227,9 +227,10 @@ func claudeRootShape(r claudeRoot) error {
 	if !codexThreadID.MatchString(r.BootID) {
 		return usageErr("claude root requires a boot identity")
 	}
-	// Build evidence is optional (an unqualified or unobserved build still
-	// registers and stays legacy) but well formed whenever present, and a
-	// label never stands without the digest and identity it came from.
+	// Build evidence is optional (build gating is parked: the per-profile
+	// canary record, not the build, is the gate on native delivery) but well
+	// formed whenever present, and a label never stands without the digest
+	// and identity it came from.
 	if r.ExeSHA256 != "" && !claudeExeDigestRE.MatchString(r.ExeSHA256) {
 		return usageErr("claude root executable digest is malformed")
 	}

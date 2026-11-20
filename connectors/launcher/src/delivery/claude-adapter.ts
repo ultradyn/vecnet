@@ -569,7 +569,7 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Cl
       try {
         invocation = commandInvocation([watchBin, '--net', coordinates.profile,
           ...(coordinates.as ? ['--as', coordinates.as] : []), 'watch', '--json'], watchEnv);
-      } catch { log.warn('claude_delivery_watch_start_failed', { scope: row.binding_key }); return; }
+      } catch { log.warn('claude_delivery_watch_start_failed', { scope: row.binding_key }); continue; }
       // The CLI watch check proves only the pinned hub and caller, so this
       // stream stays unproved: the exclusive discriminator never widens.
       const request: WatchRequest = {

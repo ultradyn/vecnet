@@ -50,8 +50,8 @@ func claudeEnrollmentRetryable(state string) bool {
 
 // errClaudeEnrollmentHost is a host capability result, not a filesystem
 // failure: without the exact live session evidence no target is persisted.
-// The build is never part of it: it is observed from the kernel-attested
-// executable at registration, never read from the environment.
+// The build is never part of it: build-version gating is parked, so the
+// executable is not observed or attested anywhere on this path.
 var errClaudeEnrollmentHost = errors.New("unsupported automatic claude setup: the host must supply its live process identity (CLAUDE_PID) and session id (CLAUDE_CODE_SESSION_ID); credentials can be enrolled, but session registration stays on the legacy hook path")
 
 // isClaudeEnvironment reports whether this run is inside a Claude Code
@@ -255,14 +255,13 @@ func (a *app) claudeConfigRoot() (string, error) {
 }
 
 // claudeRootEvidence builds the claimed root from live host evidence: the
-// Claude process (CLAUDE_PID), its canonical config root, the session's own
-// id and the kernel-attested build of its executable. CLAUDE_PID only names
-// the claim; the proof is the kernel ancestry, /proc start identity and
-// Claude's own session registry row, checked inside registerClaudeRoot.
-// The build is not observed: build-version gating is parked (see
-// claude_build.go), so no hook or registration path ever hashes the
-// executable and the root's build fields stay empty. CLAUDE_CODE_VERSION is
-// never read.
+// Claude process (CLAUDE_PID), its canonical config root and the session's
+// own id. CLAUDE_PID only names the claim; the proof is the kernel
+// ancestry, /proc start identity and Claude's own session registry row,
+// checked inside registerClaudeRoot. The build is not observed or
+// attested: build-version gating is parked (see claude_build.go), so no
+// hook or registration path ever hashes the executable and the root's
+// build fields stay empty. CLAUDE_CODE_VERSION is never read.
 func (a *app) claudeRootEvidence(session string) (claudeRoot, error) {
 	var none claudeRoot
 	pid, err := strconv.Atoi(strings.TrimSpace(a.getenv("CLAUDE_PID")))
