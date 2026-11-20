@@ -22,7 +22,12 @@ import type { WatchPool, WatchRequest, WakeEvent, WatchEnd } from '../src/delive
 
 const KEY = 'ab'.repeat(32), GEN = '01'.repeat(16), OTHER_GEN = '02'.repeat(16);
 const THREAD = 'thr_01ARZ3NDEKTSV4RRFFQ69G5FAV';
-const BIND_CONFIG = '/bind/config.toml', HUB_PIN = 'ed25519:IVL40Zt5HSRFMkLhXy6rbLfP-ntqXtMAl5YOBpiB2xI';
+// The binding config must satisfy claudeConfigPathValid on every platform
+// the suite may run (or be faked) on: drive-absolute on win32, POSIX-absolute
+// elsewhere. Every derived path follows the same rule.
+const BIND_CONFIG = process.platform === 'win32' ? 'C:\\bind\\config.toml' : '/bind/config.toml';
+const MOVED_CONFIG = process.platform === 'win32' ? 'C:\\bind\\moved.toml' : '/bind/moved.toml';
+const HUB_PIN = 'ed25519:IVL40Zt5HSRFMkLhXy6rbLfP-ntqXtMAl5YOBpiB2xI';
 
 function memoryKv() {
   const map = new Map<string, string>();
@@ -902,12 +907,12 @@ test('a config or generation change reopens the scope watch', async t => {
   assert.equal(f.pool.recording.requests.length, 1, 'one watch for the admitted scope');
   assert.equal(f.pool.recording.active(), 1);
   // The same key and generation, but the binding now names another config.
-  f.setSnapshot([admittedRow({ scope: { profile: 'p', config: '/bind/moved.toml', hub_identity: HUB_PIN, hub_endpoint: 'https://hub.example', caller: 'peer_A', recipient: 'peer_A' } })]);
+  f.setSnapshot([admittedRow({ scope: { profile: 'p', config: MOVED_CONFIG, hub_identity: HUB_PIN, hub_endpoint: 'https://hub.example', caller: 'peer_A', recipient: 'peer_A' } })]);
   f.pool.recording.notify('exclusive:claude:' + KEY, { priority: 'wake' });
   await settle();
   assert.equal(f.pool.recording.requests.length, 2, 'a config change reopens the watch');
   assert.equal(f.pool.recording.active(), 1, 'the prior subscription was released, not leaked');
-  f.setSnapshot([admittedRow({ generation: OTHER_GEN, scope: { profile: 'p', config: '/bind/moved.toml', hub_identity: HUB_PIN, hub_endpoint: 'https://hub.example', caller: 'peer_A', recipient: 'peer_A' } })]);
+  f.setSnapshot([admittedRow({ generation: OTHER_GEN, scope: { profile: 'p', config: MOVED_CONFIG, hub_identity: HUB_PIN, hub_endpoint: 'https://hub.example', caller: 'peer_A', recipient: 'peer_A' } })]);
   f.pool.recording.notify('exclusive:claude:' + KEY, { priority: 'wake' });
   await settle();
   assert.equal(f.pool.recording.requests.length, 3, 'a generation change reopens the watch');
