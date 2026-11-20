@@ -81,6 +81,21 @@ span,b,time,code,a{unicode-bidi:isolate}
 .va .side{border-right:1px solid var(--line);padding:20px 10px 0;overflow:auto;background:#0c1120;display:flex;flex-direction:column}
 /* conn and Sign out stay in view */
 .va .side .foot{margin-top:auto;position:sticky;bottom:0;padding:8px 0 24px;background:#0c1120;display:flex;flex-direction:column}
+/* hub update indicator (update.js): shown only when npm has a newer vecnet */
+.hub-update{margin:0 4px 8px;padding:8px 9px;border:1px solid var(--line2);border-radius:7px;background:#11182c;font-size:12px;color:var(--muted);display:flex;flex-direction:column;gap:4px;align-items:flex-start}
+.hub-update .uh{display:flex;align-items:center;gap:7px;color:var(--text)}
+.hub-update .uh i{width:7px;height:7px;border-radius:50%;background:var(--widle);flex:none}
+.hub-update .uh b{font-weight:600;font-size:12.5px}
+.hub-update .us{font:400 11px var(--mono);color:var(--dim)}
+.hub-update .ul{color:var(--violet);font-size:11.5px}
+.hub-update .up{font-size:11.5px}
+.hub-update .ue{font-size:11.5px;color:var(--bad);overflow-wrap:anywhere}
+.hub-update .btn{margin-top:2px;padding:4px 10px;font-size:12px}
+.hub-update .um summary{cursor:pointer;font-size:11.5px;color:var(--dim)}
+.hub-update .um>div{margin-top:4px;font-size:11.5px}
+.hub-update .uc{display:flex;align-items:center;gap:4px}
+.hub-update .uc .cpy{opacity:1}
+.hub-update .uc code{font:400 10.5px var(--mono);overflow-wrap:anywhere;user-select:all}
 .va .build-info{padding:8px 9px 0;color:var(--dim);font:400 9.5px/1.45 var(--mono);overflow-wrap:anywhere}
 .va .side .brand{padding:2px 8px 18px}
 .va .brand .hub{margin-left:auto;font:400 11px var(--mono);color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:120px}
@@ -193,6 +208,7 @@ a.plink:hover,span.plink:hover{color:var(--violet);border-bottom-color:var(--vio
   .va .side .foot{position:static;flex-direction:row;flex-wrap:wrap;align-items:center;margin-top:10px;padding:6px 0 12px;border-top:1px solid var(--line)}
   .va .side .foot .linkbtn{margin-left:auto}
   .va .build-info{flex-basis:100%;padding-top:2px}
+  .hub-update{flex-basis:100%}
 }
 
 /* This browser's appearance (appearance.js; set before first paint by

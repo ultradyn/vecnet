@@ -476,6 +476,10 @@ export function createApi({ secret, fetch = globalThis.fetch, onUnauthorized = (
     counters: () => get('/v1/admin/counters'),
     activityStats: () => get('/v1/admin/activity-stats'),
     notices: () => get('/v1/hub/notices'),
+    // Hub version check (docs/OPERATOR.md "Hub updates"). startUpdate sends
+    // no body: the hub installs only the version it read from npm itself.
+    updateStatus: () => get('/v1/admin/update'),
+    startUpdate: () => post('/v1/admin/update'),
     prefs, patchPrefs, previewPrefs,
     // blob(sha) reads a hub-hosted blob; blob(sha, id) a direct R2 one.
     // Both accept a third options argument to cancel the entire body read.

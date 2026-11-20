@@ -10,6 +10,7 @@ import { createActivity } from './activity.js';
 import { createApi } from './api.js';
 import { createAppearance } from './appearance.js';
 import { showBuildInfo } from './build-info.js';
+import { createUpdate } from './update.js';
 import { avatarHash, createAvatarCache } from './avatar-model.js';
 import * as compose from './compose.js';
 import { connectionState } from './connection-model.js';
@@ -294,6 +295,8 @@ function start(secret) {
   // in reaches it only this way.
   const activity = createActivity({ api, signal: stop.signal });
   const notices = createNotices({ api, store, root: $('notices'), onPhase: () => renderConn(store, activity, notices) });
+  // Hub update indicator: a sidebar card when npm has a newer vecnet.
+  const update = createUpdate({ api, root: $('hub-update'), toast });
   const peers = store.resource('peers', () => api.peers());
   const threads = store.resource('threads', () => api.myThreads({ limit: 200 }));
   // limit pages deliveries; the unread count and `me` do not depend on it.
@@ -386,6 +389,7 @@ function start(secret) {
     activity.onRestart(ms => notices.poll(ms)),
     activity.subscribe(ev => notices.activity(ev)),
     () => notices.close(),
+    () => update.close(),
     threads.subscribe(redraw),
     inboxHead.subscribe(redraw),
     peers.subscribe(redraw),
