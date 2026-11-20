@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/XertroV/vecnet/internal/envelope"
@@ -71,10 +72,12 @@ type mcpRelay struct {
 	waitMu     sync.Mutex
 	waitCursor string
 	// waitCtx ends every pending vecnet_wait at stdin EOF; waits tracks the
-	// goroutines so the relay cannot exit around a live connection.
+	// goroutines so the relay cannot exit around a live connection, and
+	// waitLive counts them against mcpWaitMaxConcurrent.
 	waitCtx    context.Context
 	waitCancel context.CancelFunc
 	waits      sync.WaitGroup
+	waitLive   atomic.Int32
 }
 
 func (a *app) cmdMCP(args []string) error {
@@ -940,10 +943,12 @@ func mcpAppendWaitTool(payload, result json.RawMessage) []byte {
 	return mcpRelayEncodeFields(reply)
 }
 
-// mcpWaitDefaults bound the relay-local tool's arguments.
+// mcpWaitDefaults bound the relay-local tool's arguments, and
+// mcpWaitMaxConcurrent caps its simultaneous calls per relay.
 const (
 	mcpWaitDefaultSeconds = 900
 	mcpWaitMaxSeconds     = 1800
+	mcpWaitMaxConcurrent  = 4
 )
 
 // stopWaits cancels every pending vecnet_wait (stdin EOF or shutdown) and
@@ -997,9 +1002,14 @@ func (r *mcpRelay) waitRequest(msg mcpRelayMessage) (bool, error) {
 			}
 		}
 	}
+	if r.waitLive.Add(1) > mcpWaitMaxConcurrent {
+		r.waitLive.Add(-1)
+		return true, &mcpBindingError{"too many concurrent vecnet_wait calls"}
+	}
 	r.waits.Add(1)
 	go func() {
 		defer r.waits.Done()
+		defer r.waitLive.Add(-1)
 		r.waitReply(msg.ID, timeout)
 	}()
 	return true, nil
@@ -1069,8 +1079,17 @@ func (r *mcpRelay) wait(ctx context.Context) (string, string, error) {
 		if woke {
 			return "message_available", cursor, nil
 		}
-		if ctx.Err() == nil && err != nil && terminal(err) {
-			return "", "", err
+		if ctx.Err() == nil && err != nil {
+			if terminal(err) {
+				return "", "", err
+			}
+			if _, purged := oldestCursor(err); purged {
+				// The cursor this relay resumed from is gone from the hub's
+				// log: start again from the acked cursor, like watch.
+				r.waitMu.Lock()
+				r.waitCursor = ""
+				r.waitMu.Unlock()
+			}
 		}
 		if ctx.Err() != nil {
 			return "timeout", "", nil

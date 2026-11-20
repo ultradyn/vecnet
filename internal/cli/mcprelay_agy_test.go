@@ -710,6 +710,78 @@ func TestMCPRelayAgyWaitConcurrent(t *testing.T) {
 	agyNoSideEffects(t, h, u, before)
 }
 
+// A cursor_purged stream answer resets the relay's wait cursor to empty:
+// the retry starts again from the hub's acked cursor instead of resuming a
+// position the hub no longer holds.
+func TestMCPRelayAgyWaitPurgedCursorResets(t *testing.T) {
+	var connections int32
+	h := agyFake(t, func(w http.ResponseWriter, r *http.Request) {
+		switch atomic.AddInt32(&connections, 1) {
+		case 1: // the first wait: no after=, wake at once
+			w.Header().Set("Content-Type", "text/event-stream")
+			agySSE(w, "e1.1", "delivery", agyDelivery("e1.1", "wake"))
+			<-r.Context().Done()
+		case 2: // the resume after e1.1 is purged
+			w.WriteHeader(http.StatusConflict)
+			fmt.Fprintf(w, `{"error":{"code":"cursor_purged","message":"purged","details":{"oldest_cursor":"e9.9"}}}`)
+		default: // the retry must start from the acked cursor: no after=
+			if after := r.URL.Query().Get("after"); after != "" {
+				t.Errorf("retry after a purge resumed after=%s", after)
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			agySSE(w, "e1.2", "delivery", agyDelivery("e1.2", "wake"))
+			<-r.Context().Done()
+		}
+	})
+	u := profileUser(t, h.URL, "relay-test-secret")
+	u.env["VECNET_MCP_CLIENT"] = "agy"
+	s := startRelay(t, u)
+	s.send(relayCall(2, "vecnet_wait", map[string]any{}))
+	h.waitRequest(regexp.MustCompile(`GET /v1/events`), 5*time.Second)
+	agyWaitReply(t, waitLine(t, &s.out, regexp.MustCompile(`"id":2`), 5*time.Second), "2", agyWaitWakeText, "message_available")
+	s.send(relayCall(3, "vecnet_wait", map[string]any{}))
+	h.waitRequest(regexp.MustCompile(`after=e1\.1`), 5*time.Second)
+	agyWaitReply(t, waitLine(t, &s.out, regexp.MustCompile(`"id":3`), 10*time.Second), "3", agyWaitWakeText, "message_available")
+	s.stop()
+}
+
+// At most four vecnet_wait calls run concurrently per relay; a fifth is a
+// -32602 with no hub traffic, while the stdin loop keeps serving.
+func TestMCPRelayAgyWaitConcurrencyCap(t *testing.T) {
+	var streams atomic.Int32
+	h := agyFake(t, func(w http.ResponseWriter, r *http.Request) {
+		streams.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		<-r.Context().Done() // never wakes: holds every wait open
+	})
+	u := profileUser(t, h.URL, "relay-test-secret")
+	u.env["VECNET_MCP_CLIENT"] = "agy"
+	s := startRelay(t, u)
+	for id := 2; id <= 5; id++ {
+		s.send(relayCall(id, "vecnet_wait", map[string]any{}))
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && streams.Load() < 4 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if streams.Load() != 4 {
+		t.Fatalf("open streams = %d, want 4", streams.Load())
+	}
+	s.send(relayLine(6, "ping", nil))
+	waitLine(t, &s.out, regexp.MustCompile(`"id":6`), 5*time.Second)
+	s.send(relayCall(7, "vecnet_wait", map[string]any{}))
+	line := waitLine(t, &s.out, regexp.MustCompile(`"id":7`), 5*time.Second)
+	var reply relayReply
+	if err := json.Unmarshal([]byte(line), &reply); err != nil {
+		t.Fatal(err)
+	}
+	relayError(t, reply, -32602, "too many concurrent vecnet_wait calls")
+	s.stop()
+	if n := streams.Load(); n != 4 {
+		t.Fatalf("the capped wait opened hub traffic: %d streams", n)
+	}
+}
+
 func TestMCPRelayAgyWaitStdinEOF(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
