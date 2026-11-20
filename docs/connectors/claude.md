@@ -23,8 +23,10 @@ Registration proves, through the kernel and Claude's own private session
 registry, that the registering hook is a child of the exact live Claude
 process (`/proc` start identity, boot id, OS-user ownership, the canonical
 config root, and a private messaging socket of the right type). Other
-platforms, missing evidence and unsupported builds stay on the legacy path
-and report `unsupported`; nothing is guessed. Registration requires the
+platforms stay on the legacy path and report `unsupported`, and missing or
+mismatched evidence leaves the root `blocked` or unregistered; nothing is
+guessed. The Claude build itself is not checked while build gating is
+parked. Registration requires the
 session host to supply `CLAUDE_PID` and `CLAUDE_CODE_SESSION_ID` in the hook's
 environment, and a missing or malformed value leaves registration on the
 legacy path. `CLAUDE_CODE_VERSION` is ignored.

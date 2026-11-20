@@ -1387,3 +1387,120 @@ func TestClaudeBindingsV1Migrates(t *testing.T) {
 	refuseReg(t, a.reg(f.scope("p"), a.root("S1"), nil), "opt-out")
 	f.assertPassive()
 }
+
+// TestClaudeRegistrationRepinCollisionRefused pins the re-key collision: one
+// hub behind two aliases, with E2 already re-pinned (row B = newPin@E2) while
+// row A still holds oldPin@E1 for the same recipient. When A's root
+// re-registers with E1 now pinned to newPin, its scope matches both rows; it
+// is refused as a steal, nothing is written, and the registry stays readable.
+// Both storage orders behave the same.
+func TestClaudeRegistrationRepinCollisionRefused(t *testing.T) {
+	const newPin = "ed25519:AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA"
+	for _, order := range []string{"A first", "B first"} {
+		t.Run(order, func(t *testing.T) {
+			f := newClaudeRegFixture(t)
+			e1 := f.hub
+			e2 := strings.Replace(f.hub, "127.0.0.1", "localhost", 1)
+			a := f.startTree("a")
+			a.sessionRecord(a.pid, "S1", a.socket)
+			b := f.startTree("b")
+			b.sessionRecord(b.pid, "S2", b.socket)
+			if err := saveConfig(f.config, Config{Profiles: map[string]Profile{
+				"p":  {Hub: e1, HubPubkey: claudeTestHubPin, Secret: "vn_peer_test", PeerID: "peer_A"},
+				"p2": {Hub: e2, HubPubkey: newPin, Secret: "vn_peer_test_2", PeerID: "peer_A"},
+			}}); err != nil {
+				t.Fatal(err)
+			}
+			scopeA, err := f.app().claudeScopeForProfile("p")
+			if err != nil {
+				t.Fatal(err)
+			}
+			scopeB, err := f.app().claudeScopeForProfile("p2")
+			if err != nil {
+				t.Fatal(err)
+			}
+			rowA := claudeBinding{claudeScope: scopeA, claudeRoot: a.root("S1"), Generation: strings.Repeat("a1", 16), UpdatedAt: time.Now().UTC()}
+			rowB := claudeBinding{claudeScope: scopeB, claudeRoot: b.root("S2"), Generation: strings.Repeat("b2", 16), UpdatedAt: time.Now().UTC()}
+			rows := []claudeBinding{rowA, rowB}
+			if order == "B first" {
+				rows = []claudeBinding{rowB, rowA}
+			}
+			doc := claudeDocumentEmpty()
+			doc.Bindings = rows
+			if err := claudeDocumentValidate(doc); err != nil {
+				t.Fatalf("the two-row fixture is itself invalid: %v", err)
+			}
+			if err := f.app().writeClaudeBindingsDocument(doc); err != nil {
+				t.Fatal(err)
+			}
+			base := f.registryBytes()
+
+			// E1 is now pinned to the rotated key too.
+			if err := saveConfig(f.config, Config{Profiles: map[string]Profile{
+				"p":  {Hub: e1, HubPubkey: newPin, Secret: "vn_peer_test", PeerID: "peer_A"},
+				"p2": {Hub: e2, HubPubkey: newPin, Secret: "vn_peer_test_2", PeerID: "peer_A"},
+			}}); err != nil {
+				t.Fatal(err)
+			}
+			repinned, err := f.app().claudeScopeForProfile("p")
+			if err != nil || repinned.HubIdentity != newPin || repinned.HubEndpoint != scopeA.HubEndpoint {
+				t.Fatalf("repinned scope = %+v, %v", repinned, err)
+			}
+			refuseReg(t, a.reg(repinned, a.root("S1"), nil), "cannot be stolen")
+			if !bytes.Equal(base, f.registryBytes()) {
+				t.Fatal("the refused re-key wrote the registry")
+			}
+			stored := f.storedRows(t) // the registry is still readable
+			if len(stored) != 2 {
+				t.Fatalf("the registry lost a row: %+v", stored)
+			}
+			// Status and later registrations keep working.
+			if _, err := f.app().readClaudeStatus(context.Background(), repinned); err != nil {
+				t.Fatalf("status after the refused re-key: %v", err)
+			}
+			mustReg(t, b.reg(scopeB, b.root("S2"), nil))
+			f.assertPassive()
+		})
+	}
+}
+
+// TestClaudeBindingsWriteRefusesInvalidDocument pins the write-side guard:
+// no code path can persist a document the strict reader would reject (here,
+// two rows for one recipient under one key), and a refused write leaves the
+// stored file untouched and readable.
+func TestClaudeBindingsWriteRefusesInvalidDocument(t *testing.T) {
+	f := newClaudeRegFixture(t)
+	a := f.startTree("a")
+	a.sessionRecord(a.pid, "S1", a.socket)
+	first := mustReg(t, a.reg(f.scope("p"), a.root("S1"), nil))
+	base := f.registryBytes()
+
+	dup := first
+	dup.ConfigRoot, dup.SessionID, dup.PID = filepath.Join(f.dir, "other-root"), "S9", first.PID+1
+	dup.Generation = strings.Repeat("cd", 16)
+	doc := claudeDocumentEmpty()
+	doc.Bindings = []claudeBinding{first, dup}
+	bad := map[string]claudeBindingsFile{"duplicate recipient": doc}
+	wrongVersion := claudeDocumentEmpty()
+	wrongVersion.Version = 1
+	bad["wrong version"] = wrongVersion
+	nilCanary := claudeDocumentEmpty()
+	nilCanary.Canary = nil
+	bad["missing canary"] = nilCanary
+	endpointScope := f.scope("p")
+	endpointScope.HubIdentity = endpointScope.HubEndpoint
+	endpointRow := claudeDocumentEmpty()
+	endpointRow.Bindings = []claudeBinding{{claudeScope: endpointScope, claudeRoot: first.claudeRoot, Generation: first.Generation, UpdatedAt: first.UpdatedAt}}
+	bad["endpoint-form binding"] = endpointRow
+	for label, d := range bad {
+		if err := f.app().writeClaudeBindingsDocument(d); err == nil || !strings.Contains(err.Error(), "refused before write") {
+			t.Fatalf("%s: the write was not refused: %v", label, err)
+		}
+		if !bytes.Equal(base, f.registryBytes()) {
+			t.Fatalf("%s: a refused write changed the stored file", label)
+		}
+	}
+	if rows := f.storedRows(t); len(rows) != 1 || rows[0].Generation != first.Generation {
+		t.Fatalf("the stored registry is no longer the valid original: %+v", rows)
+	}
+}

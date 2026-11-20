@@ -521,7 +521,13 @@ func (a *app) readClaudeBindingsDocument() (claudeBindingsFile, error) {
 	return claudeDocumentDecode(raw)
 }
 
+// writeClaudeBindingsDocument persists only a document the strict reader
+// accepts: a write that would brick every later registration, status,
+// deliver or resolve is refused instead, leaving the stored file as it was.
 func (a *app) writeClaudeBindingsDocument(doc claudeBindingsFile) error {
+	if err := claudeDocumentValidate(doc); err != nil {
+		return usageErr("claude binding document refused before write: " + err.Error())
+	}
 	raw, err := json.Marshal(doc)
 	if err != nil {
 		return err
@@ -657,13 +663,21 @@ func (a *app) claudeScopeWitness(scope claudeScope) error {
 // scope's (the profile's pin changed at the same endpoint) is re-keyed to the
 // present pin with a fresh generation, so its old key and generation fence
 // every claim made under them; the ownership rules still apply first.
+//
+// A scope that matches more than one stored row (its endpoint names one, its
+// present pin another: one hub behind two aliases, re-pinned unevenly) is
+// refused as a steal attempt. Re-keying either row onto the other's key would
+// persist a duplicate recipient, and merging them is never guessed.
 func claudeRegisterTransition(doc *claudeBindingsFile, scope claudeScope, root claudeRoot, now time.Time) (claudeBinding, string, error) {
 	existing := -1
 	for i, b := range doc.Bindings {
-		if claudeSameRecipient(b.claudeScope, scope) {
-			existing = i
-			break
+		if !claudeSameRecipient(b.claudeScope, scope) {
+			continue
 		}
+		if existing >= 0 {
+			return claudeBinding{}, "", usageErr("claude recipient is already registered through another binding of this hub; it cannot be stolen")
+		}
+		existing = i
 	}
 	if existing < 0 {
 		// A fresh claim must not collide with another recipient's process
