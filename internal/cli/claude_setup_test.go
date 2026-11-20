@@ -339,8 +339,14 @@ func TestClaudeRuntimeSnapshotRedaction(t *testing.T) {
 	if string(rows[0]["generation"]) != jsonString("0123456789abcdef0123456789abcdef") {
 		t.Fatalf("generation missing: %q", out.String())
 	}
-	if string(rows[0]["state"]) != jsonString("blocked") {
-		t.Fatalf("a root with no live evidence must report blocked: %q", out.String())
+	// Linux validates the root and finds no live evidence (blocked); every
+	// other platform stays on the legacy path and says so (unsupported).
+	wantState := "blocked"
+	if runtime.GOOS != "linux" {
+		wantState = "unsupported"
+	}
+	if string(rows[0]["state"]) != jsonString(wantState) {
+		t.Fatalf("a root with no live evidence must report %s: %q", wantState, out.String())
 	}
 	// The task-7 admission gate and the host's child-spawn coordinates.
 	var admission struct {
