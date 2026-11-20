@@ -56,6 +56,12 @@ export type ClaudeClaimState = typeof STATES[number];
  * helper's own exit 2 is flag parsing only; for this adapter's fixed argv it
  * can only mean a fatal runtime panic, so the transport reports it as 4. */
 export type DeliverExit = 0 | 3 | 4 | 5;
+/** The transport's result: the helper's exit code, or the exit code plus the
+ * helper's captured stderr (bounded at capture) when any was written — the
+ * adapter surfaces that text, trimmed to one line, only on a pre-write
+ * refusal (exit 5). It is a log-line diagnostic: never a claim-record field,
+ * never the status sidecar. */
+export type DeliverResult = DeliverExit | { exit: DeliverExit; stderr: string };
 
 /** Durable claim record under `claude-claims:claim:<deliveryId>`: opaque ids,
  * cursors, states and bounded timestamps only — no body, no credentials, no
@@ -130,7 +136,7 @@ export interface ClaudeDeliveryAdapterDeps {
   log: Log;
   kv: KeyValue;
   env: NodeJS.ProcessEnv;
-  transport?: (frame: ClaudeDeliveryFrame) => Promise<DeliverExit>;
+  transport?: (frame: ClaudeDeliveryFrame) => Promise<DeliverResult>;
   fetchSnapshot?: () => Promise<ClaudeSnapshot | undefined>;
   fetchCandidates?: (coordinates: ClaudeDeliveryScopeCoordinates, cursor: string | undefined) => Promise<ClaudeCandidatePage | undefined>;
   /** The read-only ack-observation read. Defaults to the pinned inbox child
@@ -221,23 +227,32 @@ function bounded<T>(p: Promise<T>, ms: number, clock: Clock): Promise<T | undefi
 }
 
 /** The default transport: one bounded `claude deliver` child per attempt.
- * Child output is never logged. Exit 2, a signal, an unmapped code or a
- * timeout is uncertain (4: bytes may have left). An `error` event is a
- * definite pre-write refusal (5) only when the child never spawned; Node
- * also emits `error` for a running child (a failed kill on the timeout), and
- * that child may be mid-write, so it is uncertain (4). `spawnChild` is the
- * process port (node's spawn unless a test injects one). */
-export function spawnClaudeDeliver(env: NodeJS.ProcessEnv, clock: Clock, spawnChild: typeof spawn = spawn): (frame: ClaudeDeliveryFrame) => Promise<DeliverExit> {
+ * Stdout is never read; up to 512 bytes of stderr are captured so a refusal
+ * can say why, and are surfaced (trimmed to one line) only in the adapter's
+ * `refused_before_write` log line — never in a claim record or the status
+ * sidecar. Exit 2, a signal, an unmapped code or a timeout is uncertain (4:
+ * bytes may have left). An `error` event is a definite pre-write refusal (5)
+ * only when the child never spawned; Node also emits `error` for a running
+ * child (a failed kill on the timeout), and that child may be mid-write, so
+ * it is uncertain (4). `spawnChild` is the process port (node's spawn
+ * unless a test injects one). */
+export function spawnClaudeDeliver(env: NodeJS.ProcessEnv, clock: Clock, spawnChild: typeof spawn = spawn): (frame: ClaudeDeliveryFrame) => Promise<DeliverResult> {
   const childEnv = cliEnvironment(Object.fromEntries(Object.entries(env).filter((e): e is [string, string] => typeof e[1] === 'string')));
   const bin = childEnv.VECNET_BIN || 'vecnet';
   return frame => new Promise(resolve => {
     let command;
     try { command = commandInvocation([bin, ...claudeDeliverArgs(frame)], childEnv); }
     catch { resolve(5); return; }
-    const child = spawnChild(command.file, command.args, { ...command, windowsHide: true, env: childEnv, stdio: ['ignore', 'ignore', 'ignore'] });
-    let settled = false;
-    const finish = (exit: DeliverExit) => { if (!settled) { settled = true; timer.cancel(); resolve(exit); } };
+    const child = spawnChild(command.file, command.args, { ...command, windowsHide: true, env: childEnv, stdio: ['ignore', 'ignore', 'pipe'] });
+    let err = '', settled = false;
+    const finish = (exit: DeliverExit) => {
+      if (settled) return;
+      settled = true;
+      timer.cancel();
+      resolve(err !== '' ? { exit, stderr: err } : exit);
+    };
     const timer = clock.timer(CHILD_TIMEOUT, () => terminateProcess(child));
+    child.stderr?.setEncoding('utf8').on('data', (chunk: string) => { err = (err + chunk).slice(0, 512); });
     // No pid: the child never ran and no byte could leave. A pid: it ran and
     // may still be writing, so the outcome is unknown.
     child.once('error', () => finish(child.pid === undefined ? 5 : 4));
@@ -813,8 +828,9 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Cl
     if (env.VECNET_CLAUDE_DELIVERY_CRASH_BEFORE_WRITE === '1') process.kill(process.pid, 'SIGKILL');
     inFlight.add(claim.deliveryId);
     try {
-      const exit = await transport({ bindingKey: row.binding_key, generation: claim.generation,
+      const result = await transport({ bindingKey: row.binding_key, generation: claim.generation,
         msgId: claim.msgId, threadId: claim.threadId, messageId: claim.messageId });
+      const exit: DeliverExit = typeof result === 'number' ? result : result.exit;
       if (exit === 0) {
         claim.state = 'released';
         claim.disposition = 'attempted';
@@ -829,7 +845,11 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Cl
         claim.disposition = 'uncertain';
         claim.dispositionReason = 'write_failed_or_outcome_unknown';
       }
-      log.info('claude_delivery_disposition', { deliveryId: claim.deliveryId, scope: claim.scope, exit, state: claim.state, disposition: claim.disposition, reason: claim.dispositionReason });
+      // The helper's own words for why it refused, trimmed to one line — a
+      // log diagnostic only: the claim keeps its fixed reason.
+      const helperStderr = typeof result === 'number' || result.exit !== 5 ? undefined
+        : result.stderr.replace(/\s+/g, ' ').trim();
+      log.info('claude_delivery_disposition', { deliveryId: claim.deliveryId, scope: claim.scope, exit, state: claim.state, disposition: claim.disposition, reason: claim.dispositionReason, ...(helperStderr !== undefined && helperStderr !== '' ? { helperStderr } : {}) });
     } catch {
       claim.state = 'uncertain';
       claim.disposition = 'uncertain';

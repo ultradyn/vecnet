@@ -11,7 +11,7 @@ import type { KeyValue } from '../src/backend.ts';
 import { fakeClock, memoryLog } from '../../hub-client/testing/fixtures.ts';
 import type { Log } from '../../hub-client/src/ports.ts';
 import { createClaudeDeliveryAdapter, claudeDeliveryCanaryAllowed, claudeInboxArgs, claudeDeliverArgs, spawnClaudeDeliver, spawnClaudeInbox, CLAUDE_PENDING_LIMIT } from '../src/delivery/claude-adapter.ts';
-import type { ClaudeCandidatePage, ClaudeClaimRecord, ClaudeDeliveryAdapterDeps, ClaudeDeliveryFrame, ClaudeDeliveryScopeCoordinates, DeliverExit } from '../src/delivery/claude-adapter.ts';
+import type { ClaudeCandidatePage, ClaudeClaimRecord, ClaudeDeliveryAdapterDeps, ClaudeDeliveryFrame, ClaudeDeliveryScopeCoordinates, DeliverExit, DeliverResult } from '../src/delivery/claude-adapter.ts';
 import type { WatchPool, WatchRequest, WakeEvent, WatchEnd } from '../src/delivery/watch-pool.ts';
 
 // Task 7 (claude delivery chain): the hosted native pointer-delivery adapter.
@@ -712,7 +712,7 @@ function deliverStub(t: TestContext, body: string): string {
 
 const frame: ClaudeDeliveryFrame = { bindingKey: KEY, generation: GEN, msgId: 'n'.repeat(32), threadId: THREAD, messageId: 'msg_' + ulid(1) };
 
-async function spawnExit(t: TestContext, body: string | undefined, drive?: (clock: ReturnType<typeof fakeClock>) => Promise<void>): Promise<DeliverExit> {
+async function spawnExit(t: TestContext, body: string | undefined, drive?: (clock: ReturnType<typeof fakeClock>) => Promise<void>): Promise<DeliverResult> {
   const clock = fakeClock(1000);
   const bin = body === undefined ? join(tmpdir(), 'vn-no-such-dir-' + randomUUID(), 'vecnet') : deliverStub(t, body);
   const pending = spawnClaudeDeliver({ HOME: tmpdir(), PATH: process.env.PATH, VECNET_BIN: bin }, clock)(frame);
@@ -780,6 +780,38 @@ test('exit 5 is a definite pre-write refusal', unixChild, async t => {
   assert.equal(claim.disposition, 'refused');
   assert.equal(claim.dispositionReason, 'refused_before_write');
   assert.notEqual(claim.hubAckObserved, true, 'a refusal is never acked');
+});
+
+test('a refusal surfaces the helper stderr, bounded, in the refused_before_write log line', unixChild, async t => {
+  // The helper's own stderr says why it refused. The transport captures up
+  // to 512 bytes of it; the adapter logs it trimmed to a single line with
+  // the refused_before_write disposition, while the durable claim keeps only
+  // its fixed reason — the stderr never enters a claim record or a sidecar.
+  const bin = deliverStub(t, 'printf "vecnet: claude deliver: the recipient opted out\\nvecnet: claude deliver: see claude status\\n" >&2\nexit 5');
+  const direct = await spawnClaudeDeliver({ HOME: tmpdir(), PATH: process.env.PATH, VECNET_BIN: bin }, fakeClock(1000))(frame);
+  assert.deepEqual(direct, { exit: 5, stderr: 'vecnet: claude deliver: the recipient opted out\nvecnet: claude deliver: see claude status\n' },
+    'the raw capture keeps the helper bytes');
+
+  const overflow = deliverStub(t, `printf '%0.sx' $(seq 1 600) >&2\nexit 5`);
+  const capped = await spawnClaudeDeliver({ HOME: tmpdir(), PATH: process.env.PATH, VECNET_BIN: overflow }, fakeClock(1000))(frame);
+  assert.equal(typeof capped === 'number' ? capped : capped.stderr.length, 512, 'the capture is bounded at 512 bytes');
+
+  const f = fixture(t, {
+    transport: async frame2 => { f.transportCalls.push(frame2); return { exit: 5, stderr: 'vecnet: claude deliver: the recipient opted out\nvecnet: claude deliver: see claude status\n' }; },
+  });
+  f.setPages([{ events: [deliveryEvent('e1.1', 1)] }]);
+  f.adapter.start();
+  await settle(); // Baseline-only first pass.
+  f.pool.recording.notify('exclusive:claude:' + KEY, { priority: 'wake' });
+  await settle();
+  const claim = f.kv.claim('dly_' + ulid(1))!;
+  assert.equal(claim.state, 'refused');
+  assert.equal(claim.dispositionReason, 'refused_before_write', 'the claim reason is unchanged');
+  assert.ok(!JSON.stringify(claim).includes('opted out'), 'the helper stderr never enters the durable claim');
+  const line = f.log.entries.find(e => e.msg === 'claude_delivery_disposition')!;
+  assert.equal((line.meta as Record<string, unknown>).helperStderr,
+    'vecnet: claude deliver: the recipient opted out vecnet: claude deliver: see claude status',
+    'the log line carries the refusal reason trimmed to one line');
 });
 
 // Phase 2 task 5: the host's scoped children run against the binding's own
