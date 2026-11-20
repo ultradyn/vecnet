@@ -180,6 +180,50 @@ func TestClaudeCanarySingleScope(t *testing.T) {
 	f.assertNoHub(t)
 }
 
+// TestClaudeCanaryHubRepin pins the re-pin refusal: the same recipient on the
+// same profile and endpoint whose stored canary record names a different
+// pinned hub identity is refused with the recovery copy (disable, then
+// enable) — consent never silently survives an identity change — and
+// disable clears exactly that stale record so a fresh enable works.
+func TestClaudeCanaryHubRepin(t *testing.T) {
+	f := newClaudeCanaryFixture(t)
+	f.ok(t, "--net", "p", "claude", "canary", "enable")
+	if doc := f.document(t); len(doc.Canary) != 1 || doc.Canary[0].HubIdentity != claudeTestHubPin {
+		t.Fatalf("enable stored no record under the current pin: %+v", doc.Canary)
+	}
+	// The hub re-pins: the same profile and endpoint now carry a different
+	// pinned identity (the config witness follows the new pin).
+	repin := "ed25519:" + "J" + claudeTestHubPin[len("ed25519:J"):]
+	alias := strings.Replace(f.hub, "127.0.0.1", "localhost", 1)
+	config := filepath.Join(f.home, "v.toml")
+	if err := saveConfig(config, Config{Profiles: map[string]Profile{
+		"p":        {Hub: f.hub, HubPubkey: repin, Secret: "vn_peer_test_p", PeerID: claudeTestPeerID},
+		"alias":    {Hub: alias, HubPubkey: claudeTestHubPin, Secret: "vn_peer_test_alias", PeerID: claudeTestPeerID},
+		"r":        {Hub: f.hub, HubPubkey: claudeTestHubPin, Secret: "vn_peer_test_r", PeerID: claudeTestPeerB},
+		"operator": {Hub: f.hub, HubPubkey: claudeTestHubPin, Secret: "vn_prn_test", EnrollmentCaller: claudeTestPrn},
+		"loose":    {Hub: f.hub, HubPubkey: claudeTestHubPin, Secret: "vn_peer_test_loose", PeerID: "peer_A"},
+		"unpinned": {Hub: "https://unpinned.example.com", Secret: "vn_peer_test_u", PeerID: claudeTestPeerID},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	f.refuse(t, "the canary record predates a hub identity change; run `claude canary disable` then `claude canary enable`",
+		"--net", "p", "claude", "canary", "enable")
+	if n := len(f.document(t).Canary); n != 1 {
+		t.Fatalf("the refused re-pin left %d record(s), want the stale one", n)
+	}
+	// Disable clears the stale record through the same endpoint; a fresh
+	// enable then records the new pin.
+	f.ok(t, "--net", "p", "claude", "canary", "disable")
+	if n := len(f.document(t).Canary); n != 0 {
+		t.Fatalf("disable left %d record(s) after the re-pin", n)
+	}
+	f.ok(t, "--net", "p", "claude", "canary", "enable")
+	if doc := f.document(t); len(doc.Canary) != 1 || doc.Canary[0].HubIdentity != repin {
+		t.Fatalf("the fresh enable stored no record under the new pin: %+v", doc.Canary)
+	}
+	f.assertNoHub(t)
+}
+
 // TestClaudeCanaryRefusesDelegatedAndPrincipal pins the scope contract: no
 // --as delegation (even an empty one), no principal credential and no
 // caller that is not a well-formed peer id may hold the canary, and a

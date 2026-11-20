@@ -32,6 +32,7 @@ var (
 	errClaudeCanaryScope     = errors.New("the first canary accepts peer credentials and a single exact recipient scope only")
 	errClaudeCanaryHeld      = errors.New("another recipient holds the canary; disable it there first")
 	errClaudeCanaryAlias     = errors.New("this recipient's canary is held through another profile or hub alias; disable it there first")
+	errClaudeCanaryRepinned  = errors.New("the canary record predates a hub identity change; run `claude canary disable` then `claude canary enable`")
 	errClaudeCanaryNotOptIn  = errors.New("the recipient has not opted into the native canary")
 	claudeCanaryUsageMessage = "claude canary: expected enable or disable"
 )
@@ -93,6 +94,13 @@ func (a *app) setClaudeCanary(ctx context.Context, scope claudeScope, enabled bo
 			case held == scope:
 				return nil // Idempotent: the exact record already exists.
 			case claudeSameRecipient(held, scope):
+				// The same recipient through the same endpoint but under a
+				// different pinned identity: the hub re-pinned, and consent
+				// never silently survives an identity change. The copy names
+				// the recovery (disable clears the stale record).
+				if held.HubEndpoint == scope.HubEndpoint && held.HubIdentity != scope.HubIdentity {
+					return errClaudeCanaryRepinned
+				}
 				return errClaudeCanaryAlias
 			default:
 				return errClaudeCanaryHeld
