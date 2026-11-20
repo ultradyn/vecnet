@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -32,16 +33,18 @@ type user struct {
 	conf string
 }
 
-// newUser returns a user with no config file yet.
+// newUser returns a command fixture with no config file yet. Automatic
+// maintenance has its own fixtures; command tests do not inventory the CWD.
 func newUser(t *testing.T) *user {
 	t.Helper()
 	dir := t.TempDir()
 	u := &user{t: t, conf: filepath.Join(dir, "config", "vecnet.toml")}
 	u.env = map[string]string{
-		"VECNET_CONFIG":   u.conf,
-		"XDG_CACHE_HOME":  filepath.Join(dir, "cache"),
-		"XDG_CONFIG_HOME": filepath.Join(dir, "config"),
-		"HOME":            filepath.Join(dir, "home"),
+		"VECNET_CONFIG":            u.conf,
+		"VECNET_LOCAL_MAINTENANCE": "0",
+		"XDG_CACHE_HOME":           filepath.Join(dir, "cache"),
+		"XDG_CONFIG_HOME":          filepath.Join(dir, "config"),
+		"HOME":                     filepath.Join(dir, "home"),
 	}
 	return u
 }
@@ -601,16 +604,25 @@ func TestAdminCommandsJSON(t *testing.T) {
 }
 
 func TestHubErrorExitCode(t *testing.T) {
-	env := testhub.Start(t)
-	_, aSec := env.NewPeer("session", "A")
-	a := profileUser(t, env.URL, aSec)
+	sends := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/messages" {
+			http.NotFound(w, r)
+			return
+		}
+		sends++
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, `{"error":{"code":"unknown_recipient","message":"recipient is not enrolled","details":{}}}`)
+	}))
+	defer srv.Close()
+	a := profileUser(t, srv.URL, "synthetic-secret")
 
-	code, out, errs := a.run("send", "Max", "hi", "--wake")
-	if code != 2 {
-		t.Fatalf("send to Max: exit %d, want 2 (stdout %q stderr %q)", code, out, errs)
+	code, out, errs := a.run("send", "peer_00000000000000000000000001", "hi", "--wake")
+	if code != 2 || out != "" || sends != 1 {
+		t.Fatalf("canonical recipient hub refusal: exit %d, sends %d, want 2 and 1 (stdout %q stderr %q)", code, sends, out, errs)
 	}
-	if !strings.HasPrefix(errs, "name_not_an_address: ") {
-		t.Fatalf("stderr = %q, want name_not_an_address: …", errs)
+	if !strings.HasPrefix(errs, "unknown_recipient: ") {
+		t.Fatalf("stderr = %q, want unknown_recipient: …", errs)
 	}
 }
 

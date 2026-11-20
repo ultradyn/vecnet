@@ -97,7 +97,7 @@ export async function openDeliveryLease(bindingsPath: string, euid: number, opti
 /** Internal writer for an elected connector. Closing it never releases the lease. */
 export function createStatusPublisher(bindingsPath: string, lease: DeliveryLease, env: Environment): StatusPublisher {
   const path = leaseStatusPaths.get(lease) ?? bindingsPath + '.status.json';
-  let closed = false, owned: { dev: number; ino: number } | undefined;
+  let closed = false, owned: { dev: bigint; ino: bigint } | undefined;
   return {
     valid: () => !closed && lease.valid(),
     publish(now, entries) {
@@ -117,14 +117,15 @@ export function createStatusPublisher(bindingsPath: string, lease: DeliveryLease
           renameSync(temp, path);
         } finally { try { unlinkSync(temp); } catch {} }
       }
-      owned = lstatSync(path);
+      owned = lstatSync(path, { bigint: true });
     },
     async close() {
       if (closed) return;
       closed = true;
       if (!owned || !lease.valid()) return;
       try {
-        const current = lstatSync(path);
+        // NTFS file IDs are uint64; number Stats can alias distinct owners.
+        const current = lstatSync(path, { bigint: true });
         if (current.dev === owned.dev && current.ino === owned.ino) unlinkSync(path);
       } catch {}
     },

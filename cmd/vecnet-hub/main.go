@@ -483,19 +483,28 @@ func serve(ctx context.Context, cfg serveConfig, stdout io.Writer) error {
 	deps.TrustFlyClientIP = cfg.TrustFly
 	deps.MCPAllowedOrigins = cfg.MCPOrigins
 	deps.MCPLegacySessions = cfg.MCPLegacySessions
-	var handler http.Handler
+	var notice envelope.HubNotice
 	if target != "" {
 		// EnsureMovingNotice also re-signs, as the hub, a stored notice that
 		// an offline rotation left unverifiable.
-		notice, err := h.EnsureMovingNotice(ctx, target)
-		if err != nil {
-			return err
-		}
+		notice, err = h.EnsureMovingNotice(ctx, target)
+	} else {
+		_, err = h.ClearOnBoot(ctx)
+	}
+	// A stop can arrive before readiness, including during store open. Only
+	// the notice operation uses the lifecycle context here; independent
+	// startup errors (and deadlines) must still be reported.
+	if ctx.Err() == context.Canceled && (err == nil || errors.Is(err, context.Canceled)) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	var handler http.Handler
+	if target != "" {
 		handler = httpapi.Relocated(deps, notice)
 	} else {
-		if _, err := h.ClearOnBoot(ctx); err != nil {
-			return err
-		}
 		handler = httpapi.New(deps)
 	}
 	srv := &http.Server{Handler: handler}

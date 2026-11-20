@@ -61,9 +61,9 @@ func TestUnsupportedSnapshotMessagePreservesInline(t *testing.T) {
 		}
 		cases["unsupported_"+key] = string(raw)
 	}
+	db := openDB(t)
 	for name, embedded := range cases {
 		t.Run(name, func(t *testing.T) {
-			db := openDB(t)
 			wire := []byte(snapshotDelivery(embedded))
 			if envelope.Validate("delivery", wire) == nil {
 				t.Fatal("regression fixture must violate Message schema")

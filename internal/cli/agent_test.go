@@ -528,11 +528,11 @@ func TestAgentCLIParity(t *testing.T) {
 
 	t.Run("priority stays required", func(t *testing.T) {
 		u := agentOperator(t, "http://127.0.0.1:9")
-		code, _, errs := u.run("send", "peer_x", "hello")
+		code, _, errs := u.run("send", "peer_01ARZ3NDEKTSV4RRFFQ69G5FAV", "hello")
 		if code != 1 || !strings.Contains(errs, "no default") {
 			t.Fatalf("send without priority: exit %d %s", code, errs)
 		}
-		code, _, errs = u.run("reply", "msg_x", "hello")
+		code, _, errs = u.run("reply", "msg_01ARZ3NDEKTSV4RRFFQ69G5FAV", "hello")
 		if code != 1 || !strings.Contains(errs, "no default") {
 			t.Fatalf("reply without priority: exit %d %s", code, errs)
 		}

@@ -13,7 +13,7 @@ import (
 )
 
 func TestStorageMaintenanceOptInAndStatus(t *testing.T) {
-	env := testhub.StartWith(t, func(c *hub.Config) { c.StorageMaintenance = store.MaintenanceOptions{ReclaimPages: 8} })
+	env := testhub.StartFull(t, func(c *hub.Config) { c.StorageMaintenance = store.MaintenanceOptions{ReclaimPages: 8} })
 	h := env.Hub
 	ctx := context.Background()
 	h.Tick(ctx, true)

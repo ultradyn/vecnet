@@ -127,7 +127,7 @@ func (c *launcherScheduler) command(ctx context.Context, op string, task launche
 	raw, err := cmd.Output()
 	if err != nil {
 		if ctx.Err() != nil {
-			return launcherSchedulerReply{}, ctx.Err()
+			return launcherSchedulerReply{}, fmt.Errorf("launcher Task Scheduler %s: %w", op, ctx.Err())
 		}
 		return launcherSchedulerReply{}, fmt.Errorf("launcher Task Scheduler %s failed: %w: %s", op, err, strings.TrimSpace(stderr.String()))
 	}

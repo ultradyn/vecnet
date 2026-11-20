@@ -59,7 +59,7 @@ func CheckFile(f *os.File, directory, private bool) error {
 	}
 	isDir := info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0
 	if isDir != directory || !directory && info.NumberOfLinks != 1 {
-		return fmt.Errorf("private state requires a single-link regular file or directory")
+		return &os.PathError{Op: "check private state", Path: f.Name(), Err: fmt.Errorf("private state requires a single-link regular file or directory: want_directory=%t is_directory=%t links=%d attributes=%#x private=%t", directory, isDir, info.NumberOfLinks, info.FileAttributes, private)}
 	}
 	sd, e := windows.GetSecurityInfo(h, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
 	if e != nil {
@@ -223,6 +223,14 @@ func openDir(path string, create bool) (*os.File, error) {
 	return dir, nil
 }
 func OpenDir(path string) (*os.File, error) { return openDir(path, false) }
+
+// OpenWindowsDirAt opens one existing directory component relative to a held parent.
+// It refuses reparse points and omits delete sharing, like OpenDir. The caller
+// must check the returned handle's owner/permissions for its trust policy.
+func OpenWindowsDirAt(parent *os.File, name string) (*os.File, error) {
+	return openAt(parent, name, os.O_RDONLY, true, false)
+}
+
 func MkdirAll(path string, mode os.FileMode) error {
 	dir, e := openDir(path, true)
 	if e != nil {

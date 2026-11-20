@@ -76,7 +76,7 @@ func (c *FakeClock) Advance(d time.Duration) {
 	c.mu.Unlock()
 }
 
-// Start opens a store in t.TempDir(), builds the hub on a FakeClock (starting
+// Start opens a disposable NORMAL store in t.TempDir(), builds the hub on a FakeClock (starting
 // at the real current time, millisecond-truncated), serves httpapi on a random
 // loopback port and creates the operator. Everything is closed at test end.
 // The hub runs with Config.AllowPrivateEgress = true, since every test
@@ -98,12 +98,22 @@ func StartWith(t *testing.T, cfgFn func(*hub.Config)) *Env {
 func StartWithServer(t *testing.T, cfgFn func(*hub.Config), srvFn func(*http.Server)) *Env {
 	t.Helper()
 	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "hub.db"))
-	if err != nil {
-		t.Fatalf("testhub: open store: %v", err)
-	}
+	db := FreshStore(t, filepath.Join(dir, "hub.db"))
 	clock := &FakeClock{t: time.Now().UTC().Truncate(time.Millisecond)}
 	return startDB(t, db, dir, clock, cfgFn, srvFn)
+}
+
+// StartFull is reserved for tests asserting storage durability/maintenance
+// policy. Unlike disposable logical fixtures it opens a fresh migrated FULL
+// store, independently of the operator environment.
+func StartFull(t *testing.T, cfgFn func(*hub.Config)) *Env {
+	t.Helper()
+	dir := t.TempDir()
+	db, err := store.OpenWithSynchronous(filepath.Join(dir, "hub.db"), "full")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return startDB(t, db, dir, &FakeClock{t: time.Now().UTC().Truncate(time.Millisecond)}, cfgFn, nil)
 }
 
 // CloneDB starts another hub over a VACUUM INTO snapshot. Database-backed
@@ -115,10 +125,7 @@ func (e *Env) CloneDB(t *testing.T) *Env {
 	if _, err := e.Hub.DB.ExecContext(context.Background(), `VACUUM INTO ?`, path); err != nil {
 		t.Fatalf("testhub: clone database: %v", err)
 	}
-	db, err := store.Open(path)
-	if err != nil {
-		t.Fatalf("testhub: open cloned store: %v", err)
-	}
+	db := OpenFixtureStore(t, path)
 	env := startDB(t, db, dir, &FakeClock{t: e.Now.Now()}, func(c *hub.Config) {
 		url, dataDir := c.PublicURL, c.DataDir
 		*c = e.Hub.Cfg

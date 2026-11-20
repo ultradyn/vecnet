@@ -38,11 +38,7 @@ func preferencesHubClock(t *testing.T, cfg hub.Config) (*hub.Hub, string, *testh
 	dir := t.TempDir()
 	cfg.DataDir = dir
 	path := filepath.Join(dir, "hub.db")
-	db, err := store.Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := testhub.FreshStore(t, path)
 	clock := testhub.NewFakeClock(prefsEpoch)
 	h, err := hub.New(db, cfg, clock.Now)
 	if err != nil {
@@ -713,11 +709,7 @@ func TestPreferencesConfigDurationsValidatedBeforeConversion(t *testing.T) {
 					cfg := hub.DefaultConfig()
 					cfg.DataDir = t.TempDir()
 					field.set(&cfg, tc.duration)
-					db, err := store.Open(filepath.Join(cfg.DataDir, "hub.db"))
-					if err != nil {
-						t.Fatal(err)
-					}
-					defer db.Close()
+					db := testhub.FreshStore(t, filepath.Join(cfg.DataDir, "hub.db"))
 					h, err := hub.New(db, cfg, testhub.NewFakeClock(prefsEpoch).Now)
 					if tc.invalid {
 						prefsCode(t, err, prefs.CodeInvalidValue)

@@ -27,6 +27,137 @@ import (
 	"github.com/XertroV/vecnet/internal/testhub"
 )
 
+// bootHub prepares disposable operation-test schemas before the readiness
+// budget. Startup/migration contract tests use bootHubFromDisk or run directly.
+// Existing stores (including their identity, state and WAL) are never replaced.
+func bootHub(t *testing.T, args []string, getenv func(string) string) *bootedHub {
+	t.Helper()
+	prepareBootHubStore(t, args, getenv)
+	return bootHubFromDisk(t, args, getenv)
+}
+
+func prepareBootHubStore(t *testing.T, args []string, getenv func(string) string) {
+	t.Helper()
+	// Operation callers must explicitly select their private data directory.
+	// Accept both flag spellings and = forms, with flags winning over the env.
+	dir := getenv("VECNET_DATA_DIR")
+	for i := 0; i < len(args); i++ {
+		arg := strings.TrimPrefix(args[i], "-")
+		arg = strings.TrimPrefix(arg, "-")
+		if arg == "data-dir" && i+1 < len(args) {
+			i++
+			dir = args[i]
+		} else if value, ok := strings.CutPrefix(arg, "data-dir="); ok {
+			dir = value
+		}
+	}
+	if dir == "" {
+		t.Fatal("bootHub requires an explicit private data directory")
+	}
+	prepareHubSchema(t, dir)
+}
+
+func prepareHubSchema(t *testing.T, dir string) {
+	t.Helper()
+	path := filepath.Join(dir, "hub.db")
+	if _, err := os.Lstat(path); err == nil {
+		return
+	} else if !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := testhub.FreshStore(t, path).Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Exercise fixture preparation directly; real serving/restart coverage lives in
+// the OAuth, identity and raw-startup tests. Existing database/WAL bytes and
+// identity material must survive repeated preparation, including while open.
+func TestBootHubOperationStoreIsolation(t *testing.T) {
+	seen := map[string]bool{}
+	for _, form := range []string{"env", "--data-dir", "-data-dir="} {
+		t.Run(form, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "hub")
+			unused := filepath.Join(t.TempDir(), "unopened")
+			envDir := unused
+			args := []string{"--listen", "127.0.0.1:0"}
+			switch form {
+			case "env":
+				envDir = dir
+			case "--data-dir":
+				args = append(args, form, dir)
+			default:
+				args = append(args, form+dir)
+			}
+			getenv := func(key string) string {
+				if key == "VECNET_DATA_DIR" {
+					return envDir
+				}
+				return ""
+			}
+			prepareBootHubStore(t, args, getenv)
+			path := filepath.Join(dir, "hub.db")
+			if _, err := os.Stat(path); err != nil {
+				t.Fatalf("fixture did not create the selected database: %v", err)
+			}
+			db := testhub.OpenFixtureStore(t, path)
+			readSeed := func(name string) string {
+				t.Helper()
+				value, err := db.Meta(context.Background(), name)
+				if err != nil || value == "" {
+					t.Fatalf("read %s: %v", name, err)
+				}
+				return value
+			}
+			seed, seal := readSeed("hub_identity_seed"), readSeed("hub_key")
+			key, err := hubid.KeyFromSeedHex(seed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if seen[key.Pubkey()] || seen[seal] {
+				t.Fatal("independent stores shared identity material")
+			}
+			seen[key.Pubkey()], seen[seal] = true, true
+			if err := db.SetMeta(context.Background(), "isolation_marker", form); err != nil {
+				t.Fatal(err)
+			}
+			readFile := func(name string) []byte {
+				t.Helper()
+				data, err := os.ReadFile(name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return data
+			}
+			before, wal := readFile(path), readFile(path+"-wal")
+			if len(wal) == 0 {
+				t.Fatal("preservation check requires a real nonempty WAL")
+			}
+			prepareBootHubStore(t, args, getenv)
+			if !bytes.Equal(readFile(path), before) || !bytes.Equal(readFile(path+"-wal"), wal) {
+				t.Fatal("preparation changed existing database or WAL bytes")
+			}
+			if readSeed("hub_identity_seed") != seed || readSeed("hub_key") != seal || readSeed("isolation_marker") != form {
+				t.Fatal("preparation changed existing identity or state")
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			before = readFile(path)
+			prepareBootHubStore(t, args, getenv)
+			if !bytes.Equal(readFile(path), before) {
+				t.Fatal("preparation replaced the closed database on restart")
+			}
+			if _, err := os.Stat(unused); !os.IsNotExist(err) {
+				t.Fatalf("unused environment directory was touched: %v", err)
+			}
+		})
+	}
+}
+
 func TestBackfillLimitsRejectBeforeOpeningStore(t *testing.T) {
 	for _, flags := range [][]string{{"--storage-backfill-rows=-1"}, {"--storage-backfill-bytes=-1"}, {"--storage-backfill-target=-1ms"}, {"--storage-backfill-bytes=9223372036854775807"}} {
 		dir := filepath.Join(t.TempDir(), "unopened")
@@ -589,7 +720,8 @@ func TestMCPAllowedOriginsFlagAndEnv(t *testing.T) {
 		{"empty flag resets default", "none", []string{"--mcp-allowed-origins", ""}, "https://chatgpt.com", 401},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			args := append([]string{"--listen", "127.0.0.1:0", "--data-dir", t.TempDir()}, tc.flags...)
+			dir := t.TempDir()
+			args := append([]string{"--listen", "127.0.0.1:0", "--data-dir", dir}, tc.flags...)
 			h := bootHub(t, args, func(key string) string {
 				if key == "VECNET_MCP_ALLOWED_ORIGINS" {
 					return tc.env
@@ -753,6 +885,8 @@ func TestEventsRefreshIntervalFlagAndEnv(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
+			// runInit still creates the operator through production startup.
+			prepareHubSchema(t, dir)
 			var out bytes.Buffer
 			if err := runInit(dir, "Max", &out); err != nil {
 				t.Fatal(err)
