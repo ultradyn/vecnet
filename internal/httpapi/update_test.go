@@ -6,19 +6,17 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/XertroV/vecnet/internal/httpapi"
 	"github.com/XertroV/vecnet/internal/selfupdate"
+	"github.com/XertroV/vecnet/internal/selfupdate/selfupdatetest"
 	"github.com/XertroV/vecnet/internal/testhub"
 )
 
@@ -29,20 +27,10 @@ type updateFixture struct {
 	env      *testhub.Env
 	svc      *selfupdate.Service
 	registry atomic.Int32
-	mu       sync.Mutex
-	installs [][]string
+	host     *selfupdatetest.Host
 	restarts atomic.Int32
 	latest   atomic.Value
 }
-
-type memInfo struct{ mode fs.FileMode }
-
-func (m memInfo) Name() string       { return "f" }
-func (m memInfo) Size() int64        { return 0 }
-func (m memInfo) Mode() fs.FileMode  { return m.mode }
-func (m memInfo) ModTime() time.Time { return time.Time{} }
-func (m memInfo) IsDir() bool        { return false }
-func (m memInfo) Sys() any           { return nil }
 
 func newUpdateFixture(t *testing.T, oneClick bool) *updateFixture {
 	t.Helper()
@@ -53,48 +41,16 @@ func newUpdateFixture(t *testing.T, oneClick bool) *updateFixture {
 		_, _ = w.Write([]byte(`{"latest":"` + f.latest.Load().(string) + `"}`))
 	}))
 	t.Cleanup(reg.Close)
-	const root = "/p/lib/node_modules/vecnet"
-	var filesMu sync.Mutex
-	files := map[string]string{root + "/package.json": `{"name":"vecnet","version":"0.2.6"}`, root + "/native/linux-x64/vecnet-hub": "\x7fELF"}
-	read := func(p string) ([]byte, error) {
-		filesMu.Lock()
-		defer filesMu.Unlock()
-		if s, ok := files[p]; ok {
-			return []byte(s), nil
-		}
-		return nil, os.ErrNotExist
-	}
-	sys := selfupdate.System{
-		Getenv:   func(string) string { return "" },
-		ReadFile: read,
-		ReadHead: func(p string, n int) ([]byte, error) { return read(p) },
-		Stat: func(p string) (fs.FileInfo, error) {
-			if _, err := read(p); err != nil {
-				return nil, err
-			}
-			return memInfo{0o755}, nil
-		},
-		Run: func(context.Context, string, []string, []string) ([]byte, error) {
-			t.Error("System.Run called; tests must use the injected installer")
-			return nil, errors.New("no")
-		},
-	}
+	host := selfupdatetest.New("0.2.6")
+	f.host = host
 	c := &selfupdate.Checker{URL: reg.URL, Client: reg.Client(), Current: "0.2.6", Interval: time.Hour}
-	f.svc = selfupdate.NewService(c, sys)
+	f.svc = selfupdate.NewService(c, host.System())
 	f.svc.Log = slog.New(slog.NewTextHandler(io.Discard, nil))
-	f.svc.Install = func(_ context.Context, name string, args, _ []string) ([]byte, error) {
-		f.mu.Lock()
-		f.installs = append(f.installs, append([]string{name}, args...))
-		f.mu.Unlock()
-		filesMu.Lock()
-		files[root+"/package.json"] = `{"name":"vecnet","version":"` + args[len(args)-1][len("vecnet@"):] + `"}`
-		filesMu.Unlock()
-		return nil, nil
-	}
+	f.svc.Install = host.Install
 	f.svc.Restart = func() { f.restarts.Add(1) }
 	f.svc.Audit = httpapi.AuditUpdates(f.env.Hub)
 	if oneClick {
-		f.svc.SetDetected(&selfupdate.Install{Prefix: "/p", Root: root, Exe: root + "/native/linux-x64/vecnet-hub", NPM: "/p/bin/npm"}, "")
+		f.svc.SetDetected(selfupdatetest.Install(), "")
 	} else {
 		f.svc.SetDetected(nil, selfupdate.ReasonContainer)
 	}
@@ -105,11 +61,7 @@ func newUpdateFixture(t *testing.T, oneClick bool) *updateFixture {
 	return f
 }
 
-func (f *updateFixture) installCount() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return len(f.installs)
-}
+func (f *updateFixture) installCount() int { return len(f.host.Installs()) }
 
 func decodeUpdateStatus(t *testing.T, raw []byte) selfupdate.Status {
 	t.Helper()
@@ -201,8 +153,8 @@ func TestPostUpdateInstallsRegistryVersionAndRestarts(t *testing.T) {
 	for f.restarts.Load() == 0 && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
-	if f.restarts.Load() != 1 || f.installCount() != 1 || !strings.HasSuffix(strings.Join(f.installs[0], " "), " vecnet@0.2.7") {
-		t.Fatalf("restarts %d installs %v", f.restarts.Load(), f.installs)
+	if f.restarts.Load() != 1 || f.installCount() != 1 || !strings.HasSuffix(strings.Join(f.host.Installs()[0], " "), " vecnet@0.2.7") {
+		t.Fatalf("restarts %d installs %v", f.restarts.Load(), f.host.Installs())
 	}
 	resp, raw = f.env.Do(f.env.OperatorSecret, "GET", "/v1/admin/audit?limit=5", nil)
 	if resp.StatusCode != 200 || !bytes.Contains(raw, []byte(`"hub_update"`)) || !bytes.Contains(raw, []byte(`"to":"0.2.7"`)) {
@@ -311,9 +263,9 @@ func TestPostUpdateNoNewerVersion(t *testing.T) {
 	mustErr(t, resp, raw, 409, "no_update")
 }
 
-// The cached answer may be stale: the job installs, and the audit records,
-// what the registry says when the job runs.
-func TestPostUpdateAuditsConfirmedVersion(t *testing.T) {
+// The audit is written at Start, before any work, naming the version Start
+// accepted; if npm's tag has moved on by then the job installs nothing.
+func TestPostUpdateAuditsAtStartAndRefusesMovedTag(t *testing.T) {
 	f := newUpdateFixture(t, true)
 	f.svc.Restart = nil
 	f.latest.Store("0.2.8")
@@ -321,12 +273,22 @@ func TestPostUpdateAuditsConfirmedVersion(t *testing.T) {
 	if resp.StatusCode != 202 {
 		t.Fatalf("POST = %d %s", resp.StatusCode, raw)
 	}
-	st := waitUpdateState(t, f.env, selfupdate.StateInstalled)
-	if st.Job.Version != "0.2.8" || !strings.HasSuffix(strings.Join(f.installs[0], " "), " vecnet@0.2.8") {
-		t.Fatalf("job %+v installs %v", st.Job, f.installs)
+	st := waitUpdateState(t, f.env, selfupdate.StateFailed)
+	if !strings.Contains(st.Job.Error, "could not confirm 0.2.7") || f.installCount() != 0 {
+		t.Fatalf("job %+v installs %v", st.Job, f.host.Installs())
 	}
 	resp, raw = f.env.Do(f.env.OperatorSecret, "GET", "/v1/admin/audit?limit=5", nil)
-	if resp.StatusCode != 200 || !bytes.Contains(raw, []byte(`"to":"0.2.8"`)) || bytes.Contains(raw, []byte(`"to":"0.2.7"`)) {
+	if resp.StatusCode != 200 || !bytes.Contains(raw, []byte(`"to":"0.2.7"`)) {
 		t.Fatalf("audit = %s", raw)
+	}
+}
+
+func TestPostUpdateRefusedWhenAuditFails(t *testing.T) {
+	f := newUpdateFixture(t, true)
+	f.svc.Audit = func(string, string) error { return errors.New("disk full") }
+	resp, raw := f.env.Do(f.env.OperatorSecret, "POST", "/v1/admin/update", nil)
+	mustErr(t, resp, raw, 503, "update_not_audited")
+	if f.installCount() != 0 {
+		t.Fatal("installed without an audit record")
 	}
 }

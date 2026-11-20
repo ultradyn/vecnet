@@ -3,7 +3,6 @@ package httpapi
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"math"
 	"net/http"
 
@@ -19,14 +18,11 @@ import (
 // else Origin against Host) and takes no body, so no client can name a
 // version.
 
-// AuditUpdates returns the hub_update audit hook for a selfupdate.Service:
-// the job calls it with the version it confirmed with the registry, which
-// may be newer than the cached one the request saw.
-func AuditUpdates(h *hub.Hub) func(from, to string) {
-	return func(from, to string) {
-		if err := h.AuditSelfUpdate(context.Background(), from, to); err != nil {
-			slog.Warn("vecnet-hub: audit hub_update", "err", err.Error())
-		}
+// AuditUpdates returns the hub_update audit hook for a selfupdate.Service.
+// Start calls it before any work; a failed write refuses the update.
+func AuditUpdates(h *hub.Hub) func(from, to string) error {
+	return func(from, to string) error {
+		return h.AuditSelfUpdate(context.Background(), from, to)
 	}
 }
 
@@ -73,6 +69,9 @@ func (s *server) postUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	case errors.Is(err, selfupdate.ErrBusy):
 		writeError(w, hub.E(http.StatusConflict, "update_running", err.Error()))
+		return
+	case errors.Is(err, selfupdate.ErrAudit):
+		writeError(w, hub.E(http.StatusServiceUnavailable, "update_not_audited", err.Error()))
 		return
 	case errors.Is(err, selfupdate.ErrCooldown):
 		e := hub.E(http.StatusTooManyRequests, "update_cooldown", err.Error()+"; retry later")
