@@ -62,7 +62,7 @@ messaging:
   react <message_id> <emoji|name> [--remove] [--wake|--wake-idle|--hold]
        default priority depends on the emoji: ✅ ❓ ❗ wake_idle, others hold
   mcp                                 stdio MCP relay to the hub's /mcp as this profile [--as X]; needs --net P
-  inbox [--since CURSOR] [--ack] [--limit N] [--include-sender-chain]
+  inbox [--since CURSOR] [--ack] [--limit N] [--include-sender-chain] [--no-display-proof]
   blob get SHA [--blob-id ID] --out PATH [--json]
        URLs are short-lived; call get again whenever you need the file, as long as it hasn't expired.
   ack <cursor>

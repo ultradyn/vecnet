@@ -1290,7 +1290,7 @@ func TestClaudeRegistrationNeedsPinnedHub(t *testing.T) {
 		t.Fatal(err)
 	}
 	app := f.app()
-	const reason = "claude registration needs a pinned hub identity; run a vecnet command for this profile once"
+	const reason = "claude registration needs a pinned hub identity; run a hub-contacting vecnet command for this profile once (for example vecnet --net PROFILE inbox); claude status and claude disable do not pin"
 	if _, err := app.claudeScopeForProfile("u"); err == nil || err.Error() != reason {
 		t.Fatalf("unpinned scope derivation = %v, want the fixed reason", err)
 	}

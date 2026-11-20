@@ -56,7 +56,7 @@ var (
 	// errClaudeHubUnpinned is the fixed pending reason for a profile with no
 	// canonical pinned hub identity: an endpoint string is never a hub
 	// identity, so registration waits for the first ordinary command's pin.
-	errClaudeHubUnpinned = errors.New("claude registration needs a pinned hub identity; run a vecnet command for this profile once")
+	errClaudeHubUnpinned = errors.New("claude registration needs a pinned hub identity; run a hub-contacting vecnet command for this profile once (for example vecnet --net PROFILE inbox); claude status and claude disable do not pin")
 
 	claudeHubKey   = regexp.MustCompile(`^[A-Za-z0-9._:/-]{1,256}$`)
 	claudeStartID  = regexp.MustCompile(`^[0-9]{1,32}$`)

@@ -9,15 +9,21 @@ legacy hook path is never removed.
 
 ## Linux prerequisites
 
-Build-version gating is currently disabled. Registration never inspects or
-hashes the Claude executable, and the runtime snapshot's admission reports
-`build_check: "disabled"` (with `version_qualified: true`) so nothing claims a
-build was verified. The kernel-attested build-digest check is implemented but
-parked for a later release. A session registers only for a profile with a
-pinned hub identity (its `hub_pubkey`, or the pin its first ordinary command
-records); otherwise registration stays pending with the reason `claude
-registration needs a pinned hub identity; run a vecnet command for this
-profile once`.
+Build checking is currently disabled: any Claude Code build is admitted.
+Registration never inspects or hashes the Claude executable, and status and
+the runtime snapshot report `build_check: "disabled"` (the snapshot keeps
+`version_qualified: true`) so nothing claims a build was verified. The
+build-digest check is implemented but parked for a later re-enable.
+
+A session registers only for a profile with a pinned hub identity: its
+`hub_pubkey`, or the key its first hub-contacting command records on first
+use. That pinned key, not the URL, is the hub identity the binding is keyed
+by, so one hub reached through two URL aliases is one recipient. Until a pin
+exists, registration stays pending with the reason `claude registration
+needs a pinned hub identity; run a hub-contacting vecnet command for this
+profile once (for example vecnet --net PROFILE inbox); claude status and
+claude disable do not pin`. The `claude` subcommands read local state only
+and never contact the hub, so none of them records a pin.
 
 Registration proves, through the kernel and Claude's own private session
 registry, that the registering hook is a child of the exact live Claude
@@ -54,10 +60,8 @@ vecnet --net P claude status
 vecnet --net P claude status --json
 ```
 
-The output is passive only:
-
 ```json
-{"version":1,"owner":"registered","mode":"legacy","generation":"…","pending_count":0}
+{"version":1,"owner":"registered","mode":"legacy","generation":"…","pending_count":0,"blocked_pending_limit":false,"canary_opt_in":false,"build_check":"disabled"}
 ```
 
 - `owner` is `registered` only when the shared delivery daemon holds its
@@ -65,7 +69,15 @@ The output is passive only:
   intervals), its PID/start identity is exactly the live writer, and the
   addressed binding is present at the current generation. Anything else is
   `none` with a `reason`.
-- `mode` stays `legacy`, or becomes `opted_out` after a durable disable.
+- `mode` is `legacy` by default and `opted_out` after a durable disable. It
+  is `canary` only when both halves hold: this recipient's durable canary
+  record (below) and the live host's report that its delivery adapter
+  admitted this exact binding at the current generation. Either half alone
+  stays `legacy` and the `reason` names the missing one. Status never
+  reports any other native mode.
+- `canary_opt_in` reports the durable canary record alone, whether or not a
+  host has admitted it.
+- `build_check` is `disabled` while build checking is parked.
 - `pending_count` is factual, not fixed: it counts the addressed scope's
   unresolved native delivery claims (`reserved`, `attempting` or `uncertain`)
   in the durable ledger, and `blocked_pending_limit` reports whether the
@@ -100,23 +112,120 @@ settled rows are hidden and the truncation is noted.
 quarantines it inbox-only (native promotion stops, the delivery stays
 readable, nothing is acknowledged). `--retry` re-arms one fresh native
 attempt, only after the explicit duplicate-risk confirmation and a fresh
-admission check; it refuses held or hold-priority claims (hold is inbox-only,
-full stop) and claims still owing a native disposition (`reserved` or
-`attempting`). Nothing in Go retires a claim tombstone.
+admission check (including the canary record and the stored config
+witness); it refuses held or hold-priority claims (hold is inbox-only, full
+stop) and claims still owing a native disposition (`reserved` or
+`attempting`). Nothing in Go retires a claim tombstone; only the delivery
+host does (below). A claim marked by the host's ack observation shows
+`hub_ack_observed: true` in JSON and `hub_ack_observed=true` in text.
 
 ## Native delivery canary (experimental, default off)
 
-The daemon's native pointer-delivery adapter exists only behind an explicit
-experimental opt-in: `VECNET_CLAUDE_DELIVERY_CANARY=1` in the delivery
-daemon's environment. Without it nothing changes: no native claim is made and
-every message flows through the legacy hook path exactly as before. With it,
-the daemon stages bounded wake candidates per admitted scope, records the
-durable claim lifecycle above, and invokes the single-shot `claude deliver`
-helper; it never acknowledges the hub (read/accepted/processed cursors stay
-untouched), `hold` and `wake_idle` never enter a native batch, and the
-daemon's inbox read uses `vecnet inbox --no-display-proof` so it never
-records legacy hook display state — a later UserPromptSubmit hook still shows
-what the daemon merely observed.
+```sh
+vecnet --net P claude canary enable    # this profile's own peer inbox only
+vecnet --net P claude canary disable
+```
+
+The per-profile canary record is the gate on native pointer delivery into a
+live Claude session. Without it nothing changes: no native claim is made and
+every message flows through the legacy hook path exactly as before. The
+record is local and neither verb contacts the hub. It fails closed:
+
+- at most one record per user, for one exact peer scope: a principal
+  credential or an `--as` delegation cannot hold it, and a second recipient,
+  or the same recipient through another profile or hub URL alias, is refused
+  until the first is disabled;
+- `claude enable` alone never turns native delivery on, and canary enable
+  never clears a durable opt-out (global or addressed); an opt-out still
+  withdraws delivery while the record exists.
+
+`VECNET_CLAUDE_DELIVERY_CANARY=0` (exactly `0`) in the delivery daemon's
+environment is the host kill switch: no delivery adapter is constructed at
+all. It is never an enable. Empty or `1` changes nothing; any other value is
+logged once as a warning (`claude_delivery_canary_env_unrecognized`) and does
+not disable anything.
+
+What an admitted scope does:
+
+- **Admission.** The host admits a scope only from the runtime snapshot:
+  registered and live, policy-enabled, canary-opted, the caller's own peer
+  inbox, and still witnessed by the config at the binding's own stored path
+  (the profile, hub, pinned identity and caller witness). More than one
+  qualifying row admits none.
+- **Pinned children.** Every child the host runs for that scope (the inbox
+  read, the watch and the ack-window read) runs with `VECNET_CONFIG` set to
+  the binding's own config, never the daemon's default. A binding whose
+  config path is missing or not absolute is never admitted.
+- **New arrivals only.** On a scope's first admission, after a generation
+  change, or with an empty cursor, the host reads `inbox --since head`,
+  stores that cursor and stages nothing: deliveries already waiting before
+  admission stay on the legacy hook and inbox path. A page that arrives with
+  events on that head read is retried, never baselined past. If the hub
+  refuses the stored cursor itself (purged below retention, from another
+  epoch after a log rebuild, or malformed), the scope rebaselines at the head
+  the same way; any other read failure keeps the cursor and retries with
+  backoff.
+- **Staging.** Bounded wake candidates, in cursor order, become durable
+  claims (`reserved`, then `attempting` before any byte can leave). `hold`
+  and `wake_idle` never enter a native batch. At most 128 unresolved claims
+  per scope; the cap blocks further native sends only.
+- **No auto-ack.** The host never acknowledges the hub and never posts a
+  receipt: read/accepted/processed cursors stay untouched. Its inbox reads
+  use `vecnet inbox --no-display-proof`, so they record no legacy hook
+  display state and a later UserPromptSubmit hook still shows what the host
+  merely observed.
+
+### The `claude deliver` helper
+
+`claude deliver` is the host's private single-shot transport child, not a
+user command. It takes only `--binding-key`, `--expect-generation` and the
+three message ids; there is no explicit socket, session or owner mode. It
+resolves the endpoint and expected owner from the live binding registry and
+holds the `claude-bindings` lock from resolution through the end of the
+write, so no registration can commit a new generation mid-attempt. After
+the kernel peer check on the one connection, and before the first byte, it
+rechecks admission (canary, opt-outs, generation, liveness), the stored
+config witness, and Claude's own session row for that process. It writes one
+pointer-only frame of at most 4 KiB within a one-second connect/write
+window. Exit codes:
+
+| Exit | Meaning | Recorded disposition |
+| ---- | ------- | -------------------- |
+| 0 | Full write and EOF flush. Never proof the session showed it. | `released` / `attempted` |
+| 3 | Connect failed; zero bytes. | `refused` / `connect_refused_or_timeout` |
+| 5 | Refused before any write: resolution, admission, generation, config witness, lock wait (one second), socket type, frame size, peer identity or the pre-write recheck; zero bytes. | `refused` / `refused_before_write` |
+| 4 | Write failure, partial write, or a recovered internal fault: bytes may have left. | `uncertain` / `write_failed_or_outcome_unknown` |
+| 2 | Flag parsing only. | as 4 |
+
+The host also treats a signal, a timeout or any unmapped code as `uncertain`
+(4), and a child that never spawned as a definite refusal (5). Older claims
+may still carry the earlier reason string `write_failed_or_partial`; it
+means the same as `write_failed_or_outcome_unknown`. An `uncertain` or
+`attempting` claim is never resent automatically.
+
+### Ack observation, tombstones and disable drain
+
+- **Ack observation.** For an admitted scope with unretired claims, at most
+  once a minute, the host reads up to 200 events from the hub's acked
+  cursor (an ordinary `inbox` read with no `--since`, never `--ack`). When
+  that window is complete (fewer than 200 events), every settled claim of
+  that scope whose delivery is absent from it is marked `hub_ack_observed`.
+  The flag is inferred from absence, so it also covers a delivery the hub
+  expired or purged unacked; it is not a confirmation the hub sent. A
+  truncated or failed read marks nothing. Live (`reserved`/`attempting`)
+  claims are never marked.
+- **Retirement.** In the claim's own scope only, a marked claim in a settled
+  state (`released`, `refused`, `held` or `expired`) is deleted, and only if
+  its stored bytes are unchanged since the host read them, so an operator
+  resolution that lands meanwhile always wins. `uncertain` claims keep the
+  mark and are never retired; an operator resolves them.
+- **Disable drain.** Every pass with a readable snapshot fences the claims of
+  every scope that is no longer admitted (disabled, opted out, no longer
+  canary-opted, unwitnessed or gone), even when nothing is admitted: a
+  `reserved` claim becomes `released` with the reason
+  `fenced_scope_not_admitted`, and an `attempting` one becomes `uncertain`
+  (`restart_may_have_written`). A pass whose snapshot cannot be read changes
+  nothing.
 
 ## Disable and enable
 
