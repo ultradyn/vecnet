@@ -450,9 +450,15 @@ func (a *app) cmdClaudeDeliveries(args []string) error {
 	}
 	for _, row := range result.Deliveries {
 		when := time.UnixMilli(row.UpdatedAt).UTC().Format(time.RFC3339)
-		fmt.Fprintf(&out, "delivery: %s state=%s disposition=%s reason=%s generation=%s message=%s thread=%s native=%s updated=%s\n",
+		// The delivery host's read-only hub ack observation, shown only when
+		// set: it is never inferred here.
+		acked := ""
+		if row.HubAckObserved {
+			acked = " hub_ack_observed=true"
+		}
+		fmt.Fprintf(&out, "delivery: %s state=%s disposition=%s reason=%s generation=%s message=%s thread=%s native=%s updated=%s%s\n",
 			row.DeliveryID, row.State, row.Disposition, row.Reason, row.Generation,
-			row.MessageID, row.ThreadID, row.MsgID, when)
+			row.MessageID, row.ThreadID, row.MsgID, when, acked)
 	}
 	if result.TruncatedSettled > 0 {
 		fmt.Fprintf(&out, "truncated: %d oldest settled row(s) hidden (the claim tombstones are retained)\n", result.TruncatedSettled)

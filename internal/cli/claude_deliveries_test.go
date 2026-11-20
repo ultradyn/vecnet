@@ -621,3 +621,55 @@ func TestClaudeDeliveriesListsLegacyKeyRows(t *testing.T) {
 		t.Fatalf("only the reserved legacy-key claim should still count as pending: %+v", status)
 	}
 }
+
+// TestClaudeDeliveriesRendersHubAckObserved pins the operator view of the
+// delivery host's ack observation (phase 2 task 6): an observed claim shows
+// hub_ack_observed true in JSON and hub_ack_observed=true in text, an
+// unobserved one shows neither. The CLI only renders the flag; it never
+// infers or writes it.
+func TestClaudeDeliveriesRendersHubAckObserved(t *testing.T) {
+	home, env := claudeStatusFixture(t)
+	observed := claudeDeliveryClaimJSON(t, map[string]any{
+		"deliveryId": "dly_00000000000000000000000002", "state": "uncertain", "disposition": "uncertain",
+		"dispositionReason": "write_failed_or_outcome_unknown", "hubAckObserved": true,
+	})
+	claudeDeliveryLedger(t, home, map[string]string{
+		claudeDeliveryClaimKey("dly_00000000000000000000000001"): claudeDeliveryClaimJSON(t, nil),
+		claudeDeliveryClaimKey("dly_00000000000000000000000002"): observed,
+	})
+	before := claudeDeliveryKV(t, home)
+	result := claudeDeliveriesJSON(t, env, "deliveries", "--json")
+	rows := map[string]map[string]any{}
+	for _, raw := range result["deliveries"].([]any) {
+		row := raw.(map[string]any)
+		rows[row["delivery_id"].(string)] = row
+	}
+	if rows["dly_00000000000000000000000002"]["hub_ack_observed"] != true {
+		t.Fatalf("the observed claim does not render hub_ack_observed: %v", rows["dly_00000000000000000000000002"])
+	}
+	if _, shown := rows["dly_00000000000000000000000001"]["hub_ack_observed"]; shown {
+		t.Fatalf("an unobserved claim renders hub_ack_observed: %v", rows["dly_00000000000000000000000001"])
+	}
+	code, out, errs := claudeStatusRun(t, env, "--net", "p", "claude", "deliveries")
+	if code != 0 {
+		t.Fatalf("claude deliveries exit %d: %s", code, errs)
+	}
+	var observedLine, plainLine string
+	for _, line := range strings.Split(out, "\n") {
+		switch {
+		case strings.HasPrefix(line, "delivery: dly_00000000000000000000000002 "):
+			observedLine = line
+		case strings.HasPrefix(line, "delivery: dly_00000000000000000000000001 "):
+			plainLine = line
+		}
+	}
+	if !strings.Contains(observedLine, " hub_ack_observed=true") {
+		t.Fatalf("the text view hides the hub ack observation: %q", observedLine)
+	}
+	if plainLine == "" || strings.Contains(plainLine, "hub_ack_observed") {
+		t.Fatalf("the text view marks an unobserved claim: %q", plainLine)
+	}
+	if after := claudeDeliveryKV(t, home); len(after) != len(before) {
+		t.Fatalf("listing changed the ledger: %v -> %v", before, after)
+	}
+}

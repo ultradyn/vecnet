@@ -26,6 +26,13 @@ import type { WatchPool, WatchRequest } from './watch-pool.ts';
 export const CLAUDE_PENDING_LIMIT = 128;
 const CLAIM_PREFIX = 'claude-claims:claim:', SCOPE_PREFIX = 'claude-claims:scope:';
 const RELOAD_MS = 10_000, CHILD_TIMEOUT = 5000, FETCH_TIMEOUT = 8000, STAGE_BATCH = 32;
+/** Ack observation: one read per admitted scope with unretired claims, at
+ * most every ACK_OBSERVE_MS, of an ACK_WINDOW-event window from the hub's
+ * acked cursor. */
+export const ACK_OBSERVE_MS = 60_000, ACK_WINDOW = 200;
+/** Settled states a confirmed hub ack may retire. `uncertain` waits for an
+ * operator; `reserved`/`attempting` are live. */
+const RETIRABLE = new Set<ClaudeClaimState>(['released', 'refused', 'held', 'expired']);
 const BACKOFF = [1000, 2000, 4000, 8000, 15_000];
 const KEY = /^[0-9a-f]{64}$/, GENERATION = /^[0-9a-f]{32}$/, CURSOR = /^e\d{1,19}\.\d{1,19}$/, HUB_ID = /^[\x21-\x7e]{1,256}$/, DELIVERY = /^[A-Za-z0-9_-]{1,128}$/, NATIVE = /^[A-Za-z0-9._:-]{1,128}$/, THREAD = /^thr_[A-HJKMNP-TV-Z0-9]{26}$/, MESSAGE = /^msg_[A-HJKMNP-TV-Z0-9]{26}$/;
 /** Known message kinds. Only `message` is ever a native candidate; the others
@@ -103,7 +110,19 @@ export interface ClaudeDeliveryCandidate {
 }
 /** One inbox page. `nextCursor` is the CLI's `next_cursor`: after a
  * `--since head` read it is the hub head the scope baselines at. */
-export interface ClaudeCandidatePage { events: ClaudeDeliveryCandidate[]; nextCursor?: string }
+export interface ClaudeCandidatePage {
+  events: ClaudeDeliveryCandidate[];
+  nextCursor?: string;
+  /** The hub refused the `--since` cursor itself (purged below retention or
+   * from another epoch, or malformed): the scope rebaselines at the head.
+   * Every other failure is transient and keeps the stored cursor. */
+  cursorRejected?: true;
+}
+
+/** One ack-observation window: the delivery ids the hub still holds unacked
+ * from the scope's acked cursor. `complete` only when the window was not
+ * truncated, so absence proves the hub acked (or expired) the delivery. */
+export interface ClaudeAckWindow { deliveryIds: Set<string>; complete: boolean }
 
 export interface ClaudeDeliveryAdapterDeps {
   pool: WatchPool;
@@ -114,6 +133,9 @@ export interface ClaudeDeliveryAdapterDeps {
   transport?: (frame: ClaudeDeliveryFrame) => Promise<DeliverExit>;
   fetchSnapshot?: () => Promise<ClaudeSnapshot | undefined>;
   fetchCandidates?: (coordinates: ClaudeDeliveryScopeCoordinates, cursor: string | undefined) => Promise<ClaudeCandidatePage | undefined>;
+  /** The read-only ack-observation read. Defaults to the pinned inbox child
+   * with no `--since` (the hub's acked cursor) and a 200-event limit. */
+  fetchAckWindow?: (coordinates: ClaudeDeliveryScopeCoordinates) => Promise<ClaudeAckWindow | undefined>;
   /** Process port for the scoped inbox and watch children (node's spawn
    * unless a test injects one). */
   spawnChild?: typeof spawn;
@@ -155,10 +177,15 @@ export interface ClaudeDeliveryAdapter extends HostedAdapter {
  * semantics stay untouched, the adapter never claims cursor ownership, and the
  * machine read never records legacy hook display state, so a later
  * UserPromptSubmit hook still shows what the daemon merely observed. */
-export function claudeInboxArgs(coordinates: ClaudeDeliveryScopeCoordinates, cursor: string | undefined): string[] {
+export function claudeInboxArgs(coordinates: ClaudeDeliveryScopeCoordinates, cursor: string | undefined, limit = STAGE_BATCH): string[] {
   return ['--net', coordinates.profile, ...(coordinates.as ? ['--as', coordinates.as] : []),
-    'inbox', '--json', '--limit', String(STAGE_BATCH), '--no-display-proof', ...(cursor ? ['--since', cursor] : [])];
+    'inbox', '--json', '--limit', String(limit), '--no-display-proof', ...(cursor ? ['--since', cursor] : [])];
 }
+
+/** The CLI's stderr for a hub refusal of the `--since` cursor itself: a
+ * purged/foreign-epoch cursor (409 cursor_purged) or a malformed one (422
+ * invalid_value on the cursor). Hub errors exit 2 as `vecnet: <code>: …`. */
+const CURSOR_REJECTED = /^vecnet: (?:cursor_purged: |invalid_value: cursor must look like )/m;
 
 /** The single-shot transport child: binding-key mode, so the endpoint and the
  * expected kernel peer identity are resolved from the live registry inside
@@ -218,22 +245,29 @@ export function spawnClaudeDeliver(env: NodeJS.ProcessEnv, clock: Clock, spawnCh
 }
 
 /** The default candidate source: the profile-scoped CLI inbox read. */
-export function spawnClaudeInbox(env: NodeJS.ProcessEnv, clock: Clock, spawnChild: typeof spawn = spawn): (coordinates: ClaudeDeliveryScopeCoordinates, cursor: string | undefined) => Promise<ClaudeCandidatePage | undefined> {
+export function spawnClaudeInbox(env: NodeJS.ProcessEnv, clock: Clock, spawnChild: typeof spawn = spawn): (coordinates: ClaudeDeliveryScopeCoordinates, cursor: string | undefined, limit?: number) => Promise<ClaudeCandidatePage | undefined> {
   const baseEnv = cliEnvironment(Object.fromEntries(Object.entries(env).filter((e): e is [string, string] => typeof e[1] === 'string')));
   const bin = baseEnv.VECNET_BIN || 'vecnet';
-  return (coordinates, cursor) => new Promise(resolve => {
+  return (coordinates, cursor, limit) => new Promise(resolve => {
     if (!claudeConfigPathValid(coordinates.config)) { resolve(undefined); return; } // Never the daemon default.
     const childEnv = claudeScopeEnv(baseEnv, coordinates);
     let command;
-    try { command = commandInvocation([bin, ...claudeInboxArgs(coordinates, cursor)], childEnv); }
+    try { command = commandInvocation([bin, ...claudeInboxArgs(coordinates, cursor, limit)], childEnv); }
     catch { resolve(undefined); return; }
-    const child = spawnChild(command.file, command.args, { ...command, windowsHide: true, env: childEnv, stdio: ['ignore', 'pipe', 'ignore'] });
-    let out = '', settled = false;
+    const child = spawnChild(command.file, command.args, { ...command, windowsHide: true, env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] });
+    // stderr is read only to classify a cursor refusal; it is never logged.
+    let out = '', err = '', settled = false;
     const finish = (value: ClaudeCandidatePage | undefined) => { if (!settled) { settled = true; timer.cancel(); resolve(value); } };
     const timer = clock.timer(FETCH_TIMEOUT, () => terminateProcess(child));
     child.once('error', () => finish(undefined));
     child.stdout.setEncoding('utf8').on('data', (chunk: string) => { if (out.length < 2_097_152) out += chunk; });
+    child.stderr.setEncoding('utf8').on('data', (chunk: string) => { if (err.length < 4096) err += chunk; });
     child.once('close', code => {
+      // A cursor refusal only means something for an explicit cursor read.
+      if (code === 2 && cursor !== undefined && cursor !== 'head' && CURSOR_REJECTED.test(err)) {
+        finish({ events: [], cursorRejected: true });
+        return;
+      }
       if (code !== 0) { finish(undefined); return; }
       try {
         // Project the CLI's inbox rows (`data` is one hub Delivery) into the
@@ -258,12 +292,67 @@ export function spawnClaudeInbox(env: NodeJS.ProcessEnv, clock: Clock, spawnChil
   });
 }
 
+type ClaimRow = { claim: ClaudeClaimRecord; raw: string };
+/** One pass's in-memory claim view (see createClaudeDeliveryAdapter). */
+interface ClaimIndex {
+  byScope: Map<string, ClaimRow[]>;
+  ids: Set<string>;
+  pending(scope: string): number;
+  put(claim: ClaudeClaimRecord, raw: string): void;
+  remove(deliveryId: string): void;
+}
+/** The fence sweep's lane key: never a binding key (those are 64 hex). */
+const FENCE_LANE = 'fence';
+
+function buildIndex(rows: ClaimRow[]): ClaimIndex {
+  const byScope = new Map<string, ClaimRow[]>();
+  const byId = new Map<string, ClaimRow>();
+  const add = (row: ClaimRow) => {
+    byId.set(row.claim.deliveryId, row);
+    const list = byScope.get(row.claim.scope);
+    if (list) list.push(row); else byScope.set(row.claim.scope, [row]);
+  };
+  const drop = (deliveryId: string) => {
+    const row = byId.get(deliveryId);
+    if (!row) return;
+    byId.delete(deliveryId);
+    const list = byScope.get(row.claim.scope) ?? [];
+    const at = list.indexOf(row);
+    if (at >= 0) list.splice(at, 1);
+    if (list.length === 0) byScope.delete(row.claim.scope);
+  };
+  for (const row of rows) add(row);
+  const ids = new Set(byId.keys());
+  return {
+    byScope, ids,
+    pending: scope => (byScope.get(scope) ?? []).filter(({ claim: c }) =>
+      c.state === 'reserved' || c.state === 'attempting' || c.state === 'uncertain').length,
+    put(claim, raw) { drop(claim.deliveryId); add({ claim: { ...claim }, raw }); ids.add(claim.deliveryId); },
+    remove(deliveryId) { drop(deliveryId); ids.delete(deliveryId); },
+  };
+}
+
 export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): ClaudeDeliveryAdapter {
   const { clock, log, kv } = deps;
   const env = { ...deps.env };
   const fetchSnapshot = deps.fetchSnapshot ?? spawnClaudeSnapshot(env);
   const spawnChild = deps.spawnChild ?? spawn;
-  const fetchCandidates = deps.fetchCandidates ?? spawnClaudeInbox(env, clock, spawnChild);
+  const inbox = spawnClaudeInbox(env, clock, spawnChild);
+  const fetchCandidates = deps.fetchCandidates ?? inbox;
+  // The ack read is the same pinned inbox child (the binding's VECNET_CONFIG,
+  // the invalid-config refusal): no --since, so it reads from the hub's
+  // acked cursor, and never --ack.
+  const fetchAckWindow = deps.fetchAckWindow ?? (async (coordinates: ClaudeDeliveryScopeCoordinates): Promise<ClaudeAckWindow | undefined> => {
+    const page = await inbox(coordinates, undefined, ACK_WINDOW);
+    if (!page || page.cursorRejected === true || !Array.isArray(page.events)) return undefined;
+    const deliveryIds = new Set<string>();
+    for (const event of page.events) {
+      if (event.type !== 'delivery') continue;
+      if (!DELIVERY.test(event.deliveryId)) return undefined; // An unreadable row proves nothing.
+      deliveryIds.add(event.deliveryId);
+    }
+    return { deliveryIds, complete: page.events.length < ACK_WINDOW };
+  });
   const transport = deps.transport ?? spawnClaudeDeliver(env, clock);
   const baseEnv = cliEnvironment(Object.fromEntries(Object.entries(env).filter((e): e is [string, string] => typeof e[1] === 'string')));
   const watchBin = baseEnv.VECNET_BIN || 'vecnet';
@@ -283,7 +372,22 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Cl
   let admissions: ReadonlyMap<string, string> = new Map();
   let ambiguousLogged = false;
 
-  const save = (claim: ClaudeClaimRecord) => kv.set(CLAIM_PREFIX + claim.deliveryId, JSON.stringify(claim));
+  /** One pass's claim view: built by a single claimRows() scan, then kept
+   * current in memory by every save and delete this adapter makes, so no
+   * pass rescans the kv. A foreign write (an operator resolution) is still
+   * caught: saveIfCurrent re-reads that one row before writing over it. */
+  let index: ClaimIndex = buildIndex([]);
+  const save = (claim: ClaudeClaimRecord) => {
+    const raw = JSON.stringify(claim);
+    kv.set(CLAIM_PREFIX + claim.deliveryId, raw);
+    index.put(claim, raw);
+    return raw;
+  };
+  const retire = (claim: ClaudeClaimRecord) => {
+    kv.delete(CLAIM_PREFIX + claim.deliveryId);
+    index.remove(claim.deliveryId);
+  };
+  const ackObserved = new Map<string, number>(); // Last ack observation per scope.
   /** True when the durable row moved past the exact bytes the adapter last
    * read or wrote. An operator resolution (`claude resolve --keep-inbox` /
    * `--retry`) may land between the read and the write; that foreign row wins
@@ -298,8 +402,8 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Cl
     save(claim);
     return true;
   };
-  const claimRows = (): Array<{ claim: ClaudeClaimRecord; raw: string }> => {
-    const rows: Array<{ claim: ClaudeClaimRecord; raw: string }> = [];
+  const claimRows = (): ClaimRow[] => {
+    const rows: ClaimRow[] = [];
     for (const key of kv.keys(CLAIM_PREFIX)) {
       const raw = kv.get(key)!;
       try {
@@ -310,9 +414,7 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Cl
     }
     return rows;
   };
-  const claims = (): ClaudeClaimRecord[] => claimRows().map(row => row.claim);
-  const pending = (scope: string) => claims().filter(c => c.scope === scope &&
-    (c.state === 'reserved' || c.state === 'attempting' || c.state === 'uncertain')).length;
+
 
   function schedulePass(): void {
     if (!running) return;
@@ -342,10 +444,16 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Cl
       } else ambiguousLogged = false;
       admissions = new Map(admitted.map(row => [row.binding_key, row.generation]));
       subscribeWatches(admitted);
+      // The snapshot is proven, so the admitted set is known (possibly
+      // empty): one scan builds this pass's index, then the fence sweep
+      // drains every claim of a scope that is no longer admitted, in its
+      // own lane, even when nothing is admitted at all.
+      index = buildIndex(claimRows());
+      const keys = new Set(admitted.map(row => row.binding_key));
+      await enqueue(FENCE_LANE, async () => fenceSweep(keys));
       if (admitted.length) {
-        const keys = new Set(admitted.map(row => row.binding_key));
         await Promise.all(admitted.map(row => enqueue(row.binding_key, () =>
-          recoverScope(row, keys).then(() => stageScope(row)))));
+          recoverScope(row).then(() => observeAcks(row)).then(() => stageScope(row)))));
       }
     } catch {
       failed = true;
@@ -453,29 +561,65 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Cl
     return next;
   }
 
-  /** Restart recovery. A foreign `reserved` claim is proven unwritten by its
-   * exact predecessor: fence it against the current admission, then either
-   * reschedule it with the current owner or release it fenced. A foreign
-   * `attempting` claim may have written bytes: retain and surface `uncertain`,
-   * never resend. Tombstones survive untouched by default (fail closed): the
-   * only retirement is a claim carrying an independently confirmed hub ack
-   * observation — a field this adapter never infers or sets itself. */
-  async function recoverScope(row: ClaudeSnapshotBinding, admitted: Set<string>): Promise<void> {
-    for (const { claim, raw } of claimRows()) {
-      if (claim.hubAckObserved === true) {
-        kv.delete(CLAIM_PREFIX + claim.deliveryId); // Confirmed ack retires the tombstone.
-        log.info('claude_delivery_claim_retired', { deliveryId: claim.deliveryId });
-        continue;
+  /** The disable drain: every claim whose scope is not admitted this pass
+   * (a disabled, opted-out, unwitnessed or vanished scope) and is not in
+   * flight is fenced, never resent. A `reserved` claim was proven unwritten
+   * and is released; an `attempting` one may have written bytes and becomes
+   * `uncertain`. Settled tombstones are left as they are. */
+  function fenceSweep(admitted: Set<string>): void {
+    for (const [scope, rows] of [...index.byScope]) {
+      if (admitted.has(scope)) continue;
+      for (const { claim, raw } of [...rows]) {
+        if (inFlight.has(claim.deliveryId)) continue;
+        if (claim.state === 'reserved') {
+          claim.state = 'released'; claim.disposition = 'released'; claim.dispositionReason = 'fenced_scope_not_admitted';
+        } else if (claim.state === 'attempting') {
+          claim.state = 'uncertain'; claim.disposition = 'uncertain'; claim.dispositionReason = 'restart_may_have_written';
+        } else continue;
+        claim.updatedAt = clock.now();
+        if (saveIfCurrent(claim, raw)) log.info('claude_delivery_claim_fenced', { deliveryId: claim.deliveryId, scope, state: claim.state });
       }
-      if (claim.scope !== row.binding_key) {
-        // Another admitted scope recovers its own rows in its own lane; a
-        // scope that vanished from the snapshot is fenced, never resent.
-        if (claim.state === 'reserved' && !admitted.has(claim.scope) && !inFlight.has(claim.deliveryId)) {
-          claim.state = 'expired'; claim.disposition = 'released'; claim.dispositionReason = 'scope_absent';
-          claim.updatedAt = clock.now(); saveIfCurrent(claim, raw);
+    }
+  }
+
+  /** Read-only hub ack observation for one admitted scope, at most every
+   * ACK_OBSERVE_MS and only while the scope has unretired claims: the only
+   * writer of `hubAckObserved`. A complete window (not truncated) from the
+   * hub's acked cursor proves every delivery absent from it was acked (or
+   * expired) by the hub; an incomplete or failed read changes nothing. Never
+   * posts an ack or a receipt. Then retires, in this scope only, settled
+   * claims carrying the observation; `uncertain` ones wait for an operator. */
+  async function observeAcks(row: ClaudeSnapshotBinding): Promise<void> {
+    const scope = row.binding_key;
+    if (!index.byScope.get(scope)?.length) return;
+    const last = ackObserved.get(scope);
+    if (last === undefined || clock.now() - last >= ACK_OBSERVE_MS) {
+      ackObserved.set(scope, clock.now());
+      const window = await bounded(fetchAckWindow(scopeCoordinates(row)), FETCH_TIMEOUT, clock);
+      if (window && window.complete === true && window.deliveryIds instanceof Set) {
+        for (const { claim, raw } of [...(index.byScope.get(scope) ?? [])]) {
+          if (claim.hubAckObserved === true || window.deliveryIds.has(claim.deliveryId) || inFlight.has(claim.deliveryId)) continue;
+          if (claim.state === 'reserved' || claim.state === 'attempting') continue; // Live work is never marked.
+          claim.hubAckObserved = true;
+          claim.updatedAt = clock.now();
+          if (saveIfCurrent(claim, raw)) log.info('claude_delivery_hub_ack_observed', { deliveryId: claim.deliveryId, scope });
         }
-        continue;
       }
+    }
+    for (const { claim } of [...(index.byScope.get(scope) ?? [])]) {
+      if (claim.hubAckObserved !== true || !RETIRABLE.has(claim.state) || inFlight.has(claim.deliveryId)) continue;
+      retire(claim); // A confirmed hub ack retires the settled tombstone.
+      log.info('claude_delivery_claim_retired', { deliveryId: claim.deliveryId, scope });
+    }
+  }
+
+  /** Restart recovery for one admitted scope, from this pass's index. A
+   * foreign `reserved` claim is proven unwritten by its exact predecessor:
+   * fence it against the current generation, then either reschedule it with
+   * the current owner or release it fenced. A foreign `attempting` claim may
+   * have written bytes: retain and surface `uncertain`, never resend. */
+  async function recoverScope(row: ClaudeSnapshotBinding): Promise<void> {
+    for (const { claim, raw } of [...(index.byScope.get(row.binding_key) ?? [])]) {
       if (inFlight.has(claim.deliveryId)) continue;
       if (claim.state === 'attempting') {
         claim.state = 'uncertain'; claim.disposition = 'uncertain'; claim.dispositionReason = 'restart_may_have_written';
@@ -494,6 +638,24 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Cl
     }
   }
 
+  /** New arrivals only, no tail: read the hub head, persist it as the
+   * scope's cursor, and stage nothing this pass. Earlier unacked deliveries
+   * stay on the legacy hook/inbox path. Triggered by a first admission, a
+   * new generation, an empty cursor or a hub-rejected cursor. A failed read
+   * persists nothing and retries on backoff. */
+  async function baseline(row: ClaudeSnapshotBinding, coordinates: ClaudeDeliveryScopeCoordinates, record: RecordValue): Promise<void> {
+    const head = await bounded(fetchCandidates(coordinates, 'head'), FETCH_TIMEOUT, clock);
+    // The hub resolves `head` and reads the page in separate snapshots: an
+    // arrival in between comes back on this page with next_cursor past it,
+    // and baselining there would skip it. Only an empty head page is a
+    // baseline; anything else retries.
+    if (!head || head.cursorRejected === true || !Array.isArray(head.events) || head.events.length !== 0 ||
+      typeof head.nextCursor !== 'string' || !CURSOR.test(head.nextCursor)) throw new Error('baseline_unavailable');
+    kv.set(SCOPE_PREFIX + row.binding_key, JSON.stringify({ v: 1, generation: row.generation, cursor: head.nextCursor,
+      blockedPendingLimit: record.blockedPendingLimit === true && record.generation === row.generation, updatedAt: clock.now() }));
+    log.info('claude_delivery_scope_baselined', { scope: row.binding_key, generation: row.generation });
+  }
+
   /** Stage one bounded ordered window, then attempt the staged wakes in
    * cursor order. The durable checkpoint advances only past fully handled
    * events; an unknown or corrupt event stalls the window for this pass. */
@@ -503,20 +665,7 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Cl
     const record = obj(JSON.parse(kv.get(scopeKey) ?? '{}'));
     const stored = typeof record.generation === 'string' && typeof record.cursor === 'string';
     if (!stored || record.generation !== row.generation || record.cursor === '' || !CURSOR.test(record.cursor)) {
-      // First admission, a new generation or an empty cursor: new arrivals
-      // only, no tail. Read the hub head, persist it as the cursor, and stage
-      // nothing this pass. Earlier unacked deliveries stay on the legacy
-      // hook/inbox path. A failed read persists nothing and retries.
-      const head = await bounded(fetchCandidates(coordinates, 'head'), FETCH_TIMEOUT, clock);
-      // The hub resolves `head` and reads the page in separate snapshots: an
-      // arrival in between comes back on this page with next_cursor past
-      // it, and baselining there would skip it. Only an empty head page is
-      // a baseline; anything else retries.
-      if (!head || !Array.isArray(head.events) || head.events.length !== 0 ||
-        typeof head.nextCursor !== 'string' || !CURSOR.test(head.nextCursor)) throw new Error('baseline_unavailable');
-      kv.set(scopeKey, JSON.stringify({ v: 1, generation: row.generation, cursor: head.nextCursor,
-        blockedPendingLimit: record.blockedPendingLimit === true && record.generation === row.generation, updatedAt: clock.now() }));
-      log.info('claude_delivery_scope_baselined', { scope: row.binding_key, generation: row.generation });
+      await baseline(row, coordinates, record);
       return;
     }
     const progress = {
@@ -527,13 +676,21 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Cl
       updatedAt: clock.now(),
     };
     const page = await bounded(fetchCandidates(coordinates, progress.cursor), FETCH_TIMEOUT, clock);
+    if (page?.cursorRejected === true) {
+      // The hub refused the stored cursor itself (purged, another epoch, or
+      // malformed): it can never succeed again, so rebaseline at the head
+      // rather than retry forever. Anything else stays a transient failure.
+      log.warn('claude_delivery_cursor_rejected', { scope: row.binding_key });
+      await baseline(row, coordinates, record);
+      return;
+    }
     if (!page || !Array.isArray(page.events)) throw new Error('candidates_unavailable');
-    const existing = new Set(claims().map(claim => claim.deliveryId));
+    const existing = index.ids;
     let cursor = progress.cursor;
-    const staged: ClaudeClaimRecord[] = [];
+    const staged: Array<{ claim: ClaudeClaimRecord; raw: string }> = [];
     let stalled = false;
-    for (const raw of page.events.slice(0, STAGE_BATCH)) {
-      const event = obj(raw);
+    for (const input of page.events.slice(0, STAGE_BATCH)) {
+      const event = obj(input);
       const shape = typeof event.cursor === 'string' && CURSOR.test(event.cursor) &&
         typeof event.type === 'string' && EVENT_TYPES.includes(event.type as typeof EVENT_TYPES[number]);
       if (!shape) { stalled = true; break; }
@@ -554,12 +711,11 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Cl
           disposition: 'held', dispositionReason: 'inbox_only', hubAckObserved: false,
           createdAt: now, updatedAt: now });
         log.info('claude_delivery_claim_held', { deliveryId: event.deliveryId, scope: row.binding_key, reason: 'inbox_only' });
-        existing.add(event.deliveryId);
         cursor = event.cursor;
         continue;
       }
       if (event.priority !== 'wake') { cursor = event.cursor; continue; } // wake_idle stays legacy.
-      if (pending(row.binding_key) >= CLAUDE_PENDING_LIMIT) {
+      if (index.pending(row.binding_key) >= CLAUDE_PENDING_LIMIT) {
         progress.blockedPendingLimit = true;
         if (!blockedLogged.has(row.binding_key)) {
           blockedLogged.add(row.binding_key);
@@ -573,13 +729,12 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Cl
         cursor: event.cursor, predecessor, priority: 'wake', state: 'reserved', attemptId: randomBytes(16).toString('hex'),
         hubAckObserved: false, createdAt: now, updatedAt: now,
       };
-      save(claim); // Durable reservation before anything else can happen.
+      const raw = save(claim); // Durable reservation before anything else can happen.
       log.info('claude_delivery_claim_reserved', { deliveryId: claim.deliveryId, scope: claim.scope });
-      existing.add(claim.deliveryId);
-      staged.push(claim);
+      staged.push({ claim, raw });
       cursor = event.cursor;
     }
-    if (pending(row.binding_key) < CLAUDE_PENDING_LIMIT) {
+    if (index.pending(row.binding_key) < CLAUDE_PENDING_LIMIT) {
       progress.blockedPendingLimit = false;
       blockedLogged.delete(row.binding_key);
     }
@@ -587,7 +742,7 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Cl
     kv.set(scopeKey, JSON.stringify(progress));
     // Fully staged work is attempted even when later staging stalled: the
     // stall stops the window, it does not strand already-reserved claims.
-    for (const claim of staged) await attempt(row, claim, JSON.stringify(claim));
+    for (const { claim, raw } of staged) await attempt(row, claim, raw);
     if (stalled) throw new Error('stalled_unknown_event');
   }
 
@@ -603,8 +758,7 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Cl
     claim.msgId = randomBytes(16).toString('hex');
     claim.state = 'attempting';
     claim.updatedAt = clock.now();
-    save(claim);
-    const committed = JSON.stringify(claim);
+    const committed = save(claim);
     log.info('claude_delivery_claim_attempting', { deliveryId: claim.deliveryId, scope: claim.scope, attemptId: claim.attemptId });
     // Canary test seam: SIGKILL this process after `attempting` is durable
     // but before any byte can leave, so a harness can replay the crash

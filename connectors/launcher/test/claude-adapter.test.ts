@@ -10,7 +10,7 @@ import type { TestContext } from 'node:test';
 import type { KeyValue } from '../src/backend.ts';
 import { fakeClock, memoryLog } from '../../hub-client/testing/fixtures.ts';
 import type { Log } from '../../hub-client/src/ports.ts';
-import { createClaudeDeliveryAdapter, claudeDeliveryCanaryAllowed, claudeInboxArgs, claudeDeliverArgs, spawnClaudeDeliver } from '../src/delivery/claude-adapter.ts';
+import { createClaudeDeliveryAdapter, claudeDeliveryCanaryAllowed, claudeInboxArgs, claudeDeliverArgs, spawnClaudeDeliver, spawnClaudeInbox } from '../src/delivery/claude-adapter.ts';
 import type { ClaudeCandidatePage, ClaudeClaimRecord, ClaudeDeliveryAdapterDeps, ClaudeDeliveryFrame, DeliverExit } from '../src/delivery/claude-adapter.ts';
 import type { WatchPool, WatchRequest, WakeEvent, WatchEnd } from '../src/delivery/watch-pool.ts';
 
@@ -133,6 +133,7 @@ function fixture(t: TestContext, deps: Partial<ClaudeDeliveryAdapterDeps> = {}, 
     fetchSnapshot: async () => snapshot as import('../src/delivery/claude-status.ts').ClaudeSnapshot,
     fetchCandidates: async () => pages.shift() ?? { events: [] },
     transport: async frame => { transportCalls.push(frame); return exit; },
+    fetchAckWindow: async () => undefined, // No observation unless a test supplies one.
     ...deps,
   });
   t.after(() => adapter.stop());
@@ -294,13 +295,14 @@ test('a reserved claim from a rotated generation is released fenced without any 
   assert.equal(claim.dispositionReason, 'fenced_generation_changed');
 });
 
-test('a reserved claim for a vanished scope expires without a write', async t => {
+test('a reserved claim for a vanished scope is released fenced without a write', async t => {
   const f = fixture(t);
   f.kv.kv.set('claude-claims:claim:dly_seeded', JSON.stringify(seededClaim({ scope: 'dd'.repeat(32) })));
   f.adapter.start();
   await settle();
   assert.equal(f.transportCalls.length, 0);
-  assert.equal(f.kv.claim('dly_seeded')!.state, 'expired');
+  const claim = f.kv.claim('dly_seeded')!;
+  assert.deepEqual([claim.state, claim.disposition, claim.dispositionReason], ['released', 'released', 'fenced_scope_not_admitted']);
 });
 
 test('an attempting claim from a crashed run surfaces uncertain and is never resent', async t => {
@@ -746,6 +748,10 @@ test('children run against the binding config, not the daemon default', unixChil
     '',
   ].join('\n'), { mode: 0o700 });
   const clock = fakeClock(1000), log = memoryLog(), store = memoryKv();
+  // One settled tombstone in the scope makes an ack observation due, so the
+  // ack-window read runs as a child too.
+  store.kv.set('claude-claims:claim:dly_seeded', JSON.stringify(seededClaim({ state: 'released', disposition: 'attempted',
+    dispositionReason: 'write_completed_no_presentation_proof' })));
   const { createWatchPool } = await import('../src/delivery/watch-pool.ts');
   const pool = createWatchPool({ log });
   t.after(() => pool.close());
@@ -758,9 +764,11 @@ test('children run against the binding config, not the daemon default', unixChil
   t.after(() => adapter.stop());
   adapter.start();
   const lines = () => { try { return readFileSync(envLog, 'utf8').trim().split('\n').filter(Boolean); } catch { return []; } };
-  for (let i = 0; i < 200 && !(lines().some(l => l.includes('inbox')) && lines().some(l => l.includes('watch'))); i++) await settle(25);
+  const ackRead = (l: string) => l.includes(' inbox ') && l.includes('--limit 200') && !l.includes('--since');
+  for (let i = 0; i < 200 && !(lines().some(l => l.includes('inbox')) && lines().some(l => l.includes('watch')) && lines().some(ackRead)); i++) await settle(25);
   const seen = lines();
   assert.ok(seen.some(l => l.includes(' inbox ') || l.includes('|--net p inbox')), `an inbox child ran: ${seen}`);
+  assert.ok(seen.some(ackRead), `an ack-window read ran: ${seen}`);
   assert.ok(seen.some(l => l.includes('watch')), `a watch child ran: ${seen}`);
   for (const line of seen) {
     assert.equal(line.split('|')[0], BIND_CONFIG, `a child ran against the daemon default: ${line}`);
@@ -937,4 +945,200 @@ test('a head page carrying events is not a baseline: it retries', async t => {
   assert.deepEqual(calls, ['head', 'head'], 'the next pass retries the baseline');
   assert.equal(f.kv.scope(KEY)!.cursor, 'e1.5', 'an empty head page baselines');
   assert.equal(f.transportCalls.length, 0);
+});
+
+// Phase 2 task 6: claim ledger hygiene. Ack observation is the first and only
+// hubAckObserved writer and is strictly read-only; retirement runs in the
+// claim's own scope lane; a fence sweep drains every claim whose scope is no
+// longer admitted, even when nothing is admitted; a pass is linear in claims.
+
+type AckWindow = { deliveryIds: Set<string>; complete: boolean } | undefined;
+
+function settledClaim(id: string, over: Partial<ClaudeClaimRecord> = {}): ClaudeClaimRecord {
+  return seededClaim({ deliveryId: id, messageId: 'msg_' + ulid(Number(id.replace(/\D/g, '')) || 70), state: 'released',
+    disposition: 'attempted', dispositionReason: 'write_completed_no_presentation_proof', ...over });
+}
+
+test('a complete acked window marks and then retires settled tombstones of its own scope only', async t => {
+  const foreign = 'ee'.repeat(32);
+  const reads: string[] = [];
+  const f = fixture(t, {
+    fetchAckWindow: async c => { reads.push(c.profile); return { deliveryIds: new Set(['dly_still']), complete: true }; },
+  });
+  for (const [id, over] of [
+    ['dly_acked', {}],
+    ['dly_refused', { state: 'refused', disposition: 'refused', dispositionReason: 'connect_refused_or_timeout' }],
+    ['dly_held', { state: 'held', disposition: 'held', dispositionReason: 'inbox_only', priority: 'hold' }],
+    ['dly_still', {}],
+  ] as const) f.kv.kv.set('claude-claims:claim:' + id, JSON.stringify(settledClaim(id, over as Partial<ClaudeClaimRecord>)));
+  // An already-acked row of another (not admitted) scope: never this lane's.
+  f.kv.kv.set('claude-claims:claim:dly_foreign', JSON.stringify(settledClaim('dly_foreign', { scope: foreign, hubAckObserved: true })));
+  f.adapter.start();
+  await settle();
+  assert.equal(reads.length, 1, 'one ack-window read for the admitted scope');
+  const after = new Map(f.kv.claims().map(c => [c.deliveryId, c]));
+  for (const id of ['dly_acked', 'dly_refused', 'dly_held']) {
+    assert.equal(after.get(id), undefined, `${id} acked by the hub and settled: retired`);
+  }
+  assert.ok(after.get('dly_still'), 'a delivery still in the unacked window survives');
+  assert.notEqual(after.get('dly_still')!.hubAckObserved, true, 'and is not marked');
+  assert.ok(after.get('dly_foreign'), 'a foreign scope\'s acked row is never retired by this lane');
+  assert.ok(f.log.entries.some(e => e.msg === 'claude_delivery_claim_retired'));
+});
+
+test('an incomplete window marks nothing', async t => {
+  const f = fixture(t, {
+    fetchAckWindow: async () => ({ deliveryIds: new Set<string>(), complete: false }),
+  });
+  f.kv.kv.set('claude-claims:claim:dly_a1', JSON.stringify(settledClaim('dly_a1')));
+  f.kv.kv.set('claude-claims:claim:dly_a2', JSON.stringify(settledClaim('dly_a2', { state: 'uncertain', disposition: 'uncertain', dispositionReason: 'write_failed_or_outcome_unknown' })));
+  const before = [...f.kv.raw.entries()].filter(([k]) => k.startsWith('claude-claims:claim:'));
+  f.adapter.start();
+  await settle();
+  const after = [...f.kv.raw.entries()].filter(([k]) => k.startsWith('claude-claims:claim:'));
+  assert.deepEqual(after, before, 'an incomplete window changes no claim byte');
+  // A failed read (no window) also changes nothing.
+  const g = fixture(t, { fetchAckWindow: async () => undefined });
+  g.kv.kv.set('claude-claims:claim:dly_a1', JSON.stringify(settledClaim('dly_a1')));
+  const raw = g.kv.raw.get('claude-claims:claim:dly_a1');
+  g.adapter.start();
+  await settle();
+  assert.equal(g.kv.raw.get('claude-claims:claim:dly_a1'), raw);
+});
+
+test('uncertain claims are marked but never retired', async t => {
+  const f = fixture(t, {
+    fetchAckWindow: async () => ({ deliveryIds: new Set<string>(), complete: true }),
+  });
+  f.kv.kv.set('claude-claims:claim:dly_u1', JSON.stringify(settledClaim('dly_u1', {
+    state: 'uncertain', disposition: 'uncertain', dispositionReason: 'write_failed_or_outcome_unknown' })));
+  f.adapter.start();
+  await settle();
+  f.clock.advance(60_000); await settle(); // A second observation and pass.
+  const claim = f.kv.claim('dly_u1')!;
+  assert.ok(claim, 'an uncertain claim is never retired');
+  assert.equal(claim.hubAckObserved, true, 'but the hub ack is recorded for the operator');
+  assert.equal(claim.state, 'uncertain');
+});
+
+test('ack observation never posts ack or receipts', unixChild, async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'vn-claude-ack-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const bin = join(dir, 'vecnet'), argvLog = join(dir, 'argv.log');
+  writeFileSync(bin, ['#!/bin/sh', `printf '%s\\n' "$*" >> ${JSON.stringify(argvLog)}`,
+    `printf '%s\\n' '{"events":[],"next_cursor":"e1.3"}'`, ''].join('\n'), { mode: 0o700 });
+  const f = fixture(t, {
+    env: { HOME: dir, PATH: process.env.PATH, VECNET_BIN: bin },
+    fetchCandidates: undefined, fetchAckWindow: undefined, // The real pinned inbox children.
+  });
+  f.kv.kv.set('claude-claims:claim:dly_s1', JSON.stringify(settledClaim('dly_s1')));
+  f.adapter.start();
+  const lines = () => { try { return readFileSync(argvLog, 'utf8').trim().split('\n').filter(Boolean); } catch { return []; } };
+  for (let i = 0; i < 200 && !lines().some(l => l.includes('--limit 200')); i++) await settle(25);
+  const seen = lines();
+  const ack = seen.find(l => l.includes('--limit 200'));
+  assert.ok(ack, `the ack window was read: ${seen}`);
+  assert.deepEqual(ack!.split(' '), ['--net', 'p', 'inbox', '--json', '--limit', '200', '--no-display-proof'],
+    'the ack read is a plain inbox read from the acked cursor');
+  for (const line of seen) {
+    const argv = line.split(' ');
+    assert.ok(!argv.includes('--ack') && !argv.includes('ack') && !argv.includes('receipt') && !argv.includes('--auto-ack'),
+      `a child acked or posted a receipt: ${line}`);
+  }
+  assert.equal(f.kv.claim('dly_s1'), undefined, 'an empty complete window retires the settled tombstone');
+});
+
+test('disabling the lone admitted scope drains reserved rows', async t => {
+  const f = fixture(t);
+  f.setSnapshot([admittedRow({ admission: { live: true, policy: false, version_qualified: true, canary: true, witness: true } })]);
+  f.kv.kv.set('claude-claims:claim:dly_r1', JSON.stringify(seededClaim({ deliveryId: 'dly_r1' })));
+  f.kv.kv.set('claude-claims:claim:dly_r2', JSON.stringify(seededClaim({ deliveryId: 'dly_r2', scope: 'ee'.repeat(32) })));
+  f.kv.kv.set('claude-claims:claim:dly_t1', JSON.stringify(seededClaim({ deliveryId: 'dly_t1', state: 'attempting' })));
+  f.kv.kv.set('claude-claims:claim:dly_k1', JSON.stringify(settledClaim('dly_k1')));
+  f.adapter.start();
+  await settle();
+  assert.equal(f.adapter.admitted().size, 0, 'nothing is admitted');
+  assert.equal(f.transportCalls.length, 0, 'a drained claim is never sent');
+  for (const id of ['dly_r1', 'dly_r2']) {
+    const c = f.kv.claim(id)!;
+    assert.deepEqual([c.state, c.disposition, c.dispositionReason], ['released', 'released', 'fenced_scope_not_admitted'], id);
+  }
+  const t1 = f.kv.claim('dly_t1')!;
+  assert.deepEqual([t1.state, t1.disposition, t1.dispositionReason], ['uncertain', 'uncertain', 'restart_may_have_written']);
+  assert.equal(f.kv.claim('dly_k1')!.state, 'released', 'a settled tombstone is left as it was');
+  assert.equal(f.kv.claim('dly_k1')!.dispositionReason, 'write_completed_no_presentation_proof');
+});
+
+test('a pass is linear in claims', async t => {
+  // A counting kv over a plain map: 200 settled tombstones plus 32 staged
+  // wakes in one pass (one snapshot, one page, one ack window).
+  const map = new Map<string, string>();
+  let gets = 0;
+  const counted: KeyValue = {
+    get: k => { gets++; return map.get(k); },
+    set: (k, v) => { map.set(k, v); },
+    delete: k => { map.delete(k); },
+    keys: (prefix = '') => [...map.keys()].filter(k => k.startsWith(prefix)),
+  };
+  map.set('claude-claims:scope:' + KEY, JSON.stringify({ v: 1, generation: GEN, cursor: 'e1.0', blockedPendingLimit: false, updatedAt: 1000 }));
+  for (let i = 0; i < 200; i++) {
+    const id = 'dly_' + ulid(1000 + i);
+    map.set('claude-claims:claim:' + id, JSON.stringify(settledClaim(id, { messageId: 'msg_' + ulid(1000 + i) })));
+  }
+  const events = Array.from({ length: 32 }, (_, i) => deliveryEvent('e1.' + (i + 1), i + 1));
+  let served = false;
+  const f = fixture(t, {
+    kv: counted,
+    fetchCandidates: async () => { if (served) return { events: [] }; served = true; return { events }; },
+  }, { baselined: false });
+  f.adapter.start();
+  await settle(150);
+  const delivered = [...map.values()].filter(v => v.includes('"write_completed_no_presentation_proof"')).length;
+  assert.equal(delivered, 232, 'all 32 staged wakes were delivered beside the 200 tombstones');
+  assert.ok(served, 'the one page was staged');
+  assert.ok(gets <= 200 + 4 * 32, `a pass made ${gets} kv.get calls, want <= ${200 + 4 * 32}`);
+});
+
+test('a rejected stored cursor rebaselines; a transient failure keeps the cursor', async t => {
+  const calls: Array<string | undefined> = [];
+  let mode: 'rejected' | 'transient' = 'rejected';
+  const f = fixture(t, {
+    fetchCandidates: async (_c, cursor) => {
+      calls.push(cursor);
+      if (cursor === 'head') return { events: [], nextCursor: 'e2.0' };
+      return mode === 'rejected' ? { events: [], cursorRejected: true } : undefined;
+    },
+  });
+  f.adapter.start();
+  await settle();
+  assert.deepEqual(calls, ['e1.0', 'head'], 'a rejected cursor reads the head in the same pass');
+  assert.equal(f.kv.scope(KEY)!.cursor, 'e2.0', 'the scope rebaselined');
+  assert.equal(f.kv.claims().length, 0, 'the rebaseline stages nothing');
+  assert.ok(f.log.entries.some(e => e.msg === 'claude_delivery_scope_baselined'));
+  assert.ok(!f.log.entries.some(e => e.msg === 'claude_delivery_reconcile_failed'), 'a rebaseline is not a failure');
+
+  mode = 'transient';
+  calls.length = 0;
+  f.pool.recording.notify('exclusive:claude:' + KEY, { priority: 'wake' });
+  await settle();
+  assert.deepEqual(calls, ['e2.0'], 'a transient failure never reads the head');
+  assert.equal(f.kv.scope(KEY)!.cursor, 'e2.0', 'and keeps the stored cursor');
+  assert.ok(f.log.entries.some(e => e.msg === 'claude_delivery_reconcile_failed'), 'a transient failure backs off');
+});
+
+test('the inbox child reports a purged or malformed cursor as rejected, anything else as a failure', unixChild, async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'vn-claude-purge-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const coordinates = { profile: 'p', config: BIND_CONFIG, hubEndpoint: 'https://hub.example', caller: 'peer_A', recipient: 'peer_A' };
+  const run = async (body: string) => {
+    const bin = join(dir, 'vecnet-' + randomUUID());
+    writeFileSync(bin, '#!/bin/sh\n' + body + '\n', { mode: 0o700 });
+    return spawnClaudeInbox({ HOME: dir, PATH: process.env.PATH, VECNET_BIN: bin }, fakeClock(1000))(coordinates, 'e1.5');
+  };
+  assert.deepEqual(await run(`echo 'vecnet: cursor_purged: cursor is below the retention floor' >&2; exit 2`), { events: [], cursorRejected: true });
+  assert.deepEqual(await run(`echo 'vecnet: invalid_value: cursor must look like e<epoch>.<seq>' >&2; exit 2`), { events: [], cursorRejected: true });
+  assert.equal(await run(`echo 'vecnet: cursor_purged: x' >&2; exit 3`), undefined, 'a network exit is transient');
+  assert.equal(await run(`echo 'vecnet: rate_limited: slow down' >&2; exit 2`), undefined, 'another hub error is transient');
+  assert.equal(await run(`echo 'vecnet: invalid_value: limit must be positive' >&2; exit 2`), undefined, 'a non-cursor validation error is transient');
+  assert.equal(await run(`echo 'note: vecnet: cursor_purged: x' >&2; exit 2`), undefined, 'the marker must start the line');
 });
