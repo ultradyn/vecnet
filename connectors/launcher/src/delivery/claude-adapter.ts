@@ -113,9 +113,18 @@ export interface ClaudeDeliveryAdapterDeps {
  * the durable per-profile record (`vecnet --net P claude canary enable`,
  * surfaced as `admission.canary`) is the gate, and `claude enable` alone can
  * never turn native delivery on. */
-export function claudeDeliveryCanaryAllowed(env: NodeJS.ProcessEnv): boolean {
-  return env.VECNET_CLAUDE_DELIVERY_CANARY !== '0';
+export function claudeDeliveryCanaryAllowed(env: NodeJS.ProcessEnv, log?: Log): boolean {
+  const value = env.VECNET_CLAUDE_DELIVERY_CANARY;
+  // Only the exact '0' is the kill switch (plan-mandated). Any other set
+  // value is surfaced once per process, so a mistyped "off" or "false" is
+  // never silently mistaken for a disable.
+  if (log && value !== undefined && value !== '' && value !== '0' && value !== '1' && !warnedCanaryValue) {
+    warnedCanaryValue = true;
+    log.warn('claude_delivery_canary_env_unrecognized', { allowed: true, killSwitch: '0' });
+  }
+  return value !== '0';
 }
+let warnedCanaryValue = false;
 
 /** The hosted delivery adapter plus its current native admissions (binding
  * key -> generation): at most one entry, empty whenever the last pass could
@@ -334,7 +343,8 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Cl
   }
 
   /** Admission: a live, policy-enabled, version-qualified (build check
-   * parked), canary-opted binding of a credential's own inbox (no `as`)
+   * parked), canary-opted binding of a peer credential's own inbox (no `as`;
+   * the `peer_` prefix is defence in depth behind the CLI's strict id check)
    * carrying the child-spawn coordinates. Every flag must be exactly `true`:
    * a snapshot from an older CLI without `canary` admits nothing. Anything
    * else stays legacy/inbox-only. */
@@ -345,7 +355,7 @@ export function createClaudeDeliveryAdapter(deps: ClaudeDeliveryAdapterDeps): Cl
       admission.live === true && admission.policy === true && admission.version_qualified === true &&
       admission.canary === true && row.scope !== undefined && scope.as === undefined &&
       HUB_ID.test(scope.profile ?? '') && HUB_ID.test(scope.hub_endpoint ?? '') &&
-      HUB_ID.test(scope.caller ?? '') && scope.recipient === scope.caller;
+      HUB_ID.test(scope.caller ?? '') && scope.caller.startsWith('peer_') && scope.recipient === scope.caller;
   }
 
   function subscribeWatches(admitted: ClaudeSnapshotBinding[]): void {

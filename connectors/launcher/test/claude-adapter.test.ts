@@ -476,6 +476,26 @@ test('the canary env var is a kill switch only: =0 refuses, nothing else enables
   }
 });
 
+test('an unrecognized canary env value warns once and is not a kill switch', () => {
+  const log = memoryLog();
+  for (const value of ['off', 'false', 'off']) assert.equal(claudeDeliveryCanaryAllowed({ VECNET_CLAUDE_DELIVERY_CANARY: value }, log), true);
+  for (const value of ['', '0', '1']) claudeDeliveryCanaryAllowed({ VECNET_CLAUDE_DELIVERY_CANARY: value }, log);
+  claudeDeliveryCanaryAllowed({}, log);
+  assert.equal(log.entries.filter(e => e.msg === 'claude_delivery_canary_env_unrecognized').length, 1, 'warned exactly once per process');
+  assert.doesNotMatch(JSON.stringify(log.entries), /off|false/, 'the raw value is never logged');
+});
+
+test('a caller that is not a peer credential is never admitted (defence in depth)', async t => {
+  const f = fixture(t);
+  f.setSnapshot([admittedRow({ scope: { profile: 'p', hub_endpoint: 'https://hub.example', caller: 'prn_A', recipient: 'prn_A' } })]);
+  f.setPages([{ events: [deliveryEvent('e1.1', 1)] }]);
+  f.adapter.start();
+  await settle();
+  assert.equal(f.pool.recording.requests.length, 0);
+  assert.equal(f.transportCalls.length, 0);
+  assert.equal(f.adapter.admitted().size, 0);
+});
+
 test('only the single canary-opted peer scope is admitted', async t => {
   const unopted = admittedRow({ admission: { live: true, policy: true, version_qualified: true, canary: false } });
   const missing = admittedRow({ admission: { live: true, policy: true, version_qualified: true } });

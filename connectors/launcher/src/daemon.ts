@@ -524,7 +524,7 @@ export async function startDaemon(o: { cfg: LauncherConfig; hub?: HubApi; stream
       // Native Claude delivery reaches only the single scope holding the
       // durable per-profile canary record; VECNET_CLAUDE_DELIVERY_CANARY=0 is
       // the kill switch. Passive status marks the adapter's admissions.
-      claudeDeliveryCanary: claudeDeliveryCanaryAllowed(deliveryEnv),
+      claudeDeliveryCanary: claudeDeliveryCanaryAllowed(deliveryEnv, log),
       auxiliary: nativeAdmissions => createClaudeStatus({ env: deliveryEnv, clock, log, fetchSnapshot: spawnClaudeSnapshot(deliveryEnv), nativeAdmissions }),
     });
     // A dead delivery host must fail the embedded service as well, not leave a

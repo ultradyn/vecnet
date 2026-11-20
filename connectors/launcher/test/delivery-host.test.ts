@@ -261,6 +261,27 @@ test('optional adapter startup failure is visible and leaves Codex v1 status hea
   assert.equal(stops, 1);
 });
 
+test('a throwing status factory still drains the built delivery adapter and closes its ledger', unix, async t => {
+  // (An fd count cannot prove the close: SQLite defers a closed
+  // connection's fd while the Codex connector's own connection to the same
+  // database holds a POSIX lock, so the host logs the close instead.)
+  const s = fixture(t);
+  let factoryCalls = 0;
+  const host = startDeliveryHost({ ...s, claudeDeliveryCanary: true, auxiliary: native => {
+    factoryCalls++;
+    assert.equal(native().size, 0, 'the unstarted delivery adapter admits nothing');
+    throw new Error('private factory detail');
+  } });
+  s.cleanup.push(() => host.stop());
+  await until(() => s.log.entries.some(e => e.msg === 'delivery_auxiliary_start_failed'), 'the factory failure is reported');
+  await until(() => s.log.entries.some(e => e.msg === 'claude_delivery_ledger_closed'),
+    'the built delivery adapter is drained and its ledger closed before host stop');
+  assert.equal(factoryCalls, 1);
+  assert.doesNotMatch(JSON.stringify(s.log.entries), /private factory detail/);
+  await host.stop();
+  assert.equal(s.log.entries.filter(e => e.msg === 'claude_delivery_ledger_closed').length, 1, 'closed exactly once');
+});
+
 test('embedded delivery takes over the managed entry’s lock after SIGKILL leaves stale readiness', unix, async t => {
   const s = fixture(t);
   // The managed entry refuses a VECNET_BIN not owned by this user or root, or

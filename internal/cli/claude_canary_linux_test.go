@@ -10,6 +10,7 @@ package cli
 
 import (
 	"encoding/json"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -90,7 +91,7 @@ func TestClaudeStatusCanaryModeNeedsHostAdmission(t *testing.T) {
 // the fixed reason), and resolve --retry refuses with the stored claim left
 // byte-identical. With the record both proceed.
 func TestClaudeDeliverAndRetryRequireCanary(t *testing.T) {
-	env, dir, _, key, generation, sink := deliverBindingFixtureSink(t)
+	env, dir, socket, key, generation, sink := deliverBindingFixtureSink(t)
 	stateDir := filepath.Join(dir, ".local", "state", "vecnet", "projects")
 	path := filepath.Join(stateDir, claudeBindingsName)
 	withRecord, err := os.ReadFile(path)
@@ -127,8 +128,10 @@ func TestClaudeDeliverAndRetryRequireCanary(t *testing.T) {
 			t.Fatalf("%s canary record validated", name)
 		}
 	}
-	if n := sink.conns.Load(); n != 0 {
-		t.Fatalf("a refused deliver connected %d time(s)", n)
+	// Synchronous proof of "refused before connect": any connection the
+	// helper made is already queued ahead of the barrier probe.
+	if early := deliverSinkBarrier(t, sink, socket); len(early) != 0 {
+		t.Fatalf("a refused deliver connected %d time(s): %q", len(early), early)
 	}
 
 	// resolve --retry: the same refusal, the claim unchanged. The deliver
@@ -187,8 +190,16 @@ func TestClaudeDeliverAndRetryRequireCanary(t *testing.T) {
 	if code, out, errs := claudeDeliverRun(t, env, deliverBindingArgs(key, generation)...); code != 0 {
 		t.Fatalf("deliver with the canary: exit %d %s %s", code, out, errs)
 	}
-	if n := sink.conns.Load(); n != 1 {
-		t.Fatalf("the admitted deliver made %d connection(s), want 1", n)
+	select {
+	case frame := <-sink.frames:
+		if string(frame) != deliverWantFrame {
+			t.Fatalf("the admitted deliver wrote %q, want the pointer frame", frame)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the admitted deliver never reached the sink")
+	}
+	if extra := deliverSinkBarrier(t, sink, socket); len(extra) != 0 {
+		t.Fatalf("the admitted deliver made %d extra connection(s): %q", len(extra), extra)
 	}
 	if code, out, errs := claudeStatusRun(t, env, retry...); code != 0 {
 		t.Fatalf("retry with the canary: exit %d %s %s", code, out, errs)
@@ -200,3 +211,36 @@ func TestClaudeDeliverAndRetryRequireCanary(t *testing.T) {
 
 // claudeTestStale is a heartbeat time past the freshness window.
 func claudeTestStale() time.Time { return time.Now().Add(-2 * claudeStatusFreshFor) }
+
+// deliverSinkProbe is the barrier's marker frame; no helper ever writes it.
+const deliverSinkProbe = "vecnet-test-sink-barrier\n"
+
+// deliverSinkBarrier is a synchronous accept-count barrier. The sink accepts
+// connections one at a time in backlog (FIFO) order, so a probe connection
+// dialled now is accepted only after every connection already queued — a
+// connect completes into the backlog before the dialler returns. It returns
+// every frame (an empty one for a connect-then-close) that arrived before
+// the probe: zero frames proves nothing connected earlier.
+func deliverSinkBarrier(t *testing.T, sink *deliverSink, socket string) [][]byte {
+	t.Helper()
+	probe, err := net.DialTimeout("unix", socket, 2*time.Second)
+	if err != nil {
+		t.Fatalf("barrier probe dial: %v", err)
+	}
+	if _, err := probe.Write([]byte(deliverSinkProbe)); err != nil {
+		t.Fatalf("barrier probe write: %v", err)
+	}
+	probe.Close()
+	var early [][]byte
+	for {
+		select {
+		case frame := <-sink.frames:
+			if string(frame) == deliverSinkProbe {
+				return early
+			}
+			early = append(early, frame)
+		case <-time.After(5 * time.Second):
+			t.Fatal("barrier probe never reached the sink")
+		}
+	}
+}

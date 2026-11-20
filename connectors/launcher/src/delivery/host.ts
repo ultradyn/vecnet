@@ -115,27 +115,31 @@ export function startDeliveryHost(o: DeliveryHostOptions): DeliveryHost {
     // The caller's adapter (passive Claude status) always rides the lease;
     // the native-delivery canary adapter composes beside it unless the kill
     // switch is thrown, and reports its admissions to the status adapter.
-    // The delivery adapter is built first so status can read it, but status
-    // starts first. `auxiliary` names whatever already exists, so a failure
-    // partway through still drains the built part.
+    // The delivery adapter is built first so status can read it; status is
+    // listed (and so started) first. `auxiliary` is reassigned after every
+    // built part, so a failure partway through (a throwing status factory, a
+    // failing start) still drains everything already built — including the
+    // never-started delivery adapter and its ledger.
     const adapters: HostedAdapter[] = [];
+    const compose = () => { auxiliary = adapters.length === 1 ? adapters[0] : composeHosted([...adapters]); };
     try {
-      let canary: HostedAdapter | undefined, native = () => NO_ADMISSIONS;
+      let native = () => NO_ADMISSIONS;
       if (o.claudeDeliveryCanary) {
         const ledger = openLedger(codexRecoveryPath(env, location), clock);
-        try {
-          const delivery = createClaudeDeliveryAdapter({ pool: watchPool, clock, log, kv: ledger.kv('claude'), env });
-          native = () => delivery.admitted();
-          canary = {
-            start: () => delivery.start(),
-            stop: async () => { try { await delivery.stop(); } finally { ledger.close(); } },
-          };
-        } catch (error) { ledger.close(); throw error; }
+        const delivery = (() => {
+          try { return createClaudeDeliveryAdapter({ pool: watchPool, clock, log, kv: ledger.kv('claude'), env }); }
+          catch (error) { ledger.close(); throw error; }
+        })();
+        native = () => delivery.admitted();
+        adapters.push({
+          start: () => delivery.start(),
+          stop: async () => { try { await delivery.stop(); } finally { ledger.close(); log.info('claude_delivery_ledger_closed'); } },
+        });
+        compose();
       }
       const base = o.auxiliary?.(native);
-      if (base) adapters.push(base);
-      if (canary) adapters.push(canary);
-      auxiliary = adapters.length === 0 ? undefined : adapters.length === 1 ? adapters[0] : composeHosted(adapters);
+      if (base) { adapters.unshift(base); compose(); }
+      if (adapters.length === 0) auxiliary = undefined;
       if (!stopping) auxiliary?.start();
     } catch {
       log.warn('delivery_auxiliary_start_failed');

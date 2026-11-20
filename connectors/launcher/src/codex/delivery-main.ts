@@ -51,7 +51,7 @@ async function main(): Promise<void> {
       // The native-delivery adapter delivers only to the single scope holding
       // the durable per-profile canary record (`claude enable` cannot set
       // it); VECNET_CLAUDE_DELIVERY_CANARY=0 is the kill switch.
-      claudeDeliveryCanary: claudeDeliveryCanaryAllowed(env),
+      claudeDeliveryCanary: claudeDeliveryCanaryAllowed(env, log),
       auxiliary: nativeAdmissions => createClaudeStatus({ env, clock: systemClock, log, fetchSnapshot: spawnClaudeSnapshot(env), nativeAdmissions }),
     });
     await Promise.race([interrupted, host.stopped]);

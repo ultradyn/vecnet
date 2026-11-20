@@ -87,11 +87,12 @@ func (a *app) setClaudeCanary(ctx context.Context, scope claudeScope, enabled bo
 		return err
 	}
 	if enabled {
-		for _, c := range doc.Canary {
-			switch {
-			case c == scope:
+		// At most one record exists (the validating reader enforces it).
+		if len(doc.Canary) > 0 {
+			switch held := doc.Canary[0]; {
+			case held == scope:
 				return nil // Idempotent: the exact record already exists.
-			case claudeSameRecipient(c, scope):
+			case claudeSameRecipient(held, scope):
 				return errClaudeCanaryAlias
 			default:
 				return errClaudeCanaryHeld
