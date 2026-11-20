@@ -10,12 +10,13 @@ package cli
 // write and no Claude-side output. A refused registration leaves the
 // stored state (and the legacy hook/Monitor path) untouched.
 //
-// v2 records the kernel-attested build evidence of each root (the table
-// label, executable digest and identity; never CLAUDE_CODE_VERSION) and keys
-// every binding by the profile's pinned ed25519 hub identity, so two URL
-// aliases of one hub are one recipient scope. A v1 document still decodes:
-// its endpoint-keyed bindings are discarded (they re-register at the next
-// hook) and its opt-outs are kept; the next write emits v2.
+// v2 keys every binding by the profile's pinned ed25519 hub identity, so
+// two URL aliases of one hub are one recipient scope. Its optional build
+// fields (build, exe_sha256, exe_identity) are reserved for kernel-attested
+// build evidence; build-version gating is parked, so nothing writes them yet.
+// A v1 document still decodes: its endpoint-keyed bindings are discarded
+// (they re-register at the next hook) and its opt-outs are kept; the next
+// write emits v2.
 
 import (
 	"bytes"
@@ -81,8 +82,9 @@ type claudeScope struct {
 // host: canonical config root, session id, private messaging endpoint, and
 // PID plus start/boot identity so a reused pid never matches. Build,
 // ExeSHA256 and ExeIdentity are the kernel-attested build evidence
-// (observeClaudeBuild): Build is the pinned table label, or "" for an
-// unqualified or unobserved build, which still registers and stays legacy.
+// (observeClaudeBuild). They are parked: build-version gating is disabled,
+// so registration never writes them; a stored value must still be well
+// formed.
 type claudeRoot struct {
 	ConfigRoot   string `json:"config_root"`
 	SessionID    string `json:"session_id"`
@@ -647,15 +649,15 @@ func (a *app) claudeScopeWitness(scope claudeScope) error {
 }
 
 // claudeRegisterTransition applies the ownership rules under the lock.
-// One active owner per exact recipient scope; resume and /clear are the
-// only generation-changing transitions; everything unknown stays pending.
+// One active owner per exact recipient scope; resume, /clear and a changed
+// hub pin are the only generation-changing transitions; everything unknown
+// stays pending.
 //
-// deferred marks a root whose build observation was deferred (a cache-only
-// miss): it carries no build evidence, so for the same live process it keeps
-// the stored evidence while that executable is still the pid's live image,
-// never downgrading a qualified row or renewing it. A new process or a first
-// registration records it unqualified.
-func claudeRegisterTransition(doc *claudeBindingsFile, scope claudeScope, root claudeRoot, now time.Time, deferred bool) (claudeBinding, string, error) {
+// A row matched through its endpoint whose pinned identity differs from the
+// scope's (the profile's pin changed at the same endpoint) is re-keyed to the
+// present pin with a fresh generation, so its old key and generation fence
+// every claim made under them; the ownership rules still apply first.
+func claudeRegisterTransition(doc *claudeBindingsFile, scope claudeScope, root claudeRoot, now time.Time) (claudeBinding, string, error) {
 	existing := -1
 	for i, b := range doc.Bindings {
 		if claudeSameRecipient(b.claudeScope, scope) {
@@ -684,9 +686,7 @@ func claudeRegisterTransition(doc *claudeBindingsFile, scope claudeScope, root c
 	}
 	b := doc.Bindings[existing]
 	sameProcess := b.ConfigRoot == root.ConfigRoot && b.PID == root.PID && b.ProcessStart == root.ProcessStart && b.BootID == root.BootID && b.UID == root.UID
-	if deferred && sameProcess && b.ExeIdentity != "" && claudeExeIdentityLive(b.PID, b.ExeIdentity) {
-		root.Build, root.ExeSHA256, root.ExeIdentity = b.Build, b.ExeSHA256, b.ExeIdentity
-	}
+	repinned := b.HubIdentity != scope.HubIdentity
 	switch {
 	case sameProcess && b.SessionID == root.SessionID:
 		if b.SocketPath != root.SocketPath {
@@ -694,16 +694,13 @@ func claudeRegisterTransition(doc *claudeBindingsFile, scope claudeScope, root c
 			// neither resume nor clear: it stays pending.
 			return claudeBinding{}, "", usageErr("claude endpoint changed without a process or conversation transition; it stays pending")
 		}
-		// Exact same conversation, process and endpoint: idempotent.
-		// Fresh build evidence (a first or retried observation, or a newly
-		// tabled digest) renews the row without a new generation.
-		if b.Build != root.Build || b.ExeSHA256 != root.ExeSHA256 || b.ExeIdentity != root.ExeIdentity {
-			b.claudeRoot = root
-			b.UpdatedAt = now
-			doc.Bindings[existing] = b
-			return b, "renewed", nil
+		if !repinned {
+			// Exact same conversation, process and endpoint: idempotent.
+			// Every compared field is already equal, so nothing (including
+			// the parked, unwritten build fields) is rewritten.
+			return b, "", nil
 		}
-		return b, "", nil
+		// Same root under a changed pin: re-key below.
 	case sameProcess && b.SessionID != root.SessionID:
 		// /clear: a verified root lifecycle observation (the session
 		// registry under the same live process reports the new id).
@@ -720,6 +717,9 @@ func claudeRegisterTransition(doc *claudeBindingsFile, scope claudeScope, root c
 	default:
 		return claudeBinding{}, "", usageErr("claude registration matches no known transition for this recipient; it stays pending")
 	}
+	if repinned {
+		b.claudeScope = scope
+	}
 	generation, err := claudeGeneration()
 	if err != nil {
 		return claudeBinding{}, "", err
@@ -734,16 +734,7 @@ func claudeRegisterTransition(doc *claudeBindingsFile, scope claudeScope, root c
 // request and no socket write; every refusal leaves the registry, and the
 // legacy hook/Monitor path, unchanged.
 func (a *app) registerClaudeRoot(ctx context.Context, scope claudeScope, root claudeRoot) (claudeBinding, error) {
-	return a.registerClaudeRootObserved(ctx, scope, root, false)
-}
-
-// registerClaudeRootObserved is registerClaudeRoot for a root whose build
-// observation may have been deferred (see claudeRegisterTransition).
-func (a *app) registerClaudeRootObserved(ctx context.Context, scope claudeScope, root claudeRoot, deferred bool) (claudeBinding, error) {
 	var none claudeBinding
-	if deferred && (root.Build != "" || root.ExeSHA256 != "" || root.ExeIdentity != "") {
-		return none, usageErr("a deferred claude build observation carries no evidence")
-	}
 	if err := claudeScopeShape(scope); err != nil {
 		return none, err
 	}
@@ -775,11 +766,6 @@ func (a *app) registerClaudeRootObserved(ctx context.Context, scope claudeScope,
 	if err := claudeRootAncestry(root); err != nil {
 		return none, err
 	}
-	// The digest was taken before the lock (a hash is never held under it);
-	// the attested executable must still be the pid's live image now.
-	if root.ExeIdentity != "" && !claudeExeIdentityLive(root.PID, root.ExeIdentity) {
-		return none, usageErr("claude executable changed since its build was observed; registration stays pending")
-	}
 	if err := a.claudeScopeWitness(scope); err != nil {
 		return none, err
 	}
@@ -800,7 +786,7 @@ func (a *app) registerClaudeRootObserved(ctx context.Context, scope claudeScope,
 	if slices.ContainsFunc(doc.OptOuts, func(s claudeScope) bool { return claudeSameRecipient(s, scope) }) {
 		return none, errClaudeOptOut
 	}
-	binding, transition, err := claudeRegisterTransition(&doc, scope, root, time.Now().UTC(), deferred)
+	binding, transition, err := claudeRegisterTransition(&doc, scope, root, time.Now().UTC())
 	if err != nil {
 		return none, err
 	}

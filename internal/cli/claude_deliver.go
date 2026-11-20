@@ -149,10 +149,9 @@ func claudeDeliverFrame(in claudeDeliverInput) ([]byte, error) {
 // claudeDeliverResolveBinding resolves the endpoint and the expected kernel
 // peer identity for one binding key from the live registry, under the same
 // claude-bindings lock registration uses. Admission is recomputed here, at
-// attempt time: a binding that is not live, policy-enabled and
-// build-qualified (its kernel-attested digest tabled under its label and
-// its executable still the live image), or whose generation moved past the
-// adapter's fence,
+// attempt time: a binding that is not live and policy-enabled (build
+// qualification is parked, so version_qualified holds for every stored
+// binding), or whose generation moved past the adapter's fence,
 // never reaches a connect. The socket path and session id never leave this
 // helper through flags or output.
 func (a *app) claudeDeliverResolveBinding(key, expectGeneration string) (claudeDeliverInput, error) {

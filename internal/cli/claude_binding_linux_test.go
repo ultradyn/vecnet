@@ -13,8 +13,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -32,7 +30,6 @@ import (
 	"time"
 
 	"github.com/XertroV/vecnet/internal/hubid"
-	"golang.org/x/sys/unix"
 )
 
 // claudeTestHubPin lives in claude_setup_test.go so every platform's tests
@@ -57,37 +54,6 @@ func claudeSocketDir(t *testing.T) string {
 	return d
 }
 
-// claudeSelfBuild returns the kernel build evidence of this test process
-// (its digest and fstat identity, computed directly rather than through the
-// bounded observation) and tables the digest under the fixture label, for
-// fixtures that register this process itself as the Claude root.
-func claudeSelfBuild(t *testing.T) (sha, identity string) {
-	t.Helper()
-	exe, err := os.Open("/proc/self/exe")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer exe.Close()
-	var st unix.Stat_t
-	if err := unix.Fstat(int(exe.Fd()), &st); err != nil {
-		t.Fatal(err)
-	}
-	h := sha256.New()
-	if _, err := io.Copy(h, exe); err != nil {
-		t.Fatal(err)
-	}
-	sha = hex.EncodeToString(h.Sum(nil))
-	claudeWithQualifiedBuild(t, sha)
-	return sha, claudeBuildStatIdentity(&st)
-}
-
-// claudeSelfBuildJSON is the stored-row JSON fragment for claudeSelfBuild.
-func claudeSelfBuildJSON(t *testing.T) string {
-	t.Helper()
-	sha, identity := claudeSelfBuild(t)
-	return `"build":` + jsonString(claudeTestBuildLabel) + `,"exe_sha256":` + jsonString(sha) + `,"exe_identity":` + jsonString(identity) + `,`
-}
-
 type claudeRegResult struct {
 	OK      bool          `json:"ok"`
 	Binding claudeBinding `json:"binding"`
@@ -106,16 +72,13 @@ type claudeRegFixture struct {
 	seq    int
 	trees  []*claudeTree
 	server *httptest.Server
-	// qualified and blockHash travel to every helper job in its payload: the
-	// jobs run in child processes, where the parent's table extensions and
-	// seams do not reach. Only this test code ever applies them.
-	qualified []string
-	blockHash bool
-	// runtimeOK stubs the local delivery runtime in reconcile jobs.
+	// hashLog travels to every helper job in its payload (the jobs run in
+	// child processes, where the parent's seams do not reach): each
+	// claudeBuildHash call there appends one line, so tests can prove no
+	// registration path hashes. runtimeOK stubs the local delivery runtime
+	// in reconcile jobs. Only this test code ever applies them.
+	hashLog   string
 	runtimeOK bool
-	// hashLog, when set, is a file each helper job appends one line to per
-	// claudeBuildHash call, counting hashes across the child processes.
-	hashLog string
 }
 
 // hashCalls counts the claudeBuildHash calls helper jobs logged.
@@ -138,6 +101,7 @@ func newClaudeRegFixture(t *testing.T) *claudeRegFixture {
 		t.Fatal(err)
 	}
 	f := &claudeRegFixture{t: t, dir: d, hits: &atomic.Int32{}, conns: &atomic.Int32{}, boot: claudeBootID()}
+	f.hashLog = filepath.Join(d, "hash-calls.log")
 	if f.boot == "" {
 		t.Fatal("cannot read this host's boot id")
 	}
@@ -300,20 +264,6 @@ func (tr *claudeTree) root(session string) claudeRoot {
 	}
 }
 
-// observedRoot is root with the build evidence this test process observes
-// for the tree's executable (the test binary); Build follows this process's
-// table.
-func (tr *claudeTree) observedRoot(session string) claudeRoot {
-	tr.f.t.Helper()
-	ev, err := tr.f.app().observeClaudeBuild(context.Background(), tr.pid, tr.start, claudeBuildMayHash)
-	if err != nil || ev.SHA256 == "" || ev.Identity == "" {
-		tr.f.t.Fatalf("cannot observe the tree's build: %+v %v", ev, err)
-	}
-	r := tr.root(session)
-	r.Build, r.ExeSHA256, r.ExeIdentity = ev.Build, ev.SHA256, ev.Identity
-	return r
-}
-
 func (tr *claudeTree) kill() {
 	tr.f.t.Helper()
 	if tr.dead {
@@ -342,13 +292,11 @@ func (tr *claudeTree) reg(scope claudeScope, root claudeRoot, env map[string]str
 		merged[k] = v
 	}
 	raw, err := json.Marshal(struct {
-		Env       map[string]string `json:"env"`
-		Scope     claudeScope       `json:"scope"`
-		Root      claudeRoot        `json:"root"`
-		Qualified []string          `json:"qualified"`
-		BlockHash bool              `json:"block_hash"`
-		HashLog   string            `json:"hash_log"`
-	}{merged, scope, root, tr.f.qualified, tr.f.blockHash, tr.f.hashLog})
+		Env     map[string]string `json:"env"`
+		Scope   claudeScope       `json:"scope"`
+		Root    claudeRoot        `json:"root"`
+		HashLog string            `json:"hash_log"`
+	}{merged, scope, root, tr.f.hashLog})
 	if err != nil {
 		tr.f.t.Fatal(err)
 	}
@@ -389,13 +337,11 @@ func (tr *claudeTree) hook(env map[string]string, args []string, stdin string) c
 		merged[k] = v
 	}
 	raw, err := json.Marshal(struct {
-		Env       map[string]string `json:"env"`
-		Args      []string          `json:"args"`
-		Stdin     string            `json:"stdin"`
-		Qualified []string          `json:"qualified"`
-		BlockHash bool              `json:"block_hash"`
-		HashLog   string            `json:"hash_log"`
-	}{merged, args, stdin, tr.f.qualified, tr.f.blockHash, tr.f.hashLog})
+		Env     map[string]string `json:"env"`
+		Args    []string          `json:"args"`
+		Stdin   string            `json:"stdin"`
+		HashLog string            `json:"hash_log"`
+	}{merged, args, stdin, tr.f.hashLog})
 	if err != nil {
 		tr.f.t.Fatal(err)
 	}
@@ -882,13 +828,10 @@ func claudeHelperClaude() {
 	}
 }
 
-// claudeHelperJobSeams applies a job payload's test-only table extension and
-// hash seam inside the helper child, restored by t.Cleanup like every other
-// table extension. Production binaries carry none of this code.
-func claudeHelperJobSeams(t *testing.T, qualified []string, blockHash bool, hashLog string) {
-	for _, sha := range qualified {
-		claudeWithQualifiedBuild(t, sha)
-	}
+// claudeHelperJobSeams counts every claudeBuildHash call in the helper
+// child into the job's hash log (restored by t.Cleanup). Production binaries
+// carry none of this code.
+func claudeHelperJobSeams(t *testing.T, hashLog string) {
 	real := claudeBuildHash
 	t.Cleanup(func() { claudeBuildHash = real })
 	claudeBuildHash = func(ctx context.Context, r io.Reader) (string, error) {
@@ -897,10 +840,6 @@ func claudeHelperJobSeams(t *testing.T, qualified []string, blockHash bool, hash
 				_, _ = f.WriteString("hash\n")
 				_ = f.Close()
 			}
-		}
-		if blockHash {
-			<-ctx.Done()
-			return "", ctx.Err()
 		}
 		return real(ctx, r)
 	}
@@ -918,17 +857,15 @@ func claudeHelperRegister(t *testing.T) {
 		fail("payload: " + err.Error())
 	}
 	var payload struct {
-		Env       map[string]string `json:"env"`
-		Scope     claudeScope       `json:"scope"`
-		Root      claudeRoot        `json:"root"`
-		Qualified []string          `json:"qualified"`
-		BlockHash bool              `json:"block_hash"`
-		HashLog   string            `json:"hash_log"`
+		Env     map[string]string `json:"env"`
+		Scope   claudeScope       `json:"scope"`
+		Root    claudeRoot        `json:"root"`
+		HashLog string            `json:"hash_log"`
 	}
 	if err := json.Unmarshal(raw, &payload); err != nil {
 		fail("payload: " + err.Error())
 	}
-	claudeHelperJobSeams(t, payload.Qualified, payload.BlockHash, payload.HashLog)
+	claudeHelperJobSeams(t, payload.HashLog)
 	a := &app{ctx: context.Background(), stdout: io.Discard, stderr: io.Discard, getenv: func(k string) string { return payload.Env[k] }}
 	binding, err := a.registerClaudeRoot(context.Background(), payload.Scope, payload.Root)
 	out := claudeRegResult{OK: err == nil, Binding: binding}
@@ -961,15 +898,13 @@ func claudeHelperReconcile(t *testing.T) {
 	var payload struct {
 		Env       map[string]string `json:"env"`
 		Record    claudeEnrollment  `json:"record"`
-		Qualified []string          `json:"qualified"`
-		BlockHash bool              `json:"block_hash"`
 		RuntimeOK bool              `json:"runtime_ok"`
 		HashLog   string            `json:"hash_log"`
 	}
 	if err := json.Unmarshal(raw, &payload); err != nil {
 		fail("payload: " + err.Error())
 	}
-	claudeHelperJobSeams(t, payload.Qualified, payload.BlockHash, payload.HashLog)
+	claudeHelperJobSeams(t, payload.HashLog)
 	a := &app{ctx: context.Background(), stdout: io.Discard, stderr: io.Discard, getenv: func(k string) string { return payload.Env[k] }}
 	if payload.RuntimeOK {
 		a.localRuntime = func(context.Context) error { return nil }
@@ -1000,11 +935,9 @@ func (tr *claudeTree) reconcile(record claudeEnrollment, env map[string]string) 
 	raw, err := json.Marshal(struct {
 		Env       map[string]string `json:"env"`
 		Record    claudeEnrollment  `json:"record"`
-		Qualified []string          `json:"qualified"`
-		BlockHash bool              `json:"block_hash"`
 		RuntimeOK bool              `json:"runtime_ok"`
 		HashLog   string            `json:"hash_log"`
-	}{merged, record, tr.f.qualified, tr.f.blockHash, tr.f.runtimeOK, tr.f.hashLog})
+	}{merged, record, tr.f.runtimeOK, tr.f.hashLog})
 	if err != nil {
 		tr.f.t.Fatal(err)
 	}
@@ -1043,17 +976,15 @@ func claudeHelperHook(t *testing.T) {
 		fail("payload: " + err.Error())
 	}
 	var job struct {
-		Env       map[string]string `json:"env"`
-		Args      []string          `json:"args"`
-		Stdin     string            `json:"stdin"`
-		Qualified []string          `json:"qualified"`
-		BlockHash bool              `json:"block_hash"`
-		HashLog   string            `json:"hash_log"`
+		Env     map[string]string `json:"env"`
+		Args    []string          `json:"args"`
+		Stdin   string            `json:"stdin"`
+		HashLog string            `json:"hash_log"`
 	}
 	if err := json.Unmarshal(raw, &job); err != nil {
 		fail("payload: " + err.Error())
 	}
-	claudeHelperJobSeams(t, job.Qualified, job.BlockHash, job.HashLog)
+	claudeHelperJobSeams(t, job.HashLog)
 	var out, errs bytes.Buffer
 	a := &app{ctx: context.Background(), stdin: strings.NewReader(job.Stdin), stdout: &out, stderr: &errs, getenv: func(k string) string { return job.Env[k] }, inHook: true}
 	a.hookRun(job.Args, hookNow, func() {}, func(data []byte) error {
@@ -1118,123 +1049,182 @@ func (tr *claudeTree) hookRegister(t *testing.T, profile, session string, extra 
 	return claudeBinding{}
 }
 
-// admission evaluates the stored row's admission evidence in this process.
-func (f *claudeRegFixture) admission(t *testing.T, b claudeBinding) claudeSnapshotAdmission {
-	t.Helper()
-	return claudeAdmissionEvidence(b, nil, false)
-}
-
-func TestClaudeRegistrationRecordsKernelBuild(t *testing.T) {
-	f := newClaudeRegFixture(t)
-	digest := claudeFileDigest(t, os.Args[0])
-
-	// Untabled: the row records the attested digest and identity, Build is
-	// empty, admission is unqualified, and registration still succeeds.
-	a := f.startTree("a")
-	a.sessionRecord(a.pid, "S1", a.socket)
-	row := a.hookRegister(t, "p", "S1", nil)
-	want := a.observedRoot("S1")
-	if row.ExeSHA256 != digest || row.ExeIdentity != want.ExeIdentity || row.Build != "" {
-		t.Fatalf("untabled row evidence = (%q, %q, %q), want (%q, %q, \"\")", row.Build, row.ExeSHA256, row.ExeIdentity, digest, want.ExeIdentity)
-	}
-	if adm := f.admission(t, row); !adm.Live || adm.VersionQualified {
-		t.Fatalf("untabled build admission = %+v, want live and unqualified", adm)
-	}
-
-	// Tabled (in the hook child and here): Build is the table label and the
-	// live attested executable qualifies.
-	f.qualified = []string{digest}
-	claudeWithQualifiedBuild(t, digest)
-	b := f.startTree("b")
-	b.sessionRecord(b.pid, "S2", b.socket)
-	row = b.hookRegister(t, "r", "S2", nil)
-	if row.ExeSHA256 != digest || row.Build != claudeTestBuildLabel || row.ExeIdentity == "" {
-		t.Fatalf("tabled row evidence = (%q, %q, %q)", row.Build, row.ExeSHA256, row.ExeIdentity)
-	}
-	if adm := f.admission(t, row); !adm.Live || !adm.VersionQualified {
-		t.Fatalf("tabled build admission = %+v, want live and qualified", adm)
-	}
-	f.assertPassive()
-}
-
-// TestClaudeRegistrationIgnoresVersionEnv pins Review Focus 4: a stale
-// CLAUDE_CODE_VERSION export never qualifies an untabled build, a
-// contradictory one never disqualifies a tabled build, and registration
-// needs none.
+// TestClaudeRegistrationIgnoresVersionEnv pins Review Focus 4 with build
+// gating parked: CLAUDE_CODE_VERSION neither gates registration nor
+// qualifies anything. A stale 2.1.322 export, a contradictory 9.9.9 export
+// and no export at all register the same way, write no build evidence, and
+// give the same admission.
 func TestClaudeRegistrationIgnoresVersionEnv(t *testing.T) {
-	f := newClaudeRegFixture(t)
-	digest := claudeFileDigest(t, os.Args[0])
-	claudeWithQualifiedBuild(t, digest) // this process judges admission
-
-	a := f.startTree("a")
-	a.sessionRecord(a.pid, "S1", a.socket)
-	stale := a.hookRegister(t, "p", "S1", map[string]string{"CLAUDE_CODE_VERSION": "2.1.322"})
-	if stale.Build != "" || f.admission(t, stale).VersionQualified {
-		t.Fatalf("a stale version export qualified an untabled build: build=%q", stale.Build)
+	for label, version := range map[string]string{"stale export": "2.1.322", "contradictory export": "9.9.9", "unset": ""} {
+		t.Run(label, func(t *testing.T) {
+			f := newClaudeRegFixture(t)
+			a := f.startTree("a")
+			a.sessionRecord(a.pid, "S1", a.socket)
+			extra := map[string]string{}
+			if version != "" {
+				extra["CLAUDE_CODE_VERSION"] = version
+			}
+			row := a.hookRegister(t, "p", "S1", extra)
+			if row.Build != "" || row.ExeSHA256 != "" || row.ExeIdentity != "" {
+				t.Fatalf("registration wrote build evidence: %+v", row.claudeRoot)
+			}
+			adm := claudeAdmissionEvidence(row, nil, false)
+			if !adm.Live || !adm.Policy || !adm.VersionQualified || adm.BuildCheck != claudeBuildCheckDisabled {
+				t.Fatalf("admission depends on the version export: %+v", adm)
+			}
+			if n := f.hashCalls(t); n != 0 {
+				t.Fatalf("registration hashed %d time(s)", n)
+			}
+			f.assertPassive()
+		})
 	}
-
-	f.qualified = []string{digest}
-	b := f.startTree("b")
-	b.sessionRecord(b.pid, "S2", b.socket)
-	contradict := b.hookRegister(t, "r", "S2", map[string]string{"CLAUDE_CODE_VERSION": "9.9.9"})
-	if contradict.Build != claudeTestBuildLabel || !f.admission(t, contradict).VersionQualified {
-		t.Fatalf("a contradictory version export disqualified a tabled build: build=%q", contradict.Build)
-	}
-
-	// Unset: registration succeeds on kernel evidence alone.
-	q := newClaudeRegFixture(t)
-	c := q.startTree("c")
-	c.sessionRecord(c.pid, "S3", c.socket)
-	env := c.claudeHookEnv("S3")
-	if _, set := env["CLAUDE_CODE_VERSION"]; set {
-		t.Fatal("the hook fixture still exports CLAUDE_CODE_VERSION")
-	}
-	if row := c.hookRegister(t, "p", "S3", nil); row.Generation == "" || row.ExeSHA256 != digest {
-		t.Fatalf("registration without the version export failed: %+v", row)
-	}
-	f.assertPassive()
-	q.assertPassive()
 }
 
-func TestClaudeRegistrationRenewsBuildWithoutNewGeneration(t *testing.T) {
+// TestClaudeRegistrationDoesNotHash pins the parked build gating: no hook
+// (SessionStart, user prompt, post-tool) and no enrollment reconciliation
+// ever hashes the Claude executable, and none writes build evidence or a
+// digest cache entry.
+func TestClaudeRegistrationDoesNotHash(t *testing.T) {
+	hub, _ := claudeLegacyHub(t)
+	f := claudeLegacyEnv(t, hub)
+	a := f.startTree("a")
+	a.sessionRecord(a.pid, "S1", a.socket)
+	env := a.claudeHookEnv("S1")
+	for k, v := range f.env {
+		env[k] = v
+	}
+	if out := a.hook(env, []string{"--profile", "p", "--event", "session-start"}, sessionStartPayload("S1")); out.Stdout != "" || out.Stderr != "" {
+		t.Fatalf("session-start emitted output: %+v", out)
+	}
+	a.hook(env, []string{"--profile", "p", "--event", "user-prompt"}, `{"hook_event_name":"UserPromptSubmit","session_id":"S1"}`)
+	a.hook(env, []string{"--profile", "p", "--event", "post-tool"}, `{"hook_event_name":"PostToolUse","session_id":"S1","tool_name":"Bash"}`)
+	if n := f.hashCalls(t); n != 0 {
+		t.Fatalf("the hooks made %d hash call(s), want 0", n)
+	}
+
+	// In-session enrollment reconciliation (the enrol and repair path).
+	intent := "0123456789abcdef0123456789abcdef"
+	secret := "vn_peer_test"
+	if err := saveConfig(f.config, Config{Profiles: map[string]Profile{
+		"p": {Hub: hub, HubPubkey: claudeTestHubPin, Secret: secret, PeerID: "peer_A",
+			EnrollmentIntent: intent, EnrollmentCredential: hookDigest([]byte(secret)),
+			EnrollmentHub: normalizeHub(hub), EnrollmentCaller: "peer_A"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	f.runtimeOK = true
+	result := a.reconcile(claudeEnrollment{
+		IntentID: intent, Hub: normalizeHub(hub), Caller: "peer_A",
+		Config: f.config, Profile: "p", ConfigRoot: a.configRoot,
+		State: claudeEnrollmentPending, UpdatedAt: time.Now().UTC(),
+	}, a.claudeHookEnv("S1"))
+	if result.State != claudeEnrollmentRegistered {
+		t.Fatalf("reconcile settled %q: %s", result.State, result.Reason)
+	}
+	if n := f.hashCalls(t); n != 0 {
+		t.Fatalf("hooks and enrollment made %d hash call(s), want 0", n)
+	}
+	rows := f.storedRows(t)
+	if len(rows) != 1 || rows[0].Build != "" || rows[0].ExeSHA256 != "" || rows[0].ExeIdentity != "" {
+		t.Fatalf("registration wrote build evidence: %+v", rows)
+	}
+	if _, err := f.app().readLocalState(claudeExeDigestsName); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("registration touched the parked digest cache: %v", err)
+	}
+	if bytes.Contains(f.registryBytes(), []byte("exe_sha256")) || bytes.Contains(f.registryBytes(), []byte(`"build"`)) {
+		t.Fatalf("the stored row carries build fields: %s", f.registryBytes())
+	}
+	f.assertPassive()
+}
+
+// TestClaudeRegistrationRenewNeverRewrites pins the idempotent same-root
+// transition with build fields parked: repeat hooks never rewrite the row,
+// and a stored row carrying (legacy, well-formed) build evidence is kept as
+// stored rather than erased by a registration that observes none.
+func TestClaudeRegistrationRenewNeverRewrites(t *testing.T) {
 	f := newClaudeRegFixture(t)
 	a := f.startTree("a")
 	a.sessionRecord(a.pid, "S1", a.socket)
 	first := mustReg(t, a.reg(f.scope("p"), a.root("S1"), nil))
 	base := f.registryBytes()
-
-	// Same process and session with fresh build evidence: renewed in place.
-	claudeWithQualifiedBuild(t, claudeFileDigest(t, os.Args[0]))
-	observed := a.observedRoot("S1")
-	renewed := mustReg(t, a.reg(f.scope("p"), observed, nil))
-	if renewed.Generation != first.Generation {
-		t.Fatalf("build renewal minted a new generation: %s vs %s", renewed.Generation, first.Generation)
+	for range 2 {
+		if again := mustReg(t, a.reg(f.scope("p"), a.root("S1"), nil)); again.Generation != first.Generation {
+			t.Fatal("an idempotent registration changed the generation")
+		}
+		if !bytes.Equal(base, f.registryBytes()) {
+			t.Fatal("an idempotent registration rewrote the registry")
+		}
 	}
-	if bytes.Equal(base, f.registryBytes()) {
-		t.Fatal("build renewal did not rewrite the row")
+	// Seed build evidence (as a later re-enable would write it) and register
+	// again without any: the stored evidence survives byte-for-byte.
+	var doc claudeBindingsFile
+	if err := json.Unmarshal(base, &doc); err != nil {
+		t.Fatal(err)
+	}
+	doc.Bindings[0].Build, doc.Bindings[0].ExeSHA256, doc.Bindings[0].ExeIdentity = "2.1.322", strings.Repeat("ab", 32), "1:2:3:4:5"
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claudeSeedLocalState(t, f.env, claudeBindingsName, append(raw, '\n'))
+	seeded := f.registryBytes()
+	if again := mustReg(t, a.reg(f.scope("p"), a.root("S1"), nil)); again.Generation != first.Generation {
+		t.Fatal("registration without build evidence changed the generation")
+	}
+	if !bytes.Equal(seeded, f.registryBytes()) {
+		t.Fatal("registration without build evidence rewrote (erased) the stored evidence")
+	}
+	f.assertPassive()
+}
+
+// TestClaudeRegistrationRepinRekeys pins a changed hub pin at the same
+// endpoint: the existing row (old identity, old key) is re-keyed to the
+// present pin with a fresh generation, so nothing stays fenced by the old
+// scope; a different live root still cannot take it over.
+func TestClaudeRegistrationRepinRekeys(t *testing.T) {
+	f := newClaudeRegFixture(t)
+	a := f.startTree("a")
+	a.sessionRecord(a.pid, "S1", a.socket)
+	first := mustReg(t, a.reg(f.scope("p"), a.root("S1"), nil))
+	oldKey := claudeBindingKey(f.scope("p"))
+
+	const newPin = "ed25519:AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA"
+	if _, err := hubid.DecodePubkey(newPin); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveConfig(f.config, Config{Profiles: map[string]Profile{
+		"p": {Hub: f.hub, HubPubkey: newPin, Secret: "vn_peer_test", PeerID: "peer_A"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	repinned, err := f.app().claudeScopeForProfile("p")
+	if err != nil || repinned.HubIdentity != newPin || repinned.HubEndpoint != f.scope("p").HubEndpoint {
+		t.Fatalf("repinned scope = %+v, %v", repinned, err)
+	}
+	// A stale scope under the old pin is no longer witnessed.
+	refuseReg(t, a.reg(f.scope("p"), a.root("S1"), nil), "differs from the profile's present pin")
+
+	// Another live root cannot take the recipient over through the new pin.
+	b := f.startTree("b")
+	b.sessionRecord(b.pid, "S2", b.socket)
+	refuseReg(t, b.reg(repinned, b.root("S2"), nil), "cannot be stolen")
+
+	rekeyed := mustReg(t, a.reg(repinned, a.root("S1"), nil))
+	if rekeyed.Generation == first.Generation {
+		t.Fatal("a re-keyed row kept the old generation")
 	}
 	rows := f.storedRows(t)
-	if len(rows) != 1 || rows[0].Generation != first.Generation || rows[0].Build != claudeTestBuildLabel ||
-		rows[0].ExeSHA256 != observed.ExeSHA256 || rows[0].ExeIdentity != observed.ExeIdentity {
-		t.Fatalf("renewed row = %+v", rows)
+	if len(rows) != 1 || rows[0].HubIdentity != newPin || claudeBindingKey(rows[0].claudeScope) == oldKey ||
+		claudeBindingKey(rows[0].claudeScope) != claudeBindingKey(repinned) || rows[0].PID != a.pid {
+		t.Fatalf("the row was not re-keyed to the present pin: %+v", rows)
 	}
-
-	// The same evidence again is idempotent.
-	renewedBytes := f.registryBytes()
-	if again := mustReg(t, a.reg(f.scope("p"), observed, nil)); again.Generation != first.Generation {
-		t.Fatal("idempotent renewal changed the generation")
+	// The re-keyed row is now idempotent under the new pin.
+	base := f.registryBytes()
+	if again := mustReg(t, a.reg(repinned, a.root("S1"), nil)); again.Generation != rekeyed.Generation {
+		t.Fatal("registration after the re-key changed the generation")
 	}
-	if !bytes.Equal(renewedBytes, f.registryBytes()) {
-		t.Fatal("idempotent renewal rewrote the registry")
-	}
-
-	// Under the lock the attested executable must still be the pid's live
-	// image: an identity from another inode is refused, the row unchanged.
-	stale := observed
-	stale.ExeIdentity = "1:2:3:4:5"
-	refuseReg(t, a.reg(f.scope("p"), stale, nil), "executable changed")
-	if !bytes.Equal(renewedBytes, f.registryBytes()) {
-		t.Fatal("a stale executable identity rewrote the registry")
+	if !bytes.Equal(base, f.registryBytes()) {
+		t.Fatal("registration after the re-key rewrote the registry")
 	}
 	f.assertPassive()
 }

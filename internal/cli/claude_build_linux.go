@@ -94,9 +94,8 @@ func claudeBuildExeStillHeld(pid int, st *unix.Stat_t) bool {
 // is non-nil only when the start identity stops matching before the open or
 // after the hash (stale or reused pid); every other failure is evidence with
 // an empty Build and one fixed reason, so a hook never fails on it.
-// CLAUDE_CODE_VERSION is never read. In claudeBuildCacheOnly mode a cache
-// miss never hashes: it returns the deferred reason and caches nothing.
-func (a *app) observeClaudeBuild(ctx context.Context, pid int, start string, mode claudeBuildMode) (claudeBuildEvidence, error) {
+// CLAUDE_CODE_VERSION is never read.
+func (a *app) observeClaudeBuild(ctx context.Context, pid int, start string) (claudeBuildEvidence, error) {
 	if now := procStart(pid); now == "" || now != start {
 		return claudeBuildEvidence{}, usageErr("claude build observation pid no longer matches its start identity (pid reuse?)")
 	}
@@ -112,9 +111,6 @@ func (a *app) observeClaudeBuild(ctx context.Context, pid int, start string, mod
 	identity := claudeBuildStatIdentity(&st)
 
 	sha, cached := a.claudeExeDigestLookup(identity)
-	if !cached && mode == claudeBuildCacheOnly {
-		return claudeBuildEvidence{Reason: claudeBuildReasonDeferred}, nil
-	}
 	if !cached {
 		hashed, timedOut := a.claudeBuildHashExe(ctx, exe)
 		if hashed == "" {

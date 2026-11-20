@@ -589,6 +589,21 @@ func TestClaudeDeliveriesListsLegacyKeyRows(t *testing.T) {
 		t.Fatalf("the refused retry changed the claim: %s", after[claudeDeliveryClaimKey(legacyID)])
 	}
 
+	// The legacy reason wins over every state fence: a legacy-key claim that
+	// is still reserved (not otherwise resolvable) refuses for being legacy.
+	reservedID := "dly_000000000000000000000000L2"
+	claudeDeliveryLedger(t, home, map[string]string{
+		claudeDeliveryClaimKey(reservedID): claudeDeliveryClaimJSON(t, map[string]any{
+			"deliveryId": reservedID, "scope": legacyKey, "state": "reserved",
+			"msgId": "0f0e0d0c0b0a0908070605040302aaaa",
+		}),
+	})
+	code, _, errs = claudeStatusRun(t, env, "--net", "p", "claude", "resolve", reservedID,
+		"--expect-generation", claudeDeliveryTestGen, "--retry", "--confirm-duplicate-risk")
+	if code == 0 || !strings.Contains(errs, "legacy endpoint-keyed scope") {
+		t.Fatalf("a reserved legacy-key claim must refuse retry with the legacy reason: %d %s", code, errs)
+	}
+
 	// --keep-inbox holds it.
 	code, out, errs := claudeStatusRun(t, env, "--net", "p", "claude", "resolve", legacyID,
 		"--expect-generation", claudeDeliveryTestGen, "--keep-inbox")
@@ -602,7 +617,7 @@ func TestClaudeDeliveriesListsLegacyKeyRows(t *testing.T) {
 	if held["state"] != "held" || held["scope"] != legacyKey {
 		t.Fatalf("keep-inbox did not hold the legacy-key claim: %v", held)
 	}
-	if status := claudeStatusJSON(t, env, "--net", "p", "claude", "status", "--json"); status.PendingCount != 0 {
-		t.Fatalf("the held legacy-key claim still counts as pending: %+v", status)
+	if status := claudeStatusJSON(t, env, "--net", "p", "claude", "status", "--json"); status.PendingCount != 1 {
+		t.Fatalf("only the reserved legacy-key claim should still count as pending: %+v", status)
 	}
 }

@@ -8,7 +8,7 @@ import "context"
 // always an unqualified build with a stable reason, and no stored identity is
 // ever confirmed live. Each platform needs its own attested-executable path
 // before any build can qualify there.
-func (a *app) observeClaudeBuild(ctx context.Context, pid int, start string, mode claudeBuildMode) (claudeBuildEvidence, error) {
+func (a *app) observeClaudeBuild(ctx context.Context, pid int, start string) (claudeBuildEvidence, error) {
 	return claudeBuildEvidence{Reason: claudeBuildReasonUnqualified}, nil
 }
 

@@ -377,11 +377,13 @@ func (a *app) cmdClaudeRuntimeSnapshot() error {
 
 // claudeSnapshotAdmission is the native-delivery gate for one stored row
 // (task 7): process liveness with start/boot identity, durable policy
-// consent, and the qualified compatibility range. Booleans only; no paths.
+// consent, and the build check (parked: version_qualified stays true and
+// build_check says "disabled"). No paths.
 type claudeSnapshotAdmission struct {
-	Live             bool `json:"live"`
-	Policy           bool `json:"policy"`
-	VersionQualified bool `json:"version_qualified"`
+	Live             bool   `json:"live"`
+	Policy           bool   `json:"policy"`
+	VersionQualified bool   `json:"version_qualified"`
+	BuildCheck       string `json:"build_check"`
 }
 
 // claudeSnapshotScope carries only the coordinates the shared host needs to
@@ -395,28 +397,17 @@ type claudeSnapshotScope struct {
 	Recipient   string `json:"recipient"`
 }
 
-// claudeBuildQualified reports whether a stored root's build is a qualified
-// native target: its recorded digest is in the pinned table for this
-// platform under the recorded label, and the attested executable is still
-// the pid's live image (dev:ino). No version string, path or environment
-// value takes part; unknown or untested builds stay legacy.
-func claudeBuildQualified(r claudeRoot) bool {
-	if r.Build == "" || r.ExeSHA256 == "" || r.ExeIdentity == "" {
-		return false
-	}
-	build, ok := claudeQualifiedBuildFor(r.ExeSHA256)
-	if !ok || build.Label != r.Build {
-		return false
-	}
-	return claudeExeIdentityLive(r.PID, r.ExeIdentity)
-}
+// claudeBuildCheckDisabled is the admission's honest build-check state:
+// build-version gating is parked (claude_build.go), so no build is verified.
+const claudeBuildCheckDisabled = "disabled"
 
 // claudeAdmissionEvidence computes the native-delivery admission booleans:
 // live is exact process evidence (this boot, live pid, start identity, OS
-// user), policy is the absence of both durable opt-outs, and version
-// qualification (JSON version_qualified, unchanged for the host) is the
-// kernel-attested build digest. The deliver helper recomputes the same
-// evidence under the registry lock before resolving an endpoint.
+// user) and policy is the absence of both durable opt-outs. Build-version
+// gating is parked: version_qualified (unchanged for the host) is true for
+// every stored, schema-valid binding, and build_check "disabled" says no
+// build was verified. The deliver helper recomputes the same evidence under
+// the registry lock before resolving an endpoint.
 func claudeAdmissionEvidence(b claudeBinding, optOuts []claudeScope, globalDisable bool) claudeSnapshotAdmission {
 	policy := !globalDisable && !slices.ContainsFunc(optOuts, func(s claudeScope) bool {
 		return claudeSameRecipient(s, b.claudeScope)
@@ -425,7 +416,7 @@ func claudeAdmissionEvidence(b claudeBinding, optOuts []claudeScope, globalDisab
 	if boot := claudeBootID(); boot != "" && b.BootID == boot && claudeHostLive(b.PID, b.ProcessStart) {
 		live = claudeProcUser(b.PID, b.UID) == nil
 	}
-	return claudeSnapshotAdmission{Live: live, Policy: policy, VersionQualified: claudeBuildQualified(b.claudeRoot)}
+	return claudeSnapshotAdmission{Live: live, Policy: policy, VersionQualified: true, BuildCheck: claudeBuildCheckDisabled}
 }
 
 // claudeBindingPassiveState classifies one stored row for the snapshot:

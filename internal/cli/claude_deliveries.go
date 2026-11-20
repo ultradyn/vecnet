@@ -464,8 +464,8 @@ func (a *app) cmdClaudeDeliveries(args []string) error {
 // claudeResolveAdmission recomputes the native-delivery admission for one
 // binding key under the claude-bindings lock, exactly as the deliver helper
 // does at attempt time: a retry may only re-arm a claim whose scope is
-// currently registered under its pinned hub identity, live,
-// policy-enabled, build-qualified and still fenced by the same generation.
+// currently registered under its pinned hub identity, live, policy-enabled
+// and still fenced by the same generation (build qualification is parked).
 func (a *app) claudeResolveAdmission(key, generation string) error {
 	ctx, cancel := context.WithTimeout(a.localRegistryContext(), 5*time.Second)
 	defer cancel()
@@ -603,6 +603,12 @@ func (a *app) cmdClaudeResolve(args []string) error {
 		return usageErr("claude resolve: the claim generation moved; re-read `claude deliveries` — the stored state is unchanged")
 	}
 	if retry {
+		// A claim recorded under the legacy endpoint key (or addressed
+		// through a profile with no pinned hub identity) belongs to a scope
+		// that can never be admitted again: inbox-only, whatever its state.
+		if !claudeHubPinned(scope.HubIdentity) || claim.Scope != key {
+			return usageErr("claude resolve --retry: the claim was recorded under the legacy endpoint-keyed scope, which is never admitted again; use --keep-inbox")
+		}
 		// Retry fences, checked before admission and before any mutation: a
 		// hold-priority delivery is inbox-only full stop (never re-armed for
 		// native transport however it settled), and a claim still owing a
@@ -615,12 +621,6 @@ func (a *app) cmdClaudeResolve(args []string) error {
 		case "refused", "uncertain", "released", "expired":
 		default:
 			return usageErr("claude resolve --retry: the claim is not in a resolvable state (it still owes a native disposition); re-read `claude deliveries`")
-		}
-		// A claim recorded under the legacy endpoint key (or addressed
-		// through a profile with no pinned hub identity) belongs to a scope
-		// that can never be admitted again: inbox-only.
-		if !claudeHubPinned(scope.HubIdentity) || claim.Scope != key {
-			return usageErr("claude resolve --retry: the claim was recorded under the legacy endpoint-keyed scope, which is never admitted again; use --keep-inbox")
 		}
 		if err := a.claudeResolveAdmission(key, expect); err != nil {
 			return err

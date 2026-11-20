@@ -28,8 +28,7 @@ const (
 	claudeTestToken  = "vn_enrol_Zm9vYmFyYmF6cXV4MDEyMzQ1Njc4OWFiY2RlZmdoaWo"
 
 	// claudeTestHubPin is the fixture hub's pinned ed25519 identity (the
-	// public key of a fixed test seed; no real hub ever carries it). Builds
-	// are qualified with claudeWithQualifiedBuild, never a version string.
+	// public key of a fixed test seed; no real hub ever carries it).
 	claudeTestHubPin = "ed25519:IVL40Zt5HSRFMkLhXy6rbLfP-ntqXtMAl5YOBpiB2xI"
 )
 
@@ -308,10 +307,8 @@ func TestClaudeRuntimeSnapshotRedaction(t *testing.T) {
 		Caller:      "peer_A",
 		Recipient:   "peer_A",
 	}
-	// The build evidence is tabled for this platform, so the stored label
-	// would qualify but for the dead pid: admission still reports false.
+	// Parked build evidence on the stored row must not leak either.
 	digest := strings.Repeat("5e", 32)
-	claudeWithQualifiedBuild(t, digest)
 	doc := `{"version":2,"bindings":[{"config_path":` + jsonString(scope.ConfigPath) +
 		`,"profile":"p","hub_identity":` + jsonString(claudeTestHubPin) + `,"hub_endpoint":"https://hub.example.com","caller":"peer_A","recipient":"peer_A",` +
 		`"config_root":` + jsonString(configRoot) + `,"session_id":"S-SNAPSHOT-REDACT-SESSION","socket_path":` + jsonString(socketPath) + `,` +
@@ -354,12 +351,15 @@ func TestClaudeRuntimeSnapshotRedaction(t *testing.T) {
 	}
 	// The task-7 admission gate and the host's child-spawn coordinates.
 	var admission struct {
-		Live             bool `json:"live"`
-		Policy           bool `json:"policy"`
-		VersionQualified bool `json:"version_qualified"`
+		Live             bool   `json:"live"`
+		Policy           bool   `json:"policy"`
+		VersionQualified bool   `json:"version_qualified"`
+		BuildCheck       string `json:"build_check"`
 	}
+	// Build gating is parked: version_qualified holds and build_check says
+	// no build was verified; the dead root is what keeps it unadmitted.
 	if err := json.Unmarshal(rows[0]["admission"], &admission); err != nil || admission.Policy != true ||
-		admission.Live != false || admission.VersionQualified != false {
+		admission.Live != false || admission.VersionQualified != true || admission.BuildCheck != "disabled" {
 		t.Fatalf("admission evidence missing or wrong: %q", rows[0]["admission"])
 	}
 	var scopeRow struct {

@@ -9,21 +9,25 @@ legacy hook path is never removed.
 
 ## Linux prerequisites
 
-Session registration is qualified per exact build: Linux x86-64 with Claude
-Code **2.1.322** (the qualified-baseline list is exact-match, not "or newer" —
-`claudeVersionQualifiedBuilds` in `internal/cli/claude_status.go`). A build not
-on that list reports `version_qualified: false` and stays on the legacy path.
+Build-version gating is currently disabled. Registration never inspects or
+hashes the Claude executable, and the runtime snapshot's admission reports
+`build_check: "disabled"` (with `version_qualified: true`) so nothing claims a
+build was verified. The kernel-attested build-digest check is implemented but
+parked for a later release. A session registers only for a profile with a
+pinned hub identity (its `hub_pubkey`, or the pin its first ordinary command
+records); otherwise registration stays pending with the reason `claude
+registration needs a pinned hub identity; run a vecnet command for this
+profile once`.
 
 Registration proves, through the kernel and Claude's own private session
 registry, that the registering hook is a child of the exact live Claude
 process (`/proc` start identity, boot id, OS-user ownership, the canonical
 config root, and a private messaging socket of the right type). Other
 platforms, missing evidence and unsupported builds stay on the legacy path
-and report `unsupported`; nothing is guessed. In particular the build version
-is never guessed or probed: registration requires the session host to supply
-`CLAUDE_PID`, `CLAUDE_CODE_SESSION_ID` and `CLAUDE_CODE_VERSION` in the hook's
+and report `unsupported`; nothing is guessed. Registration requires the
+session host to supply `CLAUDE_PID` and `CLAUDE_CODE_SESSION_ID` in the hook's
 environment, and a missing or malformed value leaves registration on the
-legacy path.
+legacy path. `CLAUDE_CODE_VERSION` is ignored.
 
 Enrollment is the single ordinary setup action, exactly as for Codex:
 
@@ -33,7 +37,7 @@ vecnet enrol --hub https://YOUR-HUB --token - --profile P
 
 Run it inside the intended Claude conversation when you want the session root
 registered. When `vecnet enrol` runs where no live Claude host identity is
-present (no `CLAUDE_PID`/`CLAUDE_CODE_SESSION_ID`/`CLAUDE_CODE_VERSION`), it
+present (no `CLAUDE_PID`/`CLAUDE_CODE_SESSION_ID`), it
 prints `credentials saved; automatic setup unsupported: …` — the profile is
 enrolled, but session registration stays on the legacy hook path until a
 session hook registers the root. Inside a session, the silent SessionStart

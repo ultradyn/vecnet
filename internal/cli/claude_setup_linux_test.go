@@ -15,8 +15,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -285,7 +283,7 @@ func TestClaudeSetupReconcileGlobalDisableIsStableDisabled(t *testing.T) {
 
 // TestClaudeSetupNoVersionEnvRegisters pins in-session enrollment without
 // CLAUDE_CODE_VERSION: the intent is prepared and reconciliation registers
-// the exact root on kernel build evidence alone.
+// the exact root (build gating is parked, so no build is observed).
 func TestClaudeSetupNoVersionEnvRegisters(t *testing.T) {
 	f := newClaudeRegFixture(t)
 	a := f.startTree("a")
@@ -319,201 +317,52 @@ func TestClaudeSetupNoVersionEnvRegisters(t *testing.T) {
 		t.Fatalf("reconcile without the version export settled %q: %s", result.State, result.Reason)
 	}
 	rows := f.storedRows(t)
-	if len(rows) != 1 || rows[0].PID != a.pid || rows[0].ExeSHA256 != claudeFileDigest(t, os.Args[0]) || rows[0].HubIdentity != claudeTestHubPin {
-		t.Fatalf("reconcile did not register the exact root with its build evidence: %+v", rows)
+	if len(rows) != 1 || rows[0].PID != a.pid || rows[0].HubIdentity != claudeTestHubPin || rows[0].ExeSHA256 != "" {
+		t.Fatalf("reconcile did not register the exact root (without build evidence): %+v", rows)
 	}
 	f.assertPassive()
 }
 
-// claudeBaselinePrompts runs n successive user-prompt hooks with no Claude
-// host evidence at all: the legacy path's outputs (the first announces the
-// delivery, later ones stay quiet) that registration runs must reproduce.
-func claudeBaselinePrompts(t *testing.T, prompt string, n int) []claudeHookResult {
-	t.Helper()
-	hub, _ := claudeLegacyHub(t)
-	f := claudeLegacyEnv(t, hub)
-	var results []claudeHookResult
-	for range n {
-		a := f.app()
-		a.inHook = true
-		a.stdin = strings.NewReader(prompt)
-		var out, errs bytes.Buffer
-		a.stdout, a.stderr = &out, &errs
-		a.hookRun([]string{"--profile", "p", "--event", "user-prompt"}, hookNow, func() {}, func(data []byte) error {
-			_, err := out.Write(data)
-			return err
-		}, 0)
-		results = append(results, claudeHookResult{Stdout: out.String(), Stderr: errs.String()})
-	}
-	return results
-}
+// TestClaudeSetupSlowDigestLeavesHookOutput pins Review Focus 2 under the
+// parked build gating: even with a hash that would block forever, the
+// user-prompt hook output is byte-identical to the no-evidence baseline,
+// because no hook ever reaches the hash, and the root still registers.
+func TestClaudeSetupSlowDigestLeavesHookOutput(t *testing.T) {
+	prompt := `{"hook_event_name":"UserPromptSubmit","session_id":"S1"}`
+	baseHub, _ := claudeLegacyHub(t)
+	baseFixture := claudeLegacyEnv(t, baseHub)
+	baseApp := baseFixture.app()
+	baseApp.inHook = true
+	baseApp.stdin = strings.NewReader(prompt)
+	var baseOut, baseErr bytes.Buffer
+	baseApp.stdout, baseApp.stderr = &baseOut, &baseErr
+	baseApp.hookRun([]string{"--profile", "p", "--event", "user-prompt"}, hookNow, func() {}, func(data []byte) error {
+		_, err := baseOut.Write(data)
+		return err
+	}, 0)
 
-// claudePromptFixture is a registration fixture whose profile p points at a
-// legacy hub, with helper-job hash calls counted.
-func claudePromptFixture(t *testing.T) (*claudeRegFixture, *claudeTree, map[string]string) {
-	t.Helper()
 	hub, _ := claudeLegacyHub(t)
 	f := claudeLegacyEnv(t, hub)
-	f.hashLog = filepath.Join(f.dir, "hash-calls.log")
 	a := f.startTree("a")
 	a.sessionRecord(a.pid, "S1", a.socket)
 	env := a.claudeHookEnv("S1")
 	for k, v := range f.env {
 		env[k] = v
 	}
-	return f, a, env
-}
-
-const claudeTestPrompt = `{"hook_event_name":"UserPromptSubmit","session_id":"S1"}`
-
-func (tr *claudeTree) prompt(t *testing.T, env map[string]string) claudeHookResult {
-	t.Helper()
-	return tr.hook(env, []string{"--profile", "p", "--event", "user-prompt"}, claudeTestPrompt)
-}
-
-func (tr *claudeTree) sessionStart(t *testing.T, env map[string]string) {
-	t.Helper()
-	out := tr.hook(env, []string{"--profile", "p", "--event", "session-start"}, sessionStartPayload("S1"))
-	if out.Stdout != "" || out.Stderr != "" {
-		t.Fatalf("session-start emitted output: stdout=%q stderr=%q", out.Stdout, out.Stderr)
-	}
-}
-
-func (f *claudeRegFixture) cacheRows(t *testing.T) int {
-	t.Helper()
-	raw, err := f.app().readLocalState(claudeExeDigestsName)
-	if err != nil {
-		return 0
-	}
-	doc, err := claudeExeDigestsDecode(raw)
-	if err != nil {
-		t.Fatalf("digest cache is invalid: %v", err)
-	}
-	return len(doc.Entries)
-}
-
-// TestClaudeUserPromptHookNeverHashesCold pins the prompt-hook budget: with
-// an empty digest cache the user-prompt hook makes no hash call (the build
-// observation is deferred to SessionStart), its output is byte-identical,
-// and the root registers unqualified. SessionStart then hashes exactly once,
-// and a later prompt hook qualifies from the cache without hashing. A
-// cache-only miss never downgrades or re-generations a stored row.
-func TestClaudeUserPromptHookNeverHashesCold(t *testing.T) {
-	base := claudeBaselinePrompts(t, claudeTestPrompt, 3)
-	baseOut, baseErr := base[0].Stdout, base[0].Stderr
-	f, a, env := claudePromptFixture(t)
-	digest := claudeFileDigest(t, os.Args[0])
-	f.qualified = []string{digest}
-	claudeWithQualifiedBuild(t, digest)
-
-	out := a.prompt(t, env)
-	if out.Stdout != baseOut || out.Stderr != baseErr {
-		t.Fatalf("a cold prompt hook changed its output:\nwith: %q / %q\nbaseline: %q / %q", out.Stdout, out.Stderr, baseOut, baseErr)
+	// The counting seam passes through to the real hash; any call at all is
+	// the failure, so a slow digest cannot matter.
+	out := a.hook(env, []string{"--profile", "p", "--event", "user-prompt"}, prompt)
+	if out.Stdout != baseOut.String() || out.Stderr != baseErr.String() {
+		t.Fatalf("registration changed the hook output:\nwith: %q / %q\nbaseline: %q / %q", out.Stdout, out.Stderr, baseOut.String(), baseErr.String())
 	}
 	if !strings.Contains(out.Stdout, "1 unacked deliveries waiting") {
 		t.Fatalf("legacy delivery missing from prompt output: %q", out.Stdout)
 	}
 	if n := f.hashCalls(t); n != 0 {
-		t.Fatalf("a cold user-prompt hook made %d hash call(s), want 0", n)
+		t.Fatalf("the prompt hook hashed %d time(s)", n)
 	}
-	if n := f.cacheRows(t); n != 0 {
-		t.Fatalf("a cache-only miss wrote %d cache row(s)", n)
-	}
-	rows := f.storedRows(t)
-	if len(rows) != 1 || rows[0].Build != "" || rows[0].ExeSHA256 != "" || rows[0].ExeIdentity != "" {
-		t.Fatalf("a deferred observation must register unqualified with no evidence: %+v", rows)
-	}
-	if claudeAdmissionEvidence(rows[0], nil, false).VersionQualified {
-		t.Fatal("a deferred observation was admitted as qualified")
-	}
-	generation := rows[0].Generation
-
-	// SessionStart has no output: it hashes exactly once and renews the row
-	// in place with the qualified evidence.
-	a.sessionStart(t, env)
-	if n := f.hashCalls(t); n != 1 {
-		t.Fatalf("session-start with an empty cache made %d hash call(s), want 1", n)
-	}
-	rows = f.storedRows(t)
-	if len(rows) != 1 || rows[0].Generation != generation || rows[0].Build != claudeTestBuildLabel || rows[0].ExeSHA256 != digest {
-		t.Fatalf("session-start did not qualify the row in place: %+v", rows)
-	}
-	qualified := f.registryBytes()
-
-	// A later prompt hook qualifies from the cache: no hash, no rewrite.
-	if out := a.prompt(t, env); out != base[1] {
-		t.Fatalf("a warm prompt hook changed its output: %+v, baseline %+v", out, base[1])
-	}
-	if n := f.hashCalls(t); n != 1 {
-		t.Fatalf("a warm user-prompt hook hashed: %d call(s) total", n)
-	}
-	if !bytes.Equal(qualified, f.registryBytes()) {
-		t.Fatal("a warm prompt hook rewrote the qualified row")
-	}
-
-	// An evicted cache is a cache-only miss again: still no hash, and the
-	// stored qualified evidence for this live executable is kept untouched.
-	if err := os.Remove(claudeStatePath(f.dir, claudeExeDigestsName)); err != nil {
-		t.Fatal(err)
-	}
-	if out := a.prompt(t, env); out != base[2] {
-		t.Fatalf("an evicted-cache prompt hook changed its output: %+v, baseline %+v", out, base[2])
-	}
-	if n := f.hashCalls(t); n != 1 {
-		t.Fatalf("an evicted-cache user-prompt hook hashed: %d call(s) total", n)
-	}
-	if !bytes.Equal(qualified, f.registryBytes()) {
-		t.Fatal("a cache-only miss downgraded or rewrote the qualified row")
-	}
-	f.assertPassive()
-}
-
-// TestClaudeSetupSlowDigestLeavesHookOutput pins Review Focus 2. The prompt
-// hook never hashes, so even a blocked hash cannot touch its output; the
-// hash belongs to SessionStart, which has no output and gives up inside its
-// own bound (well under hookBudget), caches nothing partial, and leaves the
-// row unqualified until the next SessionStart retries.
-func TestClaudeSetupSlowDigestLeavesHookOutput(t *testing.T) {
-	if claudeBuildHashBudget >= hookBudget {
-		t.Fatalf("the hash budget %v does not leave the hook budget %v room", claudeBuildHashBudget, hookBudget)
-	}
-	base := claudeBaselinePrompts(t, claudeTestPrompt, 1)
-	baseOut, baseErr := base[0].Stdout, base[0].Stderr
-	f, a, env := claudePromptFixture(t)
-	f.blockHash = true
-
-	out := a.prompt(t, env)
-	if out.Stdout != baseOut || out.Stderr != baseErr {
-		t.Fatalf("a blocked digest changed the prompt hook output:\nwith: %q / %q\nbaseline: %q / %q", out.Stdout, out.Stderr, baseOut, baseErr)
-	}
-	if n := f.hashCalls(t); n != 0 {
-		t.Fatalf("the prompt hook reached the blocked hash %d time(s)", n)
-	}
-
-	started := time.Now()
-	a.sessionStart(t, env)
-	if elapsed := time.Since(started); elapsed > 20*time.Second {
-		t.Fatalf("the session-start job took %v", elapsed)
-	}
-	if n := f.hashCalls(t); n != 1 {
-		t.Fatalf("session-start made %d hash call(s), want 1", n)
-	}
-	rows := f.storedRows(t)
-	if len(rows) != 1 || rows[0].Build != "" || rows[0].ExeSHA256 != "" || rows[0].ExeIdentity != "" {
-		t.Fatalf("a timed-out observation must leave the row unqualified with no evidence: %+v", rows)
-	}
-	if n := f.cacheRows(t); n != 0 {
-		t.Fatalf("a timed-out hash cached %d row(s)", n)
-	}
-	generation := rows[0].Generation
-
-	// The next SessionStart retries: the real hash completes and renews the
-	// row in place, same generation.
-	f.blockHash = false
-	a.sessionStart(t, env)
-	rows = f.storedRows(t)
-	if len(rows) != 1 || rows[0].Generation != generation || rows[0].ExeSHA256 != claudeFileDigest(t, os.Args[0]) {
-		t.Fatalf("the next session-start did not retry the observation: %+v", rows)
+	if rows := f.storedRows(t); len(rows) != 1 || rows[0].ExeSHA256 != "" {
+		t.Fatalf("the prompt hook did not register the root without build evidence: %+v", rows)
 	}
 	f.assertPassive()
 }

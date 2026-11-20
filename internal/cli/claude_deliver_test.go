@@ -309,7 +309,7 @@ func deliverBindingFixture(t *testing.T) (env map[string]string, dir, socket, ke
 		`"config_root":` + jsonString(configRoot) + `,"session_id":` + jsonString(deliverTestSession) + `,` +
 		`"socket_path":` + jsonString(socket) + `,` +
 		`"process_start":` + jsonString(procStart(os.Getpid())) + `,"boot_id":` + jsonString(claudeBootID()) + `,` +
-		claudeSelfBuildJSON(t) + `"pid":` + strconv.Itoa(os.Getpid()) + `,"uid":` + strconv.Itoa(os.Geteuid()) + `,` +
+		`"pid":` + strconv.Itoa(os.Getpid()) + `,"uid":` + strconv.Itoa(os.Geteuid()) + `,` +
 		`"generation":` + jsonString(generation) + `,"updated_at":"2026-11-19T00:00:00Z"}],"opt_outs":[],"canary":[]}`
 	stateDir := filepath.Join(dir, ".local", "state", "vecnet", "projects")
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
@@ -388,8 +388,8 @@ func TestClaudeDeliverBindingModeRefusals(t *testing.T) {
 }
 
 // TestClaudeDeliverBindingModeAdmissionRefusals re-registers the fixture with
-// disqualifying rows: a build label the table does not give the digest and a latched global
-// disable each refuse the attempt at exit 2 with zero connections.
+// disqualifying state: a latched global disable and an addressed opt-out
+// each refuse the attempt at exit 2 with zero connections.
 func TestClaudeDeliverBindingModeAdmissionRefusals(t *testing.T) {
 	env, dir, socket, key, generation := deliverBindingFixture(t)
 	_ = socket
@@ -404,21 +404,26 @@ func TestClaudeDeliverBindingModeAdmissionRefusals(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(stateDir, claudeSettingsName), []byte(`{"version":1,"disabled":false}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// A stored label the pinned table does not give this digest.
+	// An addressed opt-out for the recipient refuses the same way.
 	bindings, err := os.ReadFile(filepath.Join(stateDir, claudeBindingsName))
 	if err != nil {
 		t.Fatal(err)
 	}
-	unqualified := strings.Replace(string(bindings), `"build":"`+claudeTestBuildLabel+`"`, `"build":"9.9.9"`, 1)
-	if unqualified == string(bindings) {
-		t.Fatal("fixture does not carry the qualified build label")
+	var doc claudeBindingsFile
+	if err := json.Unmarshal(bindings, &doc); err != nil {
+		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(stateDir, claudeBindingsName), []byte(unqualified), 0o600); err != nil {
+	doc.OptOuts = append(doc.OptOuts, doc.Bindings[0].claudeScope)
+	opted, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, claudeBindingsName), opted, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	code, _, errs = claudeDeliverRun(t, env, deliverBindingArgs(key, generation)...)
 	if code != 2 {
-		t.Fatalf("unqualified build exit %d, want 2: %s", code, errs)
+		t.Fatalf("opted-out recipient exit %d, want 2: %s", code, errs)
 	}
 }
 

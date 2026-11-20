@@ -2,6 +2,15 @@ package cli
 
 // Kernel-attested Claude build observation (delivery Phase 2, task 1).
 //
+// PARKED: build-version gating is disabled for now (Max, 2026-11-20). No
+// production path calls observeClaudeBuild or claudeExeIdentityLive: hooks
+// and registration never hash, the binding row's build/exe_sha256/
+// exe_identity fields stay optional and unwritten, and admission reports
+// build_check "disabled". The code and its tests stay compiled and tested so
+// a later re-enable is cheap: wire observeClaudeBuild back into
+// claudeRootEvidence (off the prompt-hook budget) and restore the build
+// condition in claudeAdmissionEvidence.
+//
 // A build qualifies only when the sha256 of its kernel-attested executable
 // is in the pinned table below; the table label is the version shown. The
 // executable's path, CLAUDE_CODE_EXECPATH and CLAUDE_CODE_VERSION never
@@ -75,21 +84,6 @@ const (
 	claudeBuildReasonUnreadable  = "claude executable is unreadable"
 	claudeBuildReasonExecPath    = "CLAUDE_CODE_EXECPATH names a different executable"
 	claudeBuildReasonTimeout     = "claude build observation timed out"
-	claudeBuildReasonDeferred    = "claude build observation deferred to session start"
-)
-
-// claudeBuildMode selects how much work one observation may do. A prompt or
-// tool hook runs before the legacy delivery path inside the hook budget, so
-// it may only reuse a cached digest; SessionStart (no output), enrollment and
-// repair may hash under claudeBuildHashBudget.
-type claudeBuildMode int
-
-const (
-	// claudeBuildMayHash hashes the executable on a cache miss.
-	claudeBuildMayHash claudeBuildMode = iota
-	// claudeBuildCacheOnly never hashes: a cache miss is the deferred
-	// reason with no evidence, and nothing is cached.
-	claudeBuildCacheOnly
 )
 
 // Test seams: claudeBuildHash computes one digest under a deadline, and

@@ -275,30 +275,35 @@ func TestClaudeStatusRejectsDeadOrMismatchedHost(t *testing.T) {
 	f.assertPassive()
 }
 
-// TestClaudeAdmissionRequiresLiveExeIdentity pins build admission to the
-// live attested executable: a tabled digest and label qualify only while the
-// pid's current image is the recorded dev:ino.
-func TestClaudeAdmissionRequiresLiveExeIdentity(t *testing.T) {
+// TestClaudeAdmissionIgnoresBuild pins the parked build gating: an unknown
+// build (no evidence, or a digest and label the pinned table never had) is
+// admitted on liveness and policy alone, and the admission says honestly
+// that no build check ran. Liveness and policy still gate.
+func TestClaudeAdmissionIgnoresBuild(t *testing.T) {
 	f := newClaudeRegFixture(t)
-	claudeWithQualifiedBuild(t, claudeFileDigest(t, os.Args[0]))
 	a := f.startTree("a")
 	a.sessionRecord(a.pid, "S1", a.socket)
-	b := claudeBinding{claudeScope: f.scope("p"), claudeRoot: a.observedRoot("S1")}
-	if adm := claudeAdmissionEvidence(b, nil, false); !adm.Live || !adm.VersionQualified {
-		t.Fatalf("the live attested build is not qualified: %+v", adm)
+	unknown := claudeBinding{claudeScope: f.scope("p"), claudeRoot: a.root("S1")}
+	untabled := unknown
+	untabled.Build, untabled.ExeSHA256, untabled.ExeIdentity = "9.9.9", strings.Repeat("0", 64), "1:2:3:4:5"
+	for label, b := range map[string]claudeBinding{"no build evidence": unknown, "untabled build": untabled} {
+		adm := claudeAdmissionEvidence(b, nil, false)
+		if !adm.Live || !adm.Policy || !adm.VersionQualified || adm.BuildCheck != "disabled" {
+			t.Fatalf("%s was not admitted with build_check disabled: %+v", label, adm)
+		}
 	}
-	foreign := b
-	foreign.ExeIdentity = "1:2:3:4:5"
-	if adm := claudeAdmissionEvidence(foreign, nil, false); adm.VersionQualified {
-		t.Fatalf("a stored identity that is not the live exe qualified: %+v", adm)
+	raw, err := json.Marshal(claudeAdmissionEvidence(unknown, nil, false))
+	if err != nil || string(raw) != `{"live":true,"policy":true,"version_qualified":true,"build_check":"disabled"}` {
+		t.Fatalf("admission JSON = %s, %v", raw, err)
 	}
-	relabeled := b
-	relabeled.Build = "2.1.322"
-	if adm := claudeAdmissionEvidence(relabeled, nil, false); adm.VersionQualified {
-		t.Fatalf("a label the table does not give the digest qualified: %+v", adm)
+	if adm := claudeAdmissionEvidence(unknown, []claudeScope{f.scope("q")}, false); adm.Policy {
+		t.Fatalf("an alias opt-out did not withdraw policy: %+v", adm)
+	}
+	if adm := claudeAdmissionEvidence(unknown, nil, true); adm.Policy {
+		t.Fatalf("the global disable did not withdraw policy: %+v", adm)
 	}
 	a.kill()
-	if adm := claudeAdmissionEvidence(b, nil, false); adm.Live || adm.VersionQualified {
-		t.Fatalf("a dead root kept its admission: %+v", adm)
+	if adm := claudeAdmissionEvidence(unknown, nil, false); adm.Live {
+		t.Fatalf("a dead root stayed live: %+v", adm)
 	}
 }
