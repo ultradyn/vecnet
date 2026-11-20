@@ -72,8 +72,10 @@ messaging:
        generic shared Codex hook: no peer content or claims; delivery uses the exact-thread connector
   hook --event app-server --claim NONCE --priorities wake[,wake_idle] --expect-hub URL --expect-caller PEER_ID
   hook --release --claim NONCE
-  hook install [--client claude|codex] [--profile P] [--write] [--settings PATH] [--auto-ack] [--mcp] (--mcp: Claude-only)
-       --mcp: the hooks name MCP server vecnet-P, and --write registers it (claude mcp add)
+  hook install [--client claude|codex|agy] [--profile P] [--write] [--settings PATH] [--auto-ack] [--mcp]
+       --mcp: the hooks name MCP server vecnet-P; claude registers it (claude mcp add), agy merges .agents/mcp_config.json
+  hook install --client agy [--profile P] [--mcp] [--dry-run|--write]
+       agy workspace hooks: .agents/hooks.json group vecnet-P (SessionStart, PreInvocation); each git worktree needs its own
   hook install --client codex [--settings PATH] [--bin PATH] [--dry-run|--write] [--rollback BACKUP]
        generic hook migration; default previews a diff; --write saves a rollback backup; custom hooks survive
        rollback refuses drift; review trust in Codex /hooks yourself (never changed automatically)
