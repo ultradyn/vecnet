@@ -8,7 +8,9 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -59,6 +61,19 @@ func claudeStatePath(home, name string) string {
 	return filepath.Join(home, ".local", "state", "vecnet", "projects", name)
 }
 
+// claudeSeedLocalState writes one local state document through the product's
+// own private writer, so the directory chain and the file are owner-private
+// on every platform. os.WriteFile cannot: on Windows the inode would inherit
+// its parent's owner (Administrators on an elevated runner), which the
+// private-state reader rightly refuses.
+func claudeSeedLocalState(t *testing.T, env map[string]string, name string, raw []byte) {
+	t.Helper()
+	a := &app{ctx: context.Background(), stdout: io.Discard, stderr: io.Discard, getenv: func(k string) string { return env[k] }}
+	if err := a.writeLocalState(name, raw); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestClaudeStatusDisableEnableLeavesLegacy(t *testing.T) {
 	home, env := claudeStatusFixture(t)
 	// One stored binding row: an opt-out must block registration without
@@ -75,16 +90,11 @@ func TestClaudeStatusDisableEnableLeavesLegacy(t *testing.T) {
 		ConfigRoot: filepath.Join(home, "root"), SessionID: "S1", ProcessStart: "12",
 		BootID: "01234567-89ab-cdef-0123-456789abcdef", Version: "2.1.322", PID: 4242, UID: 1000,
 	}, Generation: "0123456789abcdef0123456789abcdef", UpdatedAt: time.Now().UTC()}
-	if err := os.MkdirAll(filepath.Dir(claudeStatePath(home, claudeBindingsName)), 0o700); err != nil {
-		t.Fatal(err)
-	}
 	rows, err := json.Marshal(claudeBindingsFile{Version: 1, Bindings: []claudeBinding{stored}, OptOuts: []claudeScope{}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(claudeStatePath(home, claudeBindingsName), rows, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	claudeSeedLocalState(t, env, claudeBindingsName, rows)
 
 	// Baseline: no opt-out, so mode stays legacy with no live owner.
 	if result := claudeStatusJSON(t, env, "--net", "p", "claude", "status", "--json"); result.Mode != "legacy" || result.Owner != "none" || result.PendingCount != 0 {

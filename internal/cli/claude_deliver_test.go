@@ -58,7 +58,7 @@ const deliverWantFrame = `{"type":"user","msgV":1,"session_id":"` + deliverTestS
 // needs no config, no state and no environment-derived path.
 func claudeDeliverFixture(t *testing.T) (env map[string]string, dir string) {
 	t.Helper()
-	d := t.TempDir()
+	d := claudeSocketDir(t) // sockets are bound here: keep sun_path short
 	env = map[string]string{
 		"HOME":            d,
 		"VECNET_CONFIG":   filepath.Join(d, "v.toml"),
@@ -507,9 +507,9 @@ func TestClaudeDeliverPeerClosedMidWriteIsExit4(t *testing.T) {
 	}()
 	codes := map[int]int{}
 	for i := 0; i < 60 && codes[4] == 0; i++ {
-		code, _, _ := claudeDeliverRun(t, env, claudeDeliverArgs(path)...)
+		code, _, errs := claudeDeliverRun(t, env, claudeDeliverArgs(path)...)
 		if code != 0 && code != 3 && code != 4 {
-			t.Fatalf("unexpected exit %d from the peer-closed socket", code)
+			t.Fatalf("unexpected exit %d from the peer-closed socket: %s", code, errs)
 		}
 		codes[code]++
 	}

@@ -261,9 +261,14 @@ test('optional adapter startup failure is visible and leaves Codex v1 status hea
 
 test('embedded delivery takes over the managed entry’s lock after SIGKILL leaves stale readiness', unix, async t => {
   const s = fixture(t);
+  // The managed entry refuses a VECNET_BIN not owned by this user or root, or
+  // writable by others. process.execPath (a CI toolcache node) need not meet
+  // that, so hand the entry a private stub it owns, as the other entry tests do.
+  const bin = join(s.env.HOME, 'vecnet');
+  writeFileSync(bin, '#!/bin/sh\nexit 1\n', { mode: 0o700 });
   const entry = fileURLToPath(new URL('../src/codex/delivery-main.ts', import.meta.url));
   const child = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', '--experimental-strip-types', entry], {
-    env: s.env, stdio: ['ignore', 'ignore', 'pipe'],
+    env: { ...s.env, VECNET_BIN: bin }, stdio: ['ignore', 'ignore', 'pipe'],
   });
   const exited = once(child, 'close');
   let stderr = '';

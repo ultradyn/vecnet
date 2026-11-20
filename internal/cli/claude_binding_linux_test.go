@@ -32,6 +32,25 @@ import (
 // claudeFixtureVersion lives in claude_setup_test.go so every platform's
 // tests can share it.
 
+// claudeSocketDir is a private fixture directory short enough to bind unix
+// sockets in. t.TempDir() lives under $TMPDIR, which CI points at a deep
+// per-job path, and a socket path there overflows the 108-byte sun_path
+// (bind: invalid argument). MkdirTemp creates it owner-only (0700), like
+// t.TempDir().
+func claudeSocketDir(t *testing.T) string {
+	t.Helper()
+	d, err := os.MkdirTemp("/tmp", "vn-claude-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(d); err != nil {
+			t.Errorf("remove socket fixture dir: %v", err)
+		}
+	})
+	return d
+}
+
 type claudeRegResult struct {
 	OK      bool          `json:"ok"`
 	Binding claudeBinding `json:"binding"`
@@ -54,7 +73,7 @@ type claudeRegFixture struct {
 
 func newClaudeRegFixture(t *testing.T) *claudeRegFixture {
 	t.Helper()
-	d, err := canonicalCodexPath(t.TempDir())
+	d, err := canonicalCodexPath(claudeSocketDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}

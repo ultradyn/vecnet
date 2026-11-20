@@ -29,11 +29,13 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/XertroV/vecnet/internal/ids"
+	"github.com/XertroV/vecnet/internal/platform"
 
 	_ "modernc.org/sqlite" // the shared delivery ledger is SQLite
 )
@@ -155,7 +157,10 @@ var claudeLedgerDSNEscape = strings.NewReplacer("%", "%25", "?", "%3f", "#", "%2
 // busy timeout the host uses (read-write: a WAL reader must attach the
 // shared-memory files). A missing or never-initialized database is simply no
 // recorded activity (nil, nil); anything not an owner-only regular file, or
-// a schema the host never wrote, refuses.
+// a schema the host never wrote, refuses. Windows has no POSIX mode bits
+// (Stat synthesizes them from the read-only attribute), so there the ledger
+// must pass the same owner-and-DACL private-file check the TS host applies
+// to delivery.sqlite before SQLite opens it.
 func openClaudeClaimsLedger(path string) (*sql.DB, error) {
 	fi, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -164,7 +169,14 @@ func openClaudeClaimsLedger(path string) (*sql.DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !fi.Mode().IsRegular() || fi.Mode().Perm()&0o077 != 0 {
+	if !fi.Mode().IsRegular() {
+		return nil, usageErr("unsafe claude delivery ledger: " + filepath.Base(path) + " must be a regular file")
+	}
+	if runtime.GOOS == "windows" {
+		if err := platform.CheckPath(path, false, true); err != nil {
+			return nil, usageErr("unsafe claude delivery ledger: " + filepath.Base(path) + " must be a private file owned by the current user: " + err.Error())
+		}
+	} else if fi.Mode().Perm()&0o077 != 0 {
 		return nil, usageErr("unsafe claude delivery ledger: " + filepath.Base(path) + " must be an owner-only file (mode 0600)")
 	}
 	db, err := sql.Open("sqlite", "file:"+claudeLedgerDSNEscape.Replace(path)+"?_pragma=busy_timeout(5000)")
