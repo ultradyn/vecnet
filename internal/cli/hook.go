@@ -427,13 +427,16 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 		// SessionStart routes to passive registration only: bounded local
 		// work, no hub lookup, no context output. The delivery path stays
 		// with user-prompt and post-tool, whose behavior is unchanged.
-		_ = a.claudeRegisterHook(ctx, a.namedProfile(), raw)
+		// It has no output, so it may hash the executable under its own bound.
+		_ = a.claudeRegisterHook(ctx, a.namedProfile(), raw, claudeBuildMayHash)
 		return hookResult{}
 	}
 	// A verified first user prompt may update registration before the
 	// ordinary legacy path. Registration is silent and passive, so the
-	// hook's output is byte-identical with or without it.
-	_ = a.claudeRegisterHook(ctx, a.namedProfile(), raw)
+	// hook's output is byte-identical with or without it. The build is read
+	// from the digest cache only: a cold hash would spend the budget the
+	// legacy delivery below needs, so a miss defers it to SessionStart.
+	_ = a.claudeRegisterHook(ctx, a.namedProfile(), raw, claudeBuildCacheOnly)
 	c, name, ch, e := a.connect()
 	if e != nil || ctx.Err() != nil {
 		return hookResult{}

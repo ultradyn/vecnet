@@ -102,7 +102,7 @@ func (f *claudeBuildFixture) app() *app {
 
 func (f *claudeBuildFixture) observe() (claudeBuildEvidence, error) {
 	f.t.Helper()
-	return f.app().observeClaudeBuild(context.Background(), f.pid, f.start)
+	return f.app().observeClaudeBuild(context.Background(), f.pid, f.start, claudeBuildMayHash)
 }
 
 // kill ends the helper and reaps it, so /proc/<pid> is gone.
@@ -354,7 +354,7 @@ func TestClaudeBuildUnreadableExeIsUnqualified(t *testing.T) {
 
 func TestClaudeBuildStalePidErrors(t *testing.T) {
 	f := newClaudeBuildFixture(t)
-	if ev, err := f.app().observeClaudeBuild(context.Background(), f.pid, f.start+"0"); err == nil {
+	if ev, err := f.app().observeClaudeBuild(context.Background(), f.pid, f.start+"0", claudeBuildMayHash); err == nil {
 		t.Fatalf("a mismatched start identity was not an error: %+v", ev)
 	}
 }

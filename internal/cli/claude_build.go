@@ -75,6 +75,21 @@ const (
 	claudeBuildReasonUnreadable  = "claude executable is unreadable"
 	claudeBuildReasonExecPath    = "CLAUDE_CODE_EXECPATH names a different executable"
 	claudeBuildReasonTimeout     = "claude build observation timed out"
+	claudeBuildReasonDeferred    = "claude build observation deferred to session start"
+)
+
+// claudeBuildMode selects how much work one observation may do. A prompt or
+// tool hook runs before the legacy delivery path inside the hook budget, so
+// it may only reuse a cached digest; SessionStart (no output), enrollment and
+// repair may hash under claudeBuildHashBudget.
+type claudeBuildMode int
+
+const (
+	// claudeBuildMayHash hashes the executable on a cache miss.
+	claudeBuildMayHash claudeBuildMode = iota
+	// claudeBuildCacheOnly never hashes: a cache miss is the deferred
+	// reason with no evidence, and nothing is cached.
+	claudeBuildCacheOnly
 )
 
 // Test seams: claudeBuildHash computes one digest under a deadline, and

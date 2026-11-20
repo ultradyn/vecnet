@@ -262,39 +262,40 @@ func (a *app) claudeConfigRoot() (string, error) {
 // The build is observed here, before registerClaudeRoot takes the bindings
 // lock, so a hash is never held under it; CLAUDE_CODE_VERSION is never read.
 // An unqualified or unobservable build still registers (Build "") and stays
-// legacy; only a stale or reused pid refuses.
-func (a *app) claudeRootEvidence(ctx context.Context, session string) (claudeRoot, error) {
+// legacy; only a stale or reused pid refuses. mode bounds the observation;
+// deferred reports a cache-only miss, which carries no evidence at all.
+func (a *app) claudeRootEvidence(ctx context.Context, session string, mode claudeBuildMode) (root claudeRoot, deferred bool, err error) {
 	var none claudeRoot
 	pid, err := strconv.Atoi(strings.TrimSpace(a.getenv("CLAUDE_PID")))
 	if err != nil || pid <= 1 {
-		return none, usageErr("claude registration needs the Claude process identity (CLAUDE_PID)")
+		return none, false, usageErr("claude registration needs the Claude process identity (CLAUDE_PID)")
 	}
 	session = strings.TrimSpace(session)
 	if !hookSessionID.MatchString(session) {
-		return none, usageErr("claude registration needs the session's own id")
+		return none, false, usageErr("claude registration needs the session's own id")
 	}
 	start := procStart(pid)
 	if start == "" {
-		return none, usageErr("claude registration cannot observe the claimed process")
+		return none, false, usageErr("claude registration cannot observe the claimed process")
 	}
 	boot := claudeBootID()
 	if boot == "" {
-		return none, errClaudeUnsupported
+		return none, false, errClaudeUnsupported
 	}
-	build, err := a.observeClaudeBuild(ctx, pid, start)
+	build, err := a.observeClaudeBuild(ctx, pid, start, mode)
 	if err != nil {
-		return none, err
+		return none, false, err
 	}
-	root, err := a.claudeConfigRoot()
+	configRoot, err := a.claudeConfigRoot()
 	if err != nil {
-		return none, err
+		return none, false, err
 	}
 	socket := a.getenv("CLAUDE_CODE_MESSAGING_SOCKET")
 	if socket != "" && (!filepath.IsAbs(socket) || filepath.Clean(socket) != socket) {
-		return none, usageErr("claude messaging endpoint must be a clean absolute path")
+		return none, false, usageErr("claude messaging endpoint must be a clean absolute path")
 	}
 	return claudeRoot{
-		ConfigRoot:   root,
+		ConfigRoot:   configRoot,
 		SessionID:    session,
 		SocketPath:   socket,
 		ProcessStart: start,
@@ -304,7 +305,7 @@ func (a *app) claudeRootEvidence(ctx context.Context, session string) (claudeRoo
 		ExeIdentity:  build.Identity,
 		PID:          pid,
 		UID:          os.Geteuid(),
-	}, nil
+	}, build.Reason == claudeBuildReasonDeferred, nil
 }
 
 // claudeHubIdentity is the profile's pinned hub identity: the canonical
@@ -389,8 +390,11 @@ func (a *app) claudeScopeForProfileAllowLegacy(profile string) (claudeScope, err
 // stdin), maps the payload's agent_id to the CLAUDE_AGENT_ID evidence key
 // so child agents are refused, and performs no hub lookup. It writes
 // nothing to the hook's output: a refusal leaves the legacy path
-// byte-identical.
-func (a *app) claudeRegisterHook(ctx context.Context, profile string, raw []byte) localSetupResult {
+// byte-identical. mode is claudeBuildMayHash only for SessionStart, which
+// has no output; the prompt and tool hooks run before the legacy delivery
+// path and pass claudeBuildCacheOnly, so a cold digest never spends their
+// budget.
+func (a *app) claudeRegisterHook(ctx context.Context, profile string, raw []byte, mode claudeBuildMode) localSetupResult {
 	var input struct {
 		SessionID string `json:"session_id"`
 		AgentID   string `json:"agent_id"`
@@ -419,11 +423,11 @@ func (a *app) claudeRegisterHook(ctx context.Context, profile string, raw []byte
 	if err != nil {
 		return claudeSetupResultFor(err)
 	}
-	root, err := worker.claudeRootEvidence(ctx, session)
+	root, deferred, err := worker.claudeRootEvidence(ctx, session, mode)
 	if err != nil {
 		return claudeSetupResultFor(err)
 	}
-	_, err = worker.registerClaudeRoot(ctx, scope, root)
+	_, err = worker.registerClaudeRootObserved(ctx, scope, root, deferred)
 	return claudeSetupResultFor(err)
 }
 
@@ -490,7 +494,8 @@ func (a *app) reconcileClaudeEnrollment(ctx context.Context, r claudeEnrollment)
 		if err != nil {
 			return fail(err)
 		}
-		root, err := a.claudeRootEvidence(ctx, strings.TrimSpace(a.getenv("CLAUDE_CODE_SESSION_ID")))
+		// Enrollment and repair are ordinary commands: they may hash.
+		root, _, err := a.claudeRootEvidence(ctx, strings.TrimSpace(a.getenv("CLAUDE_CODE_SESSION_ID")), claudeBuildMayHash)
 		if err != nil {
 			return fail(err)
 		}

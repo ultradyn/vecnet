@@ -649,7 +649,13 @@ func (a *app) claudeScopeWitness(scope claudeScope) error {
 // claudeRegisterTransition applies the ownership rules under the lock.
 // One active owner per exact recipient scope; resume and /clear are the
 // only generation-changing transitions; everything unknown stays pending.
-func claudeRegisterTransition(doc *claudeBindingsFile, scope claudeScope, root claudeRoot, now time.Time) (claudeBinding, string, error) {
+//
+// deferred marks a root whose build observation was deferred (a cache-only
+// miss): it carries no build evidence, so for the same live process it keeps
+// the stored evidence while that executable is still the pid's live image,
+// never downgrading a qualified row or renewing it. A new process or a first
+// registration records it unqualified.
+func claudeRegisterTransition(doc *claudeBindingsFile, scope claudeScope, root claudeRoot, now time.Time, deferred bool) (claudeBinding, string, error) {
 	existing := -1
 	for i, b := range doc.Bindings {
 		if claudeSameRecipient(b.claudeScope, scope) {
@@ -678,6 +684,9 @@ func claudeRegisterTransition(doc *claudeBindingsFile, scope claudeScope, root c
 	}
 	b := doc.Bindings[existing]
 	sameProcess := b.ConfigRoot == root.ConfigRoot && b.PID == root.PID && b.ProcessStart == root.ProcessStart && b.BootID == root.BootID && b.UID == root.UID
+	if deferred && sameProcess && b.ExeIdentity != "" && claudeExeIdentityLive(b.PID, b.ExeIdentity) {
+		root.Build, root.ExeSHA256, root.ExeIdentity = b.Build, b.ExeSHA256, b.ExeIdentity
+	}
 	switch {
 	case sameProcess && b.SessionID == root.SessionID:
 		if b.SocketPath != root.SocketPath {
@@ -725,7 +734,16 @@ func claudeRegisterTransition(doc *claudeBindingsFile, scope claudeScope, root c
 // request and no socket write; every refusal leaves the registry, and the
 // legacy hook/Monitor path, unchanged.
 func (a *app) registerClaudeRoot(ctx context.Context, scope claudeScope, root claudeRoot) (claudeBinding, error) {
+	return a.registerClaudeRootObserved(ctx, scope, root, false)
+}
+
+// registerClaudeRootObserved is registerClaudeRoot for a root whose build
+// observation may have been deferred (see claudeRegisterTransition).
+func (a *app) registerClaudeRootObserved(ctx context.Context, scope claudeScope, root claudeRoot, deferred bool) (claudeBinding, error) {
 	var none claudeBinding
+	if deferred && (root.Build != "" || root.ExeSHA256 != "" || root.ExeIdentity != "") {
+		return none, usageErr("a deferred claude build observation carries no evidence")
+	}
 	if err := claudeScopeShape(scope); err != nil {
 		return none, err
 	}
@@ -782,7 +800,7 @@ func (a *app) registerClaudeRoot(ctx context.Context, scope claudeScope, root cl
 	if slices.ContainsFunc(doc.OptOuts, func(s claudeScope) bool { return claudeSameRecipient(s, scope) }) {
 		return none, errClaudeOptOut
 	}
-	binding, transition, err := claudeRegisterTransition(&doc, scope, root, time.Now().UTC())
+	binding, transition, err := claudeRegisterTransition(&doc, scope, root, time.Now().UTC(), deferred)
 	if err != nil {
 		return none, err
 	}

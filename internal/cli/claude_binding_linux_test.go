@@ -16,6 +16,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -112,6 +113,22 @@ type claudeRegFixture struct {
 	blockHash bool
 	// runtimeOK stubs the local delivery runtime in reconcile jobs.
 	runtimeOK bool
+	// hashLog, when set, is a file each helper job appends one line to per
+	// claudeBuildHash call, counting hashes across the child processes.
+	hashLog string
+}
+
+// hashCalls counts the claudeBuildHash calls helper jobs logged.
+func (f *claudeRegFixture) hashCalls(t *testing.T) int {
+	t.Helper()
+	raw, err := os.ReadFile(f.hashLog)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return bytes.Count(raw, []byte("\n"))
 }
 
 func newClaudeRegFixture(t *testing.T) *claudeRegFixture {
@@ -288,7 +305,7 @@ func (tr *claudeTree) root(session string) claudeRoot {
 // table.
 func (tr *claudeTree) observedRoot(session string) claudeRoot {
 	tr.f.t.Helper()
-	ev, err := tr.f.app().observeClaudeBuild(context.Background(), tr.pid, tr.start)
+	ev, err := tr.f.app().observeClaudeBuild(context.Background(), tr.pid, tr.start, claudeBuildMayHash)
 	if err != nil || ev.SHA256 == "" || ev.Identity == "" {
 		tr.f.t.Fatalf("cannot observe the tree's build: %+v %v", ev, err)
 	}
@@ -330,7 +347,8 @@ func (tr *claudeTree) reg(scope claudeScope, root claudeRoot, env map[string]str
 		Root      claudeRoot        `json:"root"`
 		Qualified []string          `json:"qualified"`
 		BlockHash bool              `json:"block_hash"`
-	}{merged, scope, root, tr.f.qualified, tr.f.blockHash})
+		HashLog   string            `json:"hash_log"`
+	}{merged, scope, root, tr.f.qualified, tr.f.blockHash, tr.f.hashLog})
 	if err != nil {
 		tr.f.t.Fatal(err)
 	}
@@ -376,7 +394,8 @@ func (tr *claudeTree) hook(env map[string]string, args []string, stdin string) c
 		Stdin     string            `json:"stdin"`
 		Qualified []string          `json:"qualified"`
 		BlockHash bool              `json:"block_hash"`
-	}{merged, args, stdin, tr.f.qualified, tr.f.blockHash})
+		HashLog   string            `json:"hash_log"`
+	}{merged, args, stdin, tr.f.qualified, tr.f.blockHash, tr.f.hashLog})
 	if err != nil {
 		tr.f.t.Fatal(err)
 	}
@@ -866,17 +885,24 @@ func claudeHelperClaude() {
 // claudeHelperJobSeams applies a job payload's test-only table extension and
 // hash seam inside the helper child, restored by t.Cleanup like every other
 // table extension. Production binaries carry none of this code.
-func claudeHelperJobSeams(t *testing.T, qualified []string, blockHash bool) {
+func claudeHelperJobSeams(t *testing.T, qualified []string, blockHash bool, hashLog string) {
 	for _, sha := range qualified {
 		claudeWithQualifiedBuild(t, sha)
 	}
-	if blockHash {
-		real := claudeBuildHash
-		claudeBuildHash = func(ctx context.Context, r io.Reader) (string, error) {
+	real := claudeBuildHash
+	t.Cleanup(func() { claudeBuildHash = real })
+	claudeBuildHash = func(ctx context.Context, r io.Reader) (string, error) {
+		if hashLog != "" {
+			if f, err := os.OpenFile(hashLog, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600); err == nil {
+				_, _ = f.WriteString("hash\n")
+				_ = f.Close()
+			}
+		}
+		if blockHash {
 			<-ctx.Done()
 			return "", ctx.Err()
 		}
-		t.Cleanup(func() { claudeBuildHash = real })
+		return real(ctx, r)
 	}
 }
 
@@ -897,11 +923,12 @@ func claudeHelperRegister(t *testing.T) {
 		Root      claudeRoot        `json:"root"`
 		Qualified []string          `json:"qualified"`
 		BlockHash bool              `json:"block_hash"`
+		HashLog   string            `json:"hash_log"`
 	}
 	if err := json.Unmarshal(raw, &payload); err != nil {
 		fail("payload: " + err.Error())
 	}
-	claudeHelperJobSeams(t, payload.Qualified, payload.BlockHash)
+	claudeHelperJobSeams(t, payload.Qualified, payload.BlockHash, payload.HashLog)
 	a := &app{ctx: context.Background(), stdout: io.Discard, stderr: io.Discard, getenv: func(k string) string { return payload.Env[k] }}
 	binding, err := a.registerClaudeRoot(context.Background(), payload.Scope, payload.Root)
 	out := claudeRegResult{OK: err == nil, Binding: binding}
@@ -937,11 +964,12 @@ func claudeHelperReconcile(t *testing.T) {
 		Qualified []string          `json:"qualified"`
 		BlockHash bool              `json:"block_hash"`
 		RuntimeOK bool              `json:"runtime_ok"`
+		HashLog   string            `json:"hash_log"`
 	}
 	if err := json.Unmarshal(raw, &payload); err != nil {
 		fail("payload: " + err.Error())
 	}
-	claudeHelperJobSeams(t, payload.Qualified, payload.BlockHash)
+	claudeHelperJobSeams(t, payload.Qualified, payload.BlockHash, payload.HashLog)
 	a := &app{ctx: context.Background(), stdout: io.Discard, stderr: io.Discard, getenv: func(k string) string { return payload.Env[k] }}
 	if payload.RuntimeOK {
 		a.localRuntime = func(context.Context) error { return nil }
@@ -975,7 +1003,8 @@ func (tr *claudeTree) reconcile(record claudeEnrollment, env map[string]string) 
 		Qualified []string          `json:"qualified"`
 		BlockHash bool              `json:"block_hash"`
 		RuntimeOK bool              `json:"runtime_ok"`
-	}{merged, record, tr.f.qualified, tr.f.blockHash, tr.f.runtimeOK})
+		HashLog   string            `json:"hash_log"`
+	}{merged, record, tr.f.qualified, tr.f.blockHash, tr.f.runtimeOK, tr.f.hashLog})
 	if err != nil {
 		tr.f.t.Fatal(err)
 	}
@@ -1019,11 +1048,12 @@ func claudeHelperHook(t *testing.T) {
 		Stdin     string            `json:"stdin"`
 		Qualified []string          `json:"qualified"`
 		BlockHash bool              `json:"block_hash"`
+		HashLog   string            `json:"hash_log"`
 	}
 	if err := json.Unmarshal(raw, &job); err != nil {
 		fail("payload: " + err.Error())
 	}
-	claudeHelperJobSeams(t, job.Qualified, job.BlockHash)
+	claudeHelperJobSeams(t, job.Qualified, job.BlockHash, job.HashLog)
 	var out, errs bytes.Buffer
 	a := &app{ctx: context.Background(), stdin: strings.NewReader(job.Stdin), stdout: &out, stderr: &errs, getenv: func(k string) string { return job.Env[k] }, inHook: true}
 	a.hookRun(job.Args, hookNow, func() {}, func(data []byte) error {
