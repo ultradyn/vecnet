@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync/atomic"
@@ -121,7 +122,9 @@ func agyChild(t *testing.T, mode string, env map[string]string, stdin, args stri
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	t.Cleanup(cancel)
-	cmd := exec.CommandContext(ctx, "sh", "-c", os.Args[0]+" -test.run=^TestHookAgyProcess$")
+	// Quote the test binary for sh: a Windows path (C:\...) has backslashes
+	// that sh would otherwise eat.
+	cmd := exec.CommandContext(ctx, "sh", "-c", hookShellWord(filepath.ToSlash(os.Args[0]))+" -test.run=^TestHookAgyProcess$")
 	for _, entry := range os.Environ() {
 		key, _, _ := strings.Cut(entry, "=")
 		if strings.HasPrefix(key, "CODEX_") || strings.HasPrefix(key, "CLAUDE_") || strings.HasPrefix(key, "VECNET_") || strings.HasPrefix(key, "ANTIGRAVITY_") || strings.HasPrefix(key, "HH_") || key == "GORACE" {

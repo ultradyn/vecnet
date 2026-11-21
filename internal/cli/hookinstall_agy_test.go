@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/XertroV/vecnet/internal/cli"
 	"github.com/XertroV/vecnet/internal/platform"
 )
 
@@ -17,6 +18,9 @@ import (
 func agyInstallRepo(t *testing.T) (*user, string) {
 	t.Helper()
 	isolateGitEnv(t)
+	// Exercise the installer's file handling on every host: only the
+	// dedicated refusal test checks the Windows gate itself.
+	cli.SetAgyInstallOSForTest(t, "linux")
 	u := installUser(t)
 	name := "agy repo "
 	if runtime.GOOS == "windows" {
