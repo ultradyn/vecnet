@@ -6,8 +6,8 @@ package cli
 // identity of the one connected socket. SO_PEERCRED supplies the pid/uid the
 // kernel attributes the connection to; the /proc start identity read right
 // after the connect rules out a reused pid. Both must match the registered
-// owner before any byte can leave. Every failure is a validation refusal
-// (exit 2): definitely unwritten.
+// owner before any byte can leave. Every failure is a pre-write refusal
+// (exit 5): definitely unwritten.
 
 import (
 	"net"

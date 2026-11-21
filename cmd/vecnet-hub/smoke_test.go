@@ -82,6 +82,13 @@ var listenLine = regexp.MustCompile(`listening on (http://127\.0\.0\.[0-9]+:([0-
 // Leave time for graceful HTTP shutdown, background workers and store close.
 const smokeShutdownBudget = ShutdownGrace + 5*time.Second
 
+// bootHubReadiness bounds waiting for the listening line. Polling returns as
+// soon as the hub listens; this is a hang guard, not a startup-speed claim.
+// A real first-install startup (migrations and fsyncs on a fresh disk) ran
+// past 5s on a loaded single-core Windows runner. Fly's own health check
+// allows a 10s grace period. Startup refusals fail at once via run's error.
+const bootHubReadiness = 20 * time.Second
+
 // bootedHub is a hub run in a goroutine by bootHub.
 type bootedHub struct {
 	base, port string
@@ -89,11 +96,11 @@ type bootedHub struct {
 	stop       func() error // cancel and wait (≤ smokeShutdownBudget); later calls return the first result
 }
 
-// bootHub runs run(ctx, args, getenv) in a goroutine and waits for its
+// bootHubFromDisk runs run(ctx, args, getenv) in a goroutine and waits for its
 // listening line. A t.Cleanup, registered at once (so it runs before the
 // caller's earlier t.TempDir removal), stops the hub and waits for it, so no
 // failure path leaks a serving hub that holds the data dir.
-func bootHub(t *testing.T, args []string, getenv func(string) string) *bootedHub {
+func bootHubFromDisk(t *testing.T, args []string, getenv func(string) string) *bootedHub {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	out := &lockedBuffer{}
@@ -117,7 +124,7 @@ func bootHub(t *testing.T, args []string, getenv func(string) string) *bootedHub
 			t.Errorf("hub stop: %v", err)
 		}
 	})
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(bootHubReadiness)
 	for {
 		if m := listenLine.FindStringSubmatch(out.String()); m != nil {
 			return &bootedHub{base: m[1], port: m[2], out: out, stop: stop}
@@ -129,7 +136,7 @@ func bootHub(t *testing.T, args []string, getenv func(string) string) *bootedHub
 		default:
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("no listening line within 5 s; output:\n%s", out.String())
+			t.Fatalf("no listening line within %s; output:\n%s", bootHubReadiness, out.String())
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -140,7 +147,8 @@ func bootHub(t *testing.T, args []string, getenv func(string) string) *bootedHub
 // the old harness deadline. A second connection's completed request proves
 // the listener has accepted the first one; no scheduler sleeps are needed.
 func TestBootHubShutdownWaitsForAcceptedConnection(t *testing.T) {
-	h := bootHub(t, []string{"--listen", "127.0.0.1:0", "--data-dir", t.TempDir()}, noEnv)
+	// A real first-install startup; bootHubReadiness only bounds the wait.
+	h := bootHubFromDisk(t, []string{"--listen", "127.0.0.1:0", "--data-dir", t.TempDir()}, noEnv)
 	conn, err := net.Dial("tcp", "127.0.0.1:"+h.port)
 	if err != nil {
 		t.Fatal(err)

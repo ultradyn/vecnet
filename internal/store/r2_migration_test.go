@@ -197,8 +197,26 @@ func r2EvidenceDB(t *testing.T) (*sql.DB, string) {
 // are already satisfied (completed and verified, or pending and unverified),
 // so only the evidence CHECK can reject it.
 func TestR2MigrationVerificationEvidenceCheck(t *testing.T) {
+	// Apply the real migrations once. The cases are serial and each rolls
+	// back to the same pending row, avoiding three FULL migration bootstraps.
+	db, _ := r2EvidenceDB(t)
+	freshCase := func(t *testing.T) {
+		t.Helper()
+		before := r2Snapshot(t, db, "blob_objects")
+		if _, err := db.Exec("SAVEPOINT evidence_case"); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if _, err := db.Exec("ROLLBACK TO evidence_case; RELEASE evidence_case"); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(before, r2Snapshot(t, db, "blob_objects")) {
+				t.Fatal("evidence case changed the next case's starting row")
+			}
+		})
+	}
 	t.Run("complete_evidence_fields", func(t *testing.T) {
-		db, _ := r2EvidenceDB(t)
+		freshCase(t)
 		if _, err := db.Exec(r2CompleteValid); err != nil {
 			t.Fatalf("valid completion rejected: %v", err)
 		}
@@ -226,13 +244,13 @@ func TestR2MigrationVerificationEvidenceCheck(t *testing.T) {
 		}
 	})
 	t.Run("complete_without_evidence", func(t *testing.T) {
-		db, _ := r2EvidenceDB(t)
+		freshCase(t)
 		if _, err := db.Exec(`UPDATE blob_objects SET state='complete', sha256_verified=1`); err == nil {
 			t.Fatal("pending -> complete with sha256_verified=1 but no evidence accepted")
 		}
 	})
 	t.Run("unverified_with_evidence", func(t *testing.T) {
-		db, _ := r2EvidenceDB(t)
+		freshCase(t)
 		for _, stmt := range []string{
 			`UPDATE blob_objects SET verified_algorithm='sha256'`,
 			`UPDATE blob_objects SET etag='"synthetic-etag"'`,

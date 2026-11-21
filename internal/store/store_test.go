@@ -275,15 +275,13 @@ func TestTxImmediateSerialises(t *testing.T) {
 	// upgrade), or a lost update makes the total short. BEGIN IMMEDIATE takes
 	// the write lock up front, so all 200 increments land.
 	const workers, iters = 2, 100
-	start := make(chan struct{})
-	errs := make(chan error, workers*iters)
+	rounds := make(chan chan struct{})
+	results := make(chan error)
 	var wg sync.WaitGroup
-	for w := 0; w < workers; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			<-start
-			for i := 0; i < iters; i++ {
+	for range workers {
+		wg.Go(func() {
+			for start := range rounds {
+				<-start
 				err := db.Tx(ctx, func(tx *sql.Tx) error {
 					var v int
 					if err := tx.QueryRowContext(ctx, `SELECT value FROM counters WHERE name = 'race'`).Scan(&v); err != nil {
@@ -296,18 +294,27 @@ func TestTxImmediateSerialises(t *testing.T) {
 					_, err := tx.ExecContext(ctx, `UPDATE counters SET value = ? WHERE name = 'race'`, v+1)
 					return err
 				})
-				if err != nil {
-					errs <- err
-				}
+				results <- err
 			}
-		}()
+		})
 	}
-	close(start)
+	// Release both writers together, then wait for both before the next pair.
+	// SQLite still serialises each pair, but one worker cannot keep retaking
+	// the write lock across 100 durable commits and exhaust the other's timeout.
+	for range iters {
+		start := make(chan struct{})
+		for range workers {
+			rounds <- start
+		}
+		close(start)
+		for range workers {
+			if err := <-results; err != nil {
+				t.Errorf("Tx: %v", err)
+			}
+		}
+	}
+	close(rounds)
 	wg.Wait()
-	close(errs)
-	for err := range errs {
-		t.Errorf("Tx: %v", err)
-	}
 
 	var got int
 	if err := db.QueryRowContext(ctx, `SELECT value FROM counters WHERE name = 'race'`).Scan(&got); err != nil {
@@ -436,17 +443,16 @@ func TestOpenSynchronousEnv(t *testing.T) {
 	}{{"", 2}, {"full", 2}, {"FULL", 2}, {"normal", 1}, {"Normal", 1}} {
 		t.Run("env="+tc.env, func(t *testing.T) {
 			t.Setenv("VECNET_SQLITE_SYNCHRONOUS", tc.env)
-			db, err := store.Open(filepath.Join(t.TempDir(), "hub.db"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer db.Close()
+			db := openMigratedFixture(t)
 			var got int
 			if err := db.QueryRow("PRAGMA synchronous").Scan(&got); err != nil {
 				t.Fatal(err)
 			}
 			if got != tc.want {
 				t.Fatalf("synchronous=%d, want %d", got, tc.want)
+			}
+			if tc.env == "" {
+				checkMigratedFixtureIsolation(t, db)
 			}
 		})
 	}
@@ -745,5 +751,59 @@ func TestMigration0022UpgradesFrom0021(t *testing.T) {
 	}
 	if got, err := db.Meta(ctx, "hub_identity_seed"); err != nil || got != seed {
 		t.Fatalf("identity seed changed across 0022: %v", err)
+	}
+}
+
+// Explicit per-database policy must neither mutate process environment nor leak
+// NORMAL to other stores. Pin all four connections to catch one-connection PRAGMA
+// overrides which silently leave new pooled connections at FULL.
+func TestOpenExplicitSynchronousIsPoolWideAndIsolated(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	for _, tc := range []struct {
+		mode string
+		want int
+	}{{"normal", 1}, {"full", 2}} {
+		t.Run(tc.mode, func(t *testing.T) {
+			t.Parallel()
+			db, err := store.OpenWithSynchronous(filepath.Join(t.TempDir(), "explicit.db"), tc.mode)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			var conns []*sql.Conn
+			for range 4 {
+				conn, err := db.Conn(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				conns = append(conns, conn)
+				var got int
+				if err := conn.QueryRowContext(ctx, `PRAGMA synchronous`).Scan(&got); err != nil || got != tc.want {
+					t.Fatalf("policy=%s got=%d want=%d err=%v", tc.mode, got, tc.want, err)
+				}
+			}
+			for _, conn := range conns {
+				conn.Close()
+			}
+			if err := db.SetMeta(ctx, "fixture", "independent"); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	db, err := store.Open(filepath.Join(t.TempDir(), "default.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var got int
+	if err := db.QueryRow(`PRAGMA synchronous`).Scan(&got); err != nil || got != 2 {
+		t.Fatalf("default FULL changed: %d %v", got, err)
+	}
+	for _, policy := range []string{"", "off", "typo"} {
+		if db, err := store.OpenWithSynchronous(filepath.Join(t.TempDir(), "invalid.db"), policy); err == nil {
+			db.Close()
+			t.Fatalf("unsafe explicit policy %q accepted", policy)
+		}
 	}
 }

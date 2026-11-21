@@ -12,6 +12,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -28,7 +29,6 @@ func (tr *claudeTree) claudeHookEnv(session string) map[string]string {
 		"CLAUDE_CONFIG_DIR":            tr.configRoot,
 		"CLAUDE_PID":                   strconv.Itoa(tr.pid),
 		"CLAUDE_CODE_SESSION_ID":       session,
-		"CLAUDE_CODE_VERSION":          claudeFixtureVersion,
 		"CLAUDE_CODE_MESSAGING_SOCKET": tr.socket,
 	}
 }
@@ -176,7 +176,7 @@ func claudeLegacyEnv(t *testing.T, hubURL string) *claudeRegFixture {
 	t.Helper()
 	f := newClaudeRegFixture(t)
 	if err := saveConfig(f.config, Config{Profiles: map[string]Profile{
-		"p": {Hub: hubURL, Secret: "vn_peer_test", PeerID: "peer_A"},
+		"p": {Hub: hubURL, HubPubkey: claudeTestHubPin, Secret: "vn_peer_test", PeerID: "peer_A"},
 	}}); err != nil {
 		t.Fatal(err)
 	}
@@ -244,7 +244,7 @@ func TestClaudeSetupReconcileGlobalDisableIsStableDisabled(t *testing.T) {
 	intent := "0123456789abcdef0123456789abcdef"
 	secret := "vn_peer_test"
 	if err := saveConfig(f.config, Config{Profiles: map[string]Profile{
-		"p": {Hub: f.hub, Secret: secret, PeerID: "peer_A",
+		"p": {Hub: f.hub, HubPubkey: claudeTestHubPin, Secret: secret, PeerID: "peer_A",
 			EnrollmentIntent: intent, EnrollmentCredential: hookDigest([]byte(secret)),
 			EnrollmentHub: f.hub, EnrollmentCaller: "peer_A"},
 	}}); err != nil {
@@ -277,6 +277,92 @@ func TestClaudeSetupReconcileGlobalDisableIsStableDisabled(t *testing.T) {
 	}
 	if n := f.storedBindingCount(t); n != 0 {
 		t.Fatalf("globally disabled reconcile registered %d rows", n)
+	}
+	f.assertPassive()
+}
+
+// TestClaudeSetupNoVersionEnvRegisters pins in-session enrollment without
+// CLAUDE_CODE_VERSION: the intent is prepared and reconciliation registers
+// the exact root (build gating is parked, so no build is observed).
+func TestClaudeSetupNoVersionEnvRegisters(t *testing.T) {
+	f := newClaudeRegFixture(t)
+	a := f.startTree("a")
+	a.sessionRecord(a.pid, "S1", a.socket)
+	env := a.claudeHookEnv("S1")
+	if _, set := env["CLAUDE_CODE_VERSION"]; set {
+		t.Fatal("the hook fixture still exports CLAUDE_CODE_VERSION")
+	}
+	for k, v := range f.env {
+		env[k] = v
+	}
+	prep := &app{ctx: context.Background(), stdout: io.Discard, stderr: io.Discard, getenv: func(k string) string { return env[k] }}
+	intent, err := prep.prepareClaudeEnrollment("p")
+	if err != nil || intent == nil {
+		t.Fatalf("in-session enrollment without the version export was refused: %v", err)
+	}
+
+	secret := "vn_peer_test"
+	if err := saveConfig(f.config, Config{Profiles: map[string]Profile{
+		"p": {Hub: f.hub, HubPubkey: claudeTestHubPin, Secret: secret, PeerID: "peer_A",
+			EnrollmentIntent: intent.IntentID, EnrollmentCredential: hookDigest([]byte(secret)),
+			EnrollmentHub: normalizeHub(f.hub), EnrollmentCaller: "peer_A"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	record := *intent
+	record.Hub, record.Caller, record.State = normalizeHub(f.hub), "peer_A", claudeEnrollmentPending
+	f.runtimeOK = true
+	result := a.reconcile(record, a.claudeHookEnv("S1"))
+	if result.State != claudeEnrollmentRegistered {
+		t.Fatalf("reconcile without the version export settled %q: %s", result.State, result.Reason)
+	}
+	rows := f.storedRows(t)
+	if len(rows) != 1 || rows[0].PID != a.pid || rows[0].HubIdentity != claudeTestHubPin || rows[0].ExeSHA256 != "" {
+		t.Fatalf("reconcile did not register the exact root (without build evidence): %+v", rows)
+	}
+	f.assertPassive()
+}
+
+// TestClaudeSetupSlowDigestLeavesHookOutput pins Review Focus 2 under the
+// parked build gating: even with a hash that would block forever, the
+// user-prompt hook output is byte-identical to the no-evidence baseline,
+// because no hook ever reaches the hash, and the root still registers.
+func TestClaudeSetupSlowDigestLeavesHookOutput(t *testing.T) {
+	prompt := `{"hook_event_name":"UserPromptSubmit","session_id":"S1"}`
+	baseHub, _ := claudeLegacyHub(t)
+	baseFixture := claudeLegacyEnv(t, baseHub)
+	baseApp := baseFixture.app()
+	baseApp.inHook = true
+	baseApp.stdin = strings.NewReader(prompt)
+	var baseOut, baseErr bytes.Buffer
+	baseApp.stdout, baseApp.stderr = &baseOut, &baseErr
+	baseApp.hookRun([]string{"--profile", "p", "--event", "user-prompt"}, hookNow, func() {}, func(data []byte) error {
+		_, err := baseOut.Write(data)
+		return err
+	}, 0)
+
+	hub, _ := claudeLegacyHub(t)
+	f := claudeLegacyEnv(t, hub)
+	a := f.startTree("a")
+	a.sessionRecord(a.pid, "S1", a.socket)
+	env := a.claudeHookEnv("S1")
+	for k, v := range f.env {
+		env[k] = v
+	}
+	// The counting seam passes through to the real hash; any call at all is
+	// the failure, so a slow digest cannot matter.
+	out := a.hook(env, []string{"--profile", "p", "--event", "user-prompt"}, prompt)
+	if out.Stdout != baseOut.String() || out.Stderr != baseErr.String() {
+		t.Fatalf("registration changed the hook output:\nwith: %q / %q\nbaseline: %q / %q", out.Stdout, out.Stderr, baseOut.String(), baseErr.String())
+	}
+	if !strings.Contains(out.Stdout, "1 unacked deliveries waiting") {
+		t.Fatalf("legacy delivery missing from prompt output: %q", out.Stdout)
+	}
+	if n := f.hashCalls(t); n != 0 {
+		t.Fatalf("the prompt hook hashed %d time(s)", n)
+	}
+	if rows := f.storedRows(t); len(rows) != 1 || rows[0].ExeSHA256 != "" {
+		t.Fatalf("the prompt hook did not register the root without build evidence: %+v", rows)
 	}
 	f.assertPassive()
 }

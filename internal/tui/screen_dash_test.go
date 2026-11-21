@@ -296,7 +296,11 @@ func TestDashArchivedPeerInteractions(t *testing.T) {
 	wantSelected("peer_codex")
 	clickHit(t, m, "peer:peer_old")
 	p.press("enter")
-	p.until("clicked visible peer query", func() bool { return f.narrowed("peer_old") == 1 })
+	p.until("clicked visible peer query", func() bool { return f.narrowed("peer_old") >= 1 })
+	p.idle()
+	if n := f.narrowed("peer_old"); n != 1 {
+		t.Fatalf("clicked visible peer queried %d times, want 1", n)
+	}
 	p.press("esc")
 	plainAt(t, m, 140, 42)
 	clickHit(t, m, "peer:peer_codex")
@@ -312,8 +316,17 @@ func TestDashArchivedPeerInteractions(t *testing.T) {
 	if _, ok := hitByID(m, "peer:"+middle.Peer.PeerID); ok {
 		t.Fatal("hidden-again peer retained a mouse hit")
 	}
+	// The shell's own "mine" page already queried the operator as a
+	// participant, so count only the dash query that Enter adds. An exact
+	// "== 1" was true before Enter and, once Enter's query landed first,
+	// could never become true again: until then spun for its whole deadline.
+	opBefore := f.narrowed("peer_op")
 	p.press("enter")
-	p.until("repaired visible peer query", func() bool { return f.narrowed("peer_op") == 1 })
+	p.until("repaired visible peer query", func() bool { return f.narrowed("peer_op") > opBefore })
+	p.idle()
+	if n := f.narrowed("peer_op") - opBefore; n != 1 {
+		t.Fatalf("repaired visible peer queried %d times, want 1", n)
+	}
 	for _, id := range []string{first.Peer.PeerID, middle.Peer.PeerID} {
 		if n := f.narrowed(id); n != 0 {
 			t.Errorf("hidden peer %s received %d participant queries", id, n)

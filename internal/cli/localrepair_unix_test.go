@@ -11,7 +11,10 @@ import (
 )
 
 func TestLocalStartupAdoptionReusesObservedProjectIdentity(t *testing.T) {
+	searchPath := os.Getenv("PATH")
 	a, root, _ := localRegistryFixture(t)
+	// Preserve real Git lookup for this test's counted discovery wrapper.
+	t.Setenv("PATH", searchPath)
 	if _, err := a.observeLocalProject("v1", localRegistryNow()); err != nil {
 		t.Fatal(err)
 	}

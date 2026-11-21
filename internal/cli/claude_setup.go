@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/XertroV/vecnet/internal/hubid"
 	"github.com/XertroV/vecnet/internal/platform"
 )
 
@@ -48,9 +49,10 @@ func claudeEnrollmentRetryable(state string) bool {
 }
 
 // errClaudeEnrollmentHost is a host capability result, not a filesystem
-// failure: without the exact live session evidence (including an observed
-// build version, which is never guessed) no target is persisted.
-var errClaudeEnrollmentHost = errors.New("unsupported automatic claude setup: the host must supply its live process identity (CLAUDE_PID), session id (CLAUDE_CODE_SESSION_ID) and observed build version (CLAUDE_CODE_VERSION); credentials can be enrolled, but session registration stays on the legacy hook path")
+// failure: without the exact live session evidence no target is persisted.
+// The build is never part of it: build-version gating is parked, so the
+// executable is not observed or attested anywhere on this path.
+var errClaudeEnrollmentHost = errors.New("unsupported automatic claude setup: the host must supply its live process identity (CLAUDE_PID) and session id (CLAUDE_CODE_SESSION_ID); credentials can be enrolled, but session registration stays on the legacy hook path")
 
 // isClaudeEnvironment reports whether this run is inside a Claude Code
 // host tree (its Bash tool, hooks and MCP servers carry these markers).
@@ -204,9 +206,6 @@ func (a *app) prepareClaudeEnrollment(profile string) (*claudeEnrollment, error)
 	if !hookSessionID.MatchString(strings.TrimSpace(a.getenv("CLAUDE_CODE_SESSION_ID"))) {
 		return nil, errClaudeEnrollmentHost
 	}
-	if version := strings.TrimSpace(a.getenv("CLAUDE_CODE_VERSION")); version == "" || !localRegistryText(version) {
-		return nil, errClaudeEnrollmentHost
-	}
 	config, err := configPath(a.getenv)
 	if err != nil {
 		return nil, err
@@ -256,10 +255,13 @@ func (a *app) claudeConfigRoot() (string, error) {
 }
 
 // claudeRootEvidence builds the claimed root from live host evidence: the
-// Claude process (CLAUDE_PID), its canonical config root, and the
-// session's own id. CLAUDE_PID only names the claim; the proof is the
-// kernel ancestry, /proc start identity and Claude's own session registry
-// row, checked inside registerClaudeRoot.
+// Claude process (CLAUDE_PID), its canonical config root and the session's
+// own id. CLAUDE_PID only names the claim; the proof is the kernel
+// ancestry, /proc start identity and Claude's own session registry row,
+// checked inside registerClaudeRoot. The build is not observed or
+// attested: build-version gating is parked (see claude_build.go), so no
+// hook or registration path ever hashes the executable and the root's
+// build fields stay empty. CLAUDE_CODE_VERSION is never read.
 func (a *app) claudeRootEvidence(session string) (claudeRoot, error) {
 	var none claudeRoot
 	pid, err := strconv.Atoi(strings.TrimSpace(a.getenv("CLAUDE_PID")))
@@ -278,10 +280,6 @@ func (a *app) claudeRootEvidence(session string) (claudeRoot, error) {
 	if boot == "" {
 		return none, errClaudeUnsupported
 	}
-	version := strings.TrimSpace(a.getenv("CLAUDE_CODE_VERSION"))
-	if version == "" || !localRegistryText(version) {
-		return none, usageErr("claude registration needs the host build version (CLAUDE_CODE_VERSION); a runtime is never identified by a guessed version")
-	}
 	root, err := a.claudeConfigRoot()
 	if err != nil {
 		return none, err
@@ -296,17 +294,45 @@ func (a *app) claudeRootEvidence(session string) (claudeRoot, error) {
 		SocketPath:   socket,
 		ProcessStart: start,
 		BootID:       boot,
-		Version:      version,
 		PID:          pid,
 		UID:          os.Geteuid(),
 	}, nil
 }
 
-// claudeScopeForProfile derives the delivery scope from the present config
-// and its committed witness. The caller witness (the enrollment caller or
-// the stored peer id) is mandatory: a profile name alone, or credentials
-// no verified enrollment committed, never authorizes registration.
+// claudeHubIdentity is the profile's pinned hub identity: the canonical
+// ed25519 key from its config or TOFU pin. A profile with no pin has no hub
+// identity yet, and registration stays pending with a fixed reason; the
+// endpoint string is never substituted for it.
+func (a *app) claudeHubIdentity(profile string, p Profile) (string, error) {
+	pin, _ := a.effectivePin(profile, p)
+	if _, err := hubid.DecodePubkey(pin); err != nil {
+		return "", errClaudeHubUnpinned
+	}
+	return pin, nil
+}
+
+// claudeScopeForProfile derives the delivery scope from the present config,
+// its committed witness and its pinned hub identity. The caller witness (the
+// enrollment caller or the stored peer id) is mandatory: a profile name
+// alone, or credentials no verified enrollment committed, never authorizes
+// registration. An unpinned profile refuses with errClaudeHubUnpinned.
 func (a *app) claudeScopeForProfile(profile string) (claudeScope, error) {
+	scope, err := a.claudeScopeForProfileAllowLegacy(profile)
+	if err != nil {
+		return claudeScope{}, err
+	}
+	if scope.HubIdentity == scope.HubEndpoint {
+		return claudeScope{}, errClaudeHubUnpinned
+	}
+	return scope, nil
+}
+
+// claudeScopeForProfileAllowLegacy is claudeScopeForProfile for the
+// surfaces that must still work before a pin exists — addressed opt-outs,
+// status and the legacy-key claim listing: an unpinned profile yields the
+// legacy endpoint form (hub identity equal to the endpoint), which no
+// binding or canary record ever accepts.
+func (a *app) claudeScopeForProfileAllowLegacy(profile string) (claudeScope, error) {
 	var none claudeScope
 	config, err := configPath(a.getenv)
 	if err != nil {
@@ -332,11 +358,17 @@ func (a *app) claudeScopeForProfile(profile string) (claudeScope, error) {
 	if caller == "" {
 		return none, usageErr("claude registration requires a stored profile witness (enrol or verified setup committed one); a profile name alone is never authority")
 	}
+	identity, err := a.claudeHubIdentity(profile, p)
+	if errors.Is(err, errClaudeHubUnpinned) {
+		identity = hub
+	} else if err != nil {
+		return none, err
+	}
 	scope := claudeScope{
 		ConfigPath:  config,
 		Profile:     profile,
 		As:          a.as,
-		HubIdentity: hub,
+		HubIdentity: identity,
 		HubEndpoint: hub,
 		Caller:      caller,
 	}

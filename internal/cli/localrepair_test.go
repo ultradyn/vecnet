@@ -13,11 +13,19 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
 func TestLocalMaintenanceConcurrentSchedulingAndChildEnvironment(t *testing.T) {
 	a, _, home := localRegistryFixture(t)
+	// This proves exactly one of 20 racing schedulers starts a worker. With
+	// the 10ms foreground lock budget, a loaded runner let every goroutine
+	// (the first included) time out: "started 0". A generous budget lets the
+	// lock serialize them; the 30s requested marker must still dedupe.
+	previous := localScheduleBudgetOverride
+	localScheduleBudgetOverride = 10 * time.Second
+	t.Cleanup(func() { localScheduleBudgetOverride = previous })
 	var started atomic.Int32
 	a.localRepairStart = func(cmd *exec.Cmd) error {
 		if len(cmd.Args) != 3 || cmd.Args[1] != "repair" || cmd.Args[2] != "--background" {
@@ -79,47 +87,53 @@ func TestLocalInspectionDoesNotObserveOrSchedulePendingSetup(t *testing.T) {
 }
 
 func TestLocalRepairReportsLauncherUpgradePending(t *testing.T) {
-	a, root, home := localRegistryFixture(t)
-	unit := filepath.Join(home, ".config/systemd/user/vecnet-launcher.service")
-	if err := cliFixtureMkdirAll(filepath.Dir(unit), 0700); err != nil {
-		t.Fatal(err)
-	}
-	before := []byte("[Service]\nExecStart=/private/old-launcher\n")
-	if runtime.GOOS == "windows" && strings.HasSuffix(unit, ".task.json") {
-		before = []byte(`{"schema":1,"managed_by":"unregistered fixture"}`)
-	}
-	if err := cliFixtureWriteFile(unit, before, 0600); err != nil {
-		t.Fatal(err)
-	}
-	started := 0
-	a.localRepairStart = func(*exec.Cmd) error { started++; return nil }
-	a.localStartup([]string{"peers"})
-	if started != 1 {
-		t.Fatalf("installed launcher was omitted from automatic maintenance: %d", started)
-	}
-	path := filepath.Join(root, "hooks.json")
-	if err := cliFixtureWriteFile(path, []byte(`{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"vecnet hook --profile p --event user-prompt","timeout":5}]}]}}`), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := a.registerLocalArtifact(path, "codex-hooks", "old", time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	var out bytes.Buffer
-	a.stdout = &out
-	a.json = true
-	if err := a.cmdLocalRepair(nil); err == nil || !strings.Contains(err.Error(), "launcher") {
-		t.Fatalf("launcher upgrade falsely completed: error=%v output=%s", err, out.String())
-	}
-	if !strings.Contains(out.String(), `"state":"pending"`) || !strings.Contains(out.String(), "installer") {
-		t.Fatalf("missing actionable launcher upgrade result: %s", out.String())
-	}
-	if got, err := os.ReadFile(unit); err != nil || !bytes.Equal(before, got) {
-		t.Fatalf("replaced launcher without verified migration: %s %v", got, err)
-	}
-	projects, err := a.localProjects()
-	if err != nil || len(projects) != 1 || projects[0].Status != "pending" || projects[0].AppliedVersion != "" {
-		t.Fatalf("launcher software incorrectly marked upgraded: %#v %v", projects, err)
-	}
+	// Test maintenance decisions with logical time so private filesystem I/O
+	// cannot consume the production 200ms foreground startup budget.
+	synctest.Test(t, func(t *testing.T) {
+		a, root, home := localRegistryFixture(t)
+		// The project is a plain directory; host Git is outside this fixture.
+		t.Setenv("PATH", t.TempDir())
+		unit := filepath.Join(home, ".config/systemd/user/vecnet-launcher.service")
+		if err := cliFixtureMkdirAll(filepath.Dir(unit), 0700); err != nil {
+			t.Fatal(err)
+		}
+		before := []byte("[Service]\nExecStart=/private/old-launcher\n")
+		if runtime.GOOS == "windows" && strings.HasSuffix(unit, ".task.json") {
+			before = []byte(`{"schema":1,"managed_by":"unregistered fixture"}`)
+		}
+		if err := cliFixtureWriteFile(unit, before, 0600); err != nil {
+			t.Fatal(err)
+		}
+		started := 0
+		a.localRepairStart = func(*exec.Cmd) error { started++; return nil }
+		a.localStartup([]string{"peers"})
+		if started != 1 {
+			t.Fatalf("installed launcher was omitted from automatic maintenance: %d", started)
+		}
+		path := filepath.Join(root, "hooks.json")
+		if err := cliFixtureWriteFile(path, []byte(`{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"vecnet hook --profile p --event user-prompt","timeout":5}]}]}}`), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := a.registerLocalArtifact(path, "codex-hooks", "old", time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		a.stdout = &out
+		a.json = true
+		if err := a.cmdLocalRepair(nil); err == nil || !strings.Contains(err.Error(), "launcher") {
+			t.Fatalf("launcher upgrade falsely completed: error=%v output=%s", err, out.String())
+		}
+		if !strings.Contains(out.String(), `"state":"pending"`) || !strings.Contains(out.String(), "installer") {
+			t.Fatalf("missing actionable launcher upgrade result: %s", out.String())
+		}
+		if got, err := os.ReadFile(unit); err != nil || !bytes.Equal(before, got) {
+			t.Fatalf("replaced launcher without verified migration: %s %v", got, err)
+		}
+		projects, err := a.localProjects()
+		if err != nil || len(projects) != 1 || projects[0].Status != "pending" || projects[0].AppliedVersion != "" {
+			t.Fatalf("launcher software incorrectly marked upgraded: %#v %v", projects, err)
+		}
+	})
 }
 
 // Windows pathname Stat may defer file identity lookup until SameFile. Stat an
@@ -292,6 +306,11 @@ func TestLocalRepairPrefersStandaloneWithLeftoverLauncherUnit(t *testing.T) {
 
 func TestLocalRepairReportsUnregisteredProfileLauncher(t *testing.T) {
 	a, _, home := localRegistryFixture(t)
+	// This is a private filesystem/inventory fixture, not a native Task
+	// Scheduler contract test. It must not read or mutate host tasks.
+	// The project is a plain directory; host Git startup is not part of the
+	// bounded launcher-discovery check.
+	t.Setenv("PATH", t.TempDir())
 	home = filepath.Join(filepath.Dir(home), "operator[1]")
 	a.getenv = func(k string) string {
 		if k == "HOME" {
@@ -313,6 +332,14 @@ func TestLocalRepairReportsUnregisteredProfileLauncher(t *testing.T) {
 	if err := cliFixtureWriteFile(unit, before, 0600); err != nil {
 		t.Fatal(err)
 	}
+	// Capture identity from an opened file: on Windows, path-based Stat
+	// may defer reading the file ID until SameFile is called.
+	unitInfo, err := localRepairFileIdentity(unit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Prepare the cached executable identity outside the launcher-discovery check.
+	localSoftwareVersion()
 	started := 0
 	a.localRepairStart = func(*exec.Cmd) error { started++; return nil }
 	a.localStartup([]string{"peers"})
@@ -324,6 +351,9 @@ func TestLocalRepairReportsUnregisteredProfileLauncher(t *testing.T) {
 	}
 	if got, err := os.ReadFile(unit); err != nil || !bytes.Equal(got, before) {
 		t.Fatalf("unregistered unit changed: %s %v", got, err)
+	}
+	if info, err := os.Stat(unit); err != nil || !os.SameFile(unitInfo, info) {
+		t.Fatalf("unregistered unit replaced: %v", err)
 	}
 }
 
@@ -509,42 +539,66 @@ func TestLocalRepairConcurrentAdoptionRemainsPending(t *testing.T) {
 }
 
 func TestLocalStartupObservesWithoutInstallingAndAdoptsLegacyHooks(t *testing.T) {
-	a, root, _ := localRegistryFixture(t)
-	var started int
-	a.localRepairStart = func(*exec.Cmd) error { started++; return nil }
-	a.localStartup([]string{"peers"})
-	projects, err := a.localProjects()
-	if err != nil || len(projects) != 1 {
-		t.Fatalf("%#v %v", projects, err)
-	}
-	if p := projects[0]; p.ObservedVersion != localSoftwareVersion() || p.AppliedVersion != "" || len(p.Artifacts) != 0 {
-		t.Fatalf("observation changed installation state: %#v", p)
-	}
-	if started != 0 {
-		t.Fatal("inventory-only observation installed integration")
-	}
-	path := filepath.Join(root, ".codex/hooks.json")
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatal("observation installed hooks")
-	}
-	if err := cliFixtureMkdirAll(filepath.Dir(path), 0700); err != nil {
-		t.Fatal(err)
-	}
-	raw := []byte(`{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"vecnet hook --profile old --event user-prompt","timeout":5}]}]}}`)
-	if err := cliFixtureWriteFile(path, raw, 0600); err != nil {
-		t.Fatal(err)
-	}
-	a.localStartup([]string{"peers"})
-	if started != 1 {
-		t.Fatalf("recognized stale integration did not schedule repair: %d", started)
-	}
-	projects, err = a.localProjects()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(projects[0].Artifacts) != 1 || projects[0].Artifacts[0].Version != "legacy" {
-		t.Fatalf("%#v", projects)
-	}
+	// Use logical time for observation/adoption assertions so cold private
+	// filesystem I/O cannot consume the production 200ms startup budget.
+	// synctest advances time only when the bubble is durably blocked.
+	synctest.Test(t, func(t *testing.T) {
+		a, root, _ := localRegistryFixture(t)
+		// This is a plain-directory project. Do not spend its bounded startup
+		// budget launching the host Git just to report that it is not a repo.
+		t.Setenv("PATH", t.TempDir())
+		var started int
+		a.localRepairStart = func(*exec.Cmd) error { started++; return nil }
+		a.localStartup([]string{"peers"})
+		projects, err := a.localProjects()
+		if err != nil || len(projects) != 1 {
+			t.Fatalf("%#v %v", projects, err)
+		}
+		if p := projects[0]; p.ObservedVersion != localSoftwareVersion() || p.AppliedVersion != "" || len(p.Artifacts) != 0 {
+			t.Fatalf("observation changed installation state: %#v", p)
+		}
+		if started != 0 {
+			t.Fatal("inventory-only observation installed integration")
+		}
+		path := filepath.Join(root, ".codex/hooks.json")
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatal("observation installed hooks")
+		}
+		if err := cliFixtureMkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		raw := []byte(`{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"vecnet hook --profile old --event user-prompt","timeout":5}]}]}}`)
+		if err := cliFixtureWriteFile(path, raw, 0600); err != nil {
+			t.Fatal(err)
+		}
+		a.localStartup([]string{"peers"})
+		if started != 1 {
+			t.Fatalf("recognized stale integration did not schedule repair: %d", started)
+		}
+		projects, err = a.localProjects()
+		if err != nil || len(projects) != 1 {
+			t.Fatalf("%#v %v", projects, err)
+		}
+		if len(projects[0].Artifacts) != 1 || projects[0].Artifacts[0].Version != "legacy" || projects[0].Artifacts[0].Path != path || projects[0].Artifacts[0].Kind != "codex-hooks" {
+			t.Fatalf("%#v", projects)
+		}
+		if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, raw) {
+			t.Fatalf("adoption changed hooks before repair: %q %v", got, err)
+		}
+		if err := a.repairLocalProjects(); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := os.ReadFile(path); err != nil || bytes.Contains(got, []byte("--profile old")) || !hasOwnedCodexHooks(got, localBinary()) {
+			t.Fatalf("legacy hooks were not repaired: %q %v", got, err)
+		}
+		projects, err = a.localProjects()
+		if err != nil || len(projects) != 1 {
+			t.Fatalf("%#v %v", projects, err)
+		}
+		if p := projects[0]; p.Status != "ready" || p.AppliedVersion != localSoftwareVersion() || len(p.Artifacts) != 1 || p.Artifacts[0].Version != localSoftwareVersion() {
+			t.Fatalf("repair did not publish applied integration: %#v", p)
+		}
+	})
 }
 
 func TestManagedHookRepairRejectsConcurrentUserEdit(t *testing.T) {
@@ -599,38 +653,44 @@ func TestLocalRepairPreservesConcurrentSamePathInstallation(t *testing.T) {
 	}
 }
 func TestLocalStartupDefersFileIntegrityToPeriodicRepair(t *testing.T) {
-	a, root, _ := localRegistryFixture(t)
-	if _, err := a.observeLocalProject(localSoftwareVersion(), time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	if err := a.updateLocalProject(root, func(p *localProject) error {
-		// Deliberately inaccessible/missing managed targets: foreground must not
-		// inspect every registered file before dispatching an ordinary command.
-		for i := 0; i < 100; i++ {
-			p.Artifacts = append(p.Artifacts, localArtifact{Path: filepath.Join(root, "missing", time.Unix(int64(i), 0).Format("150405")), Kind: "codex-hooks", Version: localSoftwareVersion(), Hash: strings.Repeat("a", 64), Schema: 1, InstalledAt: time.Now()})
+	// Test checkpoint decisions with logical time so cold private filesystem
+	// work cannot consume the production 200ms startup budget.
+	synctest.Test(t, func(t *testing.T) {
+		a, root, _ := localRegistryFixture(t)
+		// This private project is a plain directory, so host Git is unnecessary.
+		t.Setenv("PATH", t.TempDir())
+		if _, err := a.observeLocalProject(localSoftwareVersion(), time.Now()); err != nil {
+			t.Fatal(err)
 		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	last := localRepairReport{localSetupResult: localSetupResult{State: "ready"}, Version: localSoftwareVersion(), BinarySHA256: localBinarySHA256, AttemptedAt: time.Now()}
-	if err := a.writeLocalState("repair-status.json", mustLocalJSON(last)); err != nil {
-		t.Fatal(err)
-	}
-	var starts int
-	a.localRepairStart = func(*exec.Cmd) error { starts++; return nil }
-	a.localStartup([]string{"peers"})
-	if starts != 0 {
-		t.Fatal("foreground scanned registered files despite a fresh repair checkpoint")
-	}
-	last.AttemptedAt = time.Now().Add(-11 * time.Minute)
-	if err := a.writeLocalState("repair-status.json", mustLocalJSON(last)); err != nil {
-		t.Fatal(err)
-	}
-	a.localStartup([]string{"peers"})
-	if starts != 1 {
-		t.Fatal("periodic integrity work was not scheduled")
-	}
+		if err := a.updateLocalProject(root, func(p *localProject) error {
+			// Deliberately inaccessible/missing managed targets: foreground must not
+			// inspect every registered file before dispatching an ordinary command.
+			for i := 0; i < 100; i++ {
+				p.Artifacts = append(p.Artifacts, localArtifact{Path: filepath.Join(root, "missing", time.Unix(int64(i), 0).Format("150405")), Kind: "codex-hooks", Version: localSoftwareVersion(), Hash: strings.Repeat("a", 64), Schema: 1, InstalledAt: time.Now()})
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		last := localRepairReport{localSetupResult: localSetupResult{State: "ready"}, Version: localSoftwareVersion(), BinarySHA256: localBinarySHA256, AttemptedAt: time.Now()}
+		if err := a.writeLocalState("repair-status.json", mustLocalJSON(last)); err != nil {
+			t.Fatal(err)
+		}
+		var starts int
+		a.localRepairStart = func(*exec.Cmd) error { starts++; return nil }
+		a.localStartup([]string{"peers"})
+		if starts != 0 {
+			t.Fatal("foreground scanned registered files despite a fresh repair checkpoint")
+		}
+		last.AttemptedAt = time.Now().Add(-11 * time.Minute)
+		if err := a.writeLocalState("repair-status.json", mustLocalJSON(last)); err != nil {
+			t.Fatal(err)
+		}
+		a.localStartup([]string{"peers"})
+		if starts != 1 {
+			t.Fatal("periodic integrity work was not scheduled")
+		}
+	})
 }
 
 // Exercise the complete caller, including publication of the helper's new

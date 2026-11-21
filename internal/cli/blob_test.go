@@ -35,10 +35,10 @@ func TestBlobTransfersNetworkErrorExitCode(t *testing.T) {
 					if err := cliFixtureWriteFile(path, []byte("abc"), 0o600); err != nil {
 						t.Fatal(err)
 					}
-					args = []string{command, "peer_test", "text", "--hold", "--attach", path}
+					args = []string{command, "peer_01ARZ3NDEKTSV4RRFFQ69G5FAV", "text", "--hold", "--attach", path}
 					if command == "reply" {
-						args[1] = "msg_test"
-						args = append(args, "--thread", "thr_test")
+						args[1] = "msg_01ARZ3NDEKTSV4RRFFQ69G5FAV"
+						args = append(args, "--thread", "thr_01ARZ3NDEKTSV4RRFFQ69G5FAV")
 					}
 				}
 				if jsonOutput {
@@ -130,10 +130,10 @@ func TestAttachmentErrorExitCodes(t *testing.T) {
 				if err := cliFixtureWriteFile(path, []byte("abc"), 0o600); err != nil {
 					t.Fatal(err)
 				}
-				args := []string{command, "peer_test", "text", "--hold", "--attach", path}
+				args := []string{command, "peer_01ARZ3NDEKTSV4RRFFQ69G5FAV", "text", "--hold", "--attach", path}
 				if command == "reply" {
-					args[1] = "msg_test"
-					args = append(args, "--thread", "thr_test")
+					args[1] = "msg_01ARZ3NDEKTSV4RRFFQ69G5FAV"
+					args = append(args, "--thread", "thr_01ARZ3NDEKTSV4RRFFQ69G5FAV")
 				}
 				code, out, errs := u.run(args...)
 				if code != tc.exit || !strings.Contains(errs, tc.reason) {

@@ -210,10 +210,7 @@ func inboxLine(ev envelope.Event, names map[string]string) string {
 // --- watch ---
 
 func (a *app) cmdWatch(args []string) error {
-	o, err := parseFlags("watch", args, map[string]flagKind{
-		"for-monitor": boolFlag, "since": strFlag, "auto-ack": boolFlag, "deliveries-only": boolFlag,
-		"once": boolFlag,
-	})
+	o, err := a.parseIDFlags("watch", args)
 	if err != nil {
 		return err
 	}

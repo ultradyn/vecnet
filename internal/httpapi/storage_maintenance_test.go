@@ -11,7 +11,7 @@ import (
 )
 
 func TestStorageMaintenanceOperatorDiagnostics(t *testing.T) {
-	env := testhub.Start(t)
+	env := testhub.StartFull(t, nil)
 	env.Hub.Cfg.StorageMaintenanceEnabled = true
 	env.Hub.Tick(t.Context(), true)
 	resp, raw := env.Do(env.OperatorSecret, "GET", "/v1/admin/storage/maintenance", nil)

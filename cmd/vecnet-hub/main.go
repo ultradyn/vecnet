@@ -20,6 +20,9 @@
 // VECNET_TRUST_FLY_CLIENT_IP=1 is the default of --trust-fly-client-ip: the
 // per-client limiter keys on Fly's Fly-Client-IP header, which is only safe
 // behind Fly's proxy (PROTOCOL §20.2; fly.toml sets it).
+// VECNET_UPDATE_CHECK_INTERVAL defaults --update-check-interval (6h; 0
+// disables; 15m to 720h): how often a release build asks npm for the latest
+// vecnet version (docs/OPERATOR.md "Hub updates").
 package main
 
 import (
@@ -42,6 +45,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/XertroV/vecnet/internal/buildinfo"
+	"github.com/XertroV/vecnet/internal/egress"
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/httpapi"
 	"github.com/XertroV/vecnet/internal/hub"
@@ -50,6 +55,7 @@ import (
 	"github.com/XertroV/vecnet/internal/mcpserver"
 	"github.com/XertroV/vecnet/internal/oauth"
 	"github.com/XertroV/vecnet/internal/prefs"
+	"github.com/XertroV/vecnet/internal/selfupdate"
 	"github.com/XertroV/vecnet/internal/store"
 )
 
@@ -57,7 +63,24 @@ func main() {
 	slog.SetDefault(slog.New(logging.NewHandler(os.Stderr, slog.LevelInfo)))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	err := run(ctx, os.Args[1:], os.Stdout, os.Getenv)
+	// A stop signal received while the hub drained for a restart wins: exit
+	// as for any stop, never exec. NotifyContext's cause is a signal error
+	// only when a signal arrived; stop() below cancels with no cause.
+	signalled := ctx.Err() != nil
 	stop()
+	var restart *restartError
+	if errors.As(err, &restart) && signalled {
+		slog.Info("vecnet-hub: stop signal during the update restart; exiting without restarting")
+		err = nil
+	} else if errors.As(err, &restart) {
+		// The hub drained and closed its store; replace this process with the
+		// updated binary, keeping its PID, arguments and environment, so the
+		// npm wrapper or a supervisor sees no exit.
+		slog.Info("vecnet-hub: restarting into the updated binary", "exe", restart.exe)
+		err = reexec(restart.exe, os.Args, os.Environ())
+		fmt.Fprintln(os.Stderr, "vecnet-hub: restart after update failed; start the hub again:", err)
+		os.Exit(1)
+	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "vecnet-hub:", err)
 		os.Exit(1)
@@ -99,9 +122,17 @@ func run(ctx context.Context, args []string, stdout io.Writer, getenv func(strin
 		"key the per-client rate limit on the Fly-Client-IP header; only behind Fly's proxy ($VECNET_TRUST_FLY_CLIENT_IP=1)")
 	relocatedTo := fs.String("relocated-to", "", "answer hub_moved without workers at the old hub ($VECNET_RELOCATED_TO)")
 	restartRetry := fs.String("restart-retry-ms", envOr(getenv, "VECNET_RESTART_RETRY_MS", "5000"), "restart reconnect delay in milliseconds, 0..60000 ($VECNET_RESTART_RETRY_MS)")
+	updateCheck := fs.String("update-check-interval", envOr(getenv, "VECNET_UPDATE_CHECK_INTERVAL", "6h"),
+		"how often to ask npm for a newer vecnet: a duration or whole hours, 15m to 720h, 0 disables ($VECNET_UPDATE_CHECK_INTERVAL)")
+	version := fs.Bool("version", false, "print \"vecnet-hub <version>\" and exit")
 	resolvePreferences := registerPreferenceFlags(fs, getenv)
 	resolveBlobs := registerBlobFlags(fs, getenv)
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *version {
+		// The update job's self-check runs this on a newly installed binary.
+		_, err := fmt.Fprintln(stdout, "vecnet-hub "+buildinfo.Current().Version)
 		return err
 	}
 	// URL environment values must stay out of flag metadata: parser
@@ -144,6 +175,13 @@ func run(ctx context.Context, args []string, stdout io.Writer, getenv func(strin
 	if err != nil || retryMS < 0 || retryMS > 60000 {
 		return errors.New("--restart-retry-ms must be an integer in 0..60000")
 	}
+	updateInterval, clamped, err := selfupdate.ParseInterval(*updateCheck)
+	if err != nil {
+		return errors.New("--update-check-interval: " + err.Error())
+	}
+	if clamped {
+		slog.Warn("vecnet-hub: --update-check-interval raised to the minimum", "interval", updateInterval.String())
+	}
 	// --events-refresh-interval is registered and resolved with the other
 	// preference flags: its environment value never enters flag metadata, so
 	// usage and parser errors cannot echo it.
@@ -174,7 +212,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, getenv func(strin
 		Listen: *listen, DataDir: *dataDir, PublicURL: *publicURL, DevUIDir: *devUIDir, RelocatedTo: *relocatedTo,
 		AllowPrivateEgress: *allowPrivate, TrustFly: *trustFly, RestartRetry: time.Duration(retryMS) * time.Millisecond,
 		MCPOrigins: origins, OAuthRedirects: redirects, RefreshInterval: preferenceConfig.EventsRefreshInterval, MCPLegacySessions: legacy,
-		Bootstrap: &preferenceConfig, Storage: storage,
+		Bootstrap: &preferenceConfig, Storage: storage, UpdateInterval: updateInterval,
 	}, stdout)
 }
 
@@ -385,6 +423,40 @@ type serveConfig struct {
 	// Storage sets the reference-write and backfill switches.
 	Bootstrap *hub.Config
 	Storage   storageOptions
+	// UpdateInterval is --update-check-interval; zero disables the npm
+	// version check and one-click update.
+	UpdateInterval time.Duration
+	// UpdateSetup, set only by tests, adjusts the update service before it
+	// starts (fake registry, host and npm), so nothing inspects or changes the
+	// real host or reaches npm.
+	UpdateSetup func(*selfupdate.Service)
+}
+
+// testServeHook, set only by tests, adjusts serve's config (fake registry,
+// host and npm) before the hub starts; an error stops serve at once.
+var testServeHook func(*serveConfig) error
+
+// restartError is serve's result when a one-click update asks for a restart:
+// the server has drained and the store is closed; main re-executes exe.
+type restartError struct{ exe string }
+
+func (e *restartError) Error() string { return "restart requested after update" }
+
+// newUpdateService builds the version checker and one-click update service.
+// The registry is reached through the egress guard (https, public addresses,
+// no redirects, capped headers).
+func newUpdateService(cfg serveConfig, restart func()) *selfupdate.Service {
+	c := &selfupdate.Checker{
+		Client:   egress.Policy{}.Client(selfupdate.CheckTimeout),
+		Current:  buildinfo.Current().Version,
+		Interval: cfg.UpdateInterval,
+	}
+	svc := selfupdate.NewService(c, selfupdate.DefaultSystem())
+	svc.Restart = restart
+	if cfg.UpdateSetup != nil {
+		cfg.UpdateSetup(svc)
+	}
+	return svc
 }
 
 // serve runs until ctx is cancelled. Relocated mode serves a signed move
@@ -396,6 +468,11 @@ type serveConfig struct {
 // development-only egress override (hub.Config.AllowPrivateEgress).
 // trustFly keys the per-client limiter on Fly-Client-IP (Deps.TrustFlyClientIP).
 func serve(ctx context.Context, cfg serveConfig, stdout io.Writer) error {
+	if testServeHook != nil {
+		if err := testServeHook(&cfg); err != nil {
+			return err
+		}
+	}
 	if cfg.Bootstrap != nil {
 		if err := hub.ValidateBlobConfig(*cfg.Bootstrap); err != nil {
 			return err
@@ -483,19 +560,40 @@ func serve(ctx context.Context, cfg serveConfig, stdout io.Writer) error {
 	deps.TrustFlyClientIP = cfg.TrustFly
 	deps.MCPAllowedOrigins = cfg.MCPOrigins
 	deps.MCPLegacySessions = cfg.MCPLegacySessions
-	var handler http.Handler
+	// A one-click update closes restartc; the select below then drains the
+	// server as for a signal, and serve returns a restartError.
+	restartc := make(chan struct{})
+	var restartOnce sync.Once
+	var update *selfupdate.Service
+	if target == "" {
+		update = newUpdateService(cfg, func() { restartOnce.Do(func() { close(restartc) }) })
+		update.Audit = httpapi.AuditUpdates(h)
+		// A restart must come back on the same address; port 0 would not.
+		update.EphemeralListen = ephemeralPort(cfg.Listen)
+		deps.Update = update
+	}
+	var notice envelope.HubNotice
 	if target != "" {
 		// EnsureMovingNotice also re-signs, as the hub, a stored notice that
 		// an offline rotation left unverifiable.
-		notice, err := h.EnsureMovingNotice(ctx, target)
-		if err != nil {
-			return err
-		}
+		notice, err = h.EnsureMovingNotice(ctx, target)
+	} else {
+		_, err = h.ClearOnBoot(ctx)
+	}
+	// A stop can arrive before readiness, including during store open. Only
+	// the notice operation uses the lifecycle context here; independent
+	// startup errors (and deadlines) must still be reported.
+	if ctx.Err() == context.Canceled && (err == nil || errors.Is(err, context.Canceled)) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	var handler http.Handler
+	if target != "" {
 		handler = httpapi.Relocated(deps, notice)
 	} else {
-		if _, err := h.ClearOnBoot(ctx); err != nil {
-			return err
-		}
 		handler = httpapi.New(deps)
 	}
 	srv := &http.Server{Handler: handler}
@@ -511,6 +609,12 @@ func serve(ctx context.Context, cfg serveConfig, stdout io.Writer) error {
 	}()
 	if target == "" {
 		bg.Go(func() { stack.Run(bgCtx) })
+		// Update jobs run in bg too: shutdown cancels a running npm install
+		// (killing its process group) and waits for the job to end.
+		update.Context, update.Go = bgCtx, bg.Go
+		if update.Checker.Enabled() {
+			bg.Go(func() { runUpdateCheck(bgCtx, update) })
+		}
 	}
 
 	errc := make(chan error, 1)
@@ -521,10 +625,13 @@ func serve(ctx context.Context, cfg serveConfig, stdout io.Writer) error {
 	}
 	fmt.Fprintf(stdout, "vecnet-hub listening on http://%s (public url %s)\n", addr, publicURL)
 
+	restarting := false
 	select {
 	case err := <-errc:
 		return err
 	case <-ctx.Done():
+	case <-restartc:
+		restarting = true
 	}
 	// The grace period stays under Fly's kill_timeout (fly.toml).
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), ShutdownGrace)
@@ -540,9 +647,47 @@ func serve(ctx context.Context, cfg serveConfig, stdout io.Writer) error {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		// Long-lived streams (SSE, long polls) outlasted the grace period.
 		srv.Close()
-		return err
+		if !restarting {
+			return err
+		}
+	}
+	// A stop signal that arrived during the drain cancels the restart: the
+	// hub exits as for any stop.
+	if restarting && ctx.Err() == nil {
+		// The deferred calls stop background work and close the store
+		// before main re-executes.
+		return &restartError{exe: update.Executable()}
 	}
 	return nil
+}
+
+// ephemeralPort reports a listen address whose port is 0 (or unparseable):
+// a restarted hub would bind a different port.
+func ephemeralPort(listen string) bool {
+	_, port, err := net.SplitHostPort(listen)
+	if err != nil {
+		return true
+	}
+	n, err := strconv.Atoi(port)
+	return err != nil || n == 0
+}
+
+// runUpdateCheck detects a one-click-capable install, then checks npm on the
+// configured interval until ctx ends, logging each newly seen version once.
+// Failures are logged at debug level and change nothing.
+func runUpdateCheck(ctx context.Context, update *selfupdate.Service) {
+	update.Detect(ctx)
+	announced := ""
+	update.Checker.Run(ctx, func(latest string, err error) {
+		if err != nil {
+			slog.Debug("vecnet-hub: update check failed", "err", err.Error())
+			return
+		}
+		if latest != announced && selfupdate.Newer(latest, update.Checker.Current) {
+			announced = latest
+			slog.Info("vecnet-hub: a newer vecnet is on npm", "latest", latest, "current", update.Checker.Current)
+		}
+	})
 }
 
 // registerPreferenceFlags captures explicit visits separately from values, so

@@ -29,11 +29,13 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/XertroV/vecnet/internal/ids"
+	"github.com/XertroV/vecnet/internal/platform"
 
 	_ "modernc.org/sqlite" // the shared delivery ledger is SQLite
 )
@@ -155,7 +157,10 @@ var claudeLedgerDSNEscape = strings.NewReplacer("%", "%25", "?", "%3f", "#", "%2
 // busy timeout the host uses (read-write: a WAL reader must attach the
 // shared-memory files). A missing or never-initialized database is simply no
 // recorded activity (nil, nil); anything not an owner-only regular file, or
-// a schema the host never wrote, refuses.
+// a schema the host never wrote, refuses. Windows has no POSIX mode bits
+// (Stat synthesizes them from the read-only attribute), so there the ledger
+// must pass the same owner-and-DACL private-file check the TS host applies
+// to delivery.sqlite before SQLite opens it.
 func openClaudeClaimsLedger(path string) (*sql.DB, error) {
 	fi, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -164,7 +169,14 @@ func openClaudeClaimsLedger(path string) (*sql.DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !fi.Mode().IsRegular() || fi.Mode().Perm()&0o077 != 0 {
+	if !fi.Mode().IsRegular() {
+		return nil, usageErr("unsafe claude delivery ledger: " + filepath.Base(path) + " must be a regular file")
+	}
+	if runtime.GOOS == "windows" {
+		if err := platform.CheckPath(path, false, true); err != nil {
+			return nil, usageErr("unsafe claude delivery ledger: " + filepath.Base(path) + " must be a private file owned by the current user: " + err.Error())
+		}
+	} else if fi.Mode().Perm()&0o077 != 0 {
 		return nil, usageErr("unsafe claude delivery ledger: " + filepath.Base(path) + " must be an owner-only file (mode 0600)")
 	}
 	db, err := sql.Open("sqlite", "file:"+claudeLedgerDSNEscape.Replace(path)+"?_pragma=busy_timeout(5000)")
@@ -190,10 +202,22 @@ func openClaudeClaimsLedger(path string) (*sql.DB, error) {
 	return db, nil
 }
 
-// readClaudeClaims returns the decodable claim documents of one addressed
-// scope, plus the count of claim rows the strict decoder refused (mirroring
-// the host's own warn-and-skip of corrupt rows).
-func readClaudeClaims(db *sql.DB, scopeKey string) ([]claudeClaimRecord, int, error) {
+// claudeClaimScopeKeys is the set of claim scope keys one addressed scope
+// owns: its pinned binding key and, when it differs, the legacy endpoint key
+// slice-3 claims were recorded under. Legacy-key claims stay visible,
+// counted and resolvable inbox-only; they are never admitted again.
+func claudeClaimScopeKeys(scope claudeScope) []string {
+	key, legacy := claudeBindingKey(scope), claudeLegacyBindingKey(scope)
+	if key == legacy {
+		return []string{key}
+	}
+	return []string{key, legacy}
+}
+
+// readClaudeClaims returns the decodable claim documents of the addressed
+// scope keys, plus the count of claim rows the strict decoder refused
+// (mirroring the host's own warn-and-skip of corrupt rows).
+func readClaudeClaims(db *sql.DB, scopeKeys ...string) ([]claudeClaimRecord, int, error) {
 	rows, err := db.Query(`SELECT value FROM kv WHERE ns = ? AND key LIKE 'claude-claims:claim:%'`, claudeClaimsNS)
 	if err != nil {
 		return nil, 0, err
@@ -215,7 +239,7 @@ func readClaudeClaims(db *sql.DB, scopeKey string) ([]claudeClaimRecord, int, er
 			corrupt++
 			continue
 		}
-		if claim.Scope == scopeKey {
+		if slices.Contains(scopeKeys, claim.Scope) {
 			claims = append(claims, claim)
 		}
 	}
@@ -252,7 +276,9 @@ type claudeClaimsSummary struct {
 	BlockedPendingLimit bool
 }
 
-func (a *app) claudeClaimsSummary(scopeKey string) (claudeClaimsSummary, error) {
+// claudeClaimsSummary counts the unresolved claims under every given scope
+// key; the cap state comes from the first (current) key's staging record.
+func (a *app) claudeClaimsSummary(scopeKeys ...string) (claudeClaimsSummary, error) {
 	path, err := claudeClaimsLedgerPath(a.getenv)
 	if err != nil {
 		return claudeClaimsSummary{}, err
@@ -265,11 +291,11 @@ func (a *app) claudeClaimsSummary(scopeKey string) (claudeClaimsSummary, error) 
 		return claudeClaimsSummary{}, nil
 	}
 	defer db.Close()
-	claims, _, err := readClaudeClaims(db, scopeKey)
+	claims, _, err := readClaudeClaims(db, scopeKeys...)
 	if err != nil {
 		return claudeClaimsSummary{}, err
 	}
-	progress, present, err := readClaudeScopeProgress(db, scopeKey)
+	progress, present, err := readClaudeScopeProgress(db, scopeKeys[0])
 	if err != nil {
 		return claudeClaimsSummary{}, err
 	}
@@ -316,8 +342,9 @@ type claudeDeliveriesResult struct {
 }
 
 // cmdClaudeDeliveries lists the addressed recipient's bounded dispositions.
-// It reads only the durable claim documents, lists only the addressed scope,
-// and never touches a hub or an inbox.
+// It reads only the durable claim documents, lists only the addressed scope
+// (its pinned key plus the legacy endpoint key slice-3 claims carry), and
+// never touches a hub or an inbox.
 func (a *app) cmdClaudeDeliveries(args []string) error {
 	o, err := parseFlags("claude deliveries", args, nil)
 	if err != nil {
@@ -330,11 +357,11 @@ func (a *app) cmdClaudeDeliveries(args []string) error {
 	if profile == "" {
 		return usageErr("claude deliveries requires the addressed profile: --net PROFILE")
 	}
-	scope, err := a.claudeScopeForProfile(profile)
+	scope, err := a.claudeScopeForProfileAllowLegacy(profile)
 	if err != nil {
 		return err
 	}
-	if err := claudeScopeValid(scope); err != nil {
+	if err := claudeOptOutScopeValid(scope); err != nil {
 		return err
 	}
 	key := claudeBindingKey(scope)
@@ -349,7 +376,7 @@ func (a *app) cmdClaudeDeliveries(args []string) error {
 	}
 	if db != nil {
 		defer db.Close()
-		claims, corrupt, err := readClaudeClaims(db, key)
+		claims, corrupt, err := readClaudeClaims(db, claudeClaimScopeKeys(scope)...)
 		if err != nil {
 			return err
 		}
@@ -423,9 +450,15 @@ func (a *app) cmdClaudeDeliveries(args []string) error {
 	}
 	for _, row := range result.Deliveries {
 		when := time.UnixMilli(row.UpdatedAt).UTC().Format(time.RFC3339)
-		fmt.Fprintf(&out, "delivery: %s state=%s disposition=%s reason=%s generation=%s message=%s thread=%s native=%s updated=%s\n",
+		// The delivery host's read-only hub ack observation, shown only when
+		// set: it is never inferred here.
+		acked := ""
+		if row.HubAckObserved {
+			acked = " hub_ack_observed=true"
+		}
+		fmt.Fprintf(&out, "delivery: %s state=%s disposition=%s reason=%s generation=%s message=%s thread=%s native=%s updated=%s%s\n",
 			row.DeliveryID, row.State, row.Disposition, row.Reason, row.Generation,
-			row.MessageID, row.ThreadID, row.MsgID, when)
+			row.MessageID, row.ThreadID, row.MsgID, when, acked)
 	}
 	if result.TruncatedSettled > 0 {
 		fmt.Fprintf(&out, "truncated: %d oldest settled row(s) hidden (the claim tombstones are retained)\n", result.TruncatedSettled)
@@ -437,8 +470,9 @@ func (a *app) cmdClaudeDeliveries(args []string) error {
 // claudeResolveAdmission recomputes the native-delivery admission for one
 // binding key under the claude-bindings lock, exactly as the deliver helper
 // does at attempt time: a retry may only re-arm a claim whose scope is
-// currently registered, live, policy-enabled, version-qualified and still
-// fenced by the same generation.
+// currently registered under its pinned hub identity, live, policy-enabled,
+// still witnessed by the config at its own stored path, and still fenced by
+// the same generation (build qualification is parked).
 func (a *app) claudeResolveAdmission(key, generation string) error {
 	ctx, cancel := context.WithTimeout(a.localRegistryContext(), 5*time.Second)
 	defer cancel()
@@ -462,12 +496,19 @@ func (a *app) claudeResolveAdmission(key, generation string) error {
 		if b.Generation != generation {
 			return usageErr("claude resolve: the binding generation changed before the retry; the claim stays fenced and unchanged")
 		}
-		if evidence := claudeAdmissionEvidence(b, rows.OptOuts, settings.Disabled); !evidence.Live {
+		// The canary opt-in is checked first: with build gating parked it
+		// is the only production gate on a native write.
+		if evidence := claudeAdmissionEvidence(b, rows.OptOuts, rows.Canary, settings.Disabled); !evidence.Canary {
+			return usageErr("claude resolve: " + errClaudeCanaryNotOptIn.Error())
+		} else if !evidence.Live {
 			return usageErr("claude resolve: the registered claude root is not live")
 		} else if !evidence.Policy {
 			return usageErr("claude resolve: the recipient opted out of native delivery")
 		} else if !evidence.VersionQualified {
 			return usageErr("claude resolve: the registered build is not a qualified native target")
+		}
+		if err := a.claudeScopeWitnessAt(b.claudeScope); err != nil {
+			return usageErr("claude resolve: the binding's stored config no longer witnesses its scope (config witness): " + err.Error())
 		}
 		if err := validateClaudeRoot(b.claudeRoot); err != nil {
 			return usageErr("claude resolve: the registered root no longer validates: " + err.Error())
@@ -523,14 +564,17 @@ func (a *app) cmdClaudeResolve(args []string) error {
 	if profile == "" {
 		return usageErr("claude resolve requires the addressed profile: --net PROFILE")
 	}
-	scope, err := a.claudeScopeForProfile(profile)
+	// An unpinned profile still reaches its legacy-key claims for
+	// --keep-inbox; --retry needs the pinned key and refuses below.
+	scope, err := a.claudeScopeForProfileAllowLegacy(profile)
 	if err != nil {
 		return err
 	}
-	if err := claudeScopeValid(scope); err != nil {
+	if err := claudeOptOutScopeValid(scope); err != nil {
 		return err
 	}
 	key := claudeBindingKey(scope)
+	keys := claudeClaimScopeKeys(scope)
 	path, err := claudeClaimsLedgerPath(a.getenv)
 	if err != nil {
 		return err
@@ -566,13 +610,19 @@ func (a *app) cmdClaudeResolve(args []string) error {
 	if err != nil {
 		return usageErr("claude resolve: the stored claim is corrupt and is never promoted")
 	}
-	if claim.Scope != key {
+	if !slices.Contains(keys, claim.Scope) {
 		return usageErr("claude resolve: the claim belongs to another recipient scope")
 	}
 	if claim.Generation != expect {
 		return usageErr("claude resolve: the claim generation moved; re-read `claude deliveries` — the stored state is unchanged")
 	}
 	if retry {
+		// A claim recorded under the legacy endpoint key (or addressed
+		// through a profile with no pinned hub identity) belongs to a scope
+		// that can never be admitted again: inbox-only, whatever its state.
+		if !claudeHubPinned(scope.HubIdentity) || claim.Scope != key {
+			return usageErr("claude resolve --retry: the claim was recorded under the legacy endpoint-keyed scope, which is never admitted again; use --keep-inbox")
+		}
 		// Retry fences, checked before admission and before any mutation: a
 		// hold-priority delivery is inbox-only full stop (never re-armed for
 		// native transport however it settled), and a claim still owing a

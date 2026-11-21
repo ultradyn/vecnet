@@ -3,7 +3,7 @@
 package cli
 
 // Without a qualified kernel peer-identity method there is no owner fence,
-// so `claude deliver` fails closed as a validation refusal (exit 2) before
+// so `claude deliver` fails closed as a pre-write refusal (exit 5) before
 // any connect: native delivery stays legacy on unqualified platforms.
 
 import "net"

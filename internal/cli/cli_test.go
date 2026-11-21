@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -32,16 +33,18 @@ type user struct {
 	conf string
 }
 
-// newUser returns a user with no config file yet.
+// newUser returns a command fixture with no config file yet. Automatic
+// maintenance has its own fixtures; command tests do not inventory the CWD.
 func newUser(t *testing.T) *user {
 	t.Helper()
 	dir := t.TempDir()
 	u := &user{t: t, conf: filepath.Join(dir, "config", "vecnet.toml")}
 	u.env = map[string]string{
-		"VECNET_CONFIG":   u.conf,
-		"XDG_CACHE_HOME":  filepath.Join(dir, "cache"),
-		"XDG_CONFIG_HOME": filepath.Join(dir, "config"),
-		"HOME":            filepath.Join(dir, "home"),
+		"VECNET_CONFIG":            u.conf,
+		"VECNET_LOCAL_MAINTENANCE": "0",
+		"XDG_CACHE_HOME":           filepath.Join(dir, "cache"),
+		"XDG_CONFIG_HOME":          filepath.Join(dir, "config"),
+		"HOME":                     filepath.Join(dir, "home"),
 	}
 	return u
 }
@@ -368,6 +371,13 @@ func (s *syncBuffer) String() string {
 	return s.b.String()
 }
 
+// watchLineDeadline bounds waits for a watch line that must appear. It polls,
+// so a passing run returns as soon as the line is printed. A monitor whose
+// display was deferred retries after 1s, 2s, then 4s, so a slow single-core
+// runner can need several seconds before a correct line; 5s was too tight.
+// Absence checks still follow a positive barrier, so they are not weakened.
+const watchLineDeadline = 20 * time.Second
+
 // waitLine waits until some line of buf matches re, failing after d.
 func waitLine(t *testing.T, buf *syncBuffer, re *regexp.Regexp, d time.Duration) string {
 	t.Helper()
@@ -391,7 +401,7 @@ func TestWatchForMonitor(t *testing.T) {
 	a := profileUser(t, env.URL, aSec)
 	b := profileUser(t, env.URL, bSec)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 4*watchLineDeadline)
 	defer cancel()
 	var out, errb syncBuffer
 	done := make(chan int, 1)
@@ -401,20 +411,20 @@ func TestWatchForMonitor(t *testing.T) {
 
 	sent := b.send(aID, "hello watcher", "--wake")
 	re := regexp.MustCompile(`^e\d+\.\d+ delivery ` + regexp.QuoteMeta(sent.ThreadID) + ` ` + regexp.QuoteMeta(bID) + ` B: hello watcher$`)
-	waitLine(t, &out, re, 10*time.Second)
+	waitLine(t, &out, re, watchLineDeadline)
 
 	// Text is cut to its first 120 characters and kept on one line.
 	long := strings.Repeat("é", 100) + "\n" + strings.Repeat("x", 100)
 	sent2 := b.send(aID, long, "--wake")
 	want := "B: " + strings.Repeat("é", 100) + " " + strings.Repeat("x", 16)
 	re2 := regexp.MustCompile(`^e\d+\.\d+ delivery ` + regexp.QuoteMeta(sent2.ThreadID) + ` ` + regexp.QuoteMeta(bID) + ` ` + regexp.QuoteMeta(want) + `$`)
-	waitLine(t, &out, re2, 10*time.Second)
+	waitLine(t, &out, re2, watchLineDeadline)
 
 	// A receipt for A's own message is printed too; the agent decides.
 	mine := a.send(bID, "for B", "--hold")
 	b.mustRun("inbox", "--ack")
 	re3 := regexp.MustCompile(`^e\d+\.\d+ receipt ` + regexp.QuoteMeta(mine.ThreadID) + ` ` + regexp.QuoteMeta(bID) + ` B: accepted$`)
-	waitLine(t, &out, re3, 10*time.Second)
+	waitLine(t, &out, re3, watchLineDeadline)
 
 	cancel()
 	select {
@@ -458,7 +468,7 @@ func TestFreshCacheUsesHubAckedCursor(t *testing.T) {
 
 	// watch on a fresh cache resumes at the hub's acked cursor too: the
 	// first line is the new message, not the acked one.
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*watchLineDeadline)
 	defer cancel()
 	var out, errb syncBuffer
 	done := make(chan int, 1)
@@ -468,7 +478,7 @@ func TestFreshCacheUsesHubAckedCursor(t *testing.T) {
 	}()
 	sent := a.send(bID, "two", "--wake")
 	re := regexp.MustCompile(`^e\d+\.\d+ delivery ` + regexp.QuoteMeta(sent.ThreadID) + ` ` + regexp.QuoteMeta(aID) + ` A: two$`)
-	waitLine(t, &out, re, 10*time.Second)
+	waitLine(t, &out, re, watchLineDeadline)
 	cancel()
 	select {
 	case <-done:
@@ -601,16 +611,25 @@ func TestAdminCommandsJSON(t *testing.T) {
 }
 
 func TestHubErrorExitCode(t *testing.T) {
-	env := testhub.Start(t)
-	_, aSec := env.NewPeer("session", "A")
-	a := profileUser(t, env.URL, aSec)
+	sends := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/messages" {
+			http.NotFound(w, r)
+			return
+		}
+		sends++
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, `{"error":{"code":"unknown_recipient","message":"recipient is not enrolled","details":{}}}`)
+	}))
+	defer srv.Close()
+	a := profileUser(t, srv.URL, "synthetic-secret")
 
-	code, out, errs := a.run("send", "Max", "hi", "--wake")
-	if code != 2 {
-		t.Fatalf("send to Max: exit %d, want 2 (stdout %q stderr %q)", code, out, errs)
+	code, out, errs := a.run("send", "peer_00000000000000000000000001", "hi", "--wake")
+	if code != 2 || out != "" || sends != 1 {
+		t.Fatalf("canonical recipient hub refusal: exit %d, sends %d, want 2 and 1 (stdout %q stderr %q)", code, sends, out, errs)
 	}
-	if !strings.HasPrefix(errs, "name_not_an_address: ") {
-		t.Fatalf("stderr = %q, want name_not_an_address: …", errs)
+	if !strings.HasPrefix(errs, "unknown_recipient: ") {
+		t.Fatalf("stderr = %q, want unknown_recipient: …", errs)
 	}
 }
 
@@ -1015,7 +1034,7 @@ func TestWatchPrintsReaction(t *testing.T) {
 	sent := a.send(bID, "target", "--hold")
 	postReaction(t, env, bSec, sent.MessageID, "✅", "add", "hold")
 	out, stop := startWatch(t, a, "watch", "--for-monitor")
-	line := waitLine(t, out, regexp.MustCompile(`reaction.*\+✅`), 5*time.Second)
+	line := waitLine(t, out, regexp.MustCompile(`reaction.*\+✅`), watchLineDeadline)
 	stop()
 	fields := strings.Fields(line)
 	if len(fields) < 5 || fields[1] != "reaction" || fields[2] != sent.ThreadID || fields[3] != bID || !strings.HasSuffix(line, "B_Watcher: +✅") {
@@ -1025,7 +1044,7 @@ func TestWatchPrintsReaction(t *testing.T) {
 	// A later delivery is a stream barrier: the reaction must have been skipped.
 	b := profileUser(t, env.URL, bSec)
 	b.send2("reply", sent.MessageID, "after reaction", "--hold", "--thread", sent.ThreadID)
-	waitLine(t, filtered, regexp.MustCompile(`delivery.*after reaction$`), 5*time.Second)
+	waitLine(t, filtered, regexp.MustCompile(`delivery.*after reaction$`), watchLineDeadline)
 	stopFiltered()
 	if strings.Contains(filtered.String(), " reaction ") {
 		t.Fatalf("deliveries-only printed reaction: %s", filtered.String())
@@ -1280,5 +1299,23 @@ func TestThreadShowsSendTimeName(t *testing.T) {
 	}
 	if f := strings.Fields(lines[1]); len(f) != 4 || f[0] != second.MessageID || f[2] != "After("+aID+")" || f[3] != "second" {
 		t.Fatalf("second line = %q", lines[1])
+	}
+}
+
+// TestUsageListsInboxNoDisplayProof pins the global usage lines for the
+// delivery host's machine inbox read and the per-profile canary verbs.
+func TestUsageListsInboxNoDisplayProof(t *testing.T) {
+	u := newUser(t)
+	code, out, errs := u.run("--help")
+	if code != 0 {
+		t.Fatalf("--help exit %d: %s", code, errs)
+	}
+	for _, want := range []string{
+		"inbox [--since CURSOR] [--ack] [--limit N] [--include-sender-chain] [--no-display-proof]",
+		"claude canary enable|disable",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("usage lacks %q:\n%s", want, out)
+		}
 	}
 }

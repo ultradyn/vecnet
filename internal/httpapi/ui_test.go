@@ -61,7 +61,10 @@ import (
 // shared removal recovery, measured at 786,702 bytes; next 16 KiB boundary,
 // with every file still counted. Bulk mark-read adds 7,308 bytes on merge
 // (794,010 total); both features fit the same 784 KiB cap.
-const uiMaxBytes = 784 << 10
+// Raised to 800 KiB on 2026-11-20 for the hub update indicator (update.js,
+// update-model.js and its sidebar CSS, about 7.7 KB), measured at 805,697
+// bytes; next 16 KiB boundary, all files still counted.
+const uiMaxBytes = 800 << 10
 
 var (
 	scriptTag   = regexp.MustCompile(`(?is)<script\b([^>]*)>(.*?)</script>`)

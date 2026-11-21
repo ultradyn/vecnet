@@ -1,19 +1,14 @@
 package cli_test
 
 import (
-	"encoding/binary"
-	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"testing"
-	"time"
-	"unicode/utf16"
 
+	"github.com/XertroV/vecnet/internal/cli"
 	"github.com/XertroV/vecnet/internal/platform"
 )
 
@@ -79,145 +74,11 @@ func cliFixtureRequireMode(t *testing.T, path string, want os.FileMode) {
 	}
 }
 
-// cliFixtureProgram installs a synthetic subprocess, never a real clipboard or
-// agent binary. Windows executes a copy of this test binary (not a shebang).
-type cliFixtureProgramSpec struct {
-	Kind   string
-	Log    string
-	Calls  string
-	Marker string
-	Exit   int
-}
+type cliFixtureProgramSpec = cli.CLIFixtureProgramSpec
 
 func cliFixtureProgram(t *testing.T, dir, name, script string, spec cliFixtureProgramSpec) {
 	t.Helper()
-	if runtime.GOOS != "windows" {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0755); err != nil {
-			t.Fatal(err)
-		}
-		return
-	}
-	if filepath.Ext(name) == "" {
-		name += ".exe"
-	}
-	exe, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(dir, name)
-	if linkErr := os.Link(exe, path); linkErr != nil {
-		src, err := os.Open(exe)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer src.Close()
-		dst, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0700)
-		if err != nil {
-			t.Fatal(err)
-		}
-		_, err = io.Copy(dst, src)
-		closeErr := dst.Close()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if closeErr != nil {
-			t.Fatal(closeErr)
-		}
-	}
-	raw, err := json.Marshal(spec)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := cliFixtureWriteFile(path+".cli-fixture.json", raw, 0600); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func init() {
-	if runtime.GOOS != "windows" {
-		return
-	}
-	exe, err := os.Executable()
-	if err != nil {
-		return
-	}
-	raw, err := os.ReadFile(exe + ".cli-fixture.json")
-	if os.IsNotExist(err) {
-		return
-	}
-	if err != nil {
-		panic(err)
-	}
-	var spec cliFixtureProgramSpec
-	if err := json.Unmarshal(raw, &spec); err != nil {
-		panic(err)
-	}
-	switch spec.Kind {
-	case "clipboard":
-		raw, err := io.ReadAll(os.Stdin)
-		if err != nil {
-			panic(err)
-		}
-		if len(raw) < 2 || raw[0] != 0xff || raw[1] != 0xfe || len(raw)%2 != 0 {
-			panic("Windows clipboard fixture requires BOM-prefixed UTF-16LE")
-		}
-		units := make([]uint16, (len(raw)-2)/2)
-		for i := range units {
-			units[i] = binary.LittleEndian.Uint16(raw[2+2*i:])
-		}
-		if err := os.WriteFile(spec.Log, []byte(string(utf16.Decode(units))), 0600); err != nil {
-			panic(err)
-		}
-		if spec.Calls != "" {
-			f, err := os.OpenFile(spec.Calls, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
-			if err != nil {
-				panic(err)
-			}
-			fmt.Fprintln(f, "called")
-			f.Close()
-		}
-	case "claude":
-		cwd, err := os.Getwd()
-		if err != nil {
-			panic(err)
-		}
-		cwd, err = filepath.EvalSymlinks(cwd)
-		if err != nil {
-			panic(err)
-		}
-		f, err := os.OpenFile(spec.Log, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
-		if err != nil {
-			panic(err)
-		}
-		fmt.Fprintf(f, "cwd=%s argv=%s\n", cwd, strings.Join(os.Args[1:], " "))
-		f.Close()
-	case "argv":
-		raw, err := json.Marshal(os.Args[1:])
-		if err != nil {
-			panic(err)
-		}
-		if err := os.WriteFile(spec.Log, raw, 0600); err != nil {
-			panic(err)
-		}
-	case "git-tracking":
-		if len(os.Args) > 3 && os.Args[3] == "rev-parse" {
-			fmt.Println(filepath.ToSlash(os.Args[2]))
-			os.Exit(0)
-		}
-		if len(os.Args) <= 3 || os.Args[3] != "ls-files" {
-			panic("unexpected git fixture arguments")
-		}
-	case "git-timeout":
-		time.Sleep(5 * time.Second)
-	case "git-failure":
-	case "never-run":
-		if err := os.WriteFile(spec.Marker, nil, 0600); err != nil {
-			panic(err)
-		}
-	default:
-		panic("unknown CLI fixture program kind")
-	}
-	os.Exit(spec.Exit)
+	cli.CLIFixtureProgram(t, dir, name, script, spec)
 }
 
 func cliFixtureShell(t *testing.T) string {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,10 +12,12 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
 func TestAutomaticEnrollmentRetainsCredentialsAndRetriesWithoutToken(t *testing.T) {
+	localSetupPlainDirectoryGit(t)
 	home := localSetupHome(t)
 	project := t.TempDir()
 	t.Chdir(project)
@@ -83,6 +86,7 @@ func TestAutomaticEnrollmentDoesNotInferCodexThread(t *testing.T) {
 }
 
 func TestAllProjectRepairMigratesOtherCheckoutAndDefersMissing(t *testing.T) {
+	localSetupPlainDirectoryGit(t)
 	home := localSetupHome(t)
 	dirA := t.TempDir()
 	dirB := t.TempDir()
@@ -147,6 +151,7 @@ func TestLocalMaintenanceDoesNotRunForDeliveryChildrenOrStatus(t *testing.T) {
 }
 
 func TestAutomaticEnrollmentReadyUsesSavedRootAndPreservesGeneration(t *testing.T) {
+	localSetupPlainDirectoryGit(t)
 	f := newBindFixture(t)
 	if err := cliFixtureChmod(f.env["HOME"], 0700); err != nil {
 		t.Fatal(err)
@@ -197,40 +202,60 @@ func TestAutomaticEnrollmentReadyUsesSavedRootAndPreservesGeneration(t *testing.
 }
 
 func TestAutomaticEnrollmentCannotTransferOrRenewExpiredOwner(t *testing.T) {
+	localSetupPlainDirectoryGit(t)
 	for _, expired := range []bool{false, true} {
 		t.Run(map[bool]string{false: "different-root", true: "expired"}[expired], func(t *testing.T) {
+			// Keep the listener outside the bubble and invoke its handler inline:
+			// socket I/O inside the bubble would prevent virtual time advancing.
 			f := newBindFixture(t)
-			if err := cliFixtureChmod(f.env["HOME"], 0700); err != nil {
-				t.Fatal(err)
-			}
-			f.now = time.Now().UTC()
-			if expired {
-				f.now = f.now.Add(-48 * time.Hour)
-			}
-			f.bind("p", bindT1)
-			before := append([]byte(nil), f.raw()...)
-			f.env["CODEX_THREAD_ID"] = bindT1
-			if !expired {
-				f.env["CODEX_THREAD_ID"] = bindT2
-			}
-			t.Chdir(t.TempDir())
-			a := &app{ctx: context.Background(), stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{}, getenv: func(k string) string { return f.env[k] }, localRuntime: func(context.Context) error { return nil }}
-			intent, err := a.prepareLocalEnrollment("p")
-			if err != nil {
-				t.Fatal(err)
-			}
-			commitEnrollmentFixture(t, a, intent, "peer_A")
-			if r := a.reconcileLocalEnrollment(*intent); r.State != "pending" {
-				t.Fatalf("%#v", r)
-			}
-			if !bytes.Equal(before, f.raw()) {
-				t.Fatal("automatic setup changed protected ownership")
-			}
+			synctest.Test(t, func(t *testing.T) {
+				transport := http.DefaultTransport
+				http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					if req.URL.Scheme+"://"+req.URL.Host != f.hub {
+						return nil, errors.New("unexpected enrollment fixture hub")
+					}
+					w := httptest.NewRecorder()
+					f.server.Config.Handler.ServeHTTP(w, req)
+					return w.Result(), nil
+				})
+				t.Cleanup(func() { http.DefaultTransport = transport })
+				if err := cliFixtureChmod(f.env["HOME"], 0700); err != nil {
+					t.Fatal(err)
+				}
+				f.now = time.Now().UTC()
+				if expired {
+					f.now = f.now.Add(-48 * time.Hour)
+				}
+				f.bind("p", bindT1)
+				before := append([]byte(nil), f.raw()...)
+				f.env["CODEX_THREAD_ID"] = bindT1
+				if !expired {
+					f.env["CODEX_THREAD_ID"] = bindT2
+				}
+				t.Chdir(t.TempDir())
+				a := &app{ctx: context.Background(), stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{}, getenv: func(k string) string { return f.env[k] }, localRuntime: func(context.Context) error { return nil }}
+				intent, err := a.prepareLocalEnrollment("p")
+				if err != nil {
+					t.Fatal(err)
+				}
+				commitEnrollmentFixture(t, a, intent, "peer_A")
+				wantReason := "already bound: p to Codex thread " + bindT1
+				if expired {
+					wantReason = "no matching active binding; run codex setup"
+				}
+				if r := a.reconcileLocalEnrollment(*intent); r.State != "pending" || r.Reason != wantReason {
+					t.Fatalf("expected pending because %q, got %#v", wantReason, r)
+				}
+				if !bytes.Equal(before, f.raw()) {
+					t.Fatal("automatic setup changed protected ownership")
+				}
+			})
 		})
 	}
 }
 
 func TestAutomaticEnrollmentPersistsIntentBeforeConfigExists(t *testing.T) {
+	localSetupPlainDirectoryGit(t)
 	home := localSetupHome(t)
 	t.Chdir(t.TempDir())
 	codexHome := filepath.Join(home, "codex")
@@ -251,21 +276,47 @@ func TestAutomaticEnrollmentPersistsIntentBeforeConfigExists(t *testing.T) {
 	}
 }
 
+// The canceled-invitation fixture must reach redemption even if an unrelated
+// Git on the caller's PATH would exhaust project discovery's real deadline.
+func TestEnrollmentRejectedInvitationIgnoresAmbientGit(t *testing.T) {
+	tools := t.TempDir()
+	cliFixtureProgram(t, tools, "git", "#!/bin/sh\nexec /bin/sleep 5\n", cliFixtureProgramSpec{Kind: "git-timeout", Exit: 128})
+	t.Setenv("PATH", tools)
+	t.Setenv("PATHEXT", ".EXE")
+	t.Setenv("NoDefaultCurrentDirectoryInExePath", "1")
+	t.Run("slow-git", TestEnrollmentRejectedInvitationCannotReplayOldCredential)
+}
+
 // A rejected invitation must never authorize setup of a pre-existing profile.
 func TestEnrollmentRejectedInvitationCannotReplayOldCredential(t *testing.T) {
+	localSetupPlainDirectoryGit(t)
 	f := newBindFixture(t)
 	if err := cliFixtureChmod(f.env["HOME"], 0700); err != nil {
 		t.Fatal(err)
 	}
 	t.Chdir(t.TempDir())
 	f.env["CODEX_THREAD_ID"] = bindT1
-	rejected := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Error(w, "rejected", http.StatusUnauthorized) }))
+	var redemptions atomic.Int32
+	rejected := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/enrol" {
+			http.NotFound(w, r)
+			return
+		}
+		redemptions.Add(1)
+		http.Error(w, "rejected", http.StatusUnauthorized)
+	}))
 	defer rejected.Close()
 	var calls atomic.Int32
 	a := &app{ctx: context.Background(), stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{}, getenv: func(k string) string { return f.env[k] }, localRuntime: func(context.Context) error { calls.Add(1); return usageErr("runtime reached") }}
-	if err := a.cmdEnrol([]string{"--hub", rejected.URL, "--token", "invitation", "--profile", "p"}); err == nil {
+	enrolErr := a.cmdEnrol([]string{"--hub", rejected.URL, "--token", "invitation", "--profile", "p"})
+	if enrolErr == nil {
 		t.Fatal("expected rejected invitation")
 	}
+	var rejectedError *hubError
+	if !errors.As(enrolErr, &rejectedError) || rejectedError.Status != http.StatusUnauthorized || redemptions.Load() != 1 {
+		t.Fatalf("expected one rejected POST /v1/enrol (HTTP 401): error=%T: %v; redemptions=%d", enrolErr, enrolErr, redemptions.Load())
+	}
+	t.Logf("invitation reached HTTP %d; redemptions=%d", rejectedError.Status, redemptions.Load())
 	if err := a.retryLocalEnrollments(); err != nil {
 		t.Fatalf("canceled enrollment remains actionable: %v", err)
 	}
@@ -282,6 +333,7 @@ func TestEnrollmentRejectedInvitationCannotReplayOldCredential(t *testing.T) {
 }
 
 func TestEnrollmentRequiresIntentPersistenceBeforeRedemption(t *testing.T) {
+	localSetupPlainDirectoryGit(t)
 	home := localSetupHome(t)
 	t.Chdir(t.TempDir())
 	codexHome := filepath.Join(home, "codex")
@@ -334,6 +386,7 @@ func commitEnrollmentFixture(t *testing.T, a *app, r *localEnrollment, caller st
 }
 
 func TestEnrollmentCommittedIntentRejectsCredentialReplacement(t *testing.T) {
+	localSetupPlainDirectoryGit(t)
 	for _, field := range []string{"secret", "hub", "peer", "marker", "live-caller"} {
 		t.Run(field, func(t *testing.T) {
 			f := newBindFixture(t)
@@ -409,6 +462,24 @@ func TestEnrollmentMissingThreadReportsUnsupportedWithoutRepairPromise(t *testin
 	}
 }
 
+// localSetupPlainDirectoryGit keeps plain-directory enrollment/repair fixtures
+// independent of ambient Git startup. Codex setup requires Git's explicit
+// non-repository response; a missing executable is an uncertain discovery.
+func localSetupPlainDirectoryGit(t *testing.T) {
+	t.Helper()
+	bin := t.TempDir()
+	cliFixtureProgram(t, bin, "git", "#!/bin/sh\nprintf 'fatal: not a git repository\\n' >&2\nexit 128\n", cliFixtureProgramSpec{Kind: "git-non-repository", Exit: 128})
+	t.Setenv("PATH", bin)
+	t.Setenv("NoDefaultCurrentDirectoryInExePath", "1")
+	t.Setenv("PATHEXT", ".EXE")
+	// This fixture answers "not a repository" at once; these tests prove what
+	// setup does with that answer, not Git's deadline. On a single-core
+	// Windows runner the first launch of a fresh fixture image took over the
+	// real 2s budget and failed discovery. Deadline behaviour stays covered by
+	// the git-timeout and context-label tests, which keep the product budget.
+	ExtendLocalGitProbeBudget(t, 20*time.Second)
+}
+
 func localSetupHome(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
@@ -457,6 +528,7 @@ func enrollmentStatusRuntime(path string, done chan<- error, delay ...time.Durat
 }
 
 func TestAutomaticEnrollmentWaitsForNextConnectorStatus(t *testing.T) {
+	localSetupPlainDirectoryGit(t)
 	f := newBindFixture(t)
 	if err := cliFixtureChmod(f.env["HOME"], 0700); err != nil {
 		t.Fatal(err)
@@ -480,7 +552,17 @@ func TestAutomaticEnrollmentWaitsForNextConnectorStatus(t *testing.T) {
 	}
 }
 
+func TestEnrollmentFreshRecipientIgnoresAmbientGit(t *testing.T) {
+	tools := t.TempDir()
+	cliFixtureProgram(t, tools, "git", "#!/bin/sh\nexec /bin/sleep 5\n", cliFixtureProgramSpec{Kind: "git-timeout", Exit: 128})
+	t.Setenv("PATH", tools)
+	t.Setenv("PATHEXT", ".EXE")
+	t.Setenv("NoDefaultCurrentDirectoryInExePath", "1")
+	t.Run("slow-git", TestEnrollmentFreshRecipientConvergesWithConnectorStatus)
+}
+
 func TestEnrollmentFreshRecipientConvergesWithConnectorStatus(t *testing.T) {
+	localSetupPlainDirectoryGit(t)
 	home := localSetupHome(t)
 	project := t.TempDir()
 	t.Chdir(project)
@@ -540,6 +622,7 @@ func TestEnrollmentFreshRecipientConvergesWithConnectorStatus(t *testing.T) {
 }
 
 func TestEnrollmentInterruptedAfterConfigCommitResumesPreparedRecord(t *testing.T) {
+	localSetupPlainDirectoryGit(t)
 	f := newBindFixture(t)
 	if err := cliFixtureChmod(f.env["HOME"], 0700); err != nil {
 		t.Fatal(err)
@@ -601,6 +684,7 @@ func TestEnrollmentDurableSavePreservesOtherProfileMetadata(t *testing.T) {
 }
 
 func TestEnrollmentSupersededIntentDoesNotPreventLaterRepair(t *testing.T) {
+	localSetupPlainDirectoryGit(t)
 	f := newBindFixture(t)
 	if err := cliFixtureChmod(f.env["HOME"], 0700); err != nil {
 		t.Fatal(err)

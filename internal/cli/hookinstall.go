@@ -484,7 +484,7 @@ func (a *app) warnNestedCheckouts(path string) {
 	if err != nil || list == "" {
 		return
 	}
-	ctx, cancel := context.WithTimeout(a.ctx, 2*time.Second)
+	ctx, cancel := context.WithTimeout(a.ctx, localGitProbeBudget)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", "-C", root, "worktree", "list", "--porcelain")
 	cmd.WaitDelay = 100 * time.Millisecond
@@ -513,7 +513,7 @@ func (a *app) warnNestedCheckouts(path string) {
 // hookGit runs one bounded `git -C dir rev-parse <arg>` and returns its
 // trimmed output.
 func (a *app) hookGit(dir, arg string) (string, error) {
-	ctx, cancel := context.WithTimeout(a.ctx, 2*time.Second)
+	ctx, cancel := context.WithTimeout(a.ctx, localGitProbeBudget)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", arg)
 	// Untranslated messages, so hookNotGitRepo can recognise git's answer.
@@ -584,7 +584,7 @@ func (a *app) checkCodexUntracked(root, path string) error {
 // not share a personal profile. advice, when not empty, extends the refusal
 // with client-specific guidance.
 func (a *app) checkUntracked(root, rel, path, advice string) error {
-	ctx, cancel := context.WithTimeout(a.ctx, 2*time.Second)
+	ctx, cancel := context.WithTimeout(a.ctx, localGitProbeBudget)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", "-C", root, "ls-files", "--error-unmatch", "--", rel)
 	cmd.WaitDelay = 100 * time.Millisecond

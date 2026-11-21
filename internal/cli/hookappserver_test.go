@@ -19,7 +19,7 @@ import (
 	"github.com/XertroV/vecnet/internal/envelope"
 )
 
-// Each invocation goes through the CLI dispatcher and a fake HTTP hub. Every
+// Each logical invocation exercises the real hook worker and a fake HTTP hub. Every
 // environment path, including unused connector paths, belongs to this test.
 const appHookGeneration = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
@@ -209,9 +209,11 @@ func (f *appHookFixture) add(t *testing.T, priority, text, name string) {
 }
 func (f *appHookFixture) run(t *testing.T, nonce, priorities string, extra ...string) (appHookOutput, string, string) {
 	t.Helper()
-	args := []string{"--event", "app-server", "--claim", nonce, "--priorities", priorities, "--expect-hub", f.hub, "--expect-caller", "peer_test", "--thread", bindT1, "--codex-home", f.env["CODEX_HOME"], "--expect-generation", appHookGeneration}
+	// Claims and ordering assert worker output/state, not supervisor latency.
+	// Failure, deadline and native-pipe tests invoke the supervisor directly.
+	args := []string{"hook", "--event", "app-server", "--claim", nonce, "--priorities", priorities, "--expect-hub", f.hub, "--expect-caller", "peer_test", "--thread", bindT1, "--codex-home", f.env["CODEX_HOME"], "--expect-generation", appHookGeneration}
 	args = append(args, extra...)
-	out, errs := runHook(t, f.env, args...)
+	out, errs := runHookFormatting(t, f.env, args...)
 	var got appHookOutput
 	if e := json.Unmarshal([]byte(out), &got); e != nil {
 		t.Fatalf("app-server JSON %q: %v; stderr=%q", out, e, errs)
@@ -229,7 +231,7 @@ func appHookIDs(t *testing.T, got appHookOutput, want ...string) {
 }
 func (f *appHookFixture) release(t *testing.T, nonce string, n int) {
 	t.Helper()
-	out, _ := runHook(t, f.env, "--release", "--claim", nonce, "--thread", bindT1, "--codex-home", f.env["CODEX_HOME"], "--expect-generation", appHookGeneration, "--expect-hub", f.hub, "--expect-caller", "peer_test")
+	out, _ := runHookFormatting(t, f.env, "hook", "--release", "--claim", nonce, "--thread", bindT1, "--codex-home", f.env["CODEX_HOME"], "--expect-generation", appHookGeneration, "--expect-hub", f.hub, "--expect-caller", "peer_test")
 	var result struct {
 		Released *int `json:"released"`
 	}
@@ -259,6 +261,17 @@ func TestHookAppServerClaims(t *testing.T) {
 		t.Fatalf("state %+v", s)
 	}
 }
+
+func TestHookAppServerLogicalRunsIgnoreSupervisorBudget(t *testing.T) {
+	oldBudget := hookBudget
+	hookBudget = time.Nanosecond
+	t.Cleanup(func() { hookBudget = oldBudget })
+	// Keep the real claims, HTTP and persisted ordering assertions even when
+	// the supervisor would expire before its worker can be scheduled.
+	t.Run("claims", TestHookAppServerClaims)
+	t.Run("released claims order", TestHookAppServerReleasedClaimsKeepLogOrder)
+}
+
 func TestHookAppServerEligibility(t *testing.T) {
 	f := newAppHookFixture(t)
 	for _, p := range []string{"wake", "wake_idle", "hold", "wake", "unknown"} {
@@ -281,7 +294,7 @@ func TestHookAppServerEligibility(t *testing.T) {
 	}
 }
 
-// Every run reloads the on-disk state through the CLI dispatcher, so ordering
+// Every run reloads the on-disk state through the real hook worker, so ordering
 // must survive nonce changes and independent hook invocations.
 func TestHookAppServerReleasedClaimsKeepLogOrder(t *testing.T) {
 	for _, priorities := range [][]string{

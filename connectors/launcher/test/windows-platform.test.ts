@@ -1,21 +1,25 @@
 import test from 'node:test';
 import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import childProcess from 'node:child_process';
+import childProcess, { spawn as builtinSpawn } from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
+import fs from 'node:fs';
+import type { PathLike } from 'node:fs';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, linkSync, existsSync, readFileSync, statSync, lstatSync, realpathSync, chmodSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { once } from 'node:events';
+import { Duplex, PassThrough } from 'node:stream';
 import { createConnection } from 'node:net';
+import { openLedger } from '../src/ledger.ts';
 import { localPlatform, readPrivateFileSync } from '../src/private-files.ts';
 import { readCredential } from '../src/daemon.ts';
 import { CODEX_RELOAD_MS, codexBindingsPath, codexRecoveryPath, startCodexConnector } from '../src/codex/connector.ts';
 import { readBindings } from '../src/codex/connector-authority.ts';
 import { openStatusPublisher } from '../src/codex/connector-status.ts';
 import { openCodexRpc as openDeliveryRpc } from '../src/codex/rpc.ts';
-import { nativeCodexBinary } from '../src/backends/codex-app-server/control-proxy.ts';
+import { connectControlProxy, nativeCodexBinary } from '../src/backends/codex-app-server/control-proxy.ts';
 import { openCodexRpc as openBackendRpc } from '../src/backends/codex-app-server/rpc.ts';
 import { startFakeCodexAppServer } from './fake-codex-appserver.ts';
 import { makeOwnerPrivate, makePrivateDirectory, makePublicReadable, symlinkSync, writePrivate } from './fixtures/platform.ts';
@@ -92,20 +96,55 @@ function assertPrivateDiagnostic(invoke: () => void, sentinel: string, terminalE
   }
 }
 
+function isReadDenial(code: unknown, nativeWindows: boolean): boolean {
+  // Node's bundled libuv maps Windows ERROR_ACCESS_DENIED to UV_EPERM:
+  // https://github.com/nodejs/node/blob/v24.22.2/deps/uv/src/win/error.c#L158-L159
+  return code === 'EACCES' || (nativeWindows && code === 'EPERM');
+}
+
+test('read refusal classification admits only platform access-denial codes', () => {
+  for (const [code, nativeWindows, expected] of [
+    ['EACCES', false, true], ['EACCES', true, true],
+    ['EPERM', true, true], ['EPERM', false, false],
+    ['ENOENT', true, false], ['ENOTDIR', true, false], ['EIO', true, false],
+    ['EBUSY', true, false], ['UNKNOWN', true, false], ['NO_ERROR', true, false],
+    [undefined, true, false], [null, true, false], [0, true, false],
+    ['EACCES private-input-SENTINEL', true, false],
+  ] as const) assert.equal(isReadDenial(code, nativeWindows), expected, `denial classification case ${String(code)}`);
+});
+
 for (const kind of ['file ancestor', 'inaccessible read'] as const) {
   test(`private fixture parent probes redact real ${kind} refusals`, t => {
     const dir = sandbox(t), sentinel = 'F1-parent-path-SENTINEL', parent = join(dir, sentinel), probe = join(parent, 'child');
     const bytes = 'unchanged parent fixture bytes';
     let restore = () => {};
     let verifyRestored = () => {};
+    // Drain all checks even on setup/control/redaction failure. LIFO restores
+    // ACLs first, verifies every saved ACL next, then checks data before rm.
+    onCleanup(t, () => {
+      if (kind === 'file ancestor') assert.equal(readFileSync(parent, 'utf8'), bytes);
+      else {
+        assert.deepEqual(readdirSync(parent), ['child']); assert.deepEqual(readdirSync(probe), ['keep']);
+        assert.equal(readFileSync(join(probe, 'keep'), 'utf8'), bytes);
+        if (windows) {
+          localPlatform('check-private', probe, { directory: true });
+          localPlatform('check-private', join(probe, 'keep'));
+        }
+      }
+    });
+    onCleanup(t, () => verifyRestored());
+    onCleanup(t, () => restore());
     if (kind === 'file ancestor') writeFileSync(parent, bytes);
     else {
       makePrivateDirectory(probe); writePrivate(join(probe, 'keep'), bytes);
       if (windows) {
+        localPlatform('check-private', probe, { directory: true });
+        localPlatform('check-private', join(probe, 'keep'));
+        assert.equal(readFileSync(join(probe, 'keep'), 'utf8'), bytes);
         const identity = childProcess.spawnSync('whoami.exe', ['/user', '/fo', 'csv', '/nh'], { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
         const sid = identity.stdout?.match(/S-1-\d+(?:-\d+)+/)?.[0];
         assert.ok(identity.status === 0 && sid, 'fixture token identity lookup failed');
-        const acl = join(dir, 'saved-acl'), restored = join(dir, 'restored-acl');
+        const acl = join(dir, 'saved-acl'), canonical = join(dir, 'canonical-acl'), restored = join(dir, 'restored-acl');
         const aclCommand = (args: string[]) => {
           const result = childProcess.spawnSync('icacls.exe', args, { windowsHide: true, stdio: 'ignore' });
           assert.equal(result.status, 0, 'fixture ACL operation failed');
@@ -114,45 +153,54 @@ for (const kind of ['file ancestor', 'inaccessible read'] as const) {
         // lstat can query metadata despite deny; assert a real denied read.
         aclCommand([probe, '/save', acl, '/t', '/q']);
         restore = () => aclCommand([dirname(probe), '/restore', acl, '/q']);
+        // icacls restore canonicalizes auto-inheritance metadata and leaf
+        // inheritance flags. Establish that native form before denial, then
+        // require exact bytes on a second round trip and after denied reads.
+        restore();
+        aclCommand([probe, '/save', canonical, '/t', '/q']);
+        restore = () => aclCommand([dirname(probe), '/restore', canonical, '/q']);
         verifyRestored = () => {
           aclCommand([probe, '/save', restored, '/t', '/q']);
-          assert.deepEqual(readFileSync(restored), readFileSync(acl), 'all owned ACLs must be restored exactly');
+          assert.deepEqual(readFileSync(restored), readFileSync(canonical), 'all owned canonical ACLs must be restored exactly');
         };
-        try {
-          // Native-private children have protected DACLs: deny the actual
-          // read target explicitly before denying its container.
-          aclCommand([join(probe, 'keep'), '/deny', `*${sid}:(F)`, '/q']);
-          aclCommand([probe, '/deny', `*${sid}:(F)`, '/q']);
-        }
-        catch (error) { restore(); throw error; }
+        restore(); verifyRestored();
+        localPlatform('check-private', probe, { directory: true });
+        localPlatform('check-private', join(probe, 'keep'));
+        assert.equal(readFileSync(join(probe, 'keep'), 'utf8'), bytes);
+        // Native-private children have protected DACLs: deny the actual
+        // read target explicitly before denying its container.
+        aclCommand([join(probe, 'keep'), '/deny', `*${sid}:(F)`, '/q']);
+        aclCommand([probe, '/deny', `*${sid}:(F)`, '/q']);
       } else {
         const mode = statSync(parent).mode & 0o777;
         chmodSync(parent, 0o000); restore = () => chmodSync(parent, mode);
       }
     }
-    try {
-      const errno = kind === 'file ancestor' ? windows ? 'ENOENT' : 'ENOTDIR' : 'EACCES';
-      const control = kind === 'inaccessible read' && windows ? () => readFileSync(join(probe, 'keep')) : () => lstatSync(probe);
-      assert.throws(control, (error: unknown) => (error as NodeJS.ErrnoException).code === errno,
+    const errno = kind === 'file ancestor' ? windows ? 'ENOENT' : 'ENOTDIR' : 'EACCES';
+    if (kind === 'inaccessible read') {
+      // Only a real failed read (not metadata lookup) is a native control.
+      let code: unknown = 'NO_ERROR';
+      try { if (windows) readFileSync(join(probe, 'keep')); else lstatSync(probe); }
+      catch (error) { code = (error as NodeJS.ErrnoException | undefined)?.code; }
+      // Never pass the raw error to assert: its path/message may be private.
+      const diagnostic = ['NO_ERROR', 'EACCES', 'EPERM', 'ENOENT', 'ENOTDIR', 'EIO', 'EBUSY', 'EBADF', 'EISDIR']
+        .find(known => known === code) ?? 'UNKNOWN';
+      if (windows) t.diagnostic(`native denied-read control code=${diagnostic}`);
+      assert.ok(isReadDenial(code, windows), `the control must reach a real access-denied read (code=${diagnostic})`);
+      if (windows) assert.equal(lstatSync(probe).isDirectory(), true, 'metadata lookup is not a denied file read');
+    } else {
+      assert.throws(() => lstatSync(probe), (error: unknown) => (error as NodeJS.ErrnoException).code === errno,
         'the control must reach the platform actual filesystem refusal');
-      if (kind === 'inaccessible read' && windows) assert.equal(lstatSync(probe).isDirectory(), true, 'metadata lookup is not a denied file read');
-      const descriptor = Object.getOwnPropertyDescriptor(process, 'platform')!;
-      try {
-        // Linux reaches real terminal lstat errors. Native Windows instead
-        // reaches the real helper's non-directory/inaccessible-parent open.
-        Object.defineProperty(process, 'platform', { ...descriptor, value: 'win32' });
-        for (const invoke of [() => writePrivate(join(probe, 'authority'), 'private-input-SENTINEL'), () => makePrivateDirectory(join(probe, 'directory'))]) {
-          assertPrivateDiagnostic(invoke, sentinel, windows ? undefined : errno);
-        }
-      } finally { Object.defineProperty(process, 'platform', descriptor); }
-    } finally { restore(); }
-    verifyRestored();
-    if (kind === 'file ancestor') assert.equal(readFileSync(parent, 'utf8'), bytes);
-    else {
-      assert.deepEqual(readdirSync(parent), ['child']); assert.deepEqual(readdirSync(probe), ['keep']);
-      assert.equal(readFileSync(join(probe, 'keep'), 'utf8'), bytes);
-      if (windows) localPlatform('check-private', probe, { directory: true });
     }
+    const descriptor = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    try {
+      // Linux reaches real terminal lstat errors. Native Windows instead
+      // reaches the real helper's non-directory/inaccessible-parent open.
+      Object.defineProperty(process, 'platform', { ...descriptor, value: 'win32' });
+      for (const invoke of [() => writePrivate(join(probe, 'authority'), 'private-input-SENTINEL'), () => makePrivateDirectory(join(probe, 'directory'))]) {
+        assertPrivateDiagnostic(invoke, sentinel, windows ? undefined : errno);
+      }
+    } finally { Object.defineProperty(process, 'platform', descriptor); }
   });
 }
 
@@ -213,6 +261,81 @@ test('Windows native private reads are bounded and fail closed without the helpe
   writeFileSync(path, 'x'.repeat(1_048_577)); assert.throws(() => readPrivateFileSync(path));
   writeFileSync(path, 'private');
   assert.throws(() => readPrivateFileSync(path, { env: { ...process.env, VECNET_BIN: join(dir, 'missing.exe') } }));
+});
+
+test('Windows recovery precreates a private database and preserves existing SQLite state on readmission', t => {
+  const dir = sandbox(t), env = { ...process.env, HOME: dir };
+  const recoveryPath = () => {
+    const descriptor = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    try {
+      // Exercise the Windows creation branch with the real private helper on
+      // Linux too; only native runs prove TokenUser ownership and DACLs.
+      Object.defineProperty(process, 'platform', { ...descriptor, value: 'win32' });
+      return codexRecoveryPath(env);
+    } finally { Object.defineProperty(process, 'platform', descriptor); }
+  };
+  const database = recoveryPath();
+  assert.equal(existsSync(database), true, 'private database must exist before SQLite opens it');
+  assert.equal(statSync(database).size, 0);
+  localPlatform('check-private', database, { env });
+  const clock = fakeClock(Date.now()), first = openLedger(database, clock);
+  try { first.kv('codex').set('restart-sentinel', 'retained recovery state'); }
+  finally { first.close(); }
+  const bytes = readFileSync(database), identity = statSync(database, { bigint: true });
+  assert.equal(recoveryPath(), database);
+  const admitted = statSync(database, { bigint: true });
+  assert.equal(admitted.ino, identity.ino); assert.equal(admitted.dev, identity.dev);
+  assert.deepEqual(readFileSync(database), bytes, 'readmission never replaces/truncates existing recovery');
+  localPlatform('check-private', database, { env });
+  const second = openLedger(database, clock);
+  try { assert.equal(second.kv('codex').get('restart-sentinel'), 'retained recovery state'); }
+  finally { second.close(); }
+  const restored = readFileSync(database), children = readdirSync(dirname(database));
+  makePublicReadable(database);
+  assert.throws(recoveryPath, 'public recovery database remains refused');
+  assert.deepEqual(readFileSync(database), restored);
+  makeOwnerPrivate(database);
+  const hardlink = join(dir, 'recovery-alias'); linkSync(database, hardlink);
+  assert.throws(recoveryPath, 'hard-linked recovery database remains refused');
+  rmSync(hardlink);
+  const parked = join(dir, 'parked-database'); fs.renameSync(database, parked);
+  symlinkSync(dirname(database), database); // Native directory junction needs no symlink privilege.
+  try {
+    assert.throws(recoveryPath, 'reparse/symlink recovery database remains refused');
+    assert.deepEqual(readFileSync(parked), restored);
+  } finally { rmSync(database); fs.renameSync(parked, database); }
+  const sidecar = database + '-wal'; writePrivate(sidecar, 'sidecar sentinel'); makePublicReadable(sidecar);
+  assert.throws(recoveryPath, 'public recovery sidecar remains refused');
+  assert.equal(readFileSync(sidecar, 'utf8'), 'sidecar sentinel'); rmSync(sidecar);
+  assert.deepEqual(readdirSync(dirname(database)), children, 'private creation leaves no seed files');
+  assert.equal(recoveryPath(), database);
+
+  // Interleave a real competing creator at the exclusive publication boundary.
+  // The losing initializer must validate, never replace, the winner's bytes.
+  rmSync(database);
+  const link = fs.linkSync;
+  const publication = t.mock.method(fs, 'linkSync', (source: PathLike, target: PathLike) => {
+    if (target === database) localPlatform('write-private', database, { env, input: 'concurrent recovery bytes' });
+    return link(source, target);
+  }); syncBuiltinESMExports();
+  try { assert.equal(recoveryPath(), database); }
+  finally { publication.mock.restore(); syncBuiltinESMExports(); }
+  assert.equal(readFileSync(database, 'utf8'), 'concurrent recovery bytes');
+  assert.equal(statSync(database).nlink, 1);
+  assert.deepEqual(readdirSync(dirname(database)), children, 'losing initializer removes only its private seed');
+
+  rmSync(database);
+  const unsafePublication = t.mock.method(fs, 'linkSync', (source: PathLike, target: PathLike) => {
+    if (target === database) {
+      localPlatform('write-private', database, { env, input: 'untrusted concurrent bytes' });
+      if (windows) makePublicReadable(database); else chmodSync(database, 0o644);
+    }
+    return link(source, target);
+  }); syncBuiltinESMExports();
+  try { assert.throws(recoveryPath, 'a concurrently created public database remains refused'); }
+  finally { unsafePublication.mock.restore(); syncBuiltinESMExports(); }
+  assert.equal(readFileSync(database, 'utf8'), 'untrusted concurrent bytes');
+  assert.deepEqual(readdirSync(dirname(database)), children);
 });
 
 test('Windows recovery selects explicit HOME, rejects public DACLs and junction descendants', { skip: !windows }, t => {
@@ -289,28 +412,139 @@ function mockLiveProcesses(t: TestContext, pipe: string) {
   return { helpers, children };
 }
 
+for (const refused of [false, true]) {
+test(refused ? 'control proxy synchronous admission refusal restores mocks, ESM bindings and streams' :
+  'control proxy exit releases stranded stdout before the exact child close join', async t => {
+  const dir = sandbox(t), control = join(dir, 'app-server-control');
+  makePrivateDirectory(control);
+  const node = privateExecutable(dir, process.execPath, 'node.exe');
+  // Model the native observation: the process exited but stdout never ends.
+  // Private path/binary admission and the production transport stay real.
+  const child = new childProcess.ChildProcess();
+  const stdout = new PassThrough(), stderr = new PassThrough(), stdin = new PassThrough();
+  Object.assign(child, { stdout, stderr, stdin, stdio: [stdin, stdout, stderr] });
+  const spawn = childProcess.spawn;
+  const mock = t.mock.method(childProcess, 'spawn', (...args: Parameters<typeof spawn>) => {
+    if ((args[1] as string[])[0] === 'app-server') return child;
+    return Reflect.apply(spawn, childProcess, args);
+  }); syncBuiltinESMExports();
+  let joined = false;
+  const closed = new Promise<void>(resolve => child.once('close', () => { joined = true; resolve(); }));
+  // Preserve pipe-close-before-child-close in this controlled process boundary.
+  stdout.once('close', () => child.emit('close', 0, null));
+  // Reproduce Windows' observed tunnel destruction without stdout closure;
+  // Linux Duplex.from otherwise forwards destruction and hides this leak.
+  const tunnel = new PassThrough();
+  const originalFrom = Duplex.from;
+  const from = t.mock.method(Duplex, 'from', () => tunnel);
+  const exercise = async () => {
+    let rejected: Promise<void> | undefined;
+    try {
+      const connecting = connectControlProxy(dir, { ...process.env, VECNET_CODEX_BIN: refused ? join(dir, 'missing.exe') : node });
+      rejected = assert.rejects(connecting, /WebSocket/);
+      stdin.destroy(); stderr.destroy();
+      assert.equal(stdout.destroyed, false); assert.equal(joined, false);
+      child.emit('exit', 0, null);
+      assert.equal(stdout.destroyed, true, 'exited control proxy must release its stranded stdout pipe');
+      assert.equal(joined, false, 'process exit is not the exact child close event');
+      await closed; await rejected;
+      assert.equal(stdout.closed, true); assert.equal(joined, true);
+    } finally {
+      stdin.destroy(); stdout.destroy(); stderr.destroy(); tunnel.destroy();
+      from.mock.restore(); mock.mock.restore(); syncBuiltinESMExports();
+      await rejected;
+    }
+  };
+  if (!refused) await exercise();
+  else {
+    try {
+      await assert.rejects(exercise(), /codex_native_binary_unavailable/);
+      assert.equal(childProcess.spawn, spawn, 'synchronous refusal restores spawn property');
+      assert.equal(builtinSpawn, spawn, 'synchronous refusal resynchronizes builtin ESM spawn');
+      assert.equal(Duplex.from, originalFrom, 'synchronous refusal restores Duplex.from');
+      for (const stream of [stdin, stdout, stderr, tunnel]) {
+        assert.equal(stream.destroyed, true, 'synchronous refusal destroys prepared stream');
+      }
+      await closed;
+      for (const stream of [stdin, stdout, stderr, tunnel]) assert.equal(stream.closed, true);
+    } finally {
+      // Backstop the regression itself so a RED cannot pollute later tests.
+      stdin.destroy(); stdout.destroy(); stderr.destroy(); tunnel.destroy();
+      from.mock.restore(); mock.mock.restore(); syncBuiltinESMExports();
+    }
+  }
+});
+}
+
+test('control proxy carries real WebSocket bytes and joins child close after transport shutdown', async t => {
+  const dir = sandbox(t), fake = await startFakeCodexAppServer({ dir: join(dir, 'proxy') });
+  onCleanup(t, () => fake.close());
+  makePrivateDirectory(join(dir, 'app-server-control'));
+  const node = privateExecutable(dir, process.execPath, 'node.exe');
+  const spawn = childProcess.spawn;
+  const run = fixtureSpawn(spawn, { pipe: windows ? fake.socketPath : realpathSync(fake.socketPath) });
+  let child: childProcess.ChildProcess | undefined, closed: Promise<unknown> | undefined;
+  const mock = t.mock.method(childProcess, 'spawn', (...args: Parameters<typeof spawn>) => {
+    const result = run(...args);
+    if ((args[1] as string[])[0] === 'app-server') { child = result; closed = once(result, 'close'); }
+    return result;
+  }); syncBuiltinESMExports();
+  onCleanup(t, async () => {
+    mock.mock.restore(); syncBuiltinESMExports();
+    if (child?.exitCode === null && child.signalCode === null) child.kill();
+    await closed;
+  });
+  const ws = await connectControlProxy(dir, { ...process.env, VECNET_CODEX_BIN: node });
+  onCleanup(t, () => ws.close());
+  const response = new Promise<string>(resolve => ws.onMessage(resolve));
+  ws.send(JSON.stringify({ id: 1, method: 'initialize', params: { capabilities: {} } }));
+  assert.equal(JSON.parse(await response).id, 1, 'proxy must preserve real framed response bytes');
+  ws.close(); await closed;
+  assert.equal(child!.stdout!.closed, true, 'exact child close follows stdout release');
+});
+
 test('Windows live connector exposes fatal helper loss only after fencing, and a replacement regains readiness', { skip: !windows, timeout: 15000 }, async t => {
+  const started = performance.now();
+  const phase = (name: string) => t.diagnostic(`fatal-helper phase=${name} elapsed_ms=${Math.round(performance.now() - started)}`);
+  phase('fixture-start');
+  onCleanup(t, () => phase('cleanup-complete'));
   const s = await liveBinding(t), { helpers, children } = mockLiveProcesses(t, s.fake.socketPath);
+  phase('fixture-ready');
   const clock = fakeClock(Date.now()), log = memoryLog(), reports: { reason?: string }[] = [];
   const start = () => startCodexConnector({ env: s.env, log, clock, postRuntimeStatus: async (_b, snapshot) => { reports.push(snapshot); return true; } });
   const first = start(); onCleanup(t, () => first.stop());
   await until(() => s.watches() === 1 && s.fake.subscribers(s.id).length === 1, 'live bound watch and subscription');
+  phase('first-subscribed');
   clock.advance(CODEX_RELOAD_MS); await until(s.ready, 'ready live binding before helper death');
+  phase('first-ready');
   const oldSubscriber = s.fake.subscribers(s.id)[0], firstChildren = [...children]; assert.equal(helpers.length, 1);
   helpers[0].kill();
+  phase('helper-killed');
   assert.deepEqual(await first.stopped, { reason: 'status_lock_lost' }); // no explicit stop/signal
+  phase('first-fenced');
   assert.equal(s.fake.subscribers(s.id).length, 0, 'fatal outcome waits for unsubscribe');
   await until(() => firstChildren.every(c => c.exitCode !== null || c.signalCode !== null), 'owned children exit after fenced transport close');
+  phase('first-children-exited');
   assert.equal(reports.some(r => r.reason === 'stopped'), false, 'no offline report after singleton loss');
+  const database = join(dirname(s.path), 'delivery.sqlite');
+  localPlatform('check-private', database, { env: s.env });
+  const recoveryBytes = readFileSync(database), recoveryIdentity = statSync(database, { bigint: true });
+  assert.equal(codexRecoveryPath(s.env), database, 'closed recovery database admits the replacement');
+  assert.deepEqual(readFileSync(database), recoveryBytes, 'replacement admission preserves recovery bytes');
+  assert.equal(statSync(database, { bigint: true }).ino, recoveryIdentity.ino);
+  phase('recovery-readmitted');
   const count = children.length; clock.advance(CODEX_RELOAD_MS * 2);
   assert.equal(children.length, count, 'old connector never self-revives without a singleton');
   const second = start(); onCleanup(t, () => second.stop());
   await until(() => s.watches() === 2 && s.fake.subscribers(s.id).length === 1, 'replacement live binding');
+  phase('replacement-subscribed');
   assert.notEqual(s.fake.subscribers(s.id)[0], oldSubscriber); assert.equal(helpers.length, 2);
   clock.advance(CODEX_RELOAD_MS); await until(s.ready, 'replacement readiness');
+  phase('replacement-ready');
   const replacementStatus = readFileSync(s.path + '.status.json', 'utf8');
   await first.stop(); assert.equal(readFileSync(s.path + '.status.json', 'utf8'), replacementStatus, 'old cleanup cannot delete successor readiness');
   await second.stop(); assert.deepEqual(await second.stopped, { reason: 'stopped' });
+  phase('replacement-stopped');
   assert.equal(existsSync(s.path + '.status.json'), false); assert.equal(reports.at(-1)?.reason, 'stopped');
 });
 

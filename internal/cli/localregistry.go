@@ -96,6 +96,12 @@ func (a *app) localRegistryDirectory(create bool) (*os.File, error) {
 	}
 	return localRegistryOpen(home, create)
 }
+
+// localGitProbeBudget bounds one Git project-identity subprocess. A variable
+// only so in-package tests whose subject is not this deadline can wait for a
+// cold fixture process on a slow runner; product code never changes it.
+var localGitProbeBudget = 2 * time.Second
+
 func (a *app) localRegistryContext() context.Context {
 	if a.ctx != nil {
 		return a.ctx
@@ -285,7 +291,7 @@ func (a *app) mutateLocalRegistry(create bool, fn func(*localRegistryDocument) e
 	ctx, cancel := context.WithTimeout(a.localRegistryContext(), 2*time.Second)
 	defer cancel()
 	if err := ctx.Err(); err != nil {
-		return err
+		return fmt.Errorf("local inventory update: %w", err)
 	}
 	dir, err := a.localRegistryDirectory(create)
 	if !create && errors.Is(err, os.ErrNotExist) {
@@ -297,6 +303,9 @@ func (a *app) mutateLocalRegistry(create bool, fn func(*localRegistryDocument) e
 	defer dir.Close()
 	unlock, err := localRegistryLock(ctx, dir)
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return fmt.Errorf("local inventory update: %w", err)
+		}
 		return err
 	}
 	defer unlock()
@@ -326,7 +335,7 @@ func (a *app) mutateLocalRegistry(create bool, fn func(*localRegistryDocument) e
 		return nil
 	}
 	if err := ctx.Err(); err != nil {
-		return err
+		return fmt.Errorf("local inventory update: %w", err)
 	}
 	return localRegistryAtomic(dir, "inventory.json", append(raw, '\n'))
 }
@@ -351,7 +360,7 @@ func (a *app) localProjectIdentity() (localProject, error) {
 		return localProject{}, usageErr("inventory project must be an existing directory")
 	}
 	p := localProject{Root: dir, Directory: dir, Artifacts: []localArtifact{}}
-	ctx, cancel := context.WithTimeout(a.localRegistryContext(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(a.localRegistryContext(), localGitProbeBudget)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir", "--absolute-git-dir")
 	cmd.WaitDelay = 100 * time.Millisecond
@@ -381,7 +390,7 @@ func (a *app) localProjectIdentity() (localProject, error) {
 			return p, err
 		}
 	} else if ctx.Err() != nil {
-		return p, ctx.Err()
+		return p, fmt.Errorf("local project Git discovery: %w", ctx.Err())
 	} // Non-Git directories also work without git installed.
 	return p, nil
 }

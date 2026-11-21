@@ -3,12 +3,15 @@ package httpapi_test
 import (
 	"bufio"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httptrace"
+	"os"
 	"runtime"
 	"strings"
 	"sync"
@@ -512,10 +515,77 @@ func TestSlowSSEConsumerDoesNotBlockSend(t *testing.T) {
 
 func slowSSEConsumerDoesNotBlockSend(t *testing.T, refs bool) {
 	waitStreams(t, 0)
-	env := testhub.StartWith(t, func(cfg *hub.Config) { cfg.DeliveryReferences = refs })
-	// A stuck stream is only dropped after SSEStall; at an hour, any send
-	// whose append waited on the stream would hang, and the per-send
-	// timeout below catches it. A send merely slowed by the stuck stream is
+	blocked, draining := make(chan struct{}), make(chan struct{})
+	sink, unread := net.Pipe()
+	defer sink.Close()
+	defer unread.Close()
+	env := testhub.StartWithServer(t, func(cfg *hub.Config) { cfg.DeliveryReferences = refs }, func(srv *http.Server) {
+		next := srv.Handler
+		srv.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/v1/events" {
+				stop := context.AfterFunc(r.Context(), func() { unread.Close() })
+				defer stop()
+				w = &blockedSSESocket{ResponseWriter: w, sink: sink, blocked: blocked, draining: draining}
+			}
+			next.ServeHTTP(w, r)
+		})
+	})
+	// Compare SSE backpressure, not which interleaved send pays for a WAL
+	// checkpoint. Keep this disposable fixture NORMAL and its real four-way
+	// pool; configure and retain every connection before measuring sends.
+	poolSize := env.Hub.DB.Stats().MaxOpenConnections
+	if poolSize != 4 {
+		t.Fatalf("SSE fixture pool = %d, want 4", poolSize)
+	}
+	env.Hub.DB.SetMaxIdleConns(poolSize)
+	func() {
+		var conns []*sql.Conn
+		defer func() {
+			for _, conn := range conns {
+				conn.Close()
+			}
+		}()
+		for i := 0; i < poolSize; i++ {
+			conn, err := env.Hub.DB.Conn(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			conns = append(conns, conn)
+			if _, err := conn.ExecContext(context.Background(), `PRAGMA wal_autocheckpoint=0`); err != nil {
+				t.Fatal(err)
+			}
+			var synchronous, auto int
+			if err := conn.QueryRowContext(context.Background(), `PRAGMA synchronous`).Scan(&synchronous); err != nil || synchronous != 1 {
+				t.Fatalf("connection %d: synchronous=%d, want NORMAL (1): %v", i, synchronous, err)
+			}
+			if err := conn.QueryRowContext(context.Background(), `PRAGMA wal_autocheckpoint`).Scan(&auto); err != nil || auto != 0 {
+				t.Fatalf("connection %d: wal_autocheckpoint=%d, want 0: %v", i, auto, err)
+			}
+		}
+	}()
+	var databasePath string
+	if err := env.Hub.DB.QueryRow(`SELECT file FROM pragma_database_list WHERE name='main'`).Scan(&databasePath); err != nil {
+		t.Fatal(err)
+	}
+	// Registered before openSSE's cleanup, so cancellation closes the client
+	// first. Join the handler before checking the finite burst's WAL bound
+	// and paying the deferred checkpoint cost, even on an assertion failure.
+	t.Cleanup(func() {
+		waitStreams(t, 0)
+		if info, err := os.Stat(databasePath + "-wal"); err != nil {
+			t.Errorf("deferred checkpoint WAL: %v", err)
+		} else if info.Size() > 128<<20 {
+			t.Errorf("finite SSE fixture WAL = %d bytes, want <= 128 MiB", info.Size())
+		}
+		var busy, frames, checkpointed int
+		if err := env.Hub.DB.QueryRow(`PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&busy, &frames, &checkpointed); err != nil || busy != 0 || frames != 0 || checkpointed != 0 {
+			t.Errorf("final checkpoint: busy=%d frames=%d checkpointed=%d: %v", busy, frames, checkpointed, err)
+		}
+	})
+
+	// Keep the SSE queue's stall timer from dropping the stream during
+	// measurements. Any send whose append waits on the stuck writer would
+	// hang, and the per-send timeout below catches it. A send merely slowed by the stuck stream is
 	// caught both by the aggregate send budget and by
 	// interleaving each send to b (stuck stream) with the same
 	// send to c (no stream) and comparing the totals: both halves see the
@@ -540,10 +610,6 @@ func slowSSEConsumerDoesNotBlockSend(t *testing.T, refs bool) {
 	b, bSec := env.NewPeer("session", "b")
 	c, _ := env.NewPeer("dot", "c")
 	env.SetLimits(a, 10000, 10000)
-
-	// Open a stream and never read from it.
-	s := openSSE(t, env, bSec, "", nil)
-	waitStreams(t, 1)
 
 	// Coordinator decision (2026-11-05): the stream-specific guarantee is the
 	// per-send deadlock watchdog plus the interleaved no-stream comparison
@@ -588,6 +654,18 @@ func slowSSEConsumerDoesNotBlockSend(t *testing.T, refs bool) {
 		}
 		return took
 	}
+	// An unread loopback socket can still buffer every measured Delivery.
+	// Connect over HTTP as before, but hold the writer on a real Delivery
+	// before timing either recipient, independent of OS socket buffering.
+	s := openSSE(t, env, bSec, "?after=head", nil)
+	waitStreams(t, 1)
+	send("seed", b, perSend)
+	select {
+	case <-blocked:
+	case <-time.After(perSend):
+		t.Fatal("SSE writer did not reach the seed Delivery")
+	}
+
 	var stuck, free time.Duration
 	for i := 0; i < n; i++ {
 		free += send(fmt.Sprintf("free-%d", i), c, perSend)
@@ -596,6 +674,11 @@ func slowSSEConsumerDoesNotBlockSend(t *testing.T, refs bool) {
 	t.Logf("%d sends took %v to the stuck-stream peer, %v to a peer with no stream", n, stuck, free)
 	if stuck > aggregate {
 		t.Fatalf("%d sends to a stuck SSE consumer took %v, want <= %v total", n, stuck, aggregate)
+	}
+	select {
+	case <-draining:
+		t.Fatal("SSE stream began teardown before the client canceled")
+	default:
 	}
 	if got := httpapi.ActiveStreams(); got != 1 {
 		t.Fatalf("active streams = %d after the sends, want the stuck stream still open", got)
@@ -608,6 +691,52 @@ func slowSSEConsumerDoesNotBlockSend(t *testing.T, refs bool) {
 	s.cancel()
 	s.resp.Body.Close()
 	waitStreams(t, 0)
+}
+
+// blockedSSESocket passes headers and preamble through to the real client,
+// then routes the Delivery write to an unread, deadline-aware net.Pipe.
+type blockedSSESocket struct {
+	http.ResponseWriter
+	sink     net.Conn
+	blocked  chan struct{}
+	draining chan struct{}
+
+	mu       sync.Mutex
+	deadline time.Time
+}
+
+func (w *blockedSSESocket) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+func (w *blockedSSESocket) SetWriteDeadline(deadline time.Time) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	// Frame deadlines advance, but teardown can shorten the deadline
+	// between setting it and entering the first Delivery Write.
+	teardown := deadline.Before(w.deadline)
+	select {
+	case <-w.blocked:
+		// The held writer cannot set another frame deadline.
+		teardown = true
+	default:
+	}
+	if teardown && !deadline.IsZero() {
+		select {
+		case <-w.draining:
+		default:
+			close(w.draining)
+		}
+	}
+	w.deadline = deadline
+	_ = w.sink.SetWriteDeadline(deadline)
+	return http.NewResponseController(w.ResponseWriter).SetWriteDeadline(deadline)
+}
+
+func (w *blockedSSESocket) Write(p []byte) (int, error) {
+	if strings.Contains(string(p), "\nevent: delivery\n") {
+		close(w.blocked)
+		return w.sink.Write(p)
+	}
+	return w.ResponseWriter.Write(p)
 }
 
 // observeSlowSSESend samples only this test process before the request watchdog
@@ -673,21 +802,61 @@ func (w *stalledDeliveryWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// TestStalledSSEWriterDoesNotBlockSend complements the stuck-socket test
-// above deterministically: the real SSE handler's writer is proven blocked
-// mid-Delivery write (no dependence on TCP buffer sizes), then 200 sends
-// overflow the 64-frame queue. Same-owner and unrelated sends must still
-// commit while the log reader is backpressured by the full queue.
+// TestStalledSSEWriterDoesNotBlockSend drives the SSE handler directly and
+// sends an uninterrupted burst to its recipient. The writer is blocked
+// mid-Delivery write, then 200 sends overflow the 64-frame queue. Same-owner
+// and unrelated sends must still commit while the log reader is backpressured.
 func TestStalledSSEWriterDoesNotBlockSend(t *testing.T) {
 	for _, mode := range deliveryModes {
 		t.Run(mode.name, func(t *testing.T) {
-			env := testhub.StartWith(t, func(cfg *hub.Config) {
+			env := testhub.StartFull(t, func(cfg *hub.Config) {
 				cfg.DeliveryReferences = mode.refs
 			})
 			a, aSec := env.NewPeer("grokbot", "a")
 			b, bSec := env.NewPeer("session", "b")
 			c, _ := env.NewPeer("dot", "c")
 			env.SetLimits(a, 10000, 10000)
+
+			// Checkpoint latency is independent of SSE backpressure. Keep FULL
+			// commit durability, but move checkpoints outside the timed sends.
+			// Configure every possible pool connection and retain them all so
+			// later sends cannot pick up the DSN's auto-checkpoint default.
+			poolSize := env.Hub.DB.Stats().MaxOpenConnections
+			env.Hub.DB.SetMaxIdleConns(poolSize)
+			var conns []*sql.Conn
+			configure := func() {
+				defer func() {
+					for _, conn := range conns {
+						conn.Close()
+					}
+				}()
+				for i := 0; i < poolSize; i++ {
+					conn, err := env.Hub.DB.Conn(context.Background())
+					if err != nil {
+						t.Fatal(err)
+					}
+					conns = append(conns, conn)
+					if _, err := conn.ExecContext(context.Background(), `PRAGMA wal_autocheckpoint=0`); err != nil {
+						t.Fatal(err)
+					}
+					var sync, auto int
+					if err := conn.QueryRowContext(context.Background(), `PRAGMA synchronous`).Scan(&sync); err != nil || sync != 2 {
+						t.Fatalf("connection %d: synchronous=%d, want FULL (2): %v", i, sync, err)
+					}
+					if err := conn.QueryRowContext(context.Background(), `PRAGMA wal_autocheckpoint`).Scan(&auto); err != nil || auto != 0 {
+						t.Fatalf("connection %d: wal_autocheckpoint=%d, want 0: %v", i, auto, err)
+					}
+				}
+			}
+			configure()
+			// Registered before stream cleanup: checkpoint only after the
+			// stalled handler and its writer have both exited.
+			t.Cleanup(func() {
+				var busy, frames, checkpointed int
+				if err := env.Hub.DB.QueryRow(`PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&busy, &frames, &checkpointed); err != nil || busy != 0 {
+					t.Errorf("final checkpoint: busy=%d frames=%d checkpointed=%d: %v", busy, frames, checkpointed, err)
+				}
+			})
 
 			// Serve the production handler against a controlled writer. Keep
 			// stall/heartbeat timers out of the test: only cancellation or
@@ -731,8 +900,10 @@ func TestStalledSSEWriterDoesNotBlockSend(t *testing.T) {
 
 			send := func(key, to string) {
 				t.Helper()
+				// The writer blocks explicitly on a Delivery frame; the queue is
+				// bounded by frame count. Keep bodies small to avoid unrelated
+				// database write volume in this backpressure test.
 				body := sendBody(key, to)
-				body["content"] = map[string]any{"text": strings.Repeat("x", 4000)}
 				j, err := json.Marshal(body)
 				if err != nil {
 					t.Fatal(err)
@@ -749,6 +920,9 @@ func TestStalledSSEWriterDoesNotBlockSend(t *testing.T) {
 				req.Header.Set("Authorization", "Bearer "+aSec)
 				resp, err := http.DefaultClient.Do(req)
 				if err != nil {
+					stacks := make([]byte, 256<<10)
+					n := runtime.Stack(stacks, true)
+					t.Logf("store stats after send failure: %+v\ngoroutines (up to %d bytes):\n%s", env.Hub.DB.Stats(), len(stacks), stacks[:n])
 					t.Fatalf("send %s blocked while SSE writer was stalled: %v", key, err)
 				}
 				_, err = io.Copy(io.Discard, resp.Body)

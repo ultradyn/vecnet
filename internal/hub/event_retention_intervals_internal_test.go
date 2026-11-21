@@ -21,7 +21,9 @@ func TestRetentionIndexedIntervalsPreserveHistoricalRules(t *testing.T) {
 	// with other independent scale guards without reducing their coverage.
 	t.Parallel()
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "hub.db"))
+	// This model tests interval semantics and rollback, not power-loss durability.
+	// Use a per-database policy; t.Parallel forbids process-environment overrides.
+	db, err := store.OpenWithSynchronous(filepath.Join(t.TempDir(), "hub.db"), "normal")
 	if err != nil {
 		t.Fatal(err)
 	}

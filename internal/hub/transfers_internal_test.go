@@ -20,7 +20,6 @@ import (
 	"github.com/XertroV/vecnet/internal/blob"
 	"github.com/XertroV/vecnet/internal/blobwire"
 	"github.com/XertroV/vecnet/internal/prefs"
-	"github.com/XertroV/vecnet/internal/store"
 	"path/filepath"
 )
 
@@ -198,11 +197,7 @@ type transferTestEnv struct {
 func newTransferTestEnv(t *testing.T) *transferTestEnv {
 	t.Helper()
 	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "hub.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := openTransferFixtureStore(t, filepath.Join(dir, "hub.db"))
 	clock := &transferClock{t: time.Date(2026, 11, 6, 10, 0, 0, 0, time.UTC)}
 	cfg := DefaultConfig()
 	cfg.DataDir = dir
@@ -256,7 +251,9 @@ func TestR2PreferenceSnapshotsAndClasses(t *testing.T) {
 			}
 		})
 	}
+	t.Setenv("VECNET_SQLITE_SYNCHRONOUS", "")
 	f := newTransfers(t)
+	checkTransferStoreIsolation(t, f.env)
 	g := f.reserve(t, "default", 3)
 	if g.RetentionClass != "1d" {
 		t.Fatal("wrong default")

@@ -11,11 +11,15 @@ package cli
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/XertroV/vecnet/internal/platform"
 )
 
 const (
@@ -25,11 +29,20 @@ const (
 )
 
 // claudeDeliveryScopeKey is the addressed binding key of the witnessed
-// profile in claudeStatusFixture (hub https://hub.example.com, peer_A).
+// profile in claudeStatusFixture (pinned hub claudeTestHubPin, claudeTestPeerID).
 func claudeDeliveryScopeKey() string {
 	return claudeBindingKey(claudeScope{
-		HubIdentity: "https://hub.example.com",
-		Recipient:   "peer_A",
+		HubIdentity: claudeTestHubPin,
+		Recipient:   claudeTestPeerID,
+	})
+}
+
+// claudeDeliveryLegacyScopeKey is the slice-3 key the same recipient's claims
+// were recorded under, when the hub identity was the endpoint.
+func claudeDeliveryLegacyScopeKey() string {
+	return claudeLegacyBindingKey(claudeScope{
+		HubEndpoint: "https://hub.example.com",
+		Recipient:   claudeTestPeerID,
 	})
 }
 
@@ -43,10 +56,22 @@ func claudeDeliveryTestDSN(path string) string {
 func claudeDeliveryLedger(t *testing.T, home string, rows map[string]string) string {
 	t.Helper()
 	dir := filepath.Join(home, ".local", "state", "vecnet", "codex")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := platform.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(dir, "delivery.sqlite")
+	// Seed the inode privately before SQLite touches it, as the TS host does:
+	// on Windows SQLite's own creator would inherit the parent's ACL and
+	// owner, which the ledger's private-file check rightly refuses.
+	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+		seed, err := platform.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := seed.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
 	db, err := sql.Open("sqlite", "file:"+claudeDeliveryTestDSN(path)+"?_pragma=busy_timeout(5000)")
 	if err != nil {
 		t.Fatal(err)
@@ -63,7 +88,7 @@ func claudeDeliveryLedger(t *testing.T, home string, rows map[string]string) str
 			t.Fatal(err)
 		}
 	}
-	if err := os.Chmod(path, 0o600); err != nil {
+	if err := cliFixtureChmod(path, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return path
@@ -163,7 +188,7 @@ func TestClaudeDeliveriesListIsBoundedAndRedacted(t *testing.T) {
 		t.Fatalf("claude deliveries exit %d: %s", code, errs)
 	}
 	// Redaction: no coordinates, no home paths, no inbox cursors, no secrets.
-	for _, leak := range []string{"peer_A", "hub.example.com", home, "e1.1", "e1.2", "secret"} {
+	for _, leak := range []string{claudeTestPeerID, "hub.example.com", home, "e1.1", "e1.2", "secret"} {
 		if strings.Contains(out, leak) {
 			t.Fatalf("claude deliveries leaked %q: %s", leak, out)
 		}
@@ -226,7 +251,7 @@ func TestClaudeDeliveriesListIsBoundedAndRedacted(t *testing.T) {
 	if !strings.Contains(text, "disposition=attempted") || !strings.Contains(text, "state=uncertain") {
 		t.Fatalf("the operator list must read the disposition field: %s", text)
 	}
-	for _, leak := range []string{"peer_A", "hub.example.com", home} {
+	for _, leak := range []string{claudeTestPeerID, "hub.example.com", home} {
 		if strings.Contains(text, leak) {
 			t.Fatalf("claude deliveries text leaked %q: %s", leak, text)
 		}
@@ -308,7 +333,8 @@ func TestClaudeDeliveriesRefuseUnsafeLedger(t *testing.T) {
 	path := claudeDeliveryLedger(t, home, map[string]string{
 		claudeDeliveryClaimKey("dly_00000000000000000000000001"): claudeDeliveryClaimJSON(t, nil),
 	})
-	if err := os.Chmod(path, 0o644); err != nil {
+	// os.Chmod on unix; on Windows the equivalent DACL with a world-read ACE.
+	if err := cliFixtureChmod(path, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	code, _, errs := claudeStatusRun(t, env, "--net", "p", "claude", "deliveries")
@@ -379,8 +405,8 @@ func TestClaudeResolveRetryRefusesHeldAndPending(t *testing.T) {
 		"state": "held", "disposition": "held", "dispositionReason": "inbox_only",
 	})
 	heldWake := claudeDeliveryClaimJSON(t, map[string]any{
-		"deliveryId": "dly_000000000000000000000000A2",
-		"state": "held", "disposition": "held", "dispositionReason": "operator_keep_inbox",
+		"deliveryId": "dly_000000000000000000000000A2", "state": "held",
+		"disposition": "held", "dispositionReason": "operator_keep_inbox",
 	})
 	reserved := claudeDeliveryClaimJSON(t, map[string]any{
 		"deliveryId": "dly_000000000000000000000000A3", "state": "reserved",
@@ -512,5 +538,139 @@ func TestClaudeStatusShowsPendingCapState(t *testing.T) {
 	}
 	if !strings.Contains(text, "pending_count: 2") || !strings.Contains(text, "blocked_pending_limit: true") {
 		t.Fatalf("status text hides the cap state: %s", text)
+	}
+}
+
+// TestClaudeDeliveriesListsLegacyKeyRows pins the slice-3 migration of the
+// claim ledger: claims recorded under the legacy endpoint-derived key stay
+// listed, counted and resolvable inbox-only, while --retry refuses because
+// that scope can never be admitted again.
+func TestClaudeDeliveriesListsLegacyKeyRows(t *testing.T) {
+	home, env := claudeStatusFixture(t)
+	legacyKey := claudeDeliveryLegacyScopeKey()
+	if legacyKey == claudeDeliveryScopeKey() {
+		t.Fatal("the legacy and pinned keys coincide")
+	}
+	legacyID, pinnedID := "dly_000000000000000000000000L1", "dly_000000000000000000000000P1"
+	claudeDeliveryLedger(t, home, map[string]string{
+		claudeDeliveryClaimKey(legacyID): claudeDeliveryClaimJSON(t, map[string]any{
+			"deliveryId": legacyID, "scope": legacyKey, "state": "uncertain",
+			"disposition": "uncertain", "dispositionReason": "write_failed_or_partial",
+		}),
+		claudeDeliveryClaimKey(pinnedID): claudeDeliveryClaimJSON(t, map[string]any{
+			"deliveryId": pinnedID, "msgId": "0f0e0d0c0b0a090807060504030201ff",
+		}),
+	})
+
+	result := claudeDeliveriesJSON(t, env, "deliveries", "--json")
+	list, _ := result["deliveries"].([]any)
+	seen := map[string]string{}
+	for _, raw := range list {
+		row, _ := raw.(map[string]any)
+		seen[row["delivery_id"].(string)], _ = row["scope"].(string)
+	}
+	if len(seen) != 2 || seen[legacyID] != legacyKey || seen[pinnedID] != claudeDeliveryScopeKey() {
+		t.Fatalf("the legacy-key claim is not listed beside the pinned one: %v", result)
+	}
+	if result["pending_count"] != float64(1) {
+		t.Fatalf("deliveries pending_count must count the legacy-key claim: %v", result["pending_count"])
+	}
+	if status := claudeStatusJSON(t, env, "--net", "p", "claude", "status", "--json"); status.PendingCount != 1 {
+		t.Fatalf("status pending_count must count the legacy-key claim: %+v", status)
+	}
+
+	// --retry on a legacy-key claim is refused and changes nothing.
+	before := claudeDeliveryKV(t, home)
+	code, _, errs := claudeStatusRun(t, env, "--net", "p", "claude", "resolve", legacyID,
+		"--expect-generation", claudeDeliveryTestGen, "--retry", "--confirm-duplicate-risk")
+	if code == 0 || !strings.Contains(errs, "legacy endpoint-keyed scope") {
+		t.Fatalf("retry on a legacy-key claim was not refused: %d %s", code, errs)
+	}
+	if after := claudeDeliveryKV(t, home); after[claudeDeliveryClaimKey(legacyID)] != before[claudeDeliveryClaimKey(legacyID)] {
+		t.Fatalf("the refused retry changed the claim: %s", after[claudeDeliveryClaimKey(legacyID)])
+	}
+
+	// The legacy reason wins over every state fence: a legacy-key claim that
+	// is still reserved (not otherwise resolvable) refuses for being legacy.
+	reservedID := "dly_000000000000000000000000L2"
+	claudeDeliveryLedger(t, home, map[string]string{
+		claudeDeliveryClaimKey(reservedID): claudeDeliveryClaimJSON(t, map[string]any{
+			"deliveryId": reservedID, "scope": legacyKey, "state": "reserved",
+			"msgId": "0f0e0d0c0b0a0908070605040302aaaa",
+		}),
+	})
+	code, _, errs = claudeStatusRun(t, env, "--net", "p", "claude", "resolve", reservedID,
+		"--expect-generation", claudeDeliveryTestGen, "--retry", "--confirm-duplicate-risk")
+	if code == 0 || !strings.Contains(errs, "legacy endpoint-keyed scope") {
+		t.Fatalf("a reserved legacy-key claim must refuse retry with the legacy reason: %d %s", code, errs)
+	}
+
+	// --keep-inbox holds it.
+	code, out, errs := claudeStatusRun(t, env, "--net", "p", "claude", "resolve", legacyID,
+		"--expect-generation", claudeDeliveryTestGen, "--keep-inbox")
+	if code != 0 {
+		t.Fatalf("keep-inbox on a legacy-key claim exit %d: %s %s", code, out, errs)
+	}
+	var held map[string]any
+	if err := json.Unmarshal([]byte(claudeDeliveryKV(t, home)[claudeDeliveryClaimKey(legacyID)]), &held); err != nil {
+		t.Fatal(err)
+	}
+	if held["state"] != "held" || held["scope"] != legacyKey {
+		t.Fatalf("keep-inbox did not hold the legacy-key claim: %v", held)
+	}
+	if status := claudeStatusJSON(t, env, "--net", "p", "claude", "status", "--json"); status.PendingCount != 1 {
+		t.Fatalf("only the reserved legacy-key claim should still count as pending: %+v", status)
+	}
+}
+
+// TestClaudeDeliveriesRendersHubAckObserved pins the operator view of the
+// delivery host's ack observation (phase 2 task 6): an observed claim shows
+// hub_ack_observed true in JSON and hub_ack_observed=true in text, an
+// unobserved one shows neither. The CLI only renders the flag; it never
+// infers or writes it.
+func TestClaudeDeliveriesRendersHubAckObserved(t *testing.T) {
+	home, env := claudeStatusFixture(t)
+	observed := claudeDeliveryClaimJSON(t, map[string]any{
+		"deliveryId": "dly_00000000000000000000000002", "state": "uncertain", "disposition": "uncertain",
+		"dispositionReason": "write_failed_or_outcome_unknown", "hubAckObserved": true,
+	})
+	claudeDeliveryLedger(t, home, map[string]string{
+		claudeDeliveryClaimKey("dly_00000000000000000000000001"): claudeDeliveryClaimJSON(t, nil),
+		claudeDeliveryClaimKey("dly_00000000000000000000000002"): observed,
+	})
+	before := claudeDeliveryKV(t, home)
+	result := claudeDeliveriesJSON(t, env, "deliveries", "--json")
+	rows := map[string]map[string]any{}
+	for _, raw := range result["deliveries"].([]any) {
+		row := raw.(map[string]any)
+		rows[row["delivery_id"].(string)] = row
+	}
+	if rows["dly_00000000000000000000000002"]["hub_ack_observed"] != true {
+		t.Fatalf("the observed claim does not render hub_ack_observed: %v", rows["dly_00000000000000000000000002"])
+	}
+	if _, shown := rows["dly_00000000000000000000000001"]["hub_ack_observed"]; shown {
+		t.Fatalf("an unobserved claim renders hub_ack_observed: %v", rows["dly_00000000000000000000000001"])
+	}
+	code, out, errs := claudeStatusRun(t, env, "--net", "p", "claude", "deliveries")
+	if code != 0 {
+		t.Fatalf("claude deliveries exit %d: %s", code, errs)
+	}
+	var observedLine, plainLine string
+	for _, line := range strings.Split(out, "\n") {
+		switch {
+		case strings.HasPrefix(line, "delivery: dly_00000000000000000000000002 "):
+			observedLine = line
+		case strings.HasPrefix(line, "delivery: dly_00000000000000000000000001 "):
+			plainLine = line
+		}
+	}
+	if !strings.Contains(observedLine, " hub_ack_observed=true") {
+		t.Fatalf("the text view hides the hub ack observation: %q", observedLine)
+	}
+	if plainLine == "" || strings.Contains(plainLine, "hub_ack_observed") {
+		t.Fatalf("the text view marks an unobserved claim: %q", plainLine)
+	}
+	if after := claudeDeliveryKV(t, home); !maps.Equal(after, before) {
+		t.Fatalf("listing changed the ledger: %v -> %v", before, after)
 	}
 }

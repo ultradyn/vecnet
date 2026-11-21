@@ -131,7 +131,13 @@ func launcherExecutableInfo(path string, info os.FileInfo) bool {
 	return info.Mode().Perm()&0o111 != 0
 }
 
-func launcherWindowsOpenDir(path, managed string, create bool) (_ *launcherRoot, err error) {
+func launcherWindowsOpenDir(path, managed string, create bool) (*launcherRoot, error) {
+	return launcherWindowsOpenDirWith(path, managed, create, platform.OpenDir, platform.OpenWindowsDirAt)
+}
+
+func launcherWindowsOpenDirWith(path, managed string, create bool,
+	openDir func(string) (*os.File, error), openDirAt func(*os.File, string) (*os.File, error),
+) (_ *launcherRoot, err error) {
 	volume := filepath.VolumeName(path)
 	if volume == "" || strings.HasPrefix(volume, `\\`) || strings.ContainsAny(strings.TrimPrefix(path, volume), ":\x00\r\n") {
 		return nil, usageErr("launcher requires a local absolute Windows path")
@@ -146,7 +152,15 @@ func launcherWindowsOpenDir(path, managed string, create bool) (_ *launcherRoot,
 		}
 	}()
 	pin := func(path string, private bool) error {
-		f, e := platform.OpenDir(path)
+		var f *os.File
+		var e error
+		if len(pins) == 0 {
+			f, e = openDir(path)
+		} else {
+			// Every ancestor remains pinned. Resolve only this child instead of
+			// walking again from the volume root for every successive prefix.
+			f, e = openDirAt(pins[len(pins)-1], filepath.Base(path))
+		}
 		if e != nil {
 			return e
 		}

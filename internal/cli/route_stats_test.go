@@ -363,12 +363,13 @@ func TestRouteStatsHelperRequestAndErrors(t *testing.T) {
 	}
 	t.Run("selection-errors-and-interruption", func(t *testing.T) {
 		for _, tc := range []struct {
-			err  error
-			want int
+			err         error
+			want        int
+			wantMessage string
 		}{
-			{&netError{err: errors.New(t3StatsURLCanary)}, exitNetwork},
-			{context.Canceled, exitUsage},
-			{context.DeadlineExceeded, exitUsage},
+			{&netError{err: errors.New(t3StatsURLCanary)}, exitNetwork, ""},
+			{context.Canceled, exitUsage, "interrupted"},
+			{context.DeadlineExceeded, exitUsage, "context deadline exceeded"},
 		} {
 			a, out, errs := t3StatsApp(t, false)
 			selected := 0
@@ -380,8 +381,8 @@ func TestRouteStatsHelperRequestAndErrors(t *testing.T) {
 				t.Fatal("selection failure exit changed")
 			}
 			if errors.Is(tc.err, context.Canceled) || errors.Is(tc.err, context.DeadlineExceeded) {
-				if !errors.Is(err, tc.err) || !strings.Contains(errs.String(), "interrupted") {
-					t.Fatal("interruption semantics changed")
+				if !errors.Is(err, tc.err) || errs.String() != "vecnet: "+tc.wantMessage+"\n" {
+					t.Fatal("context error identity or output changed")
 				}
 			}
 			t3StatsNoLeak(t, err.Error()+errs.String())

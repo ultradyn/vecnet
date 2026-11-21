@@ -69,14 +69,19 @@ func guardExec(t *testing.T, env *testhub.Env, q string, args ...any) {
 // Transport addresses use httptest's ephemeral listener; payload URLs are synthetic.
 func guardEnv(t *testing.T) (*testhub.Env, []guardFixture) {
 	t.Helper()
-	env := testhub.StartWith(t, func(c *hub.Config) { c.PublicURL = "https://frozen.example" })
+	return seedGuardEnv(t, testhub.StartWith(t, func(c *hub.Config) { c.PublicURL = "https://frozen.example" }))
+}
+
+// Seed the same legacy bytes into an explicitly selected logical or FULL store.
+func seedGuardEnv(t *testing.T, env *testhub.Env) (*testhub.Env, []guardFixture) {
+	t.Helper()
 	fixed, err := envelope.ParseTime(guardAt)
 	if err != nil {
 		t.Fatal(err)
 	}
 	env.Now.Advance(fixed.Sub(env.Now.Now()))
 	// One transaction for the whole seed: each autocommit statement would be
-	// its own synchronous=FULL commit, and these fixtures are rebuilt by most
+	// its own commit, and these fixtures are rebuilt by most
 	// tests in the package. Rows and bytes are identical either way.
 	tx, err := env.Hub.DB.Begin()
 	if err != nil {

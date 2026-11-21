@@ -17,6 +17,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/XertroV/vecnet/internal/envelope"
@@ -871,6 +872,8 @@ func TestHookNamesSenderFromSenderInfo(t *testing.T) {
 }
 
 func TestHookSessionStartAdmission(t *testing.T) {
+	// Signal initialization is process-wide and must precede the clock bubbles.
+	hookCatchSIGPIPE()
 	for _, tc := range []struct {
 		name                                           string
 		declared, existing, foreign, ambiguous, rebind bool
@@ -883,82 +886,94 @@ func TestHookSessionStartAdmission(t *testing.T) {
 		{name: "explicit rebind window", existing: true, foreign: true, rebind: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			env, path, polls := sessionHub(t)
-			env["CODEX_HOME"] = filepath.Join(t.TempDir(), "codex")
-			if !tc.declared {
-				noVecnetProfile(env)
-			}
-			if tc.existing {
-				seedSession(t, path, func(s *hookState) {
-					if tc.foreign {
-						boundTo("other")(s)
-					}
+			synctest.Test(t, func(t *testing.T) {
+				// Admission is functional: private file I/O must not spend the real
+				// hook budget before its worker can publish state. Keep real HTTP,
+				// with a private transport so no connection outlives this bubble.
+				previous := http.DefaultTransport
+				transport := previous.(*http.Transport).Clone()
+				http.DefaultTransport = transport
+				t.Cleanup(func() {
+					transport.CloseIdleConnections()
+					http.DefaultTransport = previous
 				})
-			}
-			if tc.ambiguous {
-				if _, err := registerSession(context.Background(), sessionsPath(path), "s1", "q", hookNow()); err != nil {
-					t.Fatal(err)
+				env, path, polls := sessionHub(t)
+				env["CODEX_HOME"] = filepath.Join(t.TempDir(), "codex")
+				if !tc.declared {
+					noVecnetProfile(env)
 				}
-			}
-			if tc.rebind {
-				if code, out, errs := runCLI(env, "hook", "rebind", "--profile", "p"); code != 0 {
-					t.Fatalf("rebind: exit=%d out=%q stderr=%q", code, out, errs)
+				if tc.existing {
+					seedSession(t, path, func(s *hookState) {
+						if tc.foreign {
+							boundTo("other")(s)
+						}
+					})
 				}
-			}
-			before, beforeErr := os.ReadFile(path)
-			beforeBinding, _ := os.ReadFile(bindingPath(path))
-			out, errs := runHookStdin(t, env, `{"hook_event_name":"SessionStart","session_id":"s1","source":"startup"}`, "hook", "--profile", "p")
-			if tc.rebind {
-				// SessionStart never claims or delivers; the session's next
-				// prompt takes the rebind window.
+				if tc.ambiguous {
+					if _, err := registerSession(context.Background(), sessionsPath(path), "s1", "q", hookNow()); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if tc.rebind {
+					if code, out, errs := runCLI(env, "hook", "rebind", "--profile", "p"); code != 0 {
+						t.Fatalf("rebind: exit=%d out=%q stderr=%q", code, out, errs)
+					}
+				}
+				before, beforeErr := os.ReadFile(path)
+				beforeBinding, _ := os.ReadFile(bindingPath(path))
+				out, errs := runHookStdin(t, env, `{"hook_event_name":"SessionStart","session_id":"s1","source":"startup"}`, "hook", "--profile", "p")
+				if tc.rebind {
+					// SessionStart never claims or delivers; the session's next
+					// prompt takes the rebind window.
+					if out != "" || errs != "" || polls.Load() != 0 {
+						t.Fatalf("rebound start: out=%q stderr=%q polls=%d", out, errs, polls.Load())
+					}
+					out, errs = runHookAs(t, env, "s1", "p")
+					if !strings.Contains(contextOf(t, out), `text="secret text"`) || polls.Load() != 1 {
+						t.Fatalf("rebound prompt: out=%q stderr=%q polls=%d", out, errs, polls.Load())
+					}
+					if s := readHookState(t, path); s.Session != "s1" || s.SessionHow != bindRebind || !s.RebindUntil.IsZero() {
+						t.Fatalf("binding=%+v", s.hookBinding)
+					}
+					return
+				}
 				if out != "" || errs != "" || polls.Load() != 0 {
-					t.Fatalf("rebound start: out=%q stderr=%q polls=%d", out, errs, polls.Load())
+					t.Fatalf("unadmitted start: out=%q stderr=%q polls=%d", out, errs, polls.Load())
 				}
-				out, errs = runHookAs(t, env, "s1", "p")
-				if !strings.Contains(contextOf(t, out), `text="secret text"`) || polls.Load() != 1 {
-					t.Fatalf("rebound prompt: out=%q stderr=%q polls=%d", out, errs, polls.Load())
+				after, afterErr := os.ReadFile(path)
+				afterBinding, _ := os.ReadFile(bindingPath(path))
+				if !bytes.Equal(before, after) || !bytes.Equal(beforeBinding, afterBinding) || errors.Is(beforeErr, os.ErrNotExist) != errors.Is(afterErr, os.ErrNotExist) {
+					t.Fatal("unadmitted start changed state or binding")
 				}
-				if s := readHookState(t, path); s.Session != "s1" || s.SessionHow != bindRebind || !s.RebindUntil.IsZero() {
-					t.Fatalf("binding=%+v", s.hookBinding)
+				if tc.foreign || tc.ambiguous {
+					return
 				}
-				return
-			}
-			if out != "" || errs != "" || polls.Load() != 0 {
-				t.Fatalf("unadmitted start: out=%q stderr=%q polls=%d", out, errs, polls.Load())
-			}
-			after, afterErr := os.ReadFile(path)
-			afterBinding, _ := os.ReadFile(bindingPath(path))
-			if !bytes.Equal(before, after) || !bytes.Equal(beforeBinding, afterBinding) || errors.Is(beforeErr, os.ErrNotExist) != errors.Is(afterErr, os.ErrNotExist) {
-				t.Fatal("unadmitted start changed state or binding")
-			}
-			if tc.foreign || tc.ambiguous {
-				return
-			}
-			// Only a prompt may establish the binding. Declared prompts claim at
-			// once; automatic prompts on an existing cursor defer the first claim.
-			prompt, _ := runHookAs(t, env, "s1", "p")
-			s := readHookState(t, path)
-			wantHow := bindAuto
-			if tc.declared {
-				wantHow = bindDeclared
-			}
-			if s.Session != "s1" || s.SessionHow != wantHow {
-				t.Fatalf("prompt binding=%+v", s.hookBinding)
-			}
-			if tc.declared {
-				if !strings.Contains(contextOf(t, prompt), `text="secret text"`) || polls.Load() != 1 {
-					t.Fatalf("declared prompt failed to claim: %q polls=%d", prompt, polls.Load())
+				// Only a prompt may establish the binding. Declared prompts claim at
+				// once; automatic prompts on an existing cursor defer the first claim.
+				prompt, _ := runHookAs(t, env, "s1", "p")
+				s := readHookState(t, path)
+				wantHow := bindAuto
+				if tc.declared {
+					wantHow = bindDeclared
 				}
-				// Leave a new delivery for the session's next prompt.
-				seedSession(t, path, func(s *hookState) { s.Shown = nil; s.Displayed = nil; s.PollCursor = "e1.0" })
-			} else if tc.existing && (prompt != "" || polls.Load() != 0) {
-				t.Fatalf("automatic prompt claimed too early: %q polls=%d", prompt, polls.Load())
-			}
-			beforePolls := polls.Load()
-			out, _ = runHookAs(t, env, "s1", "p")
-			if !strings.Contains(contextOf(t, out), `text="secret text"`) || polls.Load() != beforePolls+1 {
-				t.Fatalf("admitted prompt: out=%q polls=%d", out, polls.Load())
-			}
+				if s.Session != "s1" || s.SessionHow != wantHow {
+					t.Fatalf("prompt binding=%+v", s.hookBinding)
+				}
+				if tc.declared {
+					if !strings.Contains(contextOf(t, prompt), `text="secret text"`) || polls.Load() != 1 {
+						t.Fatalf("declared prompt failed to claim: %q polls=%d", prompt, polls.Load())
+					}
+					// Leave a new delivery for the session's next prompt.
+					seedSession(t, path, func(s *hookState) { s.Shown = nil; s.Displayed = nil; s.PollCursor = "e1.0" })
+				} else if tc.existing && (prompt != "" || polls.Load() != 0) {
+					t.Fatalf("automatic prompt claimed too early: %q polls=%d", prompt, polls.Load())
+				}
+				beforePolls := polls.Load()
+				out, _ = runHookAs(t, env, "s1", "p")
+				if !strings.Contains(contextOf(t, out), `text="secret text"`) || polls.Load() != beforePolls+1 {
+					t.Fatalf("admitted prompt: out=%q polls=%d", out, polls.Load())
+				}
+			})
 		})
 	}
 }

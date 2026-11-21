@@ -145,7 +145,7 @@ func TestRestartReplaysHookShown(t *testing.T) {
 		t.Fatal("hook did not show delivery")
 	}
 	out, stop := startWatch(t, a, "watch", "--for-monitor")
-	waitLine(t, out, regexp.MustCompile(`shown by hook$`), 5*time.Second)
+	waitLine(t, out, regexp.MustCompile(`shown by hook$`), watchLineDeadline)
 	stop()
 	if strings.Count(out.String(), "shown by hook") != 1 {
 		t.Fatalf("replay=%q", out.String())
@@ -177,7 +177,7 @@ func TestHookAndWatchShowOnce(t *testing.T) {
 	defer stop()
 	select {
 	case <-live:
-	case <-time.After(5 * time.Second):
+	case <-time.After(watchLineDeadline):
 		t.Fatal("watch did not finish replay")
 	}
 	var contexts strings.Builder
@@ -193,7 +193,7 @@ func TestHookAndWatchShowOnce(t *testing.T) {
 	// This later delivery is consumed only by watch. Ordered SSE handling
 	// guarantees the six competing deliveries have passed through live dedupe.
 	b.send(aID, "watch completion barrier", "--hold")
-	waitLine(t, out, regexp.MustCompile(`watch completion barrier$`), 5*time.Second)
+	waitLine(t, out, regexp.MustCompile(`watch completion barrier$`), watchLineDeadline)
 	stop()
 	combined := out.String() + contexts.String()
 	for i := 1; i <= 6; i++ {

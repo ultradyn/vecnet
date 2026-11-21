@@ -64,7 +64,7 @@ func (a *app) putAvatar(path string, q url.Values, arg string) error {
 // cmdAvatar sets or clears the caller's own avatar; a principal names its
 // peer with --as.
 func (a *app) cmdAvatar(args []string) error {
-	o, err := parseFlags("avatar", args, map[string]flagKind{})
+	o, err := a.parseIDFlags("avatar", args)
 	if err != nil {
 		return err
 	}

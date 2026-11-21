@@ -384,6 +384,11 @@ func TestLauncherManagedRepairResumesEveryAuthorizedPublication(t *testing.T) {
 				os.WriteFile(filepath.Join(state, "fail-reload"), nil, 0o600)
 				if _, err := a.repairLauncherArtifact(project, art); err == nil {
 					t.Fatal("expected pending reload")
+				} else {
+					t.Logf("first repair error: %v", err)
+					if !strings.Contains(err.Error(), "systemctl daemon-reload failed:") {
+						t.Fatalf("repair did not reach pending reload: %v", err)
+					}
 				}
 				var intent launcherRepairIntent
 				if err := json.Unmarshal(launcherTestRead(t, filepath.Join(filepath.Dir(art.Path), "repair-pending.json")), &intent); err != nil {
