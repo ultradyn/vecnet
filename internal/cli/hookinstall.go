@@ -149,8 +149,13 @@ func (a *app) cmdHookInstall(args []string) error {
 	if o.has("client") {
 		client = o.str("client")
 	}
-	if client != "claude" && client != "codex" {
-		return usageErr("hook install: --client must be claude or codex")
+	if client != "claude" && client != "codex" && client != "agy" {
+		return usageErr("hook install: --client must be claude or codex, or agy")
+	}
+	if client == "agy" && agyInstallOS == "windows" {
+		// agy runs hook commands under cmd /c, where the installer's POSIX
+		// quoting breaks; the Windows path is not qualified yet.
+		return &refusedError{msg: "hook install: agy hooks are not qualified on Windows yet"}
 	}
 	if client == "codex" && o.has("mcp") {
 		return usageErr("hook install: --mcp registration is supported only for --client claude")
@@ -158,11 +163,18 @@ func (a *app) cmdHookInstall(args []string) error {
 	if o.has("write") && o.has("dry-run") {
 		return usageErr("hook install: --write and --dry-run are mutually exclusive")
 	}
-	if client != "codex" && (o.has("rollback") || o.has("dry-run")) {
+	if client == "agy" && o.has("rollback") {
+		return usageErr("hook install: --rollback requires --client codex")
+	}
+	if client != "codex" && client != "agy" && (o.has("rollback") || o.has("dry-run")) {
+		// Claude's exact pre-agy wording (git show 68e5aeb8).
 		return usageErr("hook install: --rollback and --dry-run require --client codex")
 	}
 	if client == "codex" && o.has("auto-ack") {
 		return usageErr("hook install: Codex hooks never claim or acknowledge messages; omit --auto-ack")
+	}
+	if client == "agy" && o.has("auto-ack") {
+		return usageErr("hook install: agy hooks never claim or acknowledge messages; omit --auto-ack")
 	}
 	codexAdvice := func() {
 		if client == "codex" {
@@ -231,30 +243,35 @@ func (a *app) cmdHookInstall(args []string) error {
 	// own "not a git repository" answer (git missing, timed out, refused the
 	// repository): the default target's tracking status is then unknown.
 	var codexUnknown error
+	agyRoot := ""
+	// agyUnknown carries the same discovery failure for the agy target.
+	var agyUnknown error
 	if o.has("settings") {
 		if path == "" {
 			return usageErr("hook install: --settings must not be empty")
 		}
 		fmt.Fprintf(a.stderr, "settings target %s (explicit --settings)\n", path)
 	} else if client == "codex" {
-		root, gitErr := a.hookGit(cwd, "--show-toplevel")
+		root, fallback, gitUnknown := a.projectTargetRoot(cwd)
 		reason := "git top-level; Codex project hooks"
-		if gitErr != nil || root == "" {
-			if hookNotGitRepo(gitErr) {
-				fmt.Fprintf(a.stderr, "not in a git repository; using %s\n", cwd)
-			} else {
-				codexUnknown = gitErr
-				if codexUnknown == nil {
-					codexUnknown = errors.New("git printed no top-level")
-				}
-				fmt.Fprintf(a.stderr, "could not determine the git repository (%v); using %s\n", hookGitReason(codexUnknown), cwd)
-			}
-			root = cwd
+		if fallback {
 			reason = "cwd fallback; Codex project hooks"
 		} else {
 			codexRoot = root
 		}
+		codexUnknown = gitUnknown
 		path = filepath.Join(root, ".codex", "hooks.json")
+		fmt.Fprintf(a.stderr, "settings target %s (%s)\n", path, reason)
+	} else if client == "agy" {
+		root, fallback, gitUnknown := a.projectTargetRoot(cwd)
+		reason := "git top-level; agy workspace hooks"
+		if fallback {
+			reason = "cwd fallback; agy workspace hooks"
+		} else {
+			agyRoot = root
+		}
+		agyUnknown = gitUnknown
+		path = filepath.Join(root, ".agents", "hooks.json")
 		fmt.Fprintf(a.stderr, "settings target %s (%s)\n", path, reason)
 	} else {
 		if projectOK && projectDir != cwd {
@@ -295,6 +312,14 @@ func (a *app) cmdHookInstall(args []string) error {
 			fmt.Fprintln(a.stderr, "codex: generic hooks never deliver peer content; use vecnet --net P codex setup for exact-thread app-server delivery")
 		}
 		return err
+	}
+	if client == "agy" {
+		mcpPath := filepath.Join(filepath.Dir(path), "mcp_config.json")
+		if err := a.installAgyHooks(path, mcpPath, agyRoot, agyUnknown, bin, profile, mcp, o); err != nil {
+			return err
+		}
+		a.agyAdvice(mcp)
+		return nil
 	}
 	if raw, err := os.ReadFile(path); err == nil {
 		if others := otherHookProfiles(raw, profile); len(others) > 0 {
@@ -525,19 +550,50 @@ func hookGitReason(err error) string {
 	return err.Error()
 }
 
+// projectTargetRoot resolves the git top-level at or above dir for a
+// project-scoped install target (Codex project hooks, agy workspace hooks).
+// Outside every repository it falls back to dir, reporting that on stderr;
+// unknown carries a repository-discovery failure that is not git's own
+// not-a-repository answer, so the default target's tracking status cannot
+// be checked.
+func (a *app) projectTargetRoot(dir string) (root string, fallback bool, unknown error) {
+	root, gitErr := a.hookGit(dir, "--show-toplevel")
+	if gitErr != nil || root == "" {
+		if hookNotGitRepo(gitErr) {
+			fmt.Fprintf(a.stderr, "not in a git repository; using %s\n", dir)
+		} else {
+			unknown = gitErr
+			if unknown == nil {
+				unknown = errors.New("git printed no top-level")
+			}
+			fmt.Fprintf(a.stderr, "could not determine the git repository (%v); using %s\n", hookGitReason(unknown), dir)
+		}
+		return dir, true, unknown
+	}
+	return root, false, nil
+}
+
 // checkCodexUntracked allows only git's explicit untracked result. Discovery
 // succeeded, so a failed status probe must not share a personal profile.
 func (a *app) checkCodexUntracked(root, path string) error {
+	return a.checkUntracked(root, ".codex/hooks.json", path, "")
+}
+
+// checkUntracked allows only git's explicit untracked result for rel
+// (relative to root). Discovery succeeded, so a failed status probe must
+// not share a personal profile. advice, when not empty, extends the refusal
+// with client-specific guidance.
+func (a *app) checkUntracked(root, rel, path, advice string) error {
 	ctx, cancel := context.WithTimeout(a.ctx, localGitProbeBudget)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "-C", root, "ls-files", "--error-unmatch", "--", ".codex/hooks.json")
+	cmd := exec.CommandContext(ctx, "git", "-C", root, "ls-files", "--error-unmatch", "--", rel)
 	cmd.WaitDelay = 100 * time.Millisecond
 	err := cmd.Run()
 	var exit *exec.ExitError
 	if errors.As(err, &exit) && exit.ExitCode() == 1 && ctx.Err() == nil {
 		return nil
 	}
-	return fmt.Errorf("hook install: %s is tracked by git (or its status is unknown); writing it would share your profile with everyone; pass --settings %s to write it anyway", path, path)
+	return fmt.Errorf("hook install: %s is tracked by git (or its status is unknown); writing it would share your profile with everyone; pass --settings %s to write it anyway%s", path, path, advice)
 }
 
 // hookMainCheckout returns the main checkout's root when dir is in a
@@ -608,25 +664,33 @@ func otherHookProfiles(settings []byte, profile string) []string {
 // directory is a symlink, leaving the link and its target unchanged.
 func defaultSettingsRedirect(path, what string) error {
 	for _, p := range []string{filepath.Dir(path), path} {
-		reparse, err := platform.IsReparse(p)
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		if err != nil {
+		if err := symlinkSettingsRefused(p, what, path); err != nil {
 			return err
 		}
-		if !reparse {
-			continue
-		}
-		resolved := p
-		if r, err := platform.Canonical(p); err == nil {
-			resolved = r
-		} else if l, err := os.Readlink(p); err == nil {
-			resolved = l
-		}
-		return fmt.Errorf("hook install: %s is a symlink to %s; the default target is only %s, so rerun with --settings %s to write through it", p, resolved, what, path)
 	}
 	return nil
+}
+
+// symlinkSettingsRefused reports that p, part of a default settings target,
+// is a symlink; escape is the --settings path that would write through it.
+func symlinkSettingsRefused(p, what, escape string) error {
+	reparse, err := platform.IsReparse(p)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !reparse {
+		return nil
+	}
+	resolved := p
+	if r, err := platform.Canonical(p); err == nil {
+		resolved = r
+	} else if l, err := os.Readlink(p); err == nil {
+		resolved = l
+	}
+	return fmt.Errorf("hook install: %s is a symlink to %s; the default target is only %s, so rerun with --settings %s to write through it", p, resolved, what, escape)
 }
 
 // Settings have different permissions from secret config and shown-state,

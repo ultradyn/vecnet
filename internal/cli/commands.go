@@ -66,17 +66,21 @@ messaging:
   blob get SHA [--blob-id ID] --out PATH [--json]
        URLs are short-lived; call get again whenever you need the file, as long as it hasn't expired.
   ack <cursor>
-  watch [--for-monitor] [--since CURSOR] [--auto-ack] [--deliveries-only]
+  watch [--for-monitor] [--since CURSOR] [--auto-ack] [--deliveries-only] [--once]
        does not ack; use --auto-ack or vecnet ack <cursor> to avoid replaying
        the log after a restart
+       --once exits 0 right after the first printed wake/wake_idle delivery;
+       never with --auto-ack
   hook [--event user-prompt|post-tool|session-start|app-server] [--profile P] [--auto-ack] [--mcp vecnet-P]
        Claude Code hook: always exits 0; --mcp names the registered MCP server in its hints
   hook --client codex --event user-prompt|post-tool|session-start
        generic shared Codex hook: no peer content or claims; delivery uses the exact-thread connector
   hook --event app-server --claim NONCE --priorities wake[,wake_idle] --expect-hub URL --expect-caller PEER_ID
   hook --release --claim NONCE
-  hook install [--client claude|codex] [--profile P] [--write] [--settings PATH] [--auto-ack] [--mcp] (--mcp: Claude-only)
-       --mcp: the hooks name MCP server vecnet-P, and --write registers it (claude mcp add)
+  hook install [--client claude|codex|agy] [--profile P] [--write] [--settings PATH] [--auto-ack] [--mcp]
+       --mcp: the hooks name MCP server vecnet-P; claude registers it (claude mcp add), agy merges .agents/mcp_config.json
+  hook install --client agy [--profile P] [--mcp] [--dry-run|--write]
+       agy workspace hooks: .agents/hooks.json group vecnet-P (SessionStart, PreInvocation); each git worktree needs its own
   hook install --client codex [--settings PATH] [--bin PATH] [--dry-run|--write] [--rollback BACKUP]
        generic hook migration; default previews a diff; --write saves a rollback backup; custom hooks survive
        rollback refuses drift; review trust in Codex /hooks yourself (never changed automatically)
@@ -937,7 +941,7 @@ var idCommandFlags = map[string]map[string]flagKind{
 	"thread":       {"after": strFlag, "limit": strFlag},
 	"threads":      {"limit": strFlag},
 	"inbox":        {"since": strFlag, "ack": boolFlag, "limit": strFlag, "include-sender-chain": boolFlag, "no-display-proof": boolFlag},
-	"watch":        {"for-monitor": boolFlag, "since": strFlag, "auto-ack": boolFlag, "deliveries-only": boolFlag},
+	"watch":        {"for-monitor": boolFlag, "since": strFlag, "auto-ack": boolFlag, "deliveries-only": boolFlag, "once": boolFlag},
 	"presence":     {"note": strFlag},
 	"avatar":       nil,
 	"receipt":      {"note": strFlag},

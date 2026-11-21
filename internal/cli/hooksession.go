@@ -64,6 +64,7 @@ type hookProc struct {
 
 // currentProc is the Claude Code process that ran this command, or the
 // zero value when CLAUDE_PID is absent (older Claude Code, a terminal).
+// The agy equivalent, agyHookProc, is platform-split: it reads /proc.
 func currentProc(getenv func(string) string) hookProc {
 	pid, err := strconv.Atoi(strings.TrimSpace(getenv("CLAUDE_PID")))
 	if err != nil || pid <= 1 {
@@ -116,6 +117,7 @@ type hookOwner struct {
 	declared bool     // VECNET_PROFILE names this profile
 	prompt   bool     // a UserPromptSubmit run: only the top-level session fires it
 	profiles []string // every profile this session's hooks run (registry)
+	agy      bool     // an agy hook run: notices delegate rebind to the user, and only a prompt may take a rebind window
 }
 
 func (o hookOwner) ambiguous() bool { return !o.declared && len(o.profiles) > 1 }
@@ -139,8 +141,10 @@ const (
 //
 // Invariants: only a user-prompt run binds (subagents and workflow agents
 // fire tool hooks only, sometimes with their own session id), apart from
-// taking an explicit rebind window. Another session never unbinds or takes
-// a bound profile unless its Claude Code process has provably exited. A
+// taking an explicit rebind window — and an agy run takes even that only
+// with a prompt, since agy subagents share the workspace hooks and must
+// never claim an open window. Another session never unbinds or takes a
+// bound profile unless its Claude Code process has provably exited. A
 // session releases only an automatic binding of its own, for ambiguity.
 func (s *hookState) admit(o hookOwner, now time.Time) hookAdmit {
 	switch {
@@ -163,7 +167,7 @@ func (s *hookState) admit(o hookOwner, now time.Time) hookAdmit {
 		}
 		s.bindSession(o, how, now)
 		return admitCleared
-	case now.Before(s.RebindUntil):
+	case (!o.agy || o.prompt) && now.Before(s.RebindUntil):
 		s.bindSession(o, bindRebind, now)
 		return admitRebound
 	case s.Session == "" || s.Proc.gone():

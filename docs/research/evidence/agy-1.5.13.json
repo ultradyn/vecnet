@@ -1,0 +1,874 @@
+{
+  "agy_version": "1.5.13",
+  "platform": "Linux x86_64",
+  "note": "Disposable HOME + loopback Gemini API stub via GOOGLE_GEMINI_BASE_URL; sanitized (no IDs, paths, tokens).",
+  "hooks": {
+    "exit": 0,
+    "stderr_head": "",
+    "results": [
+      "SUCCESS",
+      "SUCCESS"
+    ],
+    "hook_sequence": [
+      {
+        "event": "SessionStart",
+        "invocationNum": null,
+        "initialNumSteps": null,
+        "lastUserInput_marker": "TURN1_PROMPT"
+      },
+      {
+        "event": "PreInvocation",
+        "invocationNum": 0,
+        "initialNumSteps": 1,
+        "lastUserInput_marker": "TURN1_PROMPT"
+      },
+      {
+        "event": "PostInvocation",
+        "invocationNum": 0,
+        "initialNumSteps": 1,
+        "lastUserInput_marker": "MK_PRE0_USER"
+      },
+      {
+        "event": "PreInvocation",
+        "invocationNum": 1,
+        "initialNumSteps": 5,
+        "lastUserInput_marker": "MK_PRE0_USER"
+      },
+      {
+        "event": "PostInvocation",
+        "invocationNum": 1,
+        "initialNumSteps": 5,
+        "lastUserInput_marker": "MK_PRE0_USER"
+      },
+      {
+        "event": "Stop",
+        "invocationNum": null,
+        "initialNumSteps": null,
+        "lastUserInput_marker": "MK_PRE0_USER"
+      },
+      {
+        "event": "PreInvocation",
+        "invocationNum": 0,
+        "initialNumSteps": 7,
+        "lastUserInput_marker": "TURN2_PROMPT"
+      },
+      {
+        "event": "PostInvocation",
+        "invocationNum": 0,
+        "initialNumSteps": 7,
+        "lastUserInput_marker": "MK_PRE0_USER"
+      },
+      {
+        "event": "Stop",
+        "invocationNum": null,
+        "initialNumSteps": null,
+        "lastUserInput_marker": "MK_PRE0_USER"
+      }
+    ],
+    "payload_fields": {
+      "SessionStart": {
+        "artifactDirectoryPath": "str",
+        "conversationId": "str",
+        "cwd": "str",
+        "hookEventName": "str",
+        "lastUserInput": "str",
+        "modelName": "str",
+        "transcriptPath": "str",
+        "workspacePaths": "list"
+      },
+      "PreInvocation": {
+        "artifactDirectoryPath": "str",
+        "conversationId": "str",
+        "cwd": "str",
+        "hookEventName": "str",
+        "initialNumSteps": "int",
+        "invocationNum": "int",
+        "lastUserInput": "str",
+        "modelName": "str",
+        "transcriptPath": "str",
+        "workspacePaths": "list"
+      },
+      "PostInvocation": {
+        "artifactDirectoryPath": "str",
+        "conversationId": "str",
+        "cwd": "str",
+        "hookEventName": "str",
+        "initialNumSteps": "int",
+        "invocationNum": "int",
+        "lastUserInput": "str",
+        "modelName": "str",
+        "transcriptPath": "str",
+        "workspacePaths": "list"
+      },
+      "Stop": {
+        "artifactDirectoryPath": "str",
+        "continuationActive": "bool",
+        "conversationId": "str",
+        "cwd": "str",
+        "error": "str",
+        "executionNum": "int",
+        "fullyIdle": "bool",
+        "hookEventName": "str",
+        "lastUserInput": "str",
+        "modelName": "str",
+        "terminationReason": "str",
+        "transcriptPath": "str",
+        "workspacePaths": "list"
+      }
+    },
+    "env_names": [
+      "ANTIGRAVITY_CONVERSATION_ID",
+      "GEMINI_API_KEY"
+    ],
+    "conv_env_matches_payload": true,
+    "single_conversation_id": true,
+    "hook_process_cwd_rel_to_payload_cwd": [
+      ".agents"
+    ],
+    "requests": [
+      {
+        "request": 0,
+        "last_content_role": "user",
+        "after_tool_result": false,
+        "markers": {
+          "MK_START_SYS": [
+            {
+              "where": "contents.text",
+              "role": "user",
+              "from_end": 1,
+              "framing_prefix": " It is provided by the system as important information to pay attention to.\n\n<SYSTEM_MESSAGE>\nThe following system message was injected by a SessionStart hook:\n",
+              "system_message_frame": true
+            }
+          ],
+          "MK_PRE0_USER": [
+            {
+              "where": "contents.text",
+              "role": "user",
+              "from_end": 0,
+              "framing_prefix": "<USER_REQUEST>\n<vecnet-inbox untrusted=\"true\">",
+              "system_message_frame": false
+            }
+          ],
+          "TURN1_PROMPT": [
+            {
+              "where": "contents.text",
+              "role": "user",
+              "from_end": 2,
+              "framing_prefix": "<USER_REQUEST>\n",
+              "system_message_frame": false
+            }
+          ]
+        }
+      },
+      {
+        "request": 1,
+        "last_content_role": "model",
+        "after_tool_result": true,
+        "markers": {
+          "MK_START_SYS": [
+            {
+              "where": "contents.text",
+              "role": "user",
+              "from_end": 3,
+              "framing_prefix": " It is provided by the system as important information to pay attention to.\n\n<SYSTEM_MESSAGE>\nThe following system message was injected by a SessionStart hook:\n",
+              "system_message_frame": true
+            }
+          ],
+          "MK_PRE0_USER": [
+            {
+              "where": "contents.text",
+              "role": "user",
+              "from_end": 2,
+              "framing_prefix": "<USER_REQUEST>\n<vecnet-inbox untrusted=\"true\">",
+              "system_message_frame": false
+            }
+          ],
+          "TURN1_PROMPT": [
+            {
+              "where": "contents.text",
+              "role": "user",
+              "from_end": 4,
+              "framing_prefix": "<USER_REQUEST>\n",
+              "system_message_frame": false
+            }
+          ]
+        }
+      },
+      {
+        "request": 2,
+        "last_content_role": "user",
+        "after_tool_result": false,
+        "markers": {
+          "MK_START_SYS": [
+            {
+              "where": "contents.text",
+              "role": "user",
+              "from_end": 6,
+              "framing_prefix": " It is provided by the system as important information to pay attention to.\n\n<SYSTEM_MESSAGE>\nThe following system message was injected by a SessionStart hook:\n",
+              "system_message_frame": true
+            }
+          ],
+          "MK_PRE0_USER": [
+            {
+              "where": "contents.text",
+              "role": "user",
+              "from_end": 5,
+              "framing_prefix": "<USER_REQUEST>\n<vecnet-inbox untrusted=\"true\">",
+              "system_message_frame": false
+            },
+            {
+              "where": "contents.text",
+              "role": "user",
+              "from_end": 0,
+              "framing_prefix": "<USER_REQUEST>\n<vecnet-inbox untrusted=\"true\">",
+              "system_message_frame": false
+            }
+          ],
+          "TURN1_PROMPT": [
+            {
+              "where": "contents.text",
+              "role": "user",
+              "from_end": 7,
+              "framing_prefix": "<USER_REQUEST>\n",
+              "system_message_frame": false
+            }
+          ],
+          "TURN2_PROMPT": [
+            {
+              "where": "contents.text",
+              "role": "user",
+              "from_end": 1,
+              "framing_prefix": "<USER_REQUEST>\n",
+              "system_message_frame": false
+            }
+          ]
+        }
+      }
+    ],
+    "transcript_injected": [
+      {
+        "source": "USER_EXPLICIT",
+        "type": "USER_INPUT",
+        "markers": [
+          "TURN1_PROMPT"
+        ]
+      },
+      {
+        "source": "SYSTEM_SDK",
+        "type": "SYSTEM_MESSAGE",
+        "markers": [
+          "MK_START_SYS"
+        ]
+      },
+      {
+        "source": "SYSTEM_SDK",
+        "type": "USER_INPUT",
+        "markers": [
+          "MK_PRE0_USER"
+        ]
+      },
+      {
+        "source": "USER_EXPLICIT",
+        "type": "USER_INPUT",
+        "markers": [
+          "TURN2_PROMPT"
+        ]
+      },
+      {
+        "source": "SYSTEM_SDK",
+        "type": "USER_INPUT",
+        "markers": [
+          "MK_PRE0_USER"
+        ]
+      }
+    ]
+  },
+  "inject_variants": {
+    "pre0_system": {
+      "exit": 0,
+      "requests": 2,
+      "first_seen_request": 0,
+      "seen": [
+        {
+          "request": 0,
+          "where": "contents.text",
+          "role": "user",
+          "from_end": 0,
+          "framing_prefix": "It is provided by the system as important information to pay attention to.\n\n<SYSTEM_MESSAGE>\nThe following system message was injected by a PreInvocation hook:\n"
+        },
+        {
+          "request": 1,
+          "where": "contents.text",
+          "role": "user",
+          "from_end": 2,
+          "framing_prefix": "It is provided by the system as important information to pay attention to.\n\n<SYSTEM_MESSAGE>\nThe following system message was injected by a PreInvocation hook:\n"
+        }
+      ],
+      "transcript": [
+        {
+          "source": "SYSTEM_SDK",
+          "type": "SYSTEM_MESSAGE",
+          "markers": [
+            "MK_V"
+          ]
+        }
+      ]
+    },
+    "pre0_system_user_markdown": {
+      "exit": 0,
+      "requests": 2,
+      "first_seen_request": null,
+      "seen": [],
+      "transcript": []
+    },
+    "pre0_user": {
+      "exit": 0,
+      "requests": 2,
+      "first_seen_request": 0,
+      "seen": [
+        {
+          "request": 0,
+          "where": "contents.text",
+          "role": "user",
+          "from_end": 0,
+          "framing_prefix": "<USER_REQUEST>\n"
+        },
+        {
+          "request": 1,
+          "where": "contents.text",
+          "role": "user",
+          "from_end": 2,
+          "framing_prefix": "<USER_REQUEST>\n"
+        }
+      ],
+      "transcript": [
+        {
+          "source": "SYSTEM_SDK",
+          "type": "USER_INPUT",
+          "markers": [
+            "MK_V"
+          ]
+        }
+      ]
+    },
+    "pre0_ephemeral": {
+      "exit": 0,
+      "requests": 2,
+      "first_seen_request": 0,
+      "seen": [
+        {
+          "request": 0,
+          "where": "contents.text",
+          "role": "user",
+          "from_end": 0,
+          "framing_prefix": ""
+        }
+      ],
+      "transcript": [
+        {
+          "source": "SYSTEM_SDK",
+          "type": "EPHEMERAL_MESSAGE",
+          "markers": [
+            "MK_V"
+          ]
+        }
+      ]
+    },
+    "pre1_system": {
+      "exit": 0,
+      "requests": 2,
+      "first_seen_request": 1,
+      "seen": [
+        {
+          "request": 1,
+          "where": "contents.functionResponse",
+          "role": "model",
+          "from_end": 0,
+          "framing_prefix": "s provided by the system as important information to pay attention to.\\n\\n<SYSTEM_MESSAGE>\\nThe following system message was injected by a PreInvocation hook:\\n"
+        }
+      ],
+      "transcript": [
+        {
+          "source": "SYSTEM_SDK",
+          "type": "SYSTEM_MESSAGE",
+          "markers": [
+            "MK_V"
+          ]
+        }
+      ]
+    },
+    "pre1_user": {
+      "exit": 0,
+      "requests": 2,
+      "first_seen_request": 1,
+      "seen": [
+        {
+          "request": 1,
+          "where": "contents.text",
+          "role": "user",
+          "from_end": 0,
+          "framing_prefix": "<USER_REQUEST>\n"
+        }
+      ],
+      "transcript": [
+        {
+          "source": "SYSTEM_SDK",
+          "type": "USER_INPUT",
+          "markers": [
+            "MK_V"
+          ]
+        }
+      ]
+    },
+    "post0_system": {
+      "exit": 0,
+      "requests": 2,
+      "first_seen_request": 1,
+      "seen": [
+        {
+          "request": 1,
+          "where": "contents.functionResponse",
+          "role": "model",
+          "from_end": 0,
+          "framing_prefix": " provided by the system as important information to pay attention to.\\n\\n<SYSTEM_MESSAGE>\\nThe following system message was injected by a PostInvocation hook:\\n"
+        }
+      ],
+      "transcript": [
+        {
+          "source": "SYSTEM_SDK",
+          "type": "SYSTEM_MESSAGE",
+          "markers": [
+            "MK_V"
+          ]
+        }
+      ]
+    }
+  },
+  "worktree": {
+    "main_root_cwd_root": {
+      "exit": 0,
+      "fired": true,
+      "workspace_is_cwd": true
+    },
+    "main_root_cwd_subdir": {
+      "exit": 0,
+      "fired": true,
+      "workspace_is_cwd": true
+    },
+    "linked_root_cwd_linked": {
+      "exit": 0,
+      "fired": true,
+      "workspace_is_cwd": true
+    },
+    "main_root_cwd_linked": {
+      "exit": 0,
+      "fired": false,
+      "workspace_is_cwd": false
+    },
+    "linked_root_cwd_linked_subdir": {
+      "exit": 0,
+      "fired": true,
+      "workspace_is_cwd": true
+    }
+  },
+  "background_mcp": {
+    "always": {
+      "declaration": {
+        "name": "mcp_probe_probe_wait",
+        "required": [
+          "toolSummary"
+        ]
+      },
+      "mcp_server_env_names": [
+        "GEMINI_API_KEY"
+      ],
+      "requests": [
+        {
+          "t": 0.4,
+          "last_role": "user",
+          "function_response_says_background": false,
+          "function_response_excerpt": null,
+          "wait_result": null
+        },
+        {
+          "t": 0.4,
+          "last_role": "model",
+          "function_response_says_background": true,
+          "function_response_excerpt": "{\"output\": \"Tool is running as a background task with task id: <id>/task-2\\nTask logs are available at: <path>",
+          "wait_result": null
+        },
+        {
+          "t": 4.4,
+          "last_role": "user",
+          "function_response_says_background": false,
+          "function_response_excerpt": null,
+          "wait_result": {
+            "where": "contents.text",
+            "role": "user",
+            "system_message_frame": true,
+            "priority_high": true,
+            "framing_excerpt": "=<id>/task-2 priority=MESSAGE_PRIORITY_HIGH content=Task id \"<id>/task-2\" finished with result:\n"
+          }
+        }
+      ],
+      "mcp_timeline": {
+        "call_start": 0.4,
+        "call_end": 4.4,
+        "stdin_eof": 10.1
+      },
+      "results": [
+        {
+          "status": "SUCCESS",
+          "response": "STUB_TEXT_1\nSTUB_TEXT_2"
+        }
+      ]
+    },
+    "default": {
+      "declaration": {
+        "name": "mcp_probe_probe_wait",
+        "required": [
+          "toolSummary"
+        ]
+      },
+      "mcp_server_env_names": [
+        "GEMINI_API_KEY"
+      ],
+      "requests": [
+        {
+          "t": 0.4,
+          "last_role": "user",
+          "function_response_says_background": false,
+          "function_response_excerpt": null,
+          "wait_result": null
+        },
+        {
+          "t": 4.4,
+          "last_role": "model",
+          "function_response_says_background": false,
+          "function_response_excerpt": "{\"output\": \"Created At: <ts>\\nCompleted At: <ts>\\nMK_WAIT_DONE pointer-only\"}",
+          "wait_result": {
+            "where": "contents.functionResponse",
+            "role": "model",
+            "system_message_frame": false,
+            "priority_high": false,
+            "framing_excerpt": "{\"output\": \"Created At: <ts>\\nCompleted At: <ts>\\n"
+          }
+        }
+      ],
+      "mcp_timeline": {
+        "call_start": 0.4,
+        "call_end": 4.4,
+        "stdin_eof": 10.0
+      },
+      "results": [
+        {
+          "status": "SUCCESS",
+          "response": "STUB_TEXT_1"
+        }
+      ]
+    }
+  },
+  "sidecar_agentapi": {
+    "plugin_sidecar_print_mode": {
+      "validate": 0,
+      "install": 0,
+      "enable": 0,
+      "listed_enabled": true,
+      "config_keys_after_enable": [
+        "plugins"
+      ],
+      "sidecar_opt_in_written": true,
+      "agy_exit": 0,
+      "sidecar_started": false,
+      "interactive_tui": "not run: fresh HOME requires accepting Google ToS + data-use consent"
+    },
+    "send_message_busy": {
+      "agentapi_exe_env_basename": "agy",
+      "agentapi_exe_env_send_exit": 2,
+      "shim_send_exit": 0,
+      "run_command_env_names": [
+        "ANTIGRAVITY_AGENT",
+        "ANTIGRAVITY_AGENTAPI_EXE",
+        "ANTIGRAVITY_APP_DATA_DIR",
+        "ANTIGRAVITY_CONVERSATION_ID",
+        "ANTIGRAVITY_CSRF_TOKEN",
+        "ANTIGRAVITY_LS_ADDRESS",
+        "ANTIGRAVITY_LS_VERSION",
+        "ANTIGRAVITY_PROJECT_ID",
+        "ANTIGRAVITY_SOURCE_METADATA",
+        "ANTIGRAVITY_TRAJECTORY_ID"
+      ],
+      "model_requests": 2,
+      "delivered": {
+        "request": 1,
+        "t": 0.7,
+        "where": "contents.functionResponse",
+        "role": "model",
+        "system_message_frame": true,
+        "priority_high": true,
+        "framing_excerpt": " attention to.\\n\\n<SYSTEM_MESSAGE>\\n[Message] timestamp=<ts> sender=<id> priority=MESSAGE_PRIORITY_HIGH content="
+      }
+    },
+    "send_message_idle": {
+      "agentapi_exe_env_basename": "agy",
+      "agentapi_exe_env_send_exit": 2,
+      "shim_send_exit": 0,
+      "run_command_env_names": [
+        "ANTIGRAVITY_AGENT",
+        "ANTIGRAVITY_AGENTAPI_EXE",
+        "ANTIGRAVITY_APP_DATA_DIR",
+        "ANTIGRAVITY_CONVERSATION_ID",
+        "ANTIGRAVITY_CSRF_TOKEN",
+        "ANTIGRAVITY_LS_ADDRESS",
+        "ANTIGRAVITY_LS_VERSION",
+        "ANTIGRAVITY_PROJECT_ID",
+        "ANTIGRAVITY_SOURCE_METADATA",
+        "ANTIGRAVITY_TRAJECTORY_ID"
+      ],
+      "model_requests": 3,
+      "delivered": {
+        "request": 2,
+        "t": 4.6,
+        "where": "contents.text",
+        "role": "user",
+        "system_message_frame": true,
+        "priority_high": true,
+        "framing_excerpt": "pay attention to.\n\n<SYSTEM_MESSAGE>\n[Message] timestamp=<ts> sender=<id> priority=MESSAGE_PRIORITY_HIGH content="
+      }
+    },
+    "agentapi_from_hook": {
+      "invoked_as": "agy agentapi",
+      "get_metadata_exit": 1,
+      "output_excerpt": "{\n  \"error\": \"ANTIGRAVITY_LS_ADDRESS is not set\"\n}"
+    }
+  },
+  "acp": {
+    "protocolVersion": 1,
+    "agentCapabilities": {
+      "loadSession": true,
+      "load_session": true,
+      "promptCapabilities": {
+        "image": true,
+        "audio": false,
+        "embeddedContext": true
+      },
+      "sessionCapabilities": {
+        "resume": {},
+        "close": {},
+        "load": {},
+        "list": {},
+        "additionalDirectories": {}
+      },
+      "session_capabilities": {
+        "resume": {},
+        "close": {},
+        "load": {},
+        "list": {},
+        "additionalDirectories": {}
+      },
+      "auth": {
+        "logout": {}
+      },
+      "_meta": {
+        "antigravity": {
+          "tier": true,
+          "systemPrompt": {
+            "append": true
+          }
+        }
+      }
+    },
+    "mode_ids": [
+      "default",
+      "accept-edits",
+      "plan"
+    ],
+    "current_mode": "default",
+    "set_mode_default_ok": true,
+    "prompt1_stop": "end_turn",
+    "prompt1_text_ok": true,
+    "prompt2_stop": "end_turn",
+    "permission_requests": 1,
+    "permission_option_kinds": [
+      "allow_once",
+      "reject_once"
+    ],
+    "permission_tool_kind": "execute",
+    "cancel_stop": "cancelled",
+    "close_ok": true,
+    "update_kinds": [
+      "agent_message_chunk",
+      "available_commands_update",
+      "session_info_update",
+      "tool_call",
+      "tool_call_update",
+      "usage_update"
+    ],
+    "model_requests": 5
+  },
+  "tui": {
+    "bg_mcp_wake": {
+      "turn_ended_first": true,
+      "woke_and_rendered": true,
+      "wake_requests": 1,
+      "mcp_events": [
+        "spawn",
+        "call_start",
+        "call_end"
+      ]
+    },
+    "exit_with_pending_call": {
+      "pending_calls": 1,
+      "status_bar_showed_task": true,
+      "tui_exited": true,
+      "mcp_server_alive_after": false,
+      "mcp_events_after": [
+        "call_start",
+        "call_end",
+        "call_start"
+      ]
+    },
+    "plugin_sidecar": {
+      "opt_in_written": true,
+      "sidecar_started": false
+    },
+    "agentapi_idle_send": {
+      "turn_ended_first": true,
+      "send_exit": 0,
+      "woke_and_rendered": true,
+      "pointer_text_shown_in_tui": false
+    }
+  },
+  "session_identity": {
+    "subagent": [
+      {
+        "conv": 0,
+        "event": "SessionStart",
+        "invocationNum": null,
+        "initialNumSteps": null,
+        "lastUserInput_empty": false,
+        "agy_process": "same"
+      },
+      {
+        "conv": 0,
+        "event": "PreInvocation",
+        "invocationNum": 0,
+        "initialNumSteps": 1,
+        "lastUserInput_empty": false,
+        "agy_process": "same"
+      },
+      {
+        "conv": 0,
+        "event": "PreInvocation",
+        "invocationNum": 1,
+        "initialNumSteps": 3,
+        "lastUserInput_empty": false,
+        "agy_process": "same"
+      },
+      {
+        "conv": 1,
+        "event": "SessionStart",
+        "invocationNum": null,
+        "initialNumSteps": null,
+        "lastUserInput_empty": true,
+        "agy_process": "same"
+      },
+      {
+        "conv": 1,
+        "event": "PreInvocation",
+        "invocationNum": 0,
+        "initialNumSteps": 0,
+        "lastUserInput_empty": true,
+        "agy_process": "same"
+      },
+      {
+        "conv": 0,
+        "event": "PreInvocation",
+        "invocationNum": 0,
+        "initialNumSteps": 4,
+        "lastUserInput_empty": false,
+        "agy_process": "same"
+      }
+    ],
+    "tui_clear": [
+      {
+        "conv": 0,
+        "event": "SessionStart",
+        "invocationNum": null,
+        "initialNumSteps": null,
+        "lastUserInput_empty": false,
+        "agy_process": "same"
+      },
+      {
+        "conv": 0,
+        "event": "PreInvocation",
+        "invocationNum": 0,
+        "initialNumSteps": 1,
+        "lastUserInput_empty": false,
+        "agy_process": "same"
+      },
+      {
+        "conv": 1,
+        "event": "SessionStart",
+        "invocationNum": null,
+        "initialNumSteps": null,
+        "lastUserInput_empty": false,
+        "agy_process": "same"
+      },
+      {
+        "conv": 1,
+        "event": "PreInvocation",
+        "invocationNum": 0,
+        "initialNumSteps": 1,
+        "lastUserInput_empty": false,
+        "agy_process": "same"
+      }
+    ]
+  },
+  "e2e": {
+    "steps": {
+      "1_build": {
+        "ok": true
+      },
+      "1_hub": {
+        "ok": true
+      },
+      "1_peers": {
+        "ok": true
+      },
+      "1_install": {
+        "ok": true,
+        "install_advice": [
+          "agy: each git worktree needs its own install; agy reads .agents/hooks.json from the workspace root, not the main checkout's",
+          "agy: agy asks before each vecnet_wait call unless you add the allow rule mcp(vecnet-agyrx/vecnet_wait)"
+        ]
+      },
+      "4_mcp_inbox": {
+        "ok": true,
+        "request": 1
+      },
+      "2_hook_delivery": {
+        "ok": true,
+        "request": 2
+      },
+      "3_subagent_silent": {
+        "ok": true,
+        "request": 4
+      },
+      "5_tui_warm": {
+        "ok": true
+      },
+      "5_wait_wakes_idle": {
+        "ok": true,
+        "request": 4,
+        "seconds_after_send": 0.5,
+        "task_bar": true,
+        "woke_before_send": false,
+        "reply_rendered": true
+      },
+      "6_no_ack": {
+        "ok": true
+      }
+    }
+  }
+}
