@@ -51,6 +51,13 @@ func claudeCanaryAdmits(canary []claudeScope, s claudeScope) bool {
 		return false
 	}
 	c := canary[0]
+	// A hub identity change withdraws consent: the record admits only under
+	// the identity it was granted for, even through the same endpoint (owner
+	// ruling 2026-11-21). Disable still matches by endpoint, so the stale
+	// record can be cleared and re-granted.
+	if c.HubIdentity != s.HubIdentity {
+		return false
+	}
 	return claudeCanaryEligible(c) && claudeSameRecipient(c, s)
 }
 
@@ -163,7 +170,21 @@ func (a *app) cmdClaudeCanary(args []string) error {
 	if blocked, err := a.claudeCanaryOptOutApplies(scope); err == nil && blocked {
 		human += "; a durable opt-out still applies and claude enable is required to clear it"
 	}
+	human += "\n" + claudeCanaryNextSteps(profile)
 	return a.ok(human)
+}
+
+// claudeCanaryNextSteps is the fixed guidance after a successful enable. The
+// running delivery daemon rereads the binding snapshot every 10 seconds, so a
+// daemon already on this version needs no restart; one started before the
+// upgrade must be restarted once to load the native-delivery code.
+func claudeCanaryNextSteps(profile string) string {
+	return "next steps:\n" +
+		"  the running delivery daemon picks this up within about 10 seconds; check with\n" +
+		"    vecnet --net " + profile + " claude status   (expect mode: canary once a live Claude session is registered)\n" +
+		"  if the daemon was started before you upgraded vecnet, restart it once:\n" +
+		"    systemctl --user restart vecnet-codex-delivery.service   (managed delivery daemon)\n" +
+		"    systemctl --user restart vecnet-launcher                 (launcher-embedded daemon)"
 }
 
 // claudeCanaryOptOutApplies reports whether a durable opt-out (global or

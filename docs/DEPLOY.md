@@ -99,7 +99,7 @@ For offline verification use `BB_HOST=x-p35 BB_JOBS=2 just bb just test`, `just 
    A second `init` prints `already initialised` and the existing peer id, never a secret.
 5. Check: `curl -fsS https://vecnet.xk.io/healthz`, then `vecnet peer add --kind session --name <name>` and `vecnet enrol` on the peer's host.
 
-Later deploys are `just fly-deploy` only. The hub migrates its database on start.
+Later deploys are `just fly-deploy` only. The hub migrates its database on start. Deployed from a clean checkout exactly at a release tag, the image carries that release version (for example `0.2.8`), so the web UI update badge can compare it with npm (it shows the manual update command: one-click update is never offered in a container). Any other checkout deploys as `date+hash` and the update check stays off. `/healthz` reports the commit either way.
 
 On SIGTERM/SIGINT the hub announces the restart before HTTP shutdown
 ([Restarts](#restarts)). Events and operator activity SSE drain queued
