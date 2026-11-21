@@ -577,9 +577,10 @@ func TestClaudeDeliverRefusedSocketIsExit3(t *testing.T) {
 // TestClaudeDeliverPeerClosedMidWriteIsExit4 closes every accepted
 // connection before reading. The peer fence passes (the sink is this same
 // process), so a write that lands after the peer closed must report the
-// write failure (exit 4), never a silent success-only contract: scheduling
-// decides whether the single write wins or loses the race, so the test
-// retries until the failure path is observed.
+// write failure (exit 4), never a silent success. The pre-write recheck hook
+// waits until the server has closed this connection, so the write
+// deterministically meets a closed peer (EPIPE) instead of racing the
+// accept loop into the socket buffer.
 func TestClaudeDeliverPeerClosedMidWriteIsExit4(t *testing.T) {
 	_, dir := claudeDeliverFixture(t)
 	path := filepath.Join(dir, "closed.sock")
@@ -597,6 +598,7 @@ func TestClaudeDeliverPeerClosedMidWriteIsExit4(t *testing.T) {
 	if err := unix.Listen(fd, 64); err != nil {
 		t.Fatal(err)
 	}
+	closed := make(chan struct{}, 64)
 	go func() {
 		for {
 			cfd, _, err := unix.Accept4(fd, unix.SOCK_NONBLOCK|unix.SOCK_CLOEXEC)
@@ -607,20 +609,29 @@ func TestClaudeDeliverPeerClosedMidWriteIsExit4(t *testing.T) {
 				continue
 			}
 			unix.Close(cfd)
+			closed <- struct{}{}
 		}
 	}()
+	peerClosed := func() error {
+		select {
+		case <-closed:
+			return nil
+		case <-time.After(5 * time.Second):
+			return errors.New("the fixture server never closed the connection")
+		}
+	}
 	codes := map[int]int{}
-	for i := 0; i < 60 && codes[4] == 0; i++ {
-		code, errs := deliverAttempt(t, deliverAttemptInput(path), nil)
+	for i := 0; i < 5 && codes[4] == 0; i++ {
+		code, errs := deliverAttempt(t, deliverAttemptInput(path), peerClosed)
 		// 5: the peer closed before SO_PEERCRED/the start identity could be
 		// confirmed, still a zero-byte refusal.
-		if code != 0 && code != 3 && code != 4 && code != 5 {
-			t.Fatalf("unexpected exit %d from the peer-closed socket: %s", code, errs)
+		if code != 4 && code != 5 {
+			t.Fatalf("exit %d from a write to a closed peer, want 4 (or a 5 refusal): %s", code, errs)
 		}
 		codes[code]++
 	}
 	if codes[4] == 0 {
-		t.Fatalf("deliver never surfaced the mid-write failure in %d attempts: %v", 60, codes)
+		t.Fatalf("deliver never surfaced the mid-write failure: %v", codes)
 	}
 }
 
