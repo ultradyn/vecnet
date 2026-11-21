@@ -3,10 +3,13 @@ package buildinfo
 
 import "strings"
 
-// Version and CommitDate are set with -ldflags. Development builds retain
-// safe, useful defaults.
+// Version, Commit and CommitDate are set with -ldflags. Development builds
+// retain safe, useful defaults. Commit lets a release-versioned build (for
+// example a Fly deploy of exactly "0.2.8", which keeps the update check
+// comparable) still report its source commit without "+hash" build metadata.
 var (
 	Version    = "dev"
+	Commit     = ""
 	CommitDate = "unknown"
 )
 
@@ -26,7 +29,9 @@ func Current() Info {
 		version = "dev"
 	}
 	commit := "unknown"
-	if _, tail, ok := strings.Cut(version, "+"); ok {
+	if c := strings.TrimSpace(Commit); c != "" {
+		commit = c
+	} else if _, tail, ok := strings.Cut(version, "+"); ok {
 		tail = strings.TrimSuffix(tail, ".dirty")
 		if tail != "" {
 			commit = tail

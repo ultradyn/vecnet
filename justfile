@@ -35,9 +35,16 @@ isa-check: build
 hub-init NAME="Max":
     CGO_ENABLED=0 build2 go run ./cmd/vecnet-hub init --data-dir .data --operator-name {{NAME}}
 
-# Deploy to Fly (builds the image remotely from Dockerfile; Max runs this, tests never do)
+# Deploy to Fly (builds the image remotely from Dockerfile; Max runs this, tests never do).
+# A clean checkout exactly at a release tag deploys as that release version, so the
+# hub's update check can compare it with npm; anything else keeps the date+hash version.
 fly-deploy:
-    ~/.fly/bin/flyctl deploy --remote-only -a vecnet --yes --build-arg VECNET_VERSION=$(just version) --build-arg VECNET_COMMIT_DATE=$(git show -s --format=%cI HEAD)
+    #!/usr/bin/env bash
+    set -euo pipefail
+    commit=$(git rev-parse --short HEAD)
+    version=$(just version)
+    if git diff --quiet HEAD -- && tag=$(git describe --exact-match --tags --match 'v[0-9]*' HEAD 2>/dev/null); then version=${tag#v}; fi
+    ~/.fly/bin/flyctl deploy --remote-only -a vecnet --yes --build-arg VECNET_VERSION="$version" --build-arg VECNET_COMMIT="$commit" --build-arg VECNET_COMMIT_DATE="$(git show -s --format=%cI HEAD)"
 
 # Create the operator on the deployed hub (prints the secret once)
 fly-init:

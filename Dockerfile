@@ -12,8 +12,9 @@ ENV CGO_ENABLED=0
 # cached tool lists on it, so `just fly-deploy` passes a fresh value each deploy.
 ARG VECNET_VERSION=dev
 ARG VECNET_COMMIT_DATE=unknown
-RUN go build -trimpath -ldflags="-s -w -X github.com/XertroV/vecnet/internal/mcpserver.Version=${VECNET_VERSION} -X github.com/XertroV/vecnet/internal/buildinfo.Version=${VECNET_VERSION} -X github.com/XertroV/vecnet/internal/buildinfo.CommitDate=${VECNET_COMMIT_DATE}" -o /out/vecnet-hub ./cmd/vecnet-hub \
- && go build -trimpath -ldflags="-s -w -X github.com/XertroV/vecnet/internal/mcpserver.Version=${VECNET_VERSION} -X github.com/XertroV/vecnet/internal/buildinfo.Version=${VECNET_VERSION} -X github.com/XertroV/vecnet/internal/buildinfo.CommitDate=${VECNET_COMMIT_DATE}" -o /out/vecnet ./cmd/vecnet
+ARG VECNET_COMMIT=
+RUN go build -trimpath -ldflags="-s -w -X github.com/XertroV/vecnet/internal/mcpserver.Version=${VECNET_VERSION} -X github.com/XertroV/vecnet/internal/buildinfo.Version=${VECNET_VERSION} -X github.com/XertroV/vecnet/internal/buildinfo.CommitDate=${VECNET_COMMIT_DATE} -X github.com/XertroV/vecnet/internal/buildinfo.Commit=${VECNET_COMMIT}" -o /out/vecnet-hub ./cmd/vecnet-hub \
+ && go build -trimpath -ldflags="-s -w -X github.com/XertroV/vecnet/internal/mcpserver.Version=${VECNET_VERSION} -X github.com/XertroV/vecnet/internal/buildinfo.Version=${VECNET_VERSION} -X github.com/XertroV/vecnet/internal/buildinfo.CommitDate=${VECNET_COMMIT_DATE} -X github.com/XertroV/vecnet/internal/buildinfo.Commit=${VECNET_COMMIT}" -o /out/vecnet ./cmd/vecnet
 
 FROM scratch
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
