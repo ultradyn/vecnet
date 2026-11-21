@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -247,6 +248,9 @@ func TestHookAgySubagentNeverBinds(t *testing.T) {
 // follows the process (admitCleared) and delivers. A subagent conversation
 // in that same process stays silent and binds nothing.
 func TestHookAgyClearRebinds(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("/clear rebinding needs the agy process identity, which only Linux /proc provides")
+	}
 	env, path, _ := agyHub(t)
 	seedSession(t, path, func(*hookState) {})
 	conv := "0b1c2d3e-4f5a-6b7c-8d9e-0f1a2b3c4d5e"

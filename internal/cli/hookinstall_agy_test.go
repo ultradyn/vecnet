@@ -108,6 +108,7 @@ func TestHookInstallAgyWorktreeOwnInstall(t *testing.T) {
 		t.Skip("git unavailable")
 	}
 	isolateGitEnv(t)
+	cli.SetAgyInstallOSForTest(t, "linux")
 	u := installUser(t)
 	base := t.TempDir()
 	main := filepath.Join(base, "main")
@@ -128,6 +129,7 @@ func TestHookInstallAgyWorktreeOwnInstall(t *testing.T) {
 
 func TestHookInstallAgyFallbackToCwd(t *testing.T) {
 	isolateGitEnv(t)
+	cli.SetAgyInstallOSForTest(t, "linux")
 	u := installUser(t)
 	root := t.TempDir()
 	t.Chdir(root)
@@ -453,14 +455,19 @@ func TestHookInstallAgyRefusesTrackedDefault(t *testing.T) {
 // A tracking status that git cannot answer (or a repository it cannot even
 // discover) refuses the default write target.
 func TestHookInstallAgyRefusesUnknownTracking(t *testing.T) {
-	for _, tc := range []struct{ name, stub, want string }{
-		{"status unknown", "#!/bin/sh\ncase \"$3\" in\nrev-parse) printf '%s\\n' \"$2\";;\nls-files) exit 2;;\n*) exit 99;;\nesac\n", "tracked by git (or its status is unknown)"},
-		{"discovery failed", "#!/bin/sh\necho \"fatal: detected dubious ownership in repository at '$2'\" >&2\nexit 128\n", "cannot tell whether"},
+	// kind/exit drive the Windows fixture program (internal/testfixture/
+	// cliprogram), which stands in for the sh stub there.
+	for _, tc := range []struct {
+		name, stub, want, kind string
+		exit                   int
+	}{
+		{"status unknown", "#!/bin/sh\ncase \"$3\" in\nrev-parse) printf '%s\\n' \"$2\";;\nls-files) exit 2;;\n*) exit 99;;\nesac\n", "tracked by git (or its status is unknown)", "git-tracking", 2},
+		{"discovery failed", "#!/bin/sh\necho \"fatal: detected dubious ownership in repository at '$2'\" >&2\nexit 128\n", "cannot tell whether", "git-failure", 128},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			u, root := agyInstallRepo(t)
 			binDir := t.TempDir()
-			cliFixtureProgram(t, binDir, "git", tc.stub, cliFixtureProgramSpec{Kind: "git-agy-" + tc.name, Exit: 2})
+			cliFixtureProgram(t, binDir, "git", tc.stub, cliFixtureProgramSpec{Kind: tc.kind, Exit: tc.exit})
 			t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 			path := filepath.Join(root, ".agents", "hooks.json")
 			code, out, errs := u.run("hook", "install", "--bin", "vecnet", "--client", "agy", "--profile", "p", "--write")
