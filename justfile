@@ -209,6 +209,31 @@ npm-build:
 npm-pack: npm-build
     npm pack ./dist/npm --pack-destination ./dist
 
+# Dogfood: swap freshly built binaries into the existing npm install (restart hub/agents after).
+dogfood:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v build2 >/dev/null || export PATH="{{justfile_directory()}}/scripts/bb/bin:$PATH"
+    native="$(npm prefix -g)/lib/node_modules/vecnet/native/$(node -p 'process.platform + "-" + process.arch')"
+    [ -x "$native/vecnet" ] || { echo "no npm install at $native; run: just dogfood-packed" >&2; exit 1; }
+    just build
+    # install(1) replaces the file, so running MCP/hub processes don't hit "text file busy".
+    install -m0755 bin/vecnet bin/vecnet-hub "$native/"
+    "$native/vecnet-hub" --version
+    echo "installed into $native; restart vecnet-hub and agents to pick it up"
+
+# Dogfood the real npm package: pack this checkout and install it (PREFIX defaults to npm's global prefix).
+dogfood-packed PREFIX="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v build2 >/dev/null || export PATH="{{justfile_directory()}}/scripts/bb/bin:$PATH"
+    prefix="{{PREFIX}}"
+    [ -n "$prefix" ] || prefix="$(npm prefix -g)"
+    version="$(node -p 'require("./npm/package.json").version')"
+    just npm-pack
+    npm install --global --prefix "$prefix" --no-audit --no-fund "./dist/vecnet-$version.tgz"
+    echo "installed vecnet $version (built from $(git rev-parse --short HEAD)) under $prefix; restart vecnet-hub and agents"
+
 # Verify the packed release in an isolated npm prefix and temporary hub.
 npm-check:
     build2 node --test --test-concurrency=2 scripts/npm/*.test.mjs
