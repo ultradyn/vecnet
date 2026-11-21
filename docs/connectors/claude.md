@@ -144,7 +144,18 @@ record is local and neither verb contacts the hub. It fails closed:
   until the first is disabled;
 - `claude enable` alone never turns native delivery on, and canary enable
   never clears a durable opt-out (global or addressed); an opt-out still
-  withdraws delivery while the record exists.
+  withdraws delivery while the record exists;
+- a hub identity change withdraws it: enable then refuses until you run
+  `claude canary disable` and `claude canary enable` again.
+
+The running delivery daemon rereads its binding snapshot every 10 seconds,
+so it picks up an enable or disable on its own; check with
+`vecnet --net P claude status` (`mode: canary` once a live Claude session is
+registered and admitted). A daemon started before you upgraded vecnet must be
+restarted once to load the native-delivery code:
+`systemctl --user restart vecnet-codex-delivery.service` for the managed
+delivery daemon, or `systemctl --user restart vecnet-launcher` for the
+launcher-embedded one. `canary enable` prints these steps.
 
 `VECNET_CLAUDE_DELIVERY_CANARY=0` (exactly `0`) in the delivery daemon's
 environment is the host kill switch: no delivery adapter is constructed at

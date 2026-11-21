@@ -453,3 +453,59 @@ func TestClaudeStatusReportsCanaryOptInAndBuildCheck(t *testing.T) {
 	}
 	f.assertNoHub(t)
 }
+
+// TestClaudeCanaryEnablePrintsNextSteps: a successful enable names the
+// profile-addressed status check and how the daemon picks the record up,
+// including the one restart a pre-upgrade daemon needs.
+func TestClaudeCanaryEnablePrintsNextSteps(t *testing.T) {
+	f := newClaudeCanaryFixture(t)
+	code, out, errs := f.run(t, "--net", "p", "claude", "canary", "enable")
+	if code != 0 {
+		t.Fatalf("enable exit %d: %s", code, errs)
+	}
+	for _, want := range []string{
+		"claude native canary enabled for this recipient",
+		"vecnet --net p claude status",
+		"mode: canary",
+		"within about 10 seconds",
+		"systemctl --user restart vecnet-codex-delivery.service",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("enable output lacks %q:\n%s", want, out)
+		}
+	}
+	// Idempotent re-enable prints the same guidance.
+	if _, again, _ := f.run(t, "--net", "p", "claude", "canary", "enable"); again != out {
+		t.Errorf("re-enable output differs:\n%s\nvs\n%s", again, out)
+	}
+	// JSON stays the bare ok object.
+	if _, js, _ := f.run(t, "--json", "--net", "p", "claude", "canary", "enable"); strings.TrimSpace(js) != `{"ok":true}` {
+		t.Errorf("json output = %q", js)
+	}
+	f.assertNoHub(t)
+}
+
+// TestClaudeCanaryRepinWithdrawsAdmission: a stored record admits only under
+// the hub identity it was granted for. The same recipient through the same
+// endpoint under a re-pinned identity is not admitted (owner ruling
+// 2026-11-21), while the exact scope still is.
+func TestClaudeCanaryRepinWithdrawsAdmission(t *testing.T) {
+	f := newClaudeCanaryFixture(t)
+	f.ok(t, "--net", "p", "claude", "canary", "enable")
+	doc := f.document(t)
+	if len(doc.Canary) != 1 {
+		t.Fatalf("records = %d", len(doc.Canary))
+	}
+	held := doc.Canary[0]
+	if !claudeCanaryAdmits(doc.Canary, held) {
+		t.Fatal("the exact granted scope is not admitted")
+	}
+	repinned := held
+	repinned.HubIdentity = "ed25519:" + "J" + claudeTestHubPin[len("ed25519:J"):]
+	if repinned.HubIdentity == held.HubIdentity {
+		t.Fatal("fixture re-pin did not change the identity")
+	}
+	if claudeCanaryAdmits(doc.Canary, repinned) {
+		t.Fatal("a re-pinned hub identity through the same endpoint is still admitted")
+	}
+}
