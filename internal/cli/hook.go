@@ -224,7 +224,7 @@ func hookForeignNotice(h hookHint, boundAt time.Time, o hookOwner) string {
 	if o.ambiguous() {
 		also = " This session also runs vecnet hooks for several profiles (" + hookProfileList(o.profiles) + "); launching each session with VECNET_PROFILE=<its profile> avoids this."
 	}
-	return fmt.Sprintf("vecnet: profile %s's hook belongs to another Claude Code session (bound %s). If this session is profile %s, run: %s. Otherwise ignore this.%s%s", h.profile, boundAt.UTC().Format("2006-01-02 15:04 UTC"), h.profile, h.rebind, also, h.config)
+	return fmt.Sprintf("vecnet: profile %s's hook belongs to another %s (bound %s). If this session is profile %s, run: %s. Otherwise ignore this.%s%s", h.profile, o.noun(), boundAt.UTC().Format("2006-01-02 15:04 UTC"), h.profile, h.rebind, also, h.config)
 }
 
 func hookProfileList(profiles []string) string {
@@ -242,7 +242,7 @@ func hookAmbiguousNotice(h hookHint, o hookOwner) string {
 	if o.agy {
 		return fmt.Sprintf("vecnet: profile %s's hook is not bound to this agy conversation: the conversation runs vecnet hooks for several profiles (%s), so the hook cannot tell which one it is. If this conversation is profile %s, ask your user to run `%s` in a terminal outside agy, then send the next prompt in this conversation. Otherwise ignore this. Launching each conversation with VECNET_PROFILE=<its profile> avoids this.%s", h.profile, hookProfileList(o.profiles), h.profile, h.rebind, h.config)
 	}
-	return fmt.Sprintf("vecnet: profile %s's hook is not bound to this Claude Code session: the session runs vecnet hooks for several profiles (%s), so the hook cannot tell which one it is. If this session is profile %s, run: %s. Otherwise ignore this. Launching each session with VECNET_PROFILE=<its profile> avoids this.%s", h.profile, hookProfileList(o.profiles), h.profile, h.rebind, h.config)
+	return fmt.Sprintf("vecnet: profile %s's hook is not bound to this %s: the session runs vecnet hooks for several profiles (%s), so the hook cannot tell which one it is. If this session is profile %s, run: %s. Otherwise ignore this. Launching each session with VECNET_PROFILE=<its profile> avoids this.%s", h.profile, o.noun(), hookProfileList(o.profiles), h.profile, h.rebind, h.config)
 }
 func hookOutput(event, context string) []byte {
 	name := "UserPromptSubmit"
@@ -401,19 +401,33 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 		return hookResult{}
 	}
 	agy := o.str("client") == "agy"
-	if o.has("client") && !agy && o.str("client") != "claude" {
+	pi := o.str("client") == "pi"
+	if o.has("client") && !agy && !pi && o.str("client") != "claude" {
 		return hookResult{}
 	}
 	event := o.str("event")
 	// Every publish is encoded for the host that runs the hook: the Claude
-	// envelope, or agy's single systemMessage step (hook_agy.go).
+	// envelope, agy's single systemMessage step (hook_agy.go), or the pi
+	// extension's additionalContext object (hook_pi.go).
 	encode := func(event, context string) []byte { return hookOutput(event, context) }
 	if agy {
 		encode = func(_, context string) []byte { return agyHookOutput(context) }
+	} else if pi {
+		encode = func(_, context string) []byte { return piHookOutput(context) }
 	}
 	raw, e := hookStdin(a.stdin)
 	var session string
-	if agy {
+	piPID := 0
+	if pi {
+		// The extension's payload names the pi session and process; a
+		// subagent, a print-mode run or unusable input claims nothing and
+		// touches nothing.
+		ev, sess, pid, ok := piEvent(o, raw, e)
+		if !ok || ctx.Err() != nil {
+			return hookResult{}
+		}
+		event, session, piPID = ev, sess, pid
+	} else if agy {
 		// The agy payload's conversationId binds the profile to one
 		// conversation; unusable input carried an identity this run cannot
 		// see, so it claims nothing and touches nothing.
@@ -482,17 +496,17 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 		// SessionStart routes to passive registration only: bounded local
 		// work, no hub lookup, no context output. The delivery path stays
 		// with user-prompt and post-tool, whose behavior is unchanged. agy
-		// has no Claude root to register.
-		if !agy {
+		// and pi have no Claude root to register.
+		if !agy && !pi {
 			_ = hookClaudeRegister(a, ctx, a.namedProfile(), raw)
 		}
 		return hookResult{}
 	}
 	// A verified first user prompt may update registration before the
 	// ordinary legacy path. Registration is silent and passive, so the
-	// hook's output is byte-identical with or without it. agy has no
-	// Claude root to register.
-	if !agy {
+	// hook's output is byte-identical with or without it. agy and pi have
+	// no Claude root to register.
+	if !agy && !pi {
 		_ = hookClaudeRegister(a, ctx, a.namedProfile(), raw)
 	}
 	c, name, ch, e := a.connect()
@@ -523,8 +537,10 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 	proc := currentProc(a.getenv)
 	if agy {
 		proc = agyHookProc() // CLAUDE_PID never names the agy process
+	} else if pi {
+		proc = piHookProc(piPID) // nor the pi process
 	}
-	owner := hookOwner{session: session, proc: proc, declared: strings.TrimSpace(a.getenv("VECNET_PROFILE")) == name, prompt: event == "user-prompt", agy: agy}
+	owner := hookOwner{session: session, proc: proc, declared: strings.TrimSpace(a.getenv("VECNET_PROFILE")) == name, prompt: event == "user-prompt", agy: agy, pi: pi}
 	if session != "" {
 		// Unable to tell whether this session runs other profiles' hooks
 		// too, claim nothing rather than guess.
@@ -566,12 +582,12 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 				if agy {
 					fmt.Fprintf(a.stderr, "vecnet: hook: this agy conversation runs hooks for several profiles; profile %s claims nothing until its user runs %s in a terminal outside agy\n", hint.profile, hint.rebind)
 				} else {
-					fmt.Fprintf(a.stderr, "vecnet: hook: this Claude Code session runs hooks for several profiles; profile %s claims nothing until %s\n", hint.profile, hint.rebind)
+					fmt.Fprintf(a.stderr, "vecnet: hook: this %s runs hooks for several profiles; profile %s claims nothing until %s\n", owner.noun(), hint.profile, hint.rebind)
 				}
 			} else if agy {
 				fmt.Fprintf(a.stderr, "vecnet: hook: profile %s is bound to another agy conversation; claiming nothing (ask your user to run %s in a terminal outside agy)\n", hint.profile, hint.rebind)
 			} else {
-				fmt.Fprintf(a.stderr, "vecnet: hook: profile %s is bound to another Claude Code session; claiming nothing (run %s from the right session)\n", hint.profile, hint.rebind)
+				fmt.Fprintf(a.stderr, "vecnet: hook: profile %s is bound to another %s; claiming nothing (run %s from the right session)\n", hint.profile, owner.noun(), hint.rebind)
 			}
 			if !s.notice(session) {
 				if s.Session != prev {
@@ -585,7 +601,7 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 			if agy {
 				fmt.Fprintf(a.stderr, "vecnet: hook: profile %s bound to this agy conversation\n", hint.profile)
 			} else {
-				fmt.Fprintf(a.stderr, "vecnet: hook: profile %s bound to this Claude Code session\n", hint.profile)
+				fmt.Fprintf(a.stderr, "vecnet: hook: profile %s bound to this %s\n", hint.profile, owner.noun())
 			}
 			// An automatic binding claims nothing on its own run, so the
 			// session's other hooks for this event can register first and
@@ -598,13 +614,13 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 			if agy {
 				fmt.Fprintf(a.stderr, "vecnet: hook: profile %s follows this agy process to its new conversation id\n", hint.profile)
 			} else {
-				fmt.Fprintf(a.stderr, "vecnet: hook: profile %s follows this Claude Code process to its new session id\n", hint.profile)
+				fmt.Fprintf(a.stderr, "vecnet: hook: profile %s follows this %s process to its new session id\n", hint.profile, owner.hostName())
 			}
 		case admitRebound:
 			if agy {
 				fmt.Fprintf(a.stderr, "vecnet: hook: profile %s rebound to this agy conversation\n", hint.profile)
 			} else {
-				fmt.Fprintf(a.stderr, "vecnet: hook: profile %s rebound to this Claude Code session\n", hint.profile)
+				fmt.Fprintf(a.stderr, "vecnet: hook: profile %s rebound to this %s\n", hint.profile, owner.noun())
 			}
 		}
 		if event == "post-tool" && !s.LastPostToolPoll.IsZero() && now.Sub(s.LastPostToolPoll) < hookPostToolEvery {

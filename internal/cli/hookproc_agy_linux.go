@@ -100,3 +100,6 @@ func procExeBase(root string, pid int) string {
 	}
 	return filepath.Base(exe)
 }
+
+// procParent is pid's parent pid from /proc, or 0 when unknown.
+func procParent(pid int) int { return procStatParent(agyProcFS, pid) }

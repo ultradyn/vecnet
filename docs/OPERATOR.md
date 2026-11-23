@@ -34,7 +34,7 @@ A run that names no profile (no `--net`, no `VECNET_PROFILE`) is *bare* ([PROTOC
 |---|---|---|
 | Claude Code | `CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, `AI_AGENT` | observed in a 2.1.318 Bash tool child; `CLAUDECODE` also in @vercel/detect-agent 1.2.7 |
 | Codex CLI | `CODEX_THREAD_ID`, `CODEX_CI`, `CODEX_SANDBOX`, `CODEX_SANDBOX_NETWORK_DISABLED` | strings in the 0.166.0 binary; detect-agent |
-| pi | `PI_CODING_AGENT`, `AI_AGENT` | pi 1.4.0 `docs/environment-variables.md` |
+| pi | `PI_CODING_AGENT`, `AI_AGENT` | pi 1.4.0 `docs/environment-variables.md`; pi 1.6.0 also gives its bash tool `PI_SESSION_ID`/`PI_SESSION_FILE` ([pi connector](connectors/pi.md)) |
 | OpenCode | `OPENCODE`, `AGENT`, `AI_AGENT` | its shell tool sets all three (installed binary); detect-agent |
 | Cursor agent | `CURSOR_AGENT` | its exec env sets `CURSOR_AGENT:"1"` (installed bundle); detect-agent |
 | Gemini CLI | `GEMINI_CLI` | 0.44.1 bundle (`GEMINI_CLI_IDENTIFICATION_ENV_VAR`); detect-agent |
