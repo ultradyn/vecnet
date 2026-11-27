@@ -73,14 +73,17 @@ messaging:
        never with --auto-ack
   hook [--event user-prompt|post-tool|session-start|app-server] [--profile P] [--auto-ack] [--mcp vecnet-P]
        Claude Code hook: always exits 0; --mcp names the registered MCP server in its hints
+  hook --client pi [--profile P]      pi extension hook: JSON payload on stdin, {"additionalContext"} on stdout
   hook --client codex --event user-prompt|post-tool|session-start
        generic shared Codex hook: no peer content or claims; delivery uses the exact-thread connector
   hook --event app-server --claim NONCE --priorities wake[,wake_idle] --expect-hub URL --expect-caller PEER_ID
   hook --release --claim NONCE
-  hook install [--client claude|codex|agy] [--profile P] [--write] [--settings PATH] [--auto-ack] [--mcp]
+  hook install [--client claude|codex|agy|pi] [--profile P] [--write] [--settings PATH] [--auto-ack] [--mcp]
        --mcp: the hooks name MCP server vecnet-P; claude registers it (claude mcp add), agy merges .agents/mcp_config.json
   hook install --client agy [--profile P] [--mcp] [--dry-run|--write]
        agy workspace hooks: .agents/hooks.json group vecnet-P (SessionStart, PreInvocation); each git worktree needs its own
+  hook install --client pi [--profile P] [--global|--settings PATH] [--dry-run|--write]
+       pi extension vecnet-P.ts in ./.pi/extensions (or ~/.pi/agent/extensions with --global): prompt and post-tool delivery
   hook install --client codex [--settings PATH] [--bin PATH] [--dry-run|--write] [--rollback BACKUP]
        generic hook migration; default previews a diff; --write saves a rollback backup; custom hooks survive
        rollback refuses drift; review trust in Codex /hooks yourself (never changed automatically)

@@ -7,3 +7,6 @@ package cli
 // `vecnet hook rebind` or keeps serving later root prompts in the same
 // conversation.
 func agyHookProc() hookProc { return hookProc{} }
+
+// procParent is unknown outside Linux.
+func procParent(pid int) int { return 0 }

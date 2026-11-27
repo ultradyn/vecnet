@@ -137,7 +137,7 @@ func defaultBin(exe string) (bin, warning string) {
 
 func (a *app) cmdHookInstall(args []string) error {
 	o, err := parseFlags("hook install", args, map[string]flagKind{
-		"client": strFlag, "profile": strFlag, "write": boolFlag, "settings": strFlag, "auto-ack": boolFlag, "bin": strFlag, "mcp": boolFlag, "dry-run": boolFlag, "rollback": strFlag,
+		"client": strFlag, "profile": strFlag, "write": boolFlag, "settings": strFlag, "auto-ack": boolFlag, "bin": strFlag, "mcp": boolFlag, "dry-run": boolFlag, "rollback": strFlag, "global": boolFlag,
 	})
 	if err != nil {
 		return err
@@ -149,8 +149,23 @@ func (a *app) cmdHookInstall(args []string) error {
 	if o.has("client") {
 		client = o.str("client")
 	}
-	if client != "claude" && client != "codex" && client != "agy" {
-		return usageErr("hook install: --client must be claude or codex, or agy")
+	if client != "claude" && client != "codex" && client != "agy" && client != "pi" {
+		return usageErr("hook install: --client must be claude or codex, agy or pi")
+	}
+	if o.has("global") && client != "pi" {
+		return usageErr("hook install: --global requires --client pi")
+	}
+	if client == "pi" {
+		switch {
+		case o.has("mcp"):
+			return usageErr("hook install: --mcp is not supported for --client pi; the hints name the vecnet CLI")
+		case o.has("auto-ack"):
+			return usageErr("hook install: pi hooks never acknowledge messages; omit --auto-ack")
+		case o.has("rollback"):
+			return usageErr("hook install: --rollback requires --client codex")
+		case o.has("global") && o.has("settings"):
+			return usageErr("hook install: --global and --settings are mutually exclusive")
+		}
 	}
 	if client == "agy" && agyInstallOS == "windows" {
 		// agy runs hook commands under cmd /c, where the installer's POSIX
@@ -166,7 +181,7 @@ func (a *app) cmdHookInstall(args []string) error {
 	if client == "agy" && o.has("rollback") {
 		return usageErr("hook install: --rollback requires --client codex")
 	}
-	if client != "codex" && client != "agy" && (o.has("rollback") || o.has("dry-run")) {
+	if client != "codex" && client != "agy" && client != "pi" && (o.has("rollback") || o.has("dry-run")) {
 		// Claude's exact pre-agy wording (git show 68e5aeb8).
 		return usageErr("hook install: --rollback and --dry-run require --client codex")
 	}
@@ -220,6 +235,9 @@ func (a *app) cmdHookInstall(args []string) error {
 		if warning != "" {
 			a.warn("%s", warning)
 		}
+	}
+	if client == "pi" {
+		return a.installPiHooks(o, bin, profile)
 	}
 	path := o.str("settings")
 	// The start directory picks the default target, and is where `claude

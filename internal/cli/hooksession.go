@@ -107,7 +107,11 @@ type hookBinding struct {
 	SessionHow  string    `json:"session_how,omitempty"`
 	Proc        hookProc  `json:"claude_proc,omitzero"`
 	RebindUntil time.Time `json:"rebind_until,omitzero"`
-	Noticed     []string  `json:"noticed,omitempty"`
+	// RebindFor, when set, restricts the pending window to that one session
+	// id: a pi agent's own `hook rebind` names its PI_SESSION_ID, and only
+	// that session's admitted (interactive) hook run may take it.
+	RebindFor string   `json:"rebind_for,omitempty"`
+	Noticed   []string `json:"noticed,omitempty"`
 }
 
 // hookOwner is the session a hook run speaks for.
@@ -118,9 +122,21 @@ type hookOwner struct {
 	prompt   bool     // a UserPromptSubmit run: only the top-level session fires it
 	profiles []string // every profile this session's hooks run (registry)
 	agy      bool     // an agy hook run: notices delegate rebind to the user, and only a prompt may take a rebind window
+	pi       bool     // a pi hook run (hook_pi.go): Claude semantics, pi wording
 }
 
 func (o hookOwner) ambiguous() bool { return !o.declared && len(o.profiles) > 1 }
+
+// hostName names the agent host a non-agy run speaks for, in prose.
+func (o hookOwner) hostName() string {
+	if o.pi {
+		return "pi"
+	}
+	return "Claude Code"
+}
+
+// noun is "<host> session", as stderr and notices say it.
+func (o hookOwner) noun() string { return o.hostName() + " session" }
 
 type hookAdmit int
 
@@ -167,7 +183,7 @@ func (s *hookState) admit(o hookOwner, now time.Time) hookAdmit {
 		}
 		s.bindSession(o, how, now)
 		return admitCleared
-	case (!o.agy || o.prompt) && now.Before(s.RebindUntil):
+	case (!o.agy || o.prompt) && now.Before(s.RebindUntil) && (s.RebindFor == "" || s.RebindFor == o.session):
 		s.bindSession(o, bindRebind, now)
 		return admitRebound
 	case s.Session == "" || s.Proc.gone():
@@ -189,7 +205,7 @@ func (s *hookState) admit(o hookOwner, now time.Time) hookAdmit {
 
 // bindSession gives the profile to o and closes any rebind window.
 func (s *hookState) bindSession(o hookOwner, how string, now time.Time) {
-	s.Session, s.SessionAt, s.SessionHow, s.Proc, s.RebindUntil = o.session, now.UTC(), how, o.proc, time.Time{}
+	s.Session, s.SessionAt, s.SessionHow, s.Proc, s.RebindUntil, s.RebindFor = o.session, now.UTC(), how, o.proc, time.Time{}, ""
 	s.Noticed = slices.DeleteFunc(s.Noticed, func(id string) bool { return id == o.session })
 }
 
